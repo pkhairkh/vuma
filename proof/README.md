@@ -6,22 +6,40 @@ different namespaces, no shared filenames) so that each can be built and
 audited independently. Do **not** merge them — see "Why two arena trees?"
 below.
 
+> **Role of the Lean proofs.** The Lean development under `proof/` is the
+> **formal specification** of the PMT memory model. The Lean theorems are
+> machine-checked (`lake build` passes; sorry-audit by
+> `scripts/check_lean.sh`), but they are **not linked into the compiler
+> binary**. Build-time and runtime verification go through **Z3** (the
+> SMT solver, hard build-time dependency in `src/ive/Cargo.toml`:
+> `z3 = "0.20"`) and the hand-written Rust verifiers in `src/ive/`. The
+> IVE state verifiers emit `contract_assert(…)` obligations that Z3
+> discharges at compile time; the current discharge rate is **100 % on
+> the gold-standard suite (29 944 / 29 944 = 100.00 % across all 19
+> backends)**. See [`../docs/caveats.md` §3](../docs/caveats.md) for the
+> full separation statement.
+>
+> The previous Lean↔Rust FFI bridge has been **deleted**. There is no
+> `lean_stub.c`, no `lean_ffi_linked` cfg, and no `lean_verify_*` /
+> `lean_verified_*` extern surface. Z3 + the hand-written Rust verifiers
+> are the executable verifier; the Lean proofs are the formal spec only.
+
 ## Directory layout
 
 | Path        | Module root | Namespace | Role                                                                 |
 |-------------|-------------|-----------|----------------------------------------------------------------------|
 | `PMT/`      | `PMT.*`     | `PMT`     | **PMT verification library** — Programs-as-Memory-Transformations    |
 | `Pmt/`      | `Pmt.*`     | `Pmt`     | **Arena simulation model** — faithful Lean mirror of the Rust arena  |
-| `extracted/`| n/a (FFI)   | n/a       | **Lean FFI extraction stubs + C linkage** for `PMT.Extraction`       |
+| `extracted/`| n/a (legacy FFI surface, no longer compiled) | n/a | **Legacy Lean FFI extraction stubs** — the FFI bridge is deleted; only `pmt_check.rs` (hand-translation) remains, parity-tested against the Lean definitions |
 
-Sanity check (Wave 0-C): `comm -12 <(ls Pmt/) <(ls PMT/)` returns **empty**
+Sanity check: `comm -12 <(ls Pmt/) <(ls PMT/)` returns **empty**
 — the two trees share no filenames, so there is no case-collision risk on
 case-sensitive filesystems and no ambiguity in `import` lines
 (`import Pmt.Model` vs `import PMT.Basic`).
 
 ---
 
-## `PMT/` — PMT verification library
+## `PMT/` — PMT verification library (formal specification)
 
 > Root module: [`PMT.lean`](PMT.lean) — *PMT — Programs as Memory
 > Transformations*. Re-exports every submodule so callers can
@@ -29,8 +47,10 @@ case-sensitive filesystems and no ambiguity in `import` lines
 
 This is the **formal verification core**: a machine-checked proof that
 the VUMA IR's memory-transforming execution is sound, plus its Iris-style
-separation-logic layering and the extraction surface that lets the Rust
-runtime call the proven checkers.
+separation-logic layering and the extraction surface that *used to* let
+the Rust runtime call the proven checkers (the FFI bridge is now deleted;
+the hand-translated Rust checkers in `src/codegen/src/runtime/pmt_check.rs`
+are parity-tested against these Lean definitions instead).
 
 | Submodule                         | Contents                                                                                         |
 |-----------------------------------|--------------------------------------------------------------------------------------------------|
@@ -46,16 +66,27 @@ runtime call the proven checkers.
 | `ExecFunction.lean`              | Function execution semantics                                                                      |
 | `AdditionalTheorems.lean`, `MiscLemmas.lean`, `HelperLemmas.lean` | Cross-cutting lemmas                          |
 | `PillarSoundness.lean`, `NoFFI.lean` | Pillar-level soundness and the no-FFI reduction                                               |
-| `Extraction.lean`, `ExtractionLemmas.lean` | `@[export]` FFI surface + soundness theorems for the extracted checkers             |
+| `Extraction.lean`, `ExtractionLemmas.lean` | `@[export]` FFI surface (legacy — the FFI bridge is deleted; the Lean definitions remain the formal source of truth) + soundness theorems for the extracted checkers |
 | `PipelineSim.lean`                | End-to-end pipeline simulation                                                                    |
 | `IVE/`                            | **I**ntermediate **V**erification **E**nvironment: `Soundness/` (StateWrites, StateReads, Transform, Composition), `PillarSoundness.lean` |
 | `Iris/`                           | Iris-style separation logic: `HeapModel`, `CapBndInvariant`, `ArenaRes`, `LiveMirrorInvariant`, `GuardInvariant`, `Composition`, `WeakestPrecond`, `FractionalPerm`, `SepGenuine` |
-| `FFI/PillarSoundness.lean`        | FFI variant of pillar soundness                                                                   |
+| `FFI/PillarSoundness.lean`        | FFI variant of pillar soundness (legacy — FFI bridge deleted)                                    |
 | `Test/`                           | Test harnesses: `ValidProgram`, `UafProgram`, `OverflowProgram`, `EmptyProgram`, `MultiStepProgram`, `ArenaBasicSim`, `SorryFreeAudit`, `PropertyTests`, `EdgeCases`, `RealisticProgram` |
 
 Imports inside this tree use the uppercase prefix, e.g.
 `import PMT.Soundness`, `import PMT.IVE.Soundness.Transform`,
 `import PMT.Iris.HeapModel`.
+
+> The `@[export]` annotations in `Extraction.lean` are **legacy** —
+> they were used by the previous Lean↔Rust FFI bridge to expose Lean
+> symbols to the Rust runtime. The bridge has been deleted; the
+> annotations are retained in the Lean source so the formal spec
+> remains self-documenting (each `@[export]` marks a function whose
+> soundness theorem is machine-checked), but no C archive is produced
+> and no `extern "C"` bindings resolve against Lean symbols in the
+> current build. The Rust runtime calls hand-translated checkers in
+> `src/codegen/src/runtime/pmt_check.rs` instead, parity-tested
+> against these Lean definitions.
 
 ---
 
@@ -104,26 +135,30 @@ every file.
 
 ---
 
-## `extracted/` — Lean FFI extraction stubs + C linkage
+## `extracted/` — Legacy Lean FFI extraction stubs (bridge deleted)
 
-> See [`extracted/README.md`](extracted/README.md) for the full,
-> up-to-date FFI-bridge status.
+> See [`extracted/README.md`](extracted/README.md) for the full
+> historical record of the FFI-bridge status. The bridge has been
+> **deleted**; the directory now holds only the hand-translated Rust
+> checkers and a README documenting the historical context.
 
-This directory holds the **Rust/C side** of the Lean↔Rust FFI bridge for
-the PMT checkers proven in `PMT/Extraction.lean`. The Lean definitions
-there (each with a machine-checked soundness theorem) are the formal
-source of truth; the files here let the Rust runtime link against them.
+This directory previously held the **Rust/C side** of the Lean↔Rust FFI
+bridge for the PMT checkers proven in `PMT/Extraction.lean`. The Lean
+definitions there (each with a machine-checked soundness theorem) remain
+the formal source of truth; the FFI bridge that used to let the Rust
+runtime link against them has been **deleted**.
 
 | File           | Purpose                                                                                          |
 |----------------|--------------------------------------------------------------------------------------------------|
-| `pmt_check.rs` | Hand-translated Rust checkers mirroring `PMT/Extraction.lean`, plus the `extern "C"` declarations for the 7 `@[export]`-ed Lean symbols (`lean_verified_{capacity,field_bounds,linearity,pmt}_check`, `lean_verify_{transform,state_reads,state_writes}`). Parity-tested against the Lean semantics. |
-| `lean_stub.c`  | **Linkage stub** (compiled by `build.rs` into `liblean_extraction.a`) defining the 7 Lean `@[export]` symbols so the Rust binary links cleanly when the real Lean→C extraction pipeline is unavailable. Returns hardcoded placeholders; never read in production because `build.rs` does not emit `lean_ffi_linked` on the stub path. |
-| `README.md`    | Honest per-wave status of the FFI bridge (Waves 4-A → 5-C): what is wired, what is stubbed, what is the production path. |
+| `pmt_check.rs` | Hand-translated Rust checkers mirroring `PMT/Extraction.lean`. Parity-tested against the Lean semantics via `tests/pmt_parity_test.rs`. This is the **only file still consumed** — gated by the `pmt-runtime-check` Cargo feature on `vuma-codegen`. |
+| `lean_stub.c`  | **No longer compiled.** The previous linkage stub (compiled by `build.rs` into `liblean_extraction.a`) defining the 7 Lean `@[export]` symbols so the Rust binary linked cleanly when the real Lean→C extraction pipeline was unavailable. **Removed** when the FFI bridge was deleted; the file is retained in-tree for historical reference only and is not part of any build target. |
+| `README.md`    | Historical record of the FFI-bridge status (now closed — bridge deleted, Z3 replaces Lean as the executable verifier). |
 
-As of Wave 5 the bridge is **wired end-to-end but running on a stub**:
-the real Lean runtime is not yet linked, so every FFI call resolves to a
-fail-closed C stub and the hand-written Rust verifiers in `pmt_check.rs`
-remain the production path.
+As of the bridge deletion, **there is no FFI surface between Lean and
+Rust**. The executable verifier is Z3 + the hand-written Rust verifiers
+in `src/ive/`; the Lean proofs are the formal specification only. The
+hand-translated Rust checkers in `pmt_check.rs` remain parity-tested
+against the Lean definitions but are not themselves formally verified.
 
 ---
 
@@ -134,8 +169,9 @@ merged:
 
 - **`PMT/`** is the *large* verification library: full IR semantics,
   Iris separation logic, IVE soundness, pipeline simulation, and the
-  `@[export]` FFI extraction surface consumed by `extracted/`. It proves
-  the compiler's memory transformations sound at the IR level.
+  `@[export]` FFI extraction surface (legacy — bridge deleted) consumed
+  by `extracted/pmt_check.rs` (hand-translation, parity-tested). It
+  proves the compiler's memory transformations sound at the IR level.
 - **`Pmt/`** is the *small* faithful model: a minimal Lean mirror of the
   Rust arena runtime (`USize`, `Arena`, `Layout`) plus a from-scratch
   separation-logic stack used to discharge concrete overflow/UAF safety
@@ -153,6 +189,13 @@ Both module roots build from this single `lakefile.toml`. To build a
 specific tree:
 
 ```
-cd proof && lake build PMT     # the verification library
+cd proof && lake build PMT     # the verification library (formal spec)
 cd proof && lake build Pmt     # the arena simulation model
 ```
+
+CI runs `lake build` on every push via
+`.github/workflows/proof-verify.yml` to confirm the formal Lean
+specification still builds and is sorry-free (`scripts/check_lean.sh`).
+This CI job gates the *formal spec* only — it does not gate the compiler
+build, which is gated by the regular `ci.yml` build / test jobs that
+exercise the Z3-backed executable verifier.

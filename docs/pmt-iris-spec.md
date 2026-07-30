@@ -6,6 +6,17 @@ the Lean modules, the Iris-style separation-logic invariants, ghost-state
 conventions, and weakest-precondition machinery used to verify the PMT
 arena allocator and its runtime memory-safety contract.
 
+> **Role of the Lean Iris layer.** The Iris development is the formal
+> *specification* of the PMT memory model. It is machine-checked by
+> `lake build`, but it is **not linked into the compiler binary**.
+> Build-time verification goes through **Z3** (the SMT solver, hard
+> dependency in `src/ive/Cargo.toml`) and the hand-written Rust
+> verifiers in `src/ive/`. The Iris layer justifies the design of those
+> verifiers; the Z3 discharge strategy mirrors the Iris-side proof
+> obligations (capacity bound, liveness mirror, guard page, field
+> bounds) at the SMT level. See [`./caveats.md` §3.2](./caveats.md)
+> for the full separation.
+
 The runtime companion spec — Lean signatures and proof sketches for the
 bare `Prop` predicates — is [`./pmt-formal-spec.md`](./pmt-formal-spec.md).
 This document covers the *Iris layer* (separation logic, ghost state,
@@ -55,8 +66,10 @@ a **simplified `Prop`-valued encoding** (see
     associativity, frame rule).
 
 The model is sorry-free and axiom-clean modulo `Classical.propDecidable`
-and a single local axiom `own_ex_exclusive` (§5) — which **PMT-1-G will
-derive** in a future wave.
+and a single local axiom `own_ex_exclusive` (§5). Deriving that axiom
+from the underlying resource-algebra model is a documentation-only
+follow-up; it does not affect the executable verifier, which is Z3-based
+and does not consume the Iris layer at all.
 
 ## Contents
 
@@ -88,6 +101,10 @@ required to reason about a single arena `A`:
 a single named invariant. Two distinct arenas are distinguished by their
 ghost-name pairs `(γ_used, γ_cap)`.
 
+The corresponding *executable* check is the Z3-discharged capacity
+contract in `src/codegen/src/runtime/arena.rs::alloc`; see
+[`./pmt-formal-spec.md`](./pmt-formal-spec.md) §1.3.
+
 **Lean reference.** `proof/PMT/Iris/ArenaRes.lean`; runtime mirror
 `proof/PMT/Basic.lean`.
 
@@ -111,6 +128,12 @@ rules:
 
 The `StateValRes` construct packages `↦{q}` with the value agreement
 `Ag v`, mirroring Iris's standard `StateValRes`.
+
+The executable IVE verifiers (`StateReadVerifier`,
+`StateWriteVerifier` in `src/ive/src/state_read.rs`,
+`src/ive/src/state_write.rs`) currently model full-permission (`q = 1`)
+ownership; fractional permissions are part of the formal spec only and
+are not yet exposed to the programmer.
 
 **Lean reference.** `proof/PMT/Iris/FractionalPerm.lean`.
 
@@ -184,8 +207,11 @@ theorem alloc_preserves_cap_bnd
 
 The precondition `hfit : a.used + l.total_size ≤ a.capacity` is the
 *runtime* check performed by `arena_alloc` (tested per
-[`pmt-formal-spec.md`](./pmt-formal-spec.md) §1.3). The theorem upgrades
-`PMT.Basic.alloc_preserves_capacity` (which proves only the pure
+[`pmt-formal-spec.md`](./pmt-formal-spec.md) §1.3). In the executable
+pipeline, that check is **discharged by Z3** at compile time when the
+IVE can prove it; otherwise it remains a runtime `checked_add` +
+comparison that traps via `__arena_overflow` on violation. The theorem
+upgrades `PMT.Basic.alloc_preserves_capacity` (which proves only the pure
 arithmetic fact) to the Iris invariant: the ghost state is reconstructed
 correctly after the bump.
 
@@ -224,6 +250,14 @@ Field-level safety is established by two parallel theorems, mirroring
 `proof/PMT/Iris/Composition.lean` and depend on the `[cap_bnd]`
 invariant (§3) plus the fractional-permission machinery (§2). The
 runtime versions live in `proof/PMT/Field.lean`.
+
+The executable counterpart is the IVE `StateReadVerifier` /
+`StateWriteVerifier` pair (`src/ive/src/state_read.rs`,
+`src/ive/src/state_write.rs`). They use the *actual SSA vreg* of the
+state-typed binding (not a hardcoded `vreg=0` placeholder), consult the
+`LayoutRegistry` to look up the field by name, and emit
+`contract_assert(off + size ≤ layout.total_size)` plus
+`contract_assert(token.status == Live)` for Z3 to discharge.
 
 ---
 
@@ -285,9 +319,9 @@ axiom own_ex_exclusive {α : Type} (γ : GhostName) (a b : α)
 > `a = b`); our simplified `Own` encoding is `Prop`-valued and
 > parameterised by the value (rather than storing it), so the
 > composition `⋅` is not expressible and the principle is postulated.
-> **PMT-1-G will derive this axiom** from the resource-algebra model in
-> a future wave. Until then, the file is sorry-free but uses this single
-> local axiom.
+> Deriving this axiom from the resource-algebra model is a
+> documentation-only follow-up — it does not affect the executable
+> verifier, which is Z3-based and does not consume the Iris layer.
 
 ### Frame-preserving update on `consume`
 
@@ -303,6 +337,14 @@ theorem consume_updates_mirror (γ : GhostName) (var : String)
 This mirrors the runtime `state_transform_kills_input` lemma in
 `PMT.Liveness` (which flips `LinearResource t` to `Consumed t`); here we
 flip the ghost half.
+
+The *executable* counterpart is the IVE linearity check in
+`src/ive/src/state_write.rs` and `src/ive/src/borrow_region.rs`. The
+linearity map is keyed on the *real SSA vreg* of each state-typed
+binding (not a hardcoded placeholder); `StateTransform` flips the entry
+to `Consumed`, and every subsequent `StateRead` / `StateWrite` on the
+same vreg emits a `contract_assert(token.status == Live)` that **Z3
+discharges** or hard-fails.
 
 ### Bridge to the runtime liveness proof
 
@@ -393,9 +435,19 @@ Iris model formalises `wp` for the PMT step-relation in
 `proof/PMT/Iris/WeakestPrecond.lean`, including the bind rule, the
 pure-step rule, and the state-read / state-write rules.
 
-**Statements** are given in `proof/PMT/Iris/WeakestPrecond.lean`; the
-machine-checked proofs of the higher-level rules are deferred to the
-Iris-composition work tracked as PMT-1-G.
+The **executable** counterpart is the IVE's compile-time contract
+emission. For every memory access the IVE emits a `contract_assert(…)`
+whose obligations mirror the `wp` rules above; **Z3 discharges** the
+assertions at compile time. When Z3 cannot discharge a contract, the
+pipeline hard-fails with `VumaError::Verification`; the runtime
+`__oob_trap` (§7 of [`./pmt-formal-spec.md`](./pmt-formal-spec.md)) is
+the fallback for the dynamic cases Z3 cannot predict (e.g.
+branch-dependent allocation counts).
+
+The machine-checked proofs of the higher-level Iris `wp` rules remain
+part of the formal specification; closing them is a
+documentation-only follow-up that does not affect the executable
+verifier.
 
 **Lean reference.** `proof/PMT/Iris/WeakestPrecond.lean`.
 
@@ -404,7 +456,8 @@ Iris-composition work tracked as PMT-1-G.
 ## §8. Trusted Computing Base (TCB)
 
 The VUMA PMT memory-safety argument trusts the following OS / runtime
-contracts; everything else is proven in Lean:
+contracts; everything else is proven in Lean (formal spec) or discharged
+by Z3 (executable verifier):
 
   - **`mmap PROT_NONE` guard-page semantics — Trusted.** The OS honours
     `mmap(..., PROT_NONE, ...)` by raising a segfault (exit 134 via
@@ -414,10 +467,19 @@ contracts; everything else is proven in Lean:
     computes `Layout` (size, align) and bumps `used` within `capacity`.
     The bookkeeping is tested by `arena_alloc` (see
     [`pmt-formal-spec.md`](./pmt-formal-spec.md) §1.3) and trusted; the
-    *capacity bound* itself is proven via `[cap_bnd]` (§3).
+    *capacity bound* itself is discharged by Z3 at compile time and by
+    the Iris `[cap_bnd]` invariant in the formal spec (§3).
+  - **Z3 and the hand-written Rust verifiers — Trusted.** The IVE
+    verifiers in `src/ive/` are hand-written Rust that emit
+    `contract_assert(…)` obligations for Z3 to discharge. The
+    hand-translation is parity-tested against the Lean definitions in
+    `proof/PMT/Extraction.lean` (see `tests/pmt_parity_test.rs`), but is
+    not itself formally verified.
   - **Provable.** Everything else — the capacity bound, the liveness
     mirror, the guard-page address, the field-bounds safety, the
-    composition — is proven in `proof/PMT/` and `proof/PMT/Iris/`.
+    composition — is proven in `proof/PMT/` and `proof/PMT/Iris/` (as
+    the formal spec) and discharged by Z3 at compile time (as the
+    executable verifier).
 
 **Lean reference.** `proof/PMT/Basic.lean` (TCB notes inline).
 
@@ -429,8 +491,15 @@ The full memory-safety theorem composes `[cap_bnd]` (§3), `[live_mirror]`
 (§5), and `[guard]` (§6) with the fractional-permission machinery (§2)
 and the `wp` judgement (§7) to establish that any well-typed PMT
 programme is memory-safe. The composition is sketched in
-`proof/PMT/Iris/Composition.lean`, with the higher-level rules deferred
-to PMT-1-G.
+`proof/PMT/Iris/Composition.lean`.
+
+The *executable* counterpart is the IVE aggregator
+(`src/ive/src/invariant_aggregator.rs`), which runs the three state
+verifiers (`state_read`, `state_write`, `state_transform`) plus the
+linearity / information-flow / session-type / arena-bounds / L1L3-collapse
+verifiers, each emitting Z3-discharged contracts. The aggregator's
+verdict (`OverallVerdict::Pass`) is the executable equivalent of the
+composition theorem's hypothesis.
 
 **Lean reference.** `proof/PMT/Iris/Composition.lean`.
 
@@ -449,5 +518,10 @@ to PMT-1-G.
     `WeakestPrecond.lean`, `Composition.lean`).
   - **Runtime Lean modules**: `proof/PMT/*.lean` (`Basic.lean`,
     `Liveness.lean`, `Field.lean`).
+  - **Executable verifier (Z3-backed)**: `src/ive/` (state verifiers,
+    borrow region, information flow, session type, arena bounds);
+    `src/ive/Cargo.toml` (`z3 = "0.20"`).
   - **Architecture overview**: [`./architecture.md`](./architecture.md).
   - **Pipeline overview**: [`./pipeline.md`](./pipeline.md).
+  - **Caveats (Lean proofs are standalone; Z3 is the executable
+    verifier)**: [`./caveats.md` §3](./caveats.md).

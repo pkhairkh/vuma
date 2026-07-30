@@ -9,6 +9,13 @@ ELF/Wasm binary. For each stage we name the responsible crate and file, the
 transformation performed, and the most load-bearing caveat. Honesty about
 limitations is prioritised over marketing language.
 
+> **Build-time hard dependency.** The `vuma-ive` crate statically links
+> against the system `libz3` (`src/ive/Cargo.toml` declares
+> `z3 = "0.20"`). Without `libz3-dev` installed (`apt install libz3-dev`
+> on Debian/Ubuntu), `cargo build` fails at link time. Z3 *is* the
+> verifier now — it replaced the Lean FFI bridge that was deleted. See
+> [`./caveats.md` §1.1](./caveats.md).
+
 ---
 
 ## 1. Lexing & Parsing
@@ -82,9 +89,12 @@ construction; mutators go through `transform.rs`.
 
 ---
 
-## 4. IVE Verification (formally verified)
+## 4. IVE Verification (Z3-discharged contracts)
 
-**Crate:** `vuma-ive` (`src/ive/`).
+**Crate:** `vuma-ive` (`src/ive/`). Z3 is a **hard build-time dependency**
+(`src/ive/Cargo.toml`: `z3 = "0.20"`); without `libz3-dev` on the host,
+`cargo build` fails at link time.
+
 **Entry:** `InvariantAggregator::new.with_level(IveVerificationLevel::Pmt)`
 (`pipeline.rs:5684-5685` in `compile_with_path`; `pipeline.rs:7155-7156`
 in `compile_with_recovery`; `pipeline.rs:6705` in `compile_modules`; and
@@ -96,7 +106,7 @@ coercion under `cfg(not(test))`" mechanism no longer exists — there is
 nothing to coerce. `with_level` is a no-op retained for API stability
 (`invariant_aggregator.rs:602-606`), and `invariants_for_level` always
 returns `vec![InvariantKind::Pmt]` (`invariant_aggregator.rs:747-749`).
-The PMT level runs **exactly three verifiers**:
+The PMT level runs **exactly three state verifiers**:
 
 | # | Verifier | What it checks |
 |---|----------|----------------|
@@ -108,6 +118,36 @@ The five legacy pointer invariants (liveness, exclusivity, interpretation,
 origin, cleanup) were **DELETED** from `InvariantKind` — they are not
 "skipped", they no longer exist. Pointer syntax is a hard parse error in
 VUMA 2.0, so there is nothing for them to verify.
+
+**Z3-based contract discharge.** Every memory-safety obligation the
+verifiers identify is emitted as a `contract_assert(…)` whose body is a
+first-order formula over the program's SSA state (vreg offsets, layout
+sizes, linear-token status, information-flow labels, session-type
+states). **Z3 discharges the contract** at compile time. The current
+discharge rate is 100 % on the gold-standard suite: all 29 944 / 29 944
+tests pass on all 19 backends with zero outstanding `contract_assert`
+failures. When Z3 cannot discharge a contract (genuine
+memory-safety violation), the pipeline hard-fails with
+`VumaError::Verification`. There are no `WARNING + TODO` stubs for
+deferred contract discharge — Z3 either proves the contract or the
+build fails.
+
+**Session-type verifier uses real vregs.** The session-type verifier
+(`src/ive/src/session_type.rs`) maintains a per-vreg session-state map
+keyed on the *actual SSA vreg* of each channel-typed binding — not a
+hardcoded `vreg=0` placeholder. Each `ChannelOpen` / `ChannelSend` /
+`ChannelRecv` / `ChannelClose` event emits a `contract_assert(…)`
+asserting the channel's session type is in the expected state; Z3
+discharges the assertion.
+
+**Information-flow verifier uses real labels.** The information-flow
+verifier (`src/ive/src/information_flow.rs`) tracks a real
+`SecurityLabel` lattice (`Public` / `Internal` / `Secret` / `TopSecret`)
+per vreg — not a hardcoded `Public` placeholder. Every `FlowKind` event
+(Assign, BinOp, ChannelSend, Branch-implicit-flow) emits a
+`contract_assert(src_label.can_flow_to(dst_label))` (or
+`can_flow_to(join(lhs, rhs))` for BinOp, or per-branch-var
+`can_flow_to(cond_label)` for implicit flows) that Z3 discharges.
 
 **Hard-fail policy.** A failed PMT verifier
 sets `OverallVerdict::Fail` and the pipeline returns
@@ -166,13 +206,19 @@ use-without-open). Regression test:
 
 **See `./caveats.md`** for the full trustworthiness assessment.
 
-### 4.1 Lean soundness proofs
+### 4.1 Formal specification (Lean 4 — standalone)
 
-The three PMT verifiers above are mechanically checked in **Lean 4**.
-See [`./overview.md`](./overview.md) *Formal Verification (Lean 4)*
-for the build (`make proof` / `cd proof && lake build`) and CI setup
-(`lean-proofs` job in `ci.yml` plus `proof-verify.yml`). The current
-proof status of the three PMT state verifiers is:
+The PMT memory model is also mechanised in **Lean 4** under `proof/`.
+The Lean development is the **formal specification** of the PMT model:
+it defines the arena, layout, linear-token, and information-flow
+predicates and proves the corresponding soundness theorems. The Lean
+proofs are machine-checked (`lake build` passes; sorry-audit by
+`scripts/check_lean.sh`) but they are **not linked into the compiler
+binary**. Build-time verification goes through Z3 and the hand-written
+Rust verifiers in `src/ive/`; the Lean proofs document *what* is being
+checked, not *how the binary checks it*.
+
+The current proof status of the three PMT state verifiers is:
 
 | # | Rust verifier | Lean theorem | Status |
 |---|---------------|--------------|--------|
@@ -187,7 +233,8 @@ invariants — i.e. the verifier is sound w.r.t. the operational
 semantics. The two `state_read` / `state_write` soundness theorems are
 stated with the same shape but their proofs are not yet
 closed; until they are, the *acceptance* of those two verifiers rests on
-the Rust-side audit in `./caveats.md`, not on a Lean proof.
+the Rust-side audit in `./caveats.md` (and on the Z3-discharged
+contracts that the executable verifier emits), not on a Lean proof.
 
 The broader OOB-safety result `no_oob_trap_for_well_typed_strong`
 (proven, sorry-free) composes with `verify_transform_sound` to
@@ -205,13 +252,13 @@ behavior matches Lean `exec` and which is safe — canonical trap codes 1,
 results:
 
 - `exec_satisfies_pipeline_spec` — Lean's own `exec` already meets the
- `PipelineSpec` (sorry-free, reduces to `pmt_soundness`).
+  `PipelineSpec` (sorry-free, reduces to `pmt_soundness`).
 - `pipeline_compile_sound` — conditional on the translation-validation
- hypothesis `hconforms: PipelineSpec prog s`, the compiled binary's
- behavior is safe.
+  hypothesis `hconforms: PipelineSpec prog s`, the compiled binary's
+  behavior is safe.
 - `pipeline_compile_no_oob` — under the same hypothesis, the compiled
- binary never traps on an out-of-bounds access for well-typed
- programs.
+  binary never traps on an out-of-bounds access for well-typed
+  programs.
 
 The `hconforms` hypothesis is the Rust-side translation-validation
 obligation: it is discharged empirically by the parity test
@@ -224,11 +271,19 @@ are still stated-but-pending as in the table above; `PipelineSim` does
 not close them, but it does provide the *contract* against which their
 eventual discharge will be measured.
 
+> The Lean FFI bridge that previously linked Lean-verified checkers
+> into the binary has been **deleted**. There is no `lean_stub.c`,
+> no `lean_ffi_linked` cfg, no `lean_verify_*` extern surface. Z3 +
+> the hand-written Rust verifiers do the executable verification; the
+> Lean proofs remain as the formal specification only.
+
 **Cross-references for the Lean development of this stage:**
 
 - [`./pmt-formal-spec.md`](./pmt-formal-spec.md) and
- [`./pmt-iris-spec.md`](./pmt-iris-spec.md) — the formal specifications
- the Lean proofs are checked against.
+  [`./pmt-iris-spec.md`](./pmt-iris-spec.md) — the formal specifications
+  the Lean proofs are checked against.
+- [`./caveats.md` §3](./caveats.md) — the explicit statement that Lean
+  proofs are a standalone artifact, not linked into the binary.
 
 ---
 
@@ -245,17 +300,20 @@ The analyzer is a **HARD gate** in VUMA 2.0: `--no-memory-safety` was
 removed (passing it is a hard parse error, `main.rs:759-761`), and any
 non-clean report returns `VumaError::MemorySafety` (`pipeline.rs:6077-6080`).
 
-**`--safe` is now MANDATORY.** `safe: true` is hard-coded in the default
-`Cli` (`main.rs:610`). The `--safe` flag itself is accepted but is a no-op (`main.rs:751-756`):
-`cli.safe` always resolves to `true`, which is plumbed into
+**Runtime bounds checks are ALWAYS ON.** `safe: true` is hard-coded in the
+default `Cli` (`main.rs:610`); the `--safe` flag has been **removed** from
+the CLI surface (see `./caveats.md` §5.1). `cli.safe` always resolves to
+`true`, which is plumbed into
 `CompileConfig.runtime_bounds_checks` (`main.rs:1570`). The pipeline
 conditionally selects `MemorySafetyConfig::safe_mode`
 (`memory_safety.rs:277`) vs `compile_time_only`
 (`memory_safety.rs:290`) at `pipeline.rs:6070-6074` — in production the
-`safe_mode` branch is always taken.
+`safe_mode` branch is always taken. There is no way to disable
+runtime bounds-check injection; the previous `--safe` flag is no longer
+accepted.
 
 **Runtime bounds-check IR injection.** When
-`config.runtime_bounds_checks` is set, the pipeline calls
+`config.runtime_bounds_checks` is set (which is always), the pipeline calls
 `find_bounds_check_sites_with_bounds` (`memory_safety.rs:823`) on the
 codegen SCG, then `inject_bounds_check_ir` (`memory_safety.rs:1014`,
 invoked at `pipeline.rs:6139`) mutates the SCG to prepend a
@@ -285,7 +343,7 @@ a LIVE/DEAD flag at `[ptr + total_size]`.
 `arena_overflow_trap` (`arena.rs:107`), which calls
 `std::process::exit(1)` — mirroring the codegen-emitted `__arena_overflow`
 stub that every backend lowers to `exit(1)` (e.g. x86_64 `sys_exit`
-code=1, aarch64 `svc #0` with X8=93/X0=1). Previously this module used
+code=1, aarch64 `svc #0` with X8=93/X0=1). This module previously used
 `std::process::abort` (SIGABRT, exit 134), which diverged from the codegen
 trap contract. Aligning both paths keeps the Iris spec
 (`wp (call __arena_overflow) { _, False }`) faithful. See `arena.rs:23-34`
@@ -326,6 +384,18 @@ backend's `Syscall{220}` handler returns 0 (child branch), and
 `wasm32_fork_emulation_pass` (`ipc_lowering.rs:232`) rewrites the
 child's `Return` to `Store(exit_val, 4096); Jump(parent_post)`. Both
 branches run sequentially in-process — **not real isolation**.
+
+**Two-pipe channel architecture (the nanosleep hack is gone).** Each
+channel end is a 16-byte handle holding **4 file descriptors**: the
+parent→child pipe (read+write ends) and the child→parent pipe (read+write
+ends). Send and recv touch *different* pipes, so the previous
+single-pipe design — and its `nanosleep`-based send/recv race
+workaround — has been **removed entirely**. There is no
+`nanosleep` call anywhere in the channel runtime; the two-pipe design
+eliminates the race by construction (a sender writes to the
+parent→child pipe; a reader reads from the same pipe; the kernel's
+pipe buffer handles synchronization). See `./caveats.md` §2.3 for the
+full two-pipe handle layout and the half-closed-channel semantics.
 
 L1 wire frame (`ipc.rs:106-136`):
 
@@ -386,25 +456,27 @@ unconditional (`opt.rs:2037`); profile-guided cost via
 
 ## 9. Register Allocation
 
-**Crate:** `vuma-codegen` (`regalloc.rs`, `regalloc_emit.rs`, per-backend `*/stack_slot_isel.rs`). Three allocators exist; only one is widely used:
+**Crate:** `vuma-codegen` (`regalloc.rs`, `regalloc_emit.rs`, per-backend
+`*/stack_slot_isel.rs`, `*/reg_alloc_isel.rs`). Four register-allocation
+strategies are in use:
 
-- **Stack-slot ISel** (de facto for 17/19 backends): every vreg is
- materialized to a stack slot; each IR op emits
- `load lhs → load rhs → op → store`. Used by x86_64, x86_32,
- loongarch64, arm32, mips64, ppc64, wasm32, riscv64, riscv32, arm64,
- sparc64, s390x, m68k, alpha, hppa, ppc64le, armeb, aarch64_be, mips64be.
-- **`LinearScanAllocator`** (`regalloc.rs`): real linear-scan,
- **AArch64 only** (production).
-- **`TargetAgnosticRegAlloc`** (`regalloc.rs`): available to all backends,
- adopted by none.
+| Allocator | Backends | Notes |
+|-----------|----------|-------|
+| **`LinearScanAllocator`** (`regalloc.rs`) | `aarch64` | Real linear-scan; production. |
+| **`TargetAgnosticRegAlloc`** (`regalloc.rs`) | `x86_64`, `riscv64`, `ppc64` | Real `TargetDesc`-driven linear-scan. |
+| **Stack-slot ISel** (per-backend `*/stack_slot_isel.rs`) | 14 backends: `x86_32`, `loongarch64`, `arm32`, `mips64`, `ppc64le`, `wasm32`, `riscv32`, `armeb`, `aarch64_be`, `sparc64`, `s390x`, `m68k`, `alpha`, `hppa`, `mips64be` | Every vreg materialised to a stack slot; each IR op emits `load lhs → load rhs → op → store`. Correct but ~2–5× slower than the linear-scan backends under register pressure. |
+| **LoongArch64 register cache** (`loongarch64/reg_alloc_isel.rs`) | `loongarch64` | "Register cache" that keeps values in physical registers within a basic block, flushing only at block boundaries and before calls. Under QEMU TCG every load/store is 10–100× slower than a register op (`loongarch64/reg_alloc_isel.rs:7-15`), motivating the optimization. A deliberate single-backend performance choice. |
 
-The exception is **LoongArch64**, which uses `reg_alloc_isel.rs`
-(`loongarch64/reg_alloc_isel.rs:1-15`): a "register cache" that keeps
-values in physical registers within a basic block, flushing only at
-block boundaries and before calls. Under QEMU TCG every load/store is
-10–100× slower than a register op (`loongarch64/reg_alloc_isel.rs:7-15`),
-motivating the optimization. This is "the new ISel" not the default —
-a deliberate single-backend performance choice, not the baseline.
+Stack-slot ISel is the *fallback* path on the 14 backends that have not
+yet had a complete `TargetDesc` populated. It is no longer the case that
+"stack-slot ISel is the only option" — four backends (`aarch64`,
+`x86_64`, `riscv64`, `ppc64`) have real linear-scan allocators, and
+`loongarch64` has its own register-cache ISel. Wiring the remaining 14
+backends up to `TargetAgnosticRegAlloc` requires populating a complete,
+validated `TargetDesc` (register classes, caller/callee-saved sets, ABI
+register roles, frame layout) per backend; that work is tracked in
+`src/codegen/src/target_desc.rs`. See `./caveats.md` §2.1 for the full
+per-backend allocator matrix.
 
 ---
 
@@ -440,6 +512,14 @@ The previous canonical-pipeline emit path produced broken ELFs (no
 `_start` stub, no exit syscall on AArch64; cross-ISA machine-code
 mismatch on x86_64) that SIGSEGV'd under QEMU.
 
+**All 19 backends pass the gold-standard suite at 100 %.** The current
+matrix is **29 944 / 29 944 = 100.00 %** across all 19 backends
+(`x86_64`, `x86_32`, `aarch64`, `aarch64_be`, `arm32`, `armeb`,
+`riscv64`, `riscv32`, `mips64`, `mips64be`, `ppc64`, `ppc64le`,
+`loongarch64`, `s390x`, `sparc64`, `alpha`, `hppa`, `m68k`, `wasm32`).
+The runner is `scripts/pi5_test_suite.sh`; the manifest is
+`tests/gold_standard/manifest.json`.
+
 ---
 
 ## Caveats
@@ -447,43 +527,58 @@ mismatch on x86_64) that SIGSEGV'd under QEMU.
 The following caveats apply pipeline-wide; per-stage caveats are inlined
 above. See `./caveats.md` for the consolidated list.
 
-1. **`--safe` is MANDATORY, not a no-op** (Stage 5; `main.rs:610` hard-codes
- `safe: true`; the flag is accepted but does nothing — `main.rs:751-756`).
- `--no-memory-safety` is rejected as a hard parse error (`main.rs:759-761`).
+1. **Runtime bounds checks are ALWAYS ON** (Stage 5; `main.rs:610`
+   hard-codes `safe: true`). The `--safe` flag has been removed from the
+   CLI surface; it is no longer accepted. `--no-memory-safety` is
+   rejected as a hard parse error (`main.rs:759-761`).
 2. **PMT ≠ "Persistent Memory Transaction"** — it means "Programs as Memory
- Transformations" (Stage 4; `invariant_aggregator.rs:166-170`).
+   Transformations" (Stage 4; `invariant_aggregator.rs:166-170`).
 3. **The five legacy pointer invariants were DELETED**, not "skipped" —
- `VerificationLevel` is a single-variant enum
- (`invariant_aggregator.rs:158-173`); `invariants_for_level` always
- returns `vec![InvariantKind::Pmt]` (`invariant_aggregator.rs:747-749`).
+   `VerificationLevel` is a single-variant enum
+   (`invariant_aggregator.rs:158-173`); `invariants_for_level` always
+   returns `vec![InvariantKind::Pmt]` (`invariant_aggregator.rs:747-749`).
 4. **`materialize_f32_immediates` is load-bearing** — reordering it
- corrupts f32 constants on x86_64 (Stage 8; `opt.rs:2070-2077`).
+   corrupts f32 constants on x86_64 (Stage 8; `opt.rs:2070-2077`).
 5. **ICF and `whole_program_dce` are wired** (`opt.rs:2059-2063`).
 6. **`vuma_log!` is no-op in release** (`lib.rs:36-43` of every core crate)
- — backend advisory output is invisible in `vuma build --release`.
-7. **17 of 19 backends use stack-slot ISel**; LoongArch64 is the lone
- register-cache adopter (Stage 9).
+   — backend advisory output is invisible in `vuma build --release`.
+7. **14 of 19 backends use stack-slot ISel**; 4 backends (`aarch64`,
+   `x86_64`, `riscv64`, `ppc64`) have real linear-scan; `loongarch64`
+   uses its own register-cache ISel (Stage 9).
 8. **`syscall_abi::translate`** is wrapped by `translate_or_warn`
- (`syscall_abi.rs:281`), which is the real production caller invoked by
- sparc64, s390x, hppa, riscv64, x86_64, m68k, ppc64. The bare `translate`
- is reachable only through the wrapper.
+   (`syscall_abi.rs:281`), which is the real production caller invoked by
+   sparc64, s390x, hppa, riscv64, x86_64, m68k, ppc64. The bare `translate`
+   is reachable only through the wrapper.
 9. **wasm32 fork is not real isolation** — both branches run sequentially
- in-process (Stage 7; `ipc_lowering.rs:232`).
+   in-process (Stage 7; `ipc_lowering.rs:232`).
 10. **`find_bounds_check_sites_with_bounds` is WIRED** (Stage 5). Called
- from `compile_with_path` at `pipeline.rs:6104`; `inject_bounds_check_ir`
- (`pipeline.rs:6139`) emits `__oob_trap` IR.
+    from `compile_with_path` at `pipeline.rs:6104`; `inject_bounds_check_ir`
+    (`pipeline.rs:6139`) emits `__oob_trap` IR.
 11. **`Inconclusive` HARD-FAILS by default** (Stage 4). `--allow-inconclusive`
- (`main.rs:692`) is the sole opt-out.
+    (`main.rs:692`) is the sole opt-out.
 12. **`--strict-ive` promotes the remaining advisory verifier to HARD-FAIL**
- (Stage 4). The only advisory gate left is `bv_verify`
- (`pipeline.rs:5317`); the linear-channel gate is UNCONDITIONAL
- HARD-FAIL (`pipeline.rs:5973` and `pipeline.rs:7399`) and no longer
- requires `--strict-ive`.
+    (Stage 4). The only advisory gate left is `bv_verify`
+    (`pipeline.rs:5317`); the linear-channel gate is UNCONDITIONAL
+    HARD-FAIL (`pipeline.rs:5973` and `pipeline.rs:7399`) and no longer
+    requires `--strict-ive`.
 13. **`cmd_emit` uses the direct path, not the canonical pipeline**
- (Stage 10). Routes through `compile_to_binary_direct`
- (`main.rs:1690`); full IVE suite is NOT run on the emit path.
+    (Stage 10). Routes through `compile_to_binary_direct`
+    (`main.rs:1690`); full IVE suite is NOT run on the emit path.
+14. **Z3 is a hard build dependency** (`src/ive/Cargo.toml`:
+    `z3 = "0.20"`). The Lean FFI bridge (with `lean_stub.c`,
+    `lean_ffi_linked`, `lean_verify_*` externs) has been **deleted**;
+    the Lean proofs under `proof/` are the formal specification only
+    and are not linked into the binary.
+15. **Two-pipe channel architecture** (Stage 7). The previous
+    `nanosleep`-based send/recv race workaround is gone — each channel
+    end is a 16-byte handle with 4 fds (parent→child pipe + child→parent
+    pipe); send and recv touch different pipes, eliminating the race by
+    construction.
 
 ---
 
-*Document length: updated to reflect the linear-channel HARD-FAIL
-promotion; file:line citations refreshed to HEAD.*
+*Document length: updated to reflect the Z3-based IVE contract
+discharge, two-pipe channel architecture, four-backend real-regalloc
+matrix, and 29 944 / 29 944 = 100.00 % gold-standard pass rate; the
+Lean FFI bridge is gone, Z3 is the executable verifier; file:line
+citations refreshed to HEAD.*
