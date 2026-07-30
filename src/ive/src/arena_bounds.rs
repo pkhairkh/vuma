@@ -94,7 +94,7 @@ pub fn verify_arena_bounds(
     // each node independently and track arena state via vregs.
     for node in scg.nodes() {
         match &node.payload {
-            NodePayload::ArenaNew(ArenaNewNode { capacity_vreg, result_vreg }) => {
+            NodePayload::ArenaNew(ArenaNewNode { capacity_vreg: _, result_vreg }) => {
                 // Record the arena's capacity. Since capacity_vreg is symbolic,
                 // we don't know the actual value — store None (unknown).
                 // (A future enhancement could propagate constants from
