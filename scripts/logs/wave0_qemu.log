@@ -1,0 +1,125 @@
+================================================================================
+ WAVE 0 / TASK 0-c-install — QEMU user-mode ≥ 10.0 (caveat §4.2)
+ Transcript — recorded 2026-07-30 (UTC)
+================================================================================
+
+GOAL
+----
+Provide all 18 VUMA-required `qemu-<isa>-static` user-mode binaries on $PATH,
+each reporting version ≥ 10.0 (caveat §4.2).  Required ISAs:
+
+  aarch64 aarch64_be alpha arm armeb hppa i386 loongarch64 m68k
+  mips64 mips64el ppc64 ppc64le riscv32 riscv64 s390x sparc64 x86_64
+
+ENVIRONMENT PROBE
+-----------------
+- /etc/os-release : Debian GNU/Linux 13 (trixie), amd64
+- whoami / id     : z (uid 1001, gid 1001) — non-root
+- sudo -n true    : FAILS ("a password is required")  — no passwordless sudo
+- which qemu-*    : all MISSING before install (no system qemu-user / qemu)
+- dpkg -l | qemu  : (empty)
+- apt-cache policy qemu-user-static :
+    Candidate: 1:10.0.11+ds-0+deb13u1   (Debian trixie/main)  ← ≥ 10.0 ✅
+    Also:     1:10.0.2+ds-2+deb13u1    (trixie-security)
+
+PATH CHOSEN
+-----------
+`apt-get install` is blocked by the dpkg lock (no root).  Fall back to plan
+(b) of the protocol: download the .deb files via `apt-get download` (which
+needs no root) and extract them locally into $HOME/.local/bin.
+
+Debian 13's `qemu-user-static` package is now transitional: it ships only
+`qemu-<isa>-static -> qemu-<isa>` SYMLINKS, with the actual binaries in the
+`qemu-user` package.  Therefore both packages were downloaded:
+
+  apt-get download qemu-user-static    -> 70 KB  (symlinks only)
+  apt-get download qemu-user           -> 71 MB  (real binaries)
+
+Both at version 1:10.0.11+ds-0+deb13u1.
+
+INSTALLATION STEPS
+------------------
+1. mkdir -p $HOME/.local/bin
+2. dpkg-deb -x qemu-user_*.deb /tmp/qemu-extract
+3. Copied the 18 required real binaries `qemu-<isa>` from
+   /tmp/qemu-extract/usr/bin/ to $HOME/.local/bin/  (chmod 0755).
+4. Created `qemu-<isa>-static -> qemu-<isa>` symlinks in $HOME/.local/bin/
+   for each of the 18 required ISAs (mirrors Debian qemu-user-static).
+5. Also created the compat aliases the upstream deb ships:
+   qemu-amd64->qemu-x86_64, qemu-arm64->qemu-aarch64,
+   qemu-loong64->qemu-loongarch64, qemu-powerpc->qemu-ppc,
+   qemu-armel->qemu-arm, qemu-armhf->qemu-arm, qemu-ppc64el->qemu-ppc64le.
+6. Appended an idempotent PATH-prepend block for $HOME/.local/bin to both
+   ~/.bashrc and ~/.profile (so fresh login shells find qemu-* unaided).
+7. Wrote vuma/scripts/env/qemu-env.sh — a small `source`-able wrapper that
+   prepends $HOME/.local/bin to PATH idempotently, for non-login shells
+   (CI, bash -c).  Mirrors the z3-env.sh / rust-env.sh convention.
+
+NATURE OF THE BINARIES
+----------------------
+`file $HOME/.local/bin/qemu-x86_64` reports:
+  ELF 64-bit LSB pie executable, x86-64, version 1 (GNU/Linux),
+  static-pie linked, stripped
+`ldd` reports: "statically linked".
+
+So the binaries ARE genuinely statically linked (static-PIE), even though
+upstream names them `qemu-<isa>` rather than `qemu-<isa>-static`.  The
+`-static` symlinks satisfy the VUMA test-suite's expected names directly;
+no DoD "non-static fallback" branch was needed.
+
+VERIFICATION — `qemu-<isa>-static --version | head -1` for all 18
+-----------------------------------------------------------------
+qemu-aarch64-static        10.0.11   OK   (-> /home/z/.local/bin/qemu-aarch64-static)
+qemu-aarch64_be-static     10.0.11   OK
+qemu-alpha-static          10.0.11   OK
+qemu-arm-static            10.0.11   OK
+qemu-armeb-static          10.0.11   OK
+qemu-hppa-static           10.0.11   OK
+qemu-i386-static           10.0.11   OK
+qemu-loongarch64-static    10.0.11   OK
+qemu-m68k-static           10.0.11   OK
+qemu-mips64-static         10.0.11   OK
+qemu-mips64el-static       10.0.11   OK
+qemu-ppc64-static          10.0.11   OK
+qemu-ppc64le-static        10.0.11   OK
+qemu-riscv32-static        10.0.11   OK
+qemu-riscv64-static        10.0.11   OK
+qemu-s390x-static          10.0.11   OK
+qemu-sparc64-static        10.0.11   OK
+qemu-x86_64-static         10.0.11   OK
+
+All 18/18 report version 10.0.11 ≥ 10.0.  ALL_18_OK=1.
+
+RUNTIME SMOKE TEST
+------------------
+$ qemu-x86_64-static /bin/true   ; echo $?
+0
+(/bin/true is the host's x86_64 ELF; qemu-x86_64-static exec'd it successfully.)
+
+ENV-SCRIPT SMOKE TEST
+---------------------
+$ bash -c 'source /home/z/my-project/vuma/scripts/env/qemu-env.sh && \
+           which qemu-x86_64-static qemu-aarch64-static qemu-loongarch64-static && \
+           qemu-x86_64-static --version | head -1'
+/home/z/.local/bin/qemu-x86_64-static
+/home/z/.local/bin/qemu-aarch64-static
+/home/z/.local/bin/qemu-loongarch64-static
+qemu-x86_64 version 10.0.11 (Debian 1:10.0.11+ds-0+deb13u1)
+
+DOD CHECKLIST
+-------------
+[x] DoD-1: All 18 `qemu-<isa>-static` binaries on $PATH            — PASS
+[x] DoD-2: Each `qemu-<isa>-static --version | head -1` ≥ 10.0    — PASS (10.0.11)
+[x] DoD-3: Transcript written to /home/z/my-project/scripts/logs/wave0_qemu.log — this file
+[x] DoD-4: env wrapper committed to vuma/scripts/env/qemu-env.sh  — see commit
+[x] DoD-5: No source files under vuma/src/ or vuma/proof/ touched — confirmed
+
+COMMIT
+------
+vuma repo, branch main, prefix [0-c-install]:
+  [0-c-install] expose QEMU user-mode 10.0.11 (18 ISAs) via user-local install + qemu-env.sh
+Files added:
+  scripts/env/qemu-env.sh
+  scripts/logs/wave0_qemu.log   (this file, copied into the repo)
+
+STATUS: PASS (18/18).
