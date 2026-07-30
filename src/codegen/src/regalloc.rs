@@ -1523,6 +1523,7 @@ impl LinearScanAllocator {
     /// `intervals` is the full sorted slice of live intervals (used to look
     /// up the evicted interval's `use_positions` / `def_positions` when
     /// generating eviction spill/reload code — R1-b-impl fix for audit G1).
+    #[allow(clippy::too_many_arguments)]
     fn try_alloc_gpr(
         &self,
         interval: &LiveInterval,
