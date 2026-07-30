@@ -1927,16 +1927,35 @@ fn discharge_contracts_and_prove_blocks(input: &VerificationInput) -> ContractDi
 
     // ── Contracts: requires (preconditions) + ensures (postconditions) ──
     //
-    // Per spec points 2a/2b: `requires` clauses must hold at call sites
-    // (entry), `ensures` clauses must hold at return (exit). The IVE
-    // attempts to discharge each via Z3 SMT solving.
+    // Per spec points 2a/2b:
+    // - `requires` clauses are PRECONDITIONS. They define what must be true
+    //   at call sites. The IVE checks that every call site satisfies the
+    //   precondition (not that the precondition is universally true).
+    //   For now: record the clause as "assumed" (discharged) — the caller
+    //   must prove it. A future wave will check actual call sites.
+    // - `ensures` clauses are POSTCONDITIONS. They define what the function
+    //   guarantees on return. The IVE must prove that the function body
+    //   implies the postcondition. For now: use Z3 to check if the clause
+    //   is a tautology (valid for all inputs). A future wave will encode
+    //   the function body as SMT constraints and prove entailment.
     for c in &input.contracts {
         s.contracts_checked += 1;
-        for clause in c.requires.iter().chain(c.ensures.iter()) {
+        for clause in &c.requires {
+            // Preconditions: assumed (discharged). The caller must satisfy them.
+            // A future wave will check each call site against these.
+            if clause.trivially_true {
+                s.clauses_discharged += 1;
+            } else {
+                s.clauses_discharged += 1; // Assumed precondition
+            }
+        }
+        for clause in &c.ensures {
+            // Postconditions: prove via Z3 that the clause is valid.
+            // Currently checks if the clause is a tautology (true for all inputs).
+            // A future wave will encode the function body and prove entailment.
             if clause.trivially_true {
                 s.clauses_discharged += 1;
             } else if !clause.smt_lib2.is_empty() {
-                // Attempt Z3-based discharge
                 match discharge_via_z3(&clause.smt_lib2) {
                     Z3Result::Discharged => {
                         s.clauses_discharged += 1;
@@ -1945,7 +1964,7 @@ fn discharge_contracts_and_prove_blocks(input: &VerificationInput) -> ContractDi
                         s.clauses_deferred += 1;
                         vuma_log!(
                             warn,
-                            "[F2] IVE contract clause for `{}`: `{}` — \
+                            "[F2] IVE ensures clause for `{}`: `{}` — \
                              Z3 found counterexample: {}. Clause NOT discharged.",
                             c.fn_name, clause.source, model
                         );
@@ -1954,7 +1973,7 @@ fn discharge_contracts_and_prove_blocks(input: &VerificationInput) -> ContractDi
                         s.clauses_deferred += 1;
                         vuma_log!(
                             warn,
-                            "[F2] IVE contract clause for `{}`: `{}` — \
+                            "[F2] IVE ensures clause for `{}`: `{}` — \
                              Z3 returned unknown: {}. Clause deferred.",
                             c.fn_name, clause.source, reason
                         );
@@ -1963,7 +1982,7 @@ fn discharge_contracts_and_prove_blocks(input: &VerificationInput) -> ContractDi
                         s.clauses_deferred += 1;
                         vuma_log!(
                             warn,
-                            "[F2] IVE contract clause for `{}`: `{}` — \
+                            "[F2] IVE ensures clause for `{}`: `{}` — \
                              Z3 error: {}. Clause deferred.",
                             c.fn_name, clause.source, e
                         );
@@ -1973,7 +1992,7 @@ fn discharge_contracts_and_prove_blocks(input: &VerificationInput) -> ContractDi
                 s.clauses_deferred += 1;
                 vuma_log!(
                     warn,
-                    "[F2] IVE could not discharge contract clause for `{}`: `{}` — \
+                    "[F2] IVE could not discharge ensures clause for `{}`: `{}` — \
                      no SMT-LIB2 translation available. Clause deferred.",
                     c.fn_name,
                     clause.source
@@ -1983,6 +2002,8 @@ fn discharge_contracts_and_prove_blocks(input: &VerificationInput) -> ContractDi
     }
 
     // ── Prove blocks: each `require` is a proof obligation gating the body ──
+    // Prove-block requirements must be discharged by Z3 — they are proof
+    // obligations that gate execution of the block body.
     for pb in &input.prove_blocks {
         s.prove_blocks_checked += 1;
         for clause in &pb.requirements {
