@@ -212,7 +212,7 @@ impl Arena {
             let new_offset = self.offset.wrapping_add(aligned_size);
             let ptr = unsafe { self.base.add(self.offset) };
             self.offset = new_offset;
-            return ptr;
+            ptr
         }
 
         #[cfg(not(feature = "pmt-runtime-check"))]
