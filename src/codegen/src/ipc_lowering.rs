@@ -115,6 +115,21 @@ struct Needs {
     hotswap_table: bool,
     driver_table: bool,
     stark_table: bool,
+    /// Two-pipe channel architecture: when BOTH `channel_open` AND
+    /// `spawn_worker` are used in the same function, we need an 8-byte slot
+    /// to stash the address of the most recently opened channel handle.
+    /// After `clone()`, the child branch reads this slot and swaps the
+    /// handle's pipe-direction fields so that `channel_send` (offset 4) and
+    /// `channel_recv` (offset 8) target the child→parent and parent→child
+    /// pipes respectively. Without this swap, both parent and child would
+    /// read/write the same pipe, and the parent's `channel_recv` in
+    /// `process_call`/`driver_call` would consume its own `channel_send`
+    /// frame before the child gets a chance to read it — manifesting as
+    /// `ffi_basic` timeouts under parallel load on sparc64. The slot is
+    /// only allocated when both builtins are present (see `scan_needs`) to
+    /// avoid a null-pointer dereference when `spawn_worker` is used without
+    /// `channel_open`.
+    active_channel: bool,
 }
 
 /// Per-function context carried through the lowering pass.
@@ -133,6 +148,11 @@ struct LowerContext {
     hotswap_table: Option<IRValue>,
     driver_table: Option<IRValue>,
     stark_table: Option<IRValue>,
+    /// Pointer to an 8-byte slot holding the address of the most recently
+    /// opened channel handle. Populated by `expand_channel_open`, consumed by
+    /// `expand_spawn_worker` (to swap the child's pipe-direction fields after
+    /// `clone()`). `None` when the function has no `spawn_worker`/`channel_open`.
+    active_channel: Option<IRValue>,
 }
 
 impl LowerContext {
@@ -149,6 +169,7 @@ impl LowerContext {
             hotswap_table: None,
             driver_table: None,
             stark_table: None,
+            active_channel: None,
         }
     }
 
@@ -613,6 +634,15 @@ enum DefKind {
 fn scan_needs(func: &IRFunction, ctx: &mut LowerContext) -> Needs {
     let mut needs = Needs::default();
     let mut l1_count: i64 = 0;
+    // Track whether the function uses channel_open and/or spawn_worker.
+    // The `active_channel` slot is only needed when BOTH are present:
+    // channel_open populates it, spawn_worker consumes it. If only one
+    // is present the slot is unnecessary (and if only spawn_worker were
+    // present, the slot would be zero-initialised → the swap code would
+    // dereference a null handle pointer). Guarding with the AND ensures
+    // the swap code only runs when the handle pointer is guaranteed valid.
+    let mut has_channel_open = false;
+    let mut has_spawn_worker = false;
     for block in &func.blocks {
         for instr in &block.instructions {
             if let IRInstr::Call { func: fname, .. } = instr {
@@ -638,10 +668,34 @@ fn scan_needs(func: &IRFunction, ctx: &mut LowerContext) -> Needs {
                     "stark_prove" | "stark_verify" => {
                         needs.stark_table = true;
                     }
+                    "channel_open" => {
+                        // Two-pipe channel architecture: see the note on
+                        // `has_spawn_worker` below. We track channel_open
+                        // separately and only allocate the `active_channel`
+                        // slot when BOTH channel_open and spawn_worker are
+                        // present in the same function.
+                        has_channel_open = true;
+                    }
+                    "spawn_worker" => {
+                        // spawn_worker's swap code (see expand_spawn_worker)
+                        // reads the `active_channel` slot to find the channel
+                        // handle and swap its pipe-direction fields in the
+                        // child. The slot is only populated by channel_open,
+                        // so we track spawn_worker separately and combine
+                        // with has_channel_open after the scan.
+                        has_spawn_worker = true;
+                    }
                     _ => {}
                 }
             }
         }
+    }
+    // Only allocate the active_channel slot when both channel_open and
+    // spawn_worker are present. This avoids a null-pointer dereference in
+    // the swap code when spawn_worker is used without channel_open (the
+    // slot would be zero-initialised → handle=0 → Load from address 0).
+    if has_channel_open && has_spawn_worker {
+        needs.active_channel = true;
     }
     ctx.formal_verify_count = l1_count;
     needs
@@ -742,6 +796,26 @@ fn alloc_state_slots(func: &mut IRFunction, ctx: &mut LowerContext, needs: &Need
             value: IRValue::Immediate(0),
             addr: v,
             offset: 224,
+            ty: IRType::I64,
+        });
+    }
+    if needs.active_channel {
+        // 8-byte slot holding a POINTER to the most recently opened channel
+        // handle. `channel_open` stores the handle address here; after
+        // `clone()` the child branch reads it and swaps the handle's
+        // pipe-direction fields so two-pipe IPC works without modifying user
+        // code. Zero-initialised so the child's swap is a no-op if
+        // `channel_open` hasn't run yet (defensive).
+        let v = ctx.new_vreg();
+        ctx.active_channel = Some(v.clone());
+        prepend.push(IRInstr::Alloc {
+            dst: v.clone(),
+            size: 8,
+        });
+        prepend.push(IRInstr::Store {
+            value: IRValue::Immediate(0),
+            addr: v,
+            offset: 0,
             ty: IRType::I64,
         });
     }
@@ -1037,8 +1111,37 @@ fn expand_builtin(
 // ── L0: Channel primitives ───────────────────────────────────────────
 
 /// channel_open() -> u64
-/// Creates a pipe via pipe2 syscall, returns a 64-bit handle:
-/// low 32 bits = read_fd, high 32 bits = write_fd.
+/// Creates TWO pipes via pipe2 syscall, returns a POINTER to a 16-byte
+/// handle buffer:
+///
+/// ```text
+///   handle layout (16 bytes, 4 × i32 fds):
+///     [ 0.. 4] read_fd1   — pipe1 read end  (parent reads here ONLY after child-side swap)
+///     [ 4.. 8] write_fd1  — pipe1 write end (parent writes here → child reads)
+///     [ 8..12] read_fd2   — pipe2 read end  (parent reads here ← child writes)
+///     [12..16] write_fd2  — pipe2 write end (child writes here ONLY after child-side swap)
+/// ```
+///
+/// **Two-pipe architecture.** Pipe1 carries parent→child frames; pipe2
+/// carries child→parent frames. The PARENT uses `channel_send` (writes
+/// `[handle+4]` = write_fd1 → pipe1) and `channel_recv` (reads
+/// `[handle+8]` = read_fd2 → pipe2). The CHILD, after `expand_spawn_worker`
+/// swaps `[0]↔[8]` and `[4]↔[12]`, sees write_fd2 at offset 4 and
+/// read_fd1 at offset 8 — so the same `channel_send`/`channel_recv` code
+/// paths correctly target pipe2 (child→parent) and pipe1 (parent→child)
+/// respectively.
+///
+/// This eliminates the self-echo race that plagued the single-pipe design:
+/// `process_call`/`driver_call` do `channel_send` then `channel_recv`
+/// back-to-back in the parent. With one pipe the parent's `channel_recv`
+/// could consume its own 56-byte frame before the child read it, starving
+/// the child and deadlocking — manifesting as `ffi_basic` timeouts on
+/// sparc64 under parallel load. Two pipes make the send and recv directions
+/// physically separate, so the parent's recv cannot read its own write.
+///
+/// The handle pointer is also stashed in the per-function `active_channel`
+/// slot (see `alloc_state_slots`) so `expand_spawn_worker` can find it after
+/// `clone()` and perform the child-side swap without modifying user code.
 fn expand_channel_open(dst: Option<&IRValue>, ctx: &mut LowerContext) -> Vec<IRInstr> {
     let dst = match dst {
         Some(d) => d.clone(),
@@ -1046,111 +1149,187 @@ fn expand_channel_open(dst: Option<&IRValue>, ctx: &mut LowerContext) -> Vec<IRI
             return vec![];
         }
     };
-    let fds_buf = ctx.new_vreg();
-    let ret = ctx.new_vreg();
-    let read_fd = ctx.new_vreg();
-    let write_fd = ctx.new_vreg();
+    let fds_buf1 = ctx.new_vreg();
+    let fds_buf2 = ctx.new_vreg();
+    let ret1 = ctx.new_vreg();
+    let ret2 = ctx.new_vreg();
+    let read_fd1 = ctx.new_vreg();
+    let write_fd1 = ctx.new_vreg();
+    let read_fd2 = ctx.new_vreg();
+    let write_fd2 = ctx.new_vreg();
     let handle = ctx.new_vreg();
 
-    vec![
-        // pipe2() writes the read/write fds into fds_buf (8 bytes).
+    let mut instrs = vec![
+        // ── Pipe 1: parent→child ──
+        // pipe2() writes the read/write fds into fds_buf1 (8 bytes).
         IRInstr::Alloc {
-            dst: fds_buf.clone(),
+            dst: fds_buf1.clone(),
             size: 8,
         },
         IRInstr::Syscall {
             nr: 59, // pipe2 (asm-generic)
-            args: vec![fds_buf.clone(), IRValue::Immediate(0)],
-            dst: Some(ret.clone()),
+            args: vec![fds_buf1.clone(), IRValue::Immediate(0)],
+            dst: Some(ret1.clone()),
         },
         IRInstr::Load {
-            dst: read_fd.clone(),
-            addr: fds_buf.clone(),
+            dst: read_fd1.clone(),
+            addr: fds_buf1.clone(),
             offset: 0,
             ty: IRType::I32,
         },
         IRInstr::Load {
-            dst: write_fd.clone(),
-            addr: fds_buf,
+            dst: write_fd1.clone(),
+            addr: fds_buf1,
             offset: 4,
             ty: IRType::I32,
         },
-        // Store the (read_fd, write_fd) pair in
-        // an 8-byte heap buffer and return a POINTER to it as the channel
-        // handle. The previous approach packed the two I32 fds into a
-        // single I64 via `Shl(write_fd_ext, 32) | read_fd_ext`, but on
-        // 32-bit backends (x86_32/hppa/riscv32/m68k/arm32) the I64 handle
-        // vreg gets stored in a 4-byte stack slot, losing the high 32 bits
-        // (write_fd). channel_send's `ShrL(ch, 32)` then extracts
-        // write_fd=0 → `write(0, ...)` → EBADF → receiver polls forever
-        // → exit 124 (timeout). The earlier ZExt casts on read_fd/write_fd did
-        // not help because the truncation happens AFTER the Or, when the
-        // I64 result is written to the I32-typed `ch` vreg slot.
-        //
-        // The pointer-based handle sidesteps I64 packing entirely: the
-        // pointer is naturally 32-bit on x86_32/hppa and 64-bit on
-        // 64-bit backends, so it survives intact in the handle vreg slot
-        // regardless of width. channel_send/recv/close extract the fds via
-        // I32 Loads at [handle+4]/[handle+0], which compile to plain
-        // 32-bit memory accesses on every backend. No I64 Shl/Or/ShrL is
-        // involved in handle packing/unpacking anymore.
+        // ── Pipe 2: child→parent ──
         IRInstr::Alloc {
-            dst: handle.clone(),
+            dst: fds_buf2.clone(),
             size: 8,
         },
+        IRInstr::Syscall {
+            nr: 59, // pipe2 (asm-generic)
+            args: vec![fds_buf2.clone(), IRValue::Immediate(0)],
+            dst: Some(ret2.clone()),
+        },
+        IRInstr::Load {
+            dst: read_fd2.clone(),
+            addr: fds_buf2.clone(),
+            offset: 0,
+            ty: IRType::I32,
+        },
+        IRInstr::Load {
+            dst: write_fd2.clone(),
+            addr: fds_buf2,
+            offset: 4,
+            ty: IRType::I32,
+        },
+        // ── 16-byte handle: {read_fd1@0, write_fd1@4, read_fd2@8, write_fd2@12} ──
+        // Pointer-based handle (see the historical note below) — survives
+        // intact in the handle vreg slot on both 32-bit and 64-bit backends.
+        IRInstr::Alloc {
+            dst: handle.clone(),
+            size: 16,
+        },
         IRInstr::Store {
-            value: read_fd,
+            value: read_fd1,
             addr: handle.clone(),
             offset: 0,
             ty: IRType::I32,
         },
         IRInstr::Store {
-            value: write_fd,
+            value: write_fd1,
             addr: handle.clone(),
             offset: 4,
             ty: IRType::I32,
         },
-        IRInstr::BinOp {
-            op: BinOpKind::Add,
-            dst,
-            lhs: handle,
-            rhs: IRValue::Immediate(0),
-            ty: Some(IRType::I64),
+        IRInstr::Store {
+            value: read_fd2,
+            addr: handle.clone(),
+            offset: 8,
+            ty: IRType::I32,
         },
-    ]
+        IRInstr::Store {
+            value: write_fd2,
+            addr: handle.clone(),
+            offset: 12,
+            ty: IRType::I32,
+        },
+    ];
+
+    // Stash the handle pointer in the per-function `active_channel` slot so
+    // `expand_spawn_worker` can find it after `clone()` and swap the
+    // child's pipe-direction fields. The slot is only allocated when BOTH
+    // `channel_open` and `spawn_worker` are present in the function (see
+    // `scan_needs`), so `ctx.active_channel` is `None` for functions that
+    // open a channel but never fork — in that case the store is skipped
+    // (the swap is never needed). On wasm32 the channel builtins are
+    // lowered natively by the backend (this function is never called), and
+    // fork emulation runs the child sequentially in-process, so the swap is
+    // unnecessary — the `is_some()` guard handles that too.
+    if let Some(slot) = ctx.active_channel.clone() {
+        instrs.push(IRInstr::Store {
+            value: handle.clone(),
+            addr: slot,
+            offset: 0,
+            ty: IRType::I64,
+        });
+    }
+
+    instrs.push(IRInstr::BinOp {
+        op: BinOpKind::Add,
+        dst,
+        lhs: handle,
+        rhs: IRValue::Immediate(0),
+        ty: Some(IRType::I64),
+    });
+    instrs
 }
 
 /// channel_close(handle) -> void
+///
+/// Closes all FOUR fds of the two-pipe handle (offsets 0, 4, 8, 12). The
+/// child's handle has been swapped (see `expand_spawn_worker`), so its
+/// offsets 0/4/8/12 hold read_fd2/write_fd2/read_fd1/write_fd1 — but the
+/// same close-all-four logic applies identically in both parent and child
+/// because the SET of fds is the same, just permuted.
 fn expand_channel_close(args: &[IRValue], ctx: &mut LowerContext) -> Vec<IRInstr> {
     if args.is_empty() {
         return vec![];
     }
     let handle = args[0].clone();
-    let read_fd = ctx.new_vreg();
-    let write_fd = ctx.new_vreg();
+    let fd0 = ctx.new_vreg();
+    let fd4 = ctx.new_vreg();
+    let fd8 = ctx.new_vreg();
+    let fd12 = ctx.new_vreg();
 
-    // Handle is a pointer to an 8-byte buffer {read_fd@0, write_fd@4}.
+    // Handle is a pointer to a 16-byte buffer
+    // {read_fd1@0, write_fd1@4, read_fd2@8, write_fd2@12}.
     vec![
         IRInstr::Load {
-            dst: read_fd.clone(),
+            dst: fd0.clone(),
             addr: handle.clone(),
             offset: 0,
             ty: IRType::I32,
         },
         IRInstr::Load {
-            dst: write_fd.clone(),
-            addr: handle,
+            dst: fd4.clone(),
+            addr: handle.clone(),
             offset: 4,
             ty: IRType::I32,
         },
+        IRInstr::Load {
+            dst: fd8.clone(),
+            addr: handle.clone(),
+            offset: 8,
+            ty: IRType::I32,
+        },
+        IRInstr::Load {
+            dst: fd12.clone(),
+            addr: handle,
+            offset: 12,
+            ty: IRType::I32,
+        },
+        // close() (asm-generic nr 57) each of the four fds.
         IRInstr::Syscall {
             nr: 57,
-            args: vec![read_fd],
+            args: vec![fd0],
             dst: None,
         },
         IRInstr::Syscall {
             nr: 57,
-            args: vec![write_fd],
+            args: vec![fd4],
+            dst: None,
+        },
+        IRInstr::Syscall {
+            nr: 57,
+            args: vec![fd8],
+            dst: None,
+        },
+        IRInstr::Syscall {
+            nr: 57,
+            args: vec![fd12],
             dst: None,
         },
     ]
@@ -1223,11 +1402,158 @@ fn expand_spawn_worker(dst: Option<&IRValue>, ctx: &mut LowerContext) -> Vec<IRI
     });
     instrs.push(IRInstr::BinOp {
         op: BinOpKind::Add,
-        dst,
+        dst: dst.clone(),
         lhs: ret,
         rhs: IRValue::Immediate(0),
         ty: Some(IRType::I64),
     });
+
+    // ── Two-pipe child-side handle swap ──────────────────────────────
+    //
+    // After `clone()`, both parent and child share the SAME in-memory
+    // channel handle (copy-on-write until either writes). The handle layout
+    // set up by `expand_channel_open` is:
+    //
+    //   [0]=read_fd1  [4]=write_fd1  [8]=read_fd2  [12]=write_fd2
+    //
+    // The PARENT uses offset 4 (write_fd1 → pipe1, parent→child) for
+    // `channel_send` and offset 8 (read_fd2 → pipe2, child→parent) for
+    // `channel_recv`. The CHILD must use the OPPOSITE pipes: offset 4 must
+    // be write_fd2 (child→parent) and offset 8 must be read_fd1
+    // (parent→child). We achieve this by swapping [0]↔[8] and [4]↔[12] in
+    // the CHILD ONLY.
+    //
+    // We do the swap branchlessly with `Select`: compute `is_child =
+    // (pid == 0)`, then for each offset write back either the swapped or
+    // unswapped value. In the parent (is_child=0) every slot is written
+    // back unchanged — a harmless no-op. In the child (is_child=1) the
+    // slots are permuted as required. This avoids creating new IR blocks
+    // (which would complicate the flat `Vec<IRInstr>` return type and the
+    // wasm32 fork-emulation CFG walker).
+    //
+    // The swap is skipped on wasm32: the fork-emulation pass runs the
+    // child branch sequentially in the same process, so the parent and
+    // child share the SAME handle (no copy-on-write) and swapping would
+    // corrupt the parent's view. wasm32 uses in-memory ring buffers for
+    // channels anyway (see `is_wasm32_native_channel_builtin`), so the
+    // two-pipe fd layout doesn't apply.
+    //
+    // `ctx.active_channel` is `None` when the function has `spawn_worker`
+    // but NOT `channel_open` (see `scan_needs` — the slot is only allocated
+    // when both are present). In that case the swap is skipped: there's no
+    // handle to swap, and the child inherits the parent's channels by fd
+    // inheritance (clone copies the fd table).
+    if ctx.backend != BackendKind::Wasm32 {
+        if let Some(slot) = ctx.active_channel.clone() {
+            let handle = ctx.new_vreg();
+            let fd0 = ctx.new_vreg();
+            let fd4 = ctx.new_vreg();
+            let fd8 = ctx.new_vreg();
+            let fd12 = ctx.new_vreg();
+            let is_child = ctx.new_vreg();
+            let new_fd0 = ctx.new_vreg();
+            let new_fd4 = ctx.new_vreg();
+            let new_fd8 = ctx.new_vreg();
+            let new_fd12 = ctx.new_vreg();
+
+            instrs.push(IRInstr::Load {
+                dst: handle.clone(),
+                addr: slot,
+                offset: 0,
+                ty: IRType::I64,
+            });
+            instrs.push(IRInstr::Load {
+                dst: fd0.clone(),
+                addr: handle.clone(),
+                offset: 0,
+                ty: IRType::I32,
+            });
+            instrs.push(IRInstr::Load {
+                dst: fd4.clone(),
+                addr: handle.clone(),
+                offset: 4,
+                ty: IRType::I32,
+            });
+            instrs.push(IRInstr::Load {
+                dst: fd8.clone(),
+                addr: handle.clone(),
+                offset: 8,
+                ty: IRType::I32,
+            });
+            instrs.push(IRInstr::Load {
+                dst: fd12.clone(),
+                addr: handle.clone(),
+                offset: 12,
+                ty: IRType::I32,
+            });
+            // is_child = (pid == 0) — I32 boolean (1 in child, 0 in parent).
+            instrs.push(IRInstr::Cmp {
+                kind: CmpKind::Eq,
+                dst: is_child.clone(),
+                lhs: dst.clone(),
+                rhs: IRValue::Immediate(0),
+                ty: Some(IRType::I64),
+            });
+            // Branchless conditional swap via Select. In the parent every
+            // Select picks the false_val (the original fd), so the writes
+            // are no-ops. In the child every Select picks the true_val
+            // (the opposite pipe's fd), effecting the [0↔8]/[4↔12] swap.
+            instrs.push(IRInstr::Select {
+                dst: new_fd0.clone(),
+                cond: is_child.clone(),
+                true_val: fd8.clone(),
+                false_val: fd0.clone(),
+                ty: Some(IRType::I32),
+            });
+            instrs.push(IRInstr::Select {
+                dst: new_fd4.clone(),
+                cond: is_child.clone(),
+                true_val: fd12.clone(),
+                false_val: fd4.clone(),
+                ty: Some(IRType::I32),
+            });
+            instrs.push(IRInstr::Select {
+                dst: new_fd8.clone(),
+                cond: is_child.clone(),
+                true_val: fd0.clone(),
+                false_val: fd8.clone(),
+                ty: Some(IRType::I32),
+            });
+            instrs.push(IRInstr::Select {
+                dst: new_fd12.clone(),
+                cond: is_child,
+                true_val: fd4,
+                false_val: fd12,
+                ty: Some(IRType::I32),
+            });
+            // Write the (conditionally swapped) fds back to the handle.
+            instrs.push(IRInstr::Store {
+                value: new_fd0,
+                addr: handle.clone(),
+                offset: 0,
+                ty: IRType::I32,
+            });
+            instrs.push(IRInstr::Store {
+                value: new_fd4,
+                addr: handle.clone(),
+                offset: 4,
+                ty: IRType::I32,
+            });
+            instrs.push(IRInstr::Store {
+                value: new_fd8,
+                addr: handle.clone(),
+                offset: 8,
+                ty: IRType::I32,
+            });
+            instrs.push(IRInstr::Store {
+                value: new_fd12,
+                addr: handle,
+                offset: 12,
+                ty: IRType::I32,
+            });
+        }
+    }
+
     instrs
 }
 
@@ -1346,8 +1672,10 @@ fn expand_channel_send(ctx: &mut LowerContext, args: &[IRValue]) -> Expansion {
     let i_slot = ctx.new_vreg();
     let j_slot = ctx.new_vreg();
 
-    // Extract write_fd from handle buffer at [ch+4].
-    // The handle is a pointer to {read_fd@0, write_fd@4}, not a packed I64.
+    // Extract write_fd from the 16-byte handle buffer at [ch+4].
+    // Two-pipe layout: [0]=read_fd1, [4]=write_fd1, [8]=read_fd2, [12]=write_fd2.
+    // Parent writes to write_fd1 (pipe1, parent→child). Child (after swap)
+    // writes to write_fd2 (pipe2, child→parent) — same offset, swapped value.
     let mut pre = vec![
         IRInstr::Load {
             dst: write_fd.clone(),
@@ -1931,11 +2259,12 @@ fn expand_channel_recv_result(
             dst: frame.clone(),
             size: 56,
         },
-        // read_fd = Load I32 [handle+0]
+        // read_fd = Load I32 [handle+8] — two-pipe: parent reads pipe2 (child→parent),
+        // child (after swap) reads pipe1 (parent→child). See expand_channel_open.
         IRInstr::Load {
             dst: read_fd.clone(),
             addr: ch,
-            offset: 0,
+            offset: 8,
             ty: IRType::I32,
         },
         // read(read_fd, frame, 56)
@@ -2167,11 +2496,12 @@ fn expand_channel_recv(
             dst: frame.clone(),
             size: 56,
         },
-        // read_fd = Load I32 [handle+0]
+        // read_fd = Load I32 [handle+8] — two-pipe: parent reads pipe2 (child→parent),
+        // child (after swap) reads pipe1 (parent→child). See expand_channel_open.
         IRInstr::Load {
             dst: read_fd.clone(),
             addr: ch,
-            offset: 0,
+            offset: 8,
             ty: IRType::I32,
         },
     ];
@@ -2495,7 +2825,9 @@ fn expand_channel_send_cap(ctx: &mut LowerContext, args: &[IRValue]) -> Expansio
     let i_slot = ctx.new_vreg();
     let j_slot = ctx.new_vreg();
 
-    // Extract write_fd from handle buffer at [ch+4].
+    // Extract write_fd from the 16-byte handle buffer at [ch+4].
+    // (See expand_channel_open for the two-pipe layout; same offset works
+    // for both parent and post-swap child.)
     let mut pre = vec![
         IRInstr::Load {
             dst: write_fd.clone(),
@@ -2854,11 +3186,12 @@ fn expand_channel_recv_proto(
         dst: frame.clone(),
         size: 56,
     });
-    // read_fd = Load I32 [handle+0]
+    // read_fd = Load I32 [handle+8] — two-pipe: parent reads pipe2 (child→parent),
+    // child (after swap) reads pipe1 (parent→child). See expand_channel_open.
     do_recv_blk.instructions.push(IRInstr::Load {
         dst: read_fd.clone(),
         addr: ch,
-        offset: 0,
+        offset: 8,
         ty: IRType::I32,
     });
     do_recv_blk.instructions.push(IRInstr::Syscall {
@@ -3308,11 +3641,12 @@ fn expand_channel_try_recv(
     let result = ctx.new_vreg();
 
     let mut instrs = vec![
-        // read_fd = Load I32 [handle+0]
+        // read_fd = Load I32 [handle+8] — two-pipe: parent reads pipe2 (child→parent),
+        // child (after swap) reads pipe1 (parent→child). See expand_channel_open.
         IRInstr::Load {
             dst: read_fd.clone(),
             addr: ch,
-            offset: 0,
+            offset: 8,
             ty: IRType::I32,
         },
     ];
@@ -3561,11 +3895,12 @@ fn expand_channel_recv_timeout(
     let result = ctx.new_vreg();
 
     let mut instrs = vec![
-        // read_fd = Load I32 [handle+0]
+        // read_fd = Load I32 [handle+8] — two-pipe: parent reads pipe2 (child→parent),
+        // child (after swap) reads pipe1 (parent→child). See expand_channel_open.
         IRInstr::Load {
             dst: read_fd.clone(),
             addr: ch,
-            offset: 0,
+            offset: 8,
             ty: IRType::I32,
         },
     ];
@@ -3682,11 +4017,12 @@ fn expand_channel_is_closed(
     let result = ctx.new_vreg();
 
     vec![
-        // read_fd = Load I32 [handle+0]
+        // read_fd = Load I32 [handle+8] — two-pipe: parent reads pipe2 (child→parent),
+        // child (after swap) reads pipe1 (parent→child). See expand_channel_open.
         IRInstr::Load {
             dst: read_fd.clone(),
             addr: ch,
-            offset: 0,
+            offset: 8,
             ty: IRType::I32,
         },
         IRInstr::Alloc {
@@ -4610,6 +4946,18 @@ fn expand_driver_register(
 ///
 /// Sends cmd on ch, then recvs the result. Same as channel_send + channel_recv.
 ///
+/// **Two-pipe architecture note.** The previous implementation inserted a
+/// `nanosleep(10ms)` between `channel_send` and `channel_recv` to avoid the
+/// self-echo race: with a single pipe the parent's `channel_recv` could
+/// consume the 56-byte frame the parent just wrote (pipe is a FIFO) before
+/// the child read it, starving the child and deadlocking. With two pipes
+/// (see `expand_channel_open`), the parent's `channel_send` writes to pipe1
+/// (parent→child) and the parent's `channel_recv` reads from pipe2
+/// (child→parent) — physically separate buffers, so the parent's recv
+/// CANNOT read its own write. The nanosleep is therefore unnecessary and
+/// has been removed. The `channel_recv` poll loop still has its own 1ms
+/// `nanosleep` per iteration to yield CPU on QEMU user-mode backends.
+///
 /// On wasm32, the send and recv MUST be in separate IR
 /// blocks. The wasm32 fork-emulation pass reorders the parent's code so
 /// that parent_pre runs first, then the child, then parent_post. If the
@@ -4619,8 +4967,8 @@ fn expand_driver_register(
 /// instead of the child's response. This breaks ffi_basic, ffi_isolation,
 /// and driver_isolation (Pattern C: process_call/driver_call does
 /// inline send+recv in the parent block). The fix: on wasm32, emit the
-/// channel_send + nanosleep in `pre` and the channel_recv in a new
-/// successor block, so the fork pass can split at the recv block boundary.
+/// channel_send in `pre` and the channel_recv in a new successor block,
+/// so the fork pass can split at the recv block boundary.
 fn expand_driver_call(
     ctx: &mut LowerContext,
     args: &[IRValue],
@@ -4631,36 +4979,25 @@ fn expand_driver_call(
     }
     let ch = args[0].clone();
     let cmd = args[1].clone();
-    // Expand driver_call as channel_send(ch, cmd) + nanosleep(1ms) +
-    // channel_recv(ch). The nanosleep gives the child worker time to
-    // read the request, compute the result, and write the response
-    // before the parent tries to read. Without it, the parent may
-    // read its own write (since a pipe is a FIFO — the parent's
-    // read() would consume the 56 bytes the parent just wrote,
-    // starving the child and deadlocking).
-    //
+    // Expand driver_call as channel_send(ch, cmd) + channel_recv(ch).
     // The `while changed` loop in lower_ipc_builtins will catch the
     // new Call instructions on the next iteration and expand them with
     // real CRC32 framing, capability verification, and MAGIC checks.
     //
-    // Uses emit_nanosleep which emits the correct struct timespec layout
-    // for both 32-bit (8 bytes, tv_nsec at offset 4) and 64-bit (16 bytes,
-    // tv_nsec at offset 8) backends. The 32-bit case is critical: the
-    // previous hardcoded I64 stores at offsets 0/8 corrupted the timespec
-    // on 32-bit backends, causing nanosleep to return -EINVAL immediately
-    // (no sleep) and the subsequent channel_recv to race with the child's
-    // send, deadlocking ffi_basic/driver_call on arm32/riscv32/x86_32.
-    let mut pre = vec![IRInstr::Call {
+    // No nanosleep is needed between send and recv: the two-pipe
+    // architecture (see expand_channel_open) ensures the parent's recv
+    // reads from a DIFFERENT pipe (pipe2, child→parent) than the one it
+    // wrote to (pipe1, parent→child), so there is no self-echo race.
+    let pre = vec![IRInstr::Call {
         dst: None,
         func: "channel_send".to_string(),
         args: vec![ch.clone(), cmd],
         is_extern: false,
     }];
-    pre.extend(emit_nanosleep(ctx, 10_000_000));
 
     // On wasm32, emit the channel_recv in a separate
     // successor block so the fork-emulation pass can split at the recv
-    // (parent_pre = send+nanosleep → child → parent_post = recv+rest).
+    // (parent_pre = send → child → parent_post = recv+rest).
     // On other backends, keep the flat expansion (the send+recv are
     // lowered to Syscalls and the fork pass doesn't run).
     if ctx.backend == BackendKind::Wasm32 {
