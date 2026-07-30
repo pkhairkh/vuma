@@ -1,0 +1,56 @@
+// half_closed_channel — Two-pipe channel half-closure (caveat §2.3).
+//
+// The two-pipe channel architecture means send and recv touch DIFFERENT
+// pipes (send → pipe 1 write_fd1@handle[4]; recv → pipe 2 read_fd2@handle[8]).
+// Closing one direction (the parent's write end) leaves the surviving
+// direction (child→parent, pipe 2) fully intact and operational.
+//
+// There is no dedicated `channel_close_send` builtin in VUMA — `channel_close`
+// closes all 4 fds. To demonstrate a TRUE half-close (one direction only),
+// we extract the parent's write_fd1 from the 16-byte handle buffer via
+// `shared_memory_read(ch, 4)` (a generic pointer-deref primitive that loads
+// i64 from `ptr+offset`), mask off the lower 32 bits (write_fd1 is stored as
+// i32 at offset 4, with read_fd2 packed in the upper 32 bits of the i64
+// load), and close that single fd via the raw `syscall(57, fd)` intrinsic
+// (asm-generic nr 57 = close, translated to native x86_64 nr 3 by the
+// backend's syscall_abi::translate_or_warn).
+//
+// Sequence:
+//   1. Parent opens channel, spawns worker.
+//   2. Parent sends 42 → child receives 42 (pipe 1 = parent→child).
+//   3. Parent closes its write end (write_fd1) — pipe 1 write side closed.
+//   4. Child sends 99 → parent receives 99 (pipe 2 = child→parent, intact).
+//   5. Program exits 0 — the surviving direction succeeded.
+//
+// Expected exit code: 0
+transform main() -> i32 {
+    ch = channel_open<i32>();
+    pid = spawn_worker();
+    if pid == 0 {
+        // Child: receive 42 from parent (pipe 1), then send 99 to parent
+        // (pipe 2 — the surviving direction after parent's write-end close).
+        x = channel_recv(ch);
+        channel_send(ch, 99);
+        channel_close(ch);
+        return 0;
+    }
+    // Parent: send 42 to child.
+    channel_send(ch, 42);
+
+    // Half-close the parent's write direction: extract write_fd1 (handle[4],
+    // lower 32 bits of the i64 load) and close just that one fd. This leaves
+    // read_fd2 (handle[8], parent's recv end of pipe 2) untouched.
+    packed: i64 = shared_memory_read(ch, 4);
+    wfd: i64 = packed & 4294967295;
+    syscall(57, wfd);
+
+    // Surviving direction: parent receives 99 from child via pipe 2.
+    // read_fd2 is still open, so channel_recv succeeds.
+    y = channel_recv(ch);
+
+    status = wait_worker(pid);
+    channel_close(ch);
+
+    if y == 99 { return 0; }
+    return 1;
+}

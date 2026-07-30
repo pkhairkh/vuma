@@ -1,0 +1,46 @@
+// half_closed_negative — Closed direction is unusable (caveat §2.3).
+//
+// Companion to half_closed_channel.vuma. After the parent closes its write
+// end (write_fd1), any further use of that direction MUST fail with an
+// error (EBADF — the fd is no longer valid in the parent's fd table).
+//
+// We verify this by issuing a raw `write` syscall (asm-generic nr 64,
+// translated to native x86_64 nr 1) against the closed fd and checking
+// the return value: a successful write returns >= 0; a failed write
+// returns a negative errno (-EBADF = -9 on Linux). The program exits
+// with the positive errno when the failure is detected, proving the
+// closed direction is unusable.
+//
+// Expected exit code: non-zero (9 = EBADF, or similar positive errno)
+transform main() -> i32 {
+    ch = channel_open<i32>();
+    pid = spawn_worker();
+    if pid == 0 {
+        // Child: just exit immediately. We don't need IPC activity to
+        // demonstrate that the parent's closed write fd is unusable.
+        channel_close(ch);
+        return 0;
+    }
+    // Parent: extract write_fd1 (handle[4], lower 32 bits of i64 load).
+    packed: i64 = shared_memory_read(ch, 4);
+    wfd: i64 = packed & 4294967295;
+
+    // Close the parent's write end.
+    syscall(57, wfd);
+
+    // Attempt to write 8 bytes to the now-closed fd. The write syscall
+    // (asm-generic nr 64) should return -EBADF (-9) because the fd is no
+    // longer open in the parent's fd table. We pass `ch` (a valid readable
+    // pointer to the 16-byte handle buffer) as the buf argument — the
+    // kernel rejects the fd before reading any bytes.
+    ret: i64 = syscall(64, wfd, ch, 8);
+
+    status = wait_worker(pid);
+    channel_close(ch);
+
+    // If write failed (negative errno), exit with the positive errno.
+    // EBADF = 9 on Linux. This is the expected non-zero exit.
+    if ret < 0 { return 0 - ret; }
+    // Unexpected: write succeeded on a closed fd.
+    return 1;
+}
