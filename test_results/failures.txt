@@ -1,5 +1,5 @@
-VUMA Test Failures — 2026-07-29 22:19:11 UTC
+VUMA Test Failures — 2026-07-30 07:07:38 UTC
 Total: 1 failures across 1 tests
 Skipped: 0 (architecturally unavailable on target)
 
-  ipc                  ffi_basic.vuma                                exp=  42 [('mips64be', 124, 'TO')]
+  ipc                  ffi_basic.vuma                                exp=  42 [('sparc64', 124, 'TO')]
