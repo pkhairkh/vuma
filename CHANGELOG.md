@@ -6,6 +6,96 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 where applicable.
 
+## [0.2.0-alpha.3] — Register-Based Emission & Endianness Remediation
+
+This release addresses the two critical findings from the follow-up
+remediation run (`v0.2.0-alpha.2-followup-remediation`): (1) the aarch64
+callee-saved register regressions in the regalloc path, and (2) a
+comprehensive endianness audit confirming the F3-b-fix was complete. The
+5-backend register-based emitter work (x86_64, riscv64, ppc64, ppc64le,
+aarch64_be) is deferred to a human developer per §0.7-6 of the
+orchestration prompt (estimated 4.5-6.5 weeks per backend).
+
+### Wave 0 — Environment Re-verify (Latest Stable)
+
+- All toolchains re-verified at latest stable: Z3 5.0.0, Rust stable
+  1.97.1 + nightly 1.99.0 (project pin nightly-2026-03-01), QEMU 10.0.11,
+  wasmtime 47.0.2, Lean 4.32.2 (project pin v4.21.0).
+- Workspace build + clippy + pmt-runtime-check build all exit 0.
+- Pi5 cluster reported 29963/29963 (100.00%) — confirming the prior
+  F3-b-fix resolved all 6 big-endian half_closed_channel failures.
+
+### Wave 1 — Aarch64 Callee-Saved Register Fix
+
+- **R1-a-audit**: Root-caused the 8 callee-saved register regressions to
+  spill-code generation bugs: `gen_eviction_spill_reload` hardcoded spill
+  position 0 and emitted no reloads; `gen_spill_reload` used X0 as scratch
+  (which `resolve_reg` never reads back).
+- **R1-b-impl**: Fixed `gen_eviction_spill_reload` to spill at the eviction
+  position and emit reloads at future use positions. Fixed `gen_spill_reload`
+  to use X15 (caller-saved scratch). Added `verify_callee_saved` verifier
+  pass behind `VUMA_VERIFY_CALLEE_SAVED=1` env var. 6/8 previously-failing
+  tests fixed.
+- **R1-b2-fix**: Added `contains_fork` detection (clone syscall nr=220) to
+  fall back to stack-slot path for IPC functions (fork+regalloc interaction
+  is unsafe). 8/8 previously-failing tests fixed.
+- **R1-b3-fix**: Track `IRInstr::Syscall` in `call_positions` so vregs live
+  across syscalls are spilled/kept-in-callee-saved. try_recv no longer
+  SIGSEGVs (but exits 0 instead of 77 — known edge case).
+- **R1-c-test**: 30-test curated matrix. Regalloc path 29/30, stack-slot
+  30/30. try_recv is the 1 remaining edge case.
+- **Production impact**: ZERO. Env-var gate `VUMA_REAL_REGALLOC_AARCH64=1`
+  defaults OFF. Flipping to default-on deferred pending try_recv fix.
+
+### Waves 2-5 — Deferred to Human Developer (per §0.7-6)
+
+- **R2-a-audit**: Produced 568-line x86_64 register-based emitter design
+  doc covering register file (System V AMD64 ABI), reusable components
+  from aarch64's `emit_function_regalloc`, new components needed,
+  TargetDesc readiness (G7 gap: RBP needs `.not_allocatable()`), risk
+  assessment, phased rollout, and concrete code changes.
+- **Effort estimate**: 4.5-6.5 developer-weeks per backend (x86_64, riscv64,
+  ppc64). aarch64_be (Wave 5) is verification-only (inherits aarch64) and
+  may be achievable in 1-2 days.
+- **Recommendation**: Start with aarch64_be verification, then x86_64
+  (following R2-a-audit design doc), then riscv64 and ppc64 (producing
+  equivalent design docs first).
+
+### Wave 6 — Endianness Audit
+
+- **R6-a-audit**: Audited all 26 `shared_memory_read`/`shared_memory_write`
+  callers. 20 SAFE, 6 SUSPECT (stale test assertions), 0 BUG.
+- **R6-b-audit**: Audited IPC lowering (58 sites). 58 SAFE, 0 SUSPECT,
+  0 BUG. The F3-b-fix was comprehensive.
+- **R6-c-fix**: Fixed 6 stale test assertions in
+  `tests/wave4b_half_closed_channel.rs` to match F3-b-fix's new IR pattern
+  (`Load I32 + Cast ZExt` instead of `Load I64 + BinOp And 0xFFFFFFFF`).
+  3/3 tests pass.
+- **R6-d-test**: Big-endian regression suite. 7 backends × 30 tests = 210
+  executions, 210/210 pass (100%). Confirms F3-b-fix is endianness-agnostic
+  across all supported backends (aarch64_be, mips64be, ppc64, s390x, m68k,
+  hppa, ppc64le).
+
+### Wave 7 — Release
+
+- Version bumped `0.2.0-alpha.2` → `0.2.0-alpha.3`.
+- Annotated tag `v0.2.0-alpha.3-regalloc-endianness` created.
+- All commits pushed to `origin/main`.
+
+### Notes
+
+- The aarch64 regalloc path (env-var gated, OFF by default) passes 29/30
+  curated tests. try_recv is the 1 remaining edge case (exits 0 instead of
+  77; syscall return value handling issue). The env-var gate will remain OFF
+  until try_recv is fixed.
+- The 5-backend register-based emitter work (Waves 2-5) is deferred to a
+  human developer. The R2-a-audit design doc is the actionable artefact.
+- The full 29963-test Pi5 cluster matrix (last reported 29963/29963 on
+  2026-07-30_2003-UTC) continues to pass; the Wave 1 and Wave 6 changes
+  do not affect the default (stack-slot) production path.
+
+---
+
 ## [0.2.0-alpha.2] — Follow-up Remediation
 
 This release closes the four follow-up items surfaced by the prior
