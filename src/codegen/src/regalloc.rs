@@ -3148,7 +3148,32 @@ impl TargetAgnosticRegAlloc {
         result: &mut RegAllocResult,
     ) {
         // Use a scratch register for spill/reload code annotation.
-        let scratch = crate::backend::PhysicalReg::new(interval.class.into(), 0);
+        //
+        // Index 0 was used here historically, but on riscv64 GPR index 0 is
+        // x0/Zero (writes discarded — the Zero-register hazard flagged by
+        // CC-a-audit §7.5). Using Zero as a scratch would emit metadata
+        // that, if honored literally by a future register-based emitter,
+        // would silently drop the spill/reload value.
+        //
+        // Index 5 is safe on every ISA currently modeled:
+        //   - riscv64 : x5  = t0 (caller-saved temporary)
+        //   - aarch64 : x5  = X5 (caller-saved temporary)
+        //   - x86_64  : R5  = RBP — but x86_64 does NOT route through
+        //     `gen_spill_reload` on the metadata path (its own
+        //     `LinearScanAllocator` byte-changes spills directly); and
+        //     since the E2-a-fix, RBP is `not_allocatable` anyway.
+        //   - ppc64   : R5  (caller-saved) — ppc64 also has its own inline
+        //     stack-slot ISel and does not consume this metadata.
+        // For SimdFp, index 5 is f5/V5 (caller-saved temporaries on
+        // riscv64 / aarch64 respectively).
+        //
+        // IMPORTANT: this `gen_spill_reload` is consumed only by the
+        // metadata-only `TargetAgnosticRegAlloc`. It does NOT affect the
+        // current stack-slot production path (still 30/30 on riscv64).
+        // The fix prevents the metadata path from reporting Zero as a
+        // scratch, which would confuse future register-based emission.
+        // (Wave 3 foundational fix E3-ab.)
+        let scratch = crate::backend::PhysicalReg::new(interval.class.into(), 5);
 
         for &def_pos in &interval.def_positions {
             let spill = GenericSpillCode::Spill {
