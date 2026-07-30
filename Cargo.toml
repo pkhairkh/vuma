@@ -65,10 +65,13 @@ vuma-package.workspace = true
 bitflags = "2"
 
 [build-dependencies]
-# Used by build.rs to compile the Lean-extracted (or stub) C archive into
-# the vuma binary when the `pmt-runtime-check` feature is enabled. When the
-# feature is off, build.rs does not reference `cc`, but the dependency is
-# declared unconditionally so the feature path is buildable in one shot.
+# HISTORICALLY used by build.rs to compile the Lean-extracted (or stub) C
+# archive into the vuma binary when the `pmt-runtime-check` feature was
+# enabled. The Lean FFI bridge has been REMOVED (see build.rs file-level
+# doc and the "Lean FFI bridge removed" comment in
+# src/ive/src/verification.rs); build.rs no longer compiles any C. The
+# `cc` dependency is retained unconditionally so the workspace still
+# builds in one shot if a future change reintroduces a C build step.
 cc = "1"
 
 [profile.release]
@@ -93,12 +96,18 @@ codegen-units = 16
 debug = false
 strip = true
 
-# Forward the pmt-runtime-check feature to the codegen crate so
+# Forward the pmt-runtime-check feature to the codegen and ive crates so
 # `cargo build --features pmt-runtime-check` works from the repo root.
 # `cc` is declared as a NON-optional [build-dependency] (see above), so no
-# `dep:cc` wiring is needed here -- the feature only forwards to the member
-# crate that actually gates cfg(feature) code. `default = []` keeps the
-# feature OFF by default (opt-in only).
+# `dep:cc` wiring is needed here. `default = []` keeps the feature OFF by
+# default (opt-in only).
+#
+# NOTE: the Lean FFI bridge has been REMOVED (see build.rs file-level doc
+# and the "Lean FFI bridge removed" comment in
+# src/ive/src/verification.rs). The feature is RETAINED as a no-op for
+# IVE (so existing CI commands don't break) but still has a real effect
+# in `vuma-codegen`, where it activates the pure-Rust `pmt_check` module
+# (a parity-tested hand-translation, NOT the deleted stub).
 [features]
 default = []
 pmt-runtime-check = ["vuma-codegen/pmt-runtime-check", "vuma-ive/pmt-runtime-check"]

@@ -22,8 +22,16 @@ z3 = "0.20"
 
 [features]
 default = []
-# Activates the Lean↔Rust FFI routing in src/ive/src/verification.rs.
-# When off (default), the IVE pipeline uses hand-written Rust verifiers.
-# When on, the call site dispatches to verify_pmt_via_lean (stub or real
-# Lean depending on the lean_ffi_linked cfg emitted by build.rs).
+# pmt-runtime-check: HISTORICALLY activated the Lean↔Rust FFI routing in
+# src/ive/src/verification.rs (verify_pmt_via_lean). The Lean FFI bridge
+# has been REMOVED — see the "Lean FFI bridge removed" comment block in
+# src/ive/src/verification.rs. The feature is retained here as a NO-OP
+# so existing CI commands (`cargo build --features pmt-runtime-check`)
+# and the workspace-level feature forwarding in the root Cargo.toml do
+# not break. PMT state verification in IVE now ALWAYS uses the
+# hand-written Rust verifiers regardless of this flag.
+#
+# NOTE: the feature still has a real effect in the `vuma-codegen` crate
+# (it activates the independent pure-Rust `pmt_check` module — a
+# parity-tested hand-translation, NOT the deleted stub).
 pmt-runtime-check = []
