@@ -6,6 +6,64 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 where applicable.
 
+## [0.2.0-alpha.5] — Emitter Foundational Fixes
+
+This release applies the foundational register-allocator fixes identified
+by the R2-a-audit (x86_64), CC-a-audit (riscv64), and CD-a-audit (ppc64)
+design docs. These fixes close the G7 / Zero-register / R31 gaps that
+would block future register-based emitter implementations.
+
+### Wave 1 — try_recv CSEL Investigation (deferred)
+
+- E1-b attempted to fix the try_recv CSEL bug by replacing SUB (non-flag-
+  setting) with CMP (flag-setting) and correcting rn/rm operand ordering.
+  The fix is correct for the Select/CtSelect lowering, but testing revealed
+  the regalloc path is fundamentally unstable across rebuilds (HashMap
+  iteration order non-determinism in LinearScanAllocator).
+- Fix reverted. Investigation documented at
+  scripts/audit/emitter_wave1_csel_flag_analysis.md.
+- VUMA_REAL_REGALLOC_AARCH64 env-var gate remains OFF by default.
+- Deferred to human developer: fix the allocator non-determinism first,
+  then apply the CSEL+CMP fix.
+
+### Wave 2 — x86_64 RBP .not_allocatable() (G7 fix)
+
+- E2-a-fix (00b6318f): Marked RBP as .not_allocatable() in x86_64_target_desc.
+  The frame_pointer() builder does not clear is_allocatable, so RBP was
+  previously in the allocatable GPR pool. TargetAgnosticRegAlloc could
+  assign a vreg to RBP and clobber the frame pointer.
+- 5/5 x86_64 stack-slot tests pass (no regression).
+
+### Wave 3 — riscv64 S0/FP + Zero-Register Hazard
+
+- E3-ab-fix (8605dc98): Marked S0/FP (X8) as .not_allocatable() in
+  riscv64_target_desc (same pattern as x86_64 RBP).
+- Fixed Zero-register hazard in gen_spill_reload: changed scratch from
+  PhysicalReg index 0 (x0 = hardwired zero on riscv64 — spill would be
+  a silent no-op) to index 5 (T0, caller-saved on riscv64 and aarch64).
+- 5/5 riscv64 stack-slot tests pass (no regression).
+
+### Wave 4 — ppc64 R31 + LR-Save + BE U8-Load
+
+- E4-a-fix (6918cb67): Marked R31 (FP) as .not_allocatable() in
+  ppc64_target_desc (same pattern as x86_64 RBP and riscv64 S0/FP).
+- Verified LR-save-in-callee-frame fix is present (ppc64/mod.rs:3219-3223,
+  LR at SP+fs-24, not caller SP+fs+16).
+- Verified BE U8-load workaround is present (ppc64/mod.rs:3303-3410,
+  upgrades single U8 load to return-type width when address is from Add).
+- 5/5 ppc64 + 5/5 ppc64le stack-slot tests pass (no regression).
+
+### Notes
+
+- All 3 foundational fixes (x86_64 RBP, riscv64 S0/FP + Zero-register, ppc64
+  R31) are now in place. These close the gaps that would block future
+  register-based emitter implementations.
+- The try_recv CSEL fix is deferred pending regalloc allocator stability.
+- Production impact: ZERO. Default code path unchanged (stack-slot ISel).
+- Full Pi5 cluster matrix: 29963/29963 (100%).
+
+---
+
 ## [0.2.0-alpha.4] — Regalloc Completion & Design Docs
 
 This release completes the achievable items from the regalloc-endianness
