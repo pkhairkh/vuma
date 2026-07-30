@@ -37,7 +37,7 @@ follow `BackendTier` in `backend.rs`.
 
 | # | Name | File | ISA family | LOC | Tier | Regalloc | ELF | Known limitations | Formal |
 |--:|------|------|------------|----:|------|----------|-----|--------------------|--------|
-|  1 | `aarch64`     | `arm64.rs`              | ARMv8-A (AArch64)    |  6 235 | Complete        | TargetAgnostic (real) | ELF64 LE | None — reference backend. | PMT only |
+|  1 | `aarch64`     | `arm64.rs`              | ARMv8-A (AArch64)    |  6 235 | Complete        | TargetAgnostic (real); LS prototype (env-gated, OFF) | ELF64 LE | None — reference backend. | PMT only |
 |  2 | `aarch64_be`  | `aarch64_be.rs`         | ARMv8-A (BE data)   |    197 | Complete (wrap) | inherits AArch64  | ELF64 BE | BE data, LE instr. fetch (ARM ARM D6.1.3). | PMT only |
 |  3 | `x86_64`      | `x86_64/{mod,stack_slot_isel,disasm}.rs` | x86-64 (amd64) | 10 243 | Complete | TargetAgnostic (real) | ELF64 LE | SIMD codegen emits zero bytes (TODO, `x86_64/mod.rs:934`). | PMT only |
 |  4 | `x86_32`      | `x86_32/{mod,stack_slot_isel,disasm}.rs` | x86 (i386) |  6 277 | Complete | Stack-slot | ELF32 LE | I64 channel handle stored in 4-byte slot (K13A workaround). | PMT only |
@@ -61,12 +61,16 @@ Totals: 15 Complete + 4 Experimental = 19. The 4 Complete wrappers
 (`aarch64_be`, `armeb`, `mips64be`, `ppc64le`) delegate `allocate_registers`
 to their parent in a single line.
 
-> **Annotation-only caveat.** The 6 "real" allocator backends (rows 1, 2,
-> 3, 5, 12, 13) wire `TargetAgnosticRegAlloc` via `try_real_regalloc`, but
-> the encoded bytes still come from the stack-slot ISel baseline — the real
-> allocator annotates `reads` / `writes` metadata only (`regalloc_emit.rs:82-92`).
-> No VUMA backend emits register-based code in production today. See
-> [caveats.md §2.1](./caveats.md#21-stack-slot-isel-is-the-only-production-code-emission-path)
+> **Annotation-only caveat (default production path).** The 6 "real"
+> allocator backends (rows 1, 2, 3, 5, 12, 13) wire `TargetAgnosticRegAlloc`
+> via `try_real_regalloc`, but the encoded bytes still come from the
+> stack-slot ISel baseline — the real allocator annotates `reads` /
+> `writes` metadata only (`regalloc_emit.rs:82-92`). No VUMA backend
+> emits register-based code in production by default. **aarch64 has an
+> opt-in register-based prototype** behind `VUMA_REAL_REGALLOC_AARCH64=1`
+> (commit `ee06b362`, default OFF, 22/30 PASS on the curated matrix —
+> **not production-ready**; 8 callee-saved regressions, see
+> [caveats.md §2.1 + §2.1.1](./caveats.md#21-stack-slot-isel-is-the-only-production-code-emission-path))
 > and §3 below.
 
 ---
@@ -151,28 +155,35 @@ overwrites the `reads` / `writes` physical-register metadata on each
 `AllocatedInstruction` with the assigned physical registers. Spilled
 vregs keep their stack slot.
 
-**Annotation-only (critical).** The `encoded` bytes are NOT modified
-(`regalloc_emit.rs:82-92`); they always come from the stack-slot ISel
-baseline invoked *before* `try_real_regalloc`
+**Annotation-only (critical, default production path).** The `encoded`
+bytes are NOT modified (`regalloc_emit.rs:82-92`); they always come
+from the stack-slot ISel baseline invoked *before* `try_real_regalloc`
 (`emitter.emit_function(func, None)` on aarch64,
-`stack_slot_isel::allocate_registers` on the others). The
-`reads` / `writes` metadata is consumed by disassemblers, debuggers, and
+`stack_slot_isel::allocate_registers` on the others). The `reads` /
+`writes` metadata is consumed by disassemblers, debuggers, and
 downstream tooling — it does not change emitted code. **No VUMA backend
-emits register-based code in production today.** See
-[caveats.md §2.1](./caveats.md#21-stack-slot-isel-is-the-only-production-code-emission-path)
-for the full metadata-only caveat and the (currently unused)
+emits register-based code in production by default.** The
 `emit_function_regalloc` plumbing at `emit.rs:1056` that would re-emit
-bytes from a `RegAllocResult`.
+bytes from a `RegAllocResult` is reachable from exactly one production
+call site: the aarch64 opt-in prototype
+(`VUMA_REAL_REGALLOC_AARCH64=1`, OFF by default, 22/30 PASS — **not
+production-ready**; see
+[caveats.md §2.1 + §2.1.1](./caveats.md#21-stack-slot-isel-is-the-only-production-code-emission-path)).
 
 `LinearScanAllocator` (`regalloc.rs:1208`) — an older AArch64-specific
 linear-scan allocator with hardcoded caller/callee-saved GPR+SIMD lists,
 live-interval computation, boundary-safe overlap detection
 (`liveness_interference_from`), spill-weighted eviction
 (`spill_weight_with_pressure`), and copy coalescing
-(`coalesce_copies_post_alloc`) — is **test-only**: `LinearScanAllocator::new`
-is invoked only inside `#[cfg(test)]` modules (`regalloc.rs:4738+`,
-`emit.rs:9188+`). It is retained for test-parity but is not on the
-production code path.
+(`coalesce_copies_post_alloc`) — is invoked from exactly **one**
+production call site: the aarch64 opt-in prototype at
+`backend.rs:3207-3231` (env-var `VUMA_REAL_REGALLOC_AARCH64=1`, OFF by
+default, commit `ee06b362`). It is also used inside `#[cfg(test)]`
+modules (`regalloc.rs:4738+`, `emit.rs:9188+`). The prototype has
+**known correctness bugs** (incomplete `used_callee_saved_gprs` —
+8/30 curated tests regress, see
+[caveats.md §2.1.1](./caveats.md#21-stack-slot-isel-is-the-only-production-code-emission-path));
+do not enable the env var in production.
 
 The float-op verifier (`verify_function_float_ops`, `backend.rs:154`) is
 called **centrally** as `verify_program_float_ops(&ir_program)`
@@ -399,10 +410,17 @@ only backend-specific items appear here.
 
 **aarch64** (`arm64.rs`). Reference backend. Real `TargetAgnosticRegAlloc`
 via `try_real_regalloc` (`backend.rs:3099`, `TargetAgnosticRegAlloc::new`
-at `:3114`; the older `LinearScanAllocator` at `regalloc.rs:1208` is
-test-only — see §3). FP conversion Rn-field position regression test at
-`:5827-5835` (Rn at bits[9:5], not bits[14:10] which is the fixed
-`00000` constant field).
+at `:3114`). **Plus an opt-in register-based prototype** behind
+`VUMA_REAL_REGALLOC_AARCH64=1` (commit `ee06b362`, OFF by default) that
+invokes the older `LinearScanAllocator` (`regalloc.rs:1208`, `new` at
+`:1318`) and feeds its `AllocationResult` to `Emitter::emit_function_regalloc`
+(`emit.rs:1056`) via `Emitter::emit_function(func, Some(&alloc))`
+(`backend.rs:3213`). 22/30 PASS on the curated 30-test matrix — **not
+production-ready** (8 callee-saved regressions; see
+[caveats.md §2.1.1](./caveats.md#21-stack-slot-isel-is-the-only-production-code-emission-path)
+and [`scripts/audit/followup_wave2_aarch64_prototype.md`](../scripts/audit/followup_wave2_aarch64_prototype.md)).
+FP conversion Rn-field position regression test at `:5827-5835` (Rn at
+bits[9:5], not bits[14:10] which is the fixed `00000` constant field).
 
 **aarch64_be** (`aarch64_be.rs:23-44`). No instruction byte-swap
 (ARM ARM D6.1.3); only ELF header fields flipped.

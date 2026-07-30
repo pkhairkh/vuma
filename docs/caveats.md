@@ -50,7 +50,7 @@ commit `83846368`), the 19 backends split 6 / 12 / 1 by what
 
 | Backend(s) | Allocator wired in `allocate_registers` | Encoded bytes come from |
 |------------|------------------------------------------|-------------------------|
-| `aarch64` (direct), `aarch64_be` (inherits via wrapper delegation) | Real — `TargetAgnosticRegAlloc` via `try_real_regalloc` (`backend.rs:3099`, `TargetAgnosticRegAlloc::new` at `:3114`) | Stack-slot ISel baseline (`emitter.emit_function(func, None)`, `backend.rs:3180`) |
+| `aarch64` (direct), `aarch64_be` (inherits via wrapper delegation) | Real — `TargetAgnosticRegAlloc` via `try_real_regalloc` (`backend.rs:3099`, `TargetAgnosticRegAlloc::new` at `:3114`); aarch64 **also** has an opt-in `LinearScanAllocator` prototype behind `VUMA_REAL_REGALLOC_AARCH64=1` (see §2.1.1 below) | Stack-slot ISel baseline (`emitter.emit_function(func, None)`, `backend.rs:3226`) **by default**; register-based bytes only when `VUMA_REAL_REGALLOC_AARCH64=1` is set |
 | `x86_64` (direct) | Real — `TargetAgnosticRegAlloc` via `try_real_regalloc` (`x86_64/mod.rs:4081`) | Stack-slot ISel baseline (`stack_slot_isel::allocate_registers`, `x86_64/mod.rs:4143`) |
 | `riscv64` (direct) | Real — `TargetAgnosticRegAlloc` via `try_real_regalloc` (`riscv64.rs:6542`) | Stack-slot ISel baseline |
 | `ppc64` (direct), `ppc64le` (inherits via wrapper delegation) | Real — `TargetAgnosticRegAlloc` via `try_real_regalloc` (`ppc64/mod.rs:3011`) | Stack-slot ISel baseline |
@@ -66,26 +66,93 @@ pure stack-slot ISel (`arm32`, `armeb`, `mips64`, `mips64be`, `riscv32`,
 Total: 19. (The pre-audit caveat text counted "15 of 19" by mis-bucketing
 `aarch64_be`, `ppc64le`, and `wasm32` into the stack-slot column.)
 
-**Metadata-only caveat (critical).** Even on the 6 backends with a real
-allocator wired, the real allocator runs **only as an annotation pass**:
-it computes a `RegAllocResult` which
+**Default production path (all 6 "real" backends, unchanged).** On the
+6 backends with a real allocator wired, the real allocator runs **only
+as an annotation pass**: it computes a `RegAllocResult` which
 `regalloc_emit::annotate_with_regalloc` (`regalloc_emit.rs:82-92`) uses
 to overwrite each `AllocatedInstruction`'s `reads` / `writes`
 physical-register metadata. **The `encoded` byte stream is NOT modified**
 — it always comes from the stack-slot ISel baseline invoked *before*
 `try_real_regalloc`. The `reads` / `writes` metadata is consumed by
 disassemblers, debuggers, and downstream tooling; it does not affect
-emitted code. As a result **no VUMA backend emits register-based code in
-production today**: all 18 native backends emit stack-slot-spill bytes
-and `wasm32` emits Wasm bytecode. The `emit_function_regalloc` plumbing
-that would re-emit bytes from a `RegAllocResult` exists at `emit.rs:1056`
-but is unused in production — it is reachable only via
-`emitter.emit_function(func, Some(alloc))`, which no production
-`allocate_registers` calls. `LinearScanAllocator` (`regalloc.rs:1208`,
-the older AArch64-specific linear-scan allocator with hardcoded
-caller/callee-saved GPR+SIMD lists) is **test-only**:
-`LinearScanAllocator::new` is invoked only inside `#[cfg(test)]` modules
-(`regalloc.rs:4738+`, `emit.rs:9188+`).
+emitted code. As a result **all 6 "real" backends emit stack-slot-spill
+bytes in production** (identical to the 12 pure stack-slot backends);
+`wasm32` emits Wasm bytecode. The byte-changing
+`emit_function_regalloc` plumbing at `emit.rs:1056` is reachable only
+via `emitter.emit_function(func, Some(alloc))`, which **no production
+`allocate_registers` calls by default**. `LinearScanAllocator`
+(`regalloc.rs:1208`, the older AArch64-specific linear-scan allocator
+with hardcoded caller/callee-saved GPR+SIMD lists) is invoked from
+exactly **one** production call site — the env-var-gated aarch64
+prototype in §2.1.1 below — and is otherwise used only inside
+`#[cfg(test)]` modules (`regalloc.rs:4738+`, `emit.rs:9188+`).
+
+#### 2.1.1 aarch64 opt-in register-based prototype (`VUMA_REAL_REGALLOC_AARCH64=1`, OFF by default)
+
+Commit `ee06b362` ([F2-b-impl]) added an **opt-in** register-based
+emission path on `aarch64` only, gated by the environment variable
+`VUMA_REAL_REGALLOC_AARCH64=1`. The default (env var unset or any value
+other than `"1"`) is the stack-slot path described above; **production
+behaviour on aarch64 is unchanged when the env var is unset.** When the
+env var is set, `AArch64Backend::allocate_registers`
+(`backend.rs:3207-3231`) instead invokes the older AArch64-specific
+`LinearScanAllocator` (`regalloc.rs:1208`, `new` at `:1318`) to compute
+an `AllocationResult`, and feeds it to
+`Emitter::emit_function(func, Some(&alloc))` (`backend.rs:3213`), which
+dispatches to the byte-changing `Emitter::emit_function_regalloc` path
+at `emit.rs:1056` (real vreg→preg mapping, callee-saved
+prologue/epilogue, spill/reload insertion, copy elision). On
+`LinearScanAllocator` error the method falls back to the stack-slot
+path with a `vuma_log!(warn, …)` diagnostic so a single bad function
+never blocks the whole compilation.
+
+**This is a research prototype, not production-ready.** The F2-c-test
+verification run (commit `95a2963e`,
+[`scripts/audit/followup_wave2_aarch64_prototype.md`](../scripts/audit/followup_wave2_aarch64_prototype.md))
+ran a curated 30-test matrix on aarch64 under QEMU in both modes:
+
+| Mode | Pass rate | Total emitted bytes |
+|------|-----------|---------------------|
+| Stack-slot baseline (no env var) | **30/30 (100.0%)** | 111 204 |
+| Regalloc prototype (`VUMA_REAL_REGALLOC_AARCH64=1`) | **22/30 (73.3%)** | 98 748 (−11.20%) |
+
+The prototype is correct on **pure-arithmetic** tests (all 6 `u32_arith`
++ all 5 `crypto_patterns` PASS, each with a 52-byte binary-size
+reduction) and on single-cell `complex_stores` / `concurrency` /
+`try_recv` tests. The **8 regressions** all involve callee-saved
+register pressure:
+
+- `complex_stores`: `cs_overwrite_last`, `cs_two_buf_sum`,
+  `cs_three_cell_sum` (multiple sequential stores to distinct cells —
+  regalloc binaries are *larger* here, suggesting over-spilling).
+- `multi_function`: `mf_pass_through`, `mf_chained_adders`,
+  `mf_square_pair_sum` (caller return value lost across calls).
+- `ipc`: `simple_send`, `ping_pong` (both exit 139 / `SIGSEGV`; both
+  use `spawn_worker()`; `try_recv` without spawn survives).
+
+The failure pattern matches the **§5.3 HIGH-severity risk** flagged in
+the F2-a-audit design doc
+([`scripts/audit/followup_wave2_emit_regalloc_design.md`](../scripts/audit/followup_wave2_emit_regalloc_design.md))
+materialising: `LinearScanAllocator::used_callee_saved_gprs`
+(`regalloc.rs`) is **incomplete** — it does not enumerate every
+physical register the byte-changing `Emitter::emit_function_regalloc`
+actually writes, so the prologue skips save/restore for callee-saved
+registers it clobbers. The chained-adders pattern (each call
+overwrites the previous result) and the `spawn_worker` SIGSEGV are
+textbook callee-saved corruption signatures.
+
+**The env-var gate MUST remain off-by-default** until the §5.3
+mitigation (a verifier pass that asserts every physical register the
+emitter writes is either caller-saved, in `used_callee_saved_gprs`, or
+one of `X29`/`X30`/`SP`) lands and the 30-test matrix reaches ≥ 29/30
+with zero regressions. Production behaviour is unchanged because the
+env var defaults off.
+
+**Other 5 real backends remain metadata-only (out of scope).**
+`x86_64`, `riscv64`, `ppc64`, `ppc64le`, and `aarch64_be` have no
+opt-in register-based path. Per the design doc §3.2-3.5 and Phases
+2-5, each would require a new per-backend register-based emitter
+(2-4 weeks each); this work is out of scope for the current run.
 
 **Implication.** On the 12 pure stack-slot backends every arithmetic /
 load / store operation performs two extra memory accesses (load operands
@@ -95,14 +162,15 @@ correct (verified by the 12-backend stack-slot correctness sweep,
 468/468 PASS — see
 [`scripts/audit/wave2_stackslot_results.md`](../scripts/audit/wave2_stackslot_results.md))
 but is not benchmark-grade. **There is currently no performance gap
-between the 6 "real" and 12 stack-slot backends**, because the "real"
-path is metadata-only: every backend emits stack-slot-spill code at
-runtime. A `~2–5×` speedup relative to today remains *theoretical* and
-would require a future wave to make `emit_function_regalloc` consume
-the `RegAllocResult` and re-emit register-based bytes (the plumbing
-exists; the call site does not). The previous caveat wording ("~2–5×
-slower than the linear-scan backends") was misleading and has been
-removed.
+between the 6 "real" and 12 stack-slot backends in production**,
+because the "real" path is metadata-only by default: every backend
+emits stack-slot-spill code at runtime. A `~2–5×` speedup relative to
+today remains *theoretical* and would require (a) flipping
+`VUMA_REAL_REGALLOC_AARCH64=1` to default-on — blocked on the §2.1.1
+callee-saved fix — and (b) landing new per-backend register-based
+emitters for the other 5 real backends (design doc Phases 2-5). The
+previous caveat wording ("~2–5× slower than the linear-scan backends")
+was misleading and has been removed.
 
 **Why it's still in place.** The `TargetAgnosticRegAlloc` is
 `TargetDesc`-driven, and wiring each remaining backend up requires
@@ -115,7 +183,12 @@ per-backend classification with file:line citations for all 19 backends
 lives in
 [`scripts/audit/allocator_classification.md`](../scripts/audit/allocator_classification.md);
 [`docs/backends.md`](backends.md) §1 carries the matching `Regalloc`
-column.
+column. The phased rollout plan for register-based emission (aarch64
+first, then x86_64 / riscv64 / ppc64 / aarch64_be / ppc64le) is in
+[`scripts/audit/followup_wave2_emit_regalloc_design.md`](../scripts/audit/followup_wave2_emit_regalloc_design.md)
+§6; the aarch64 prototype test results (22/30 PASS, 8 callee-saved
+regressions) are in
+[`scripts/audit/followup_wave2_aarch64_prototype.md`](../scripts/audit/followup_wave2_aarch64_prototype.md).
 
 ### 2.2 wasm32 fork emulation is non-isolating
 
