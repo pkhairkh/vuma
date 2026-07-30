@@ -8,12 +8,21 @@
 // There is no dedicated `channel_close_send` builtin in VUMA — `channel_close`
 // closes all 4 fds. To demonstrate a TRUE half-close (one direction only),
 // we extract the parent's write_fd1 from the 16-byte handle buffer via
-// `shared_memory_read(ch, 4)` (a generic pointer-deref primitive that loads
-// i64 from `ptr+offset`), mask off the lower 32 bits (write_fd1 is stored as
-// i32 at offset 4, with read_fd2 packed in the upper 32 bits of the i64
-// load), and close that single fd via the raw `syscall(57, fd)` intrinsic
-// (asm-generic nr 57 = close, translated to native x86_64 nr 3 by the
-// backend's syscall_abi::translate_or_warn).
+// `shared_memory_read_i32(ch, 4)` — a TYPED pointer-deref primitive that
+// performs a native-endian i32 load (4 bytes) at handle offset 4, matching
+// the i32 store `expand_channel_open` emitted at the same offset. The
+// loaded i32 is zero-extended to i64. Using a typed i32 load (rather than
+// `shared_memory_read`'s i64 load + `& 0xFFFFFFFF` bit-mask) makes the
+// extraction endianness-agnostic: a native i32 load of a native i32 store
+// round-trips the same value on LE and BE backends. We then close that
+// single fd via the raw `syscall(57, fd)` intrinsic (asm-generic nr 57 =
+// close, translated to native x86_64 nr 3 by the backend's
+// syscall_abi::translate_or_warn).
+//
+// (See the F3-a root-cause report
+// `scripts/audit/followup_wave3_big_endian_root_cause.md` for why the
+// previous i64-load + bit-mask formulation extracted read_fd2 instead of
+// write_fd1 on big-endian backends, killing the surviving direction.)
 //
 // Sequence:
 //   1. Parent opens channel, spawns worker.
@@ -37,11 +46,11 @@ transform main() -> i32 {
     // Parent: send 42 to child.
     channel_send(ch, 42);
 
-    // Half-close the parent's write direction: extract write_fd1 (handle[4],
-    // lower 32 bits of the i64 load) and close just that one fd. This leaves
-    // read_fd2 (handle[8], parent's recv end of pipe 2) untouched.
-    packed: i64 = shared_memory_read(ch, 4);
-    wfd: i64 = packed & 4294967295;
+    // Half-close the parent's write direction: extract write_fd1 (handle[4])
+    // via a typed native-endian i32 load — endianness-agnostic — and close
+    // just that one fd. This leaves read_fd2 (handle[8], parent's recv end
+    // of pipe 2) untouched.
+    wfd: i64 = shared_memory_read_i32(ch, 4);
     syscall(57, wfd);
 
     // Surviving direction: parent receives 99 from child via pipe 2.

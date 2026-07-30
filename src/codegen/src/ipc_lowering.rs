@@ -56,6 +56,7 @@ pub fn is_ipc_builtin(name: &str) -> bool {
             | "wait_worker"
             | "shared_memory_open"
             | "shared_memory_read"
+            | "shared_memory_read_i32"
             | "shared_memory_write"
             | "checkpoint_save"
             | "checkpoint_restore"
@@ -1041,6 +1042,19 @@ fn expand_builtin(
         // ── L4: Shared memory ──────────────────────────────────────────
         "shared_memory_open" => Expansion::flat(expand_shared_memory_open(args, dst, ctx)),
         "shared_memory_read" => Expansion::flat(expand_shared_memory_read(args, dst, ctx)),
+        // `shared_memory_read_i32` is a typed variant of `shared_memory_read`
+        // that performs a NATIVE-ENDIAN i32 load (4 bytes) and zero-extends
+        // the result to i64. Unlike `shared_memory_read` (which loads an
+        // i64 and therefore reads 8 bytes spanning two adjacent i32 slots),
+        // this primitive round-trips a single i32 value on every backend
+        // regardless of byte order — matching the i32 store that
+        // `expand_channel_open` emits at the corresponding handle offset.
+        // See the F3-a root-cause report
+        // (`scripts/audit/followup_wave3_big_endian_root_cause.md`): on
+        // big-endian backends the i64 load + `& 0xFFFFFFFF` mask extracts
+        // the WRONG adjacent i32 slot (bytes [8..12] instead of [4..8]).
+        // The typed i32 load makes the operation endianness-agnostic.
+        "shared_memory_read_i32" => Expansion::flat(expand_shared_memory_read_i32(args, dst, ctx)),
         "shared_memory_write" => Expansion::flat(expand_shared_memory_write(args, ctx)),
         // ── L4: Driver / IRQ ───────────────────────────────────────────
         "driver_register" => Expansion::flat(expand_driver_register(ctx, args, dst)),
@@ -4335,6 +4349,75 @@ fn expand_shared_memory_read(
             addr,
             offset: 0,
             ty: IRType::I64,
+        },
+    ]
+}
+
+/// `shared_memory_read_i32(ptr, offset) -> i64` — typed pointer-deref
+/// primitive that loads a NATIVE-ENDIAN i32 (4 bytes) from `ptr + offset`
+/// and zero-extends it to i64.
+///
+/// This is the endianness-agnostic counterpart to `shared_memory_read`.
+/// The latter loads an i64 (8 bytes) and is therefore only safe to use for
+/// values the caller knows to occupy a full 8-byte slot; bit-masking the
+/// i64 result to extract a single i32 sub-field is endianness-dependent
+/// (LE: low 32 bits = bytes [off..off+4]; BE: low 32 bits = bytes
+/// [off+4..off+8]). By emitting a native I32 load whose access size
+/// matches the I32 store that `expand_channel_open` emits at the same
+/// handle offset, the round-trip is byte-order-independent by
+/// construction. See the F3-a root-cause report for the full analysis.
+///
+/// IR shape: `addr = ptr + offset` (i64); `tmp = load I32 addr+0`;
+/// `dst = zext I32→I64 tmp`. The explicit ZExt makes the i32→i64
+/// widening independent of per-backend load-extension semantics (e.g.
+/// MIPS/RISC-V `lw` sign-extends, x86_64/aarch64 `LDR W` zero-extends).
+/// Fd values are small non-negative integers, so sign vs zero extension
+/// is moot in practice — ZExt is the principled choice for an unsigned fd.
+fn expand_shared_memory_read_i32(
+    args: &[IRValue],
+    dst: Option<&IRValue>,
+    ctx: &mut LowerContext,
+) -> Vec<IRInstr> {
+    if args.len() < 2 {
+        return vec![];
+    }
+    let ptr = args[0].clone();
+    let offset = args[1].clone();
+    let dst = match dst {
+        Some(d) => d.clone(),
+        None => {
+            return vec![];
+        }
+    };
+    let addr = ctx.new_vreg();
+    let tmp = ctx.new_vreg();
+    vec![
+        IRInstr::BinOp {
+            op: BinOpKind::Add,
+            dst: addr.clone(),
+            lhs: ptr,
+            rhs: offset,
+            ty: Some(IRType::I64),
+        },
+        // Native-endian I32 load — matches the I32 store emitted by
+        // `expand_channel_open` at the same handle offset, so the value
+        // round-trips identically on LE and BE backends.
+        IRInstr::Load {
+            dst: tmp.clone(),
+            addr,
+            offset: 0,
+            ty: IRType::I32,
+        },
+        // Zero-extend i32 → i64 so the result occupies the low 32 bits
+        // of the i64 dst on every backend (matching the test's `wfd: i64`
+        // assignment). Explicit rather than relying on per-backend
+        // I32-load extension semantics.
+        IRInstr::Cast {
+            kind: CastKind::ZExt,
+            dst,
+            src: tmp,
+            from_ty: Some(IRType::I32),
+            to_ty: Some(IRType::I64),
         },
     ]
 }
