@@ -8,6 +8,10 @@ legacy pointer dialect is no longer accepted. The same compiler builds the
 contributions to the kernel follow the same patterns as contributions to
 the compiler.
 
+The full gold-standard suite is **29 944 / 29 944 = 100.00 %** across all
+19 backends. Verification is unconditional — IVE state verifiers + Z3
+contract discharge run on every build, and there is no opt-out flag.
+
 This document covers getting a dev environment running, following the code
 style, writing PMT tests, adding new backends, contributing to the VWK
 kernel, the VUMA code patterns every contributor should know, and landing a
@@ -54,6 +58,27 @@ rustup toolchain install nightly-2026-03-01 \
   --target aarch64-unknown-none
 ```
 
+### Install Z3 (hard build dependency)
+
+The `vuma-ive` crate statically links against the system `libz3`.
+**Without `libz3-dev` installed, `cargo build` fails at link time.**
+Z3 is the executable IVE verifier — it discharges every memory-safety
+contract the state verifiers emit. There is no feature flag to disable
+it. Install on the host:
+
+```bash
+# Debian / Ubuntu:
+sudo apt-get install libz3-dev
+# macOS:
+brew install z3
+# Arch:
+sudo pacman -S z3
+```
+
+See [`building.md` §1 Build Dependencies](building.md#1-build-dependencies)
+and [`caveats.md` §1.1](caveats.md#11-z3-is-a-hard-dependency-libz3-dev)
+for the full statement.
+
 ### Install QEMU user-mode
 
 Cross-backend testing needs QEMU user-mode emulators. On Debian/Ubuntu:
@@ -64,9 +89,11 @@ sudo apt-get install qemu-user qemu-user-static
 
 For no-root / sandboxed-CI environments, see
 [`building.md` §7 QEMU Installation](building.md#7-qemu-installation) for
-the static-binary tarball approach. The 7 executable backends in the standard
-sweep are `x86_64` (native), `aarch64`, `riscv64`, `arm32`, `ppc64le`,
-`mips64`, `s390x`, `loongarch64`, plus `wasm32` under `wasmtime`.
+the static-binary tarball approach. The 19 backends in the standard
+sweep are `x86_64` (native), `x86_32`, `aarch64`, `aarch64_be`, `arm32`,
+`armeb`, `riscv64`, `riscv32`, `mips64`, `mips64be`, `ppc64`, `ppc64le`,
+`loongarch64`, `s390x`, `sparc64`, `alpha`, `hppa`, `m68k`, plus
+`wasm32` under `wasmtime`.
 
 ### Build
 
@@ -90,14 +117,22 @@ every backend, runs each under QEMU / wasmtime, and checks the exit code
 against the `// Expected exit code: N` header.
 
 ```bash
-scripts/pi5_test_suite.sh --workers 8 --fresh --verify
+scripts/pi5_test_suite.sh --workers 8 --fresh
 ```
+
+> The `--verify` flag is no longer needed — IVE state verifiers + Z3
+> contract discharge are unconditional in VUMA 2.0. There is no
+> `--no-verify` opt-out in production builds. The pipeline hard-fails on
+> any contract that Z3 cannot discharge. See [`caveats.md` §5.1](caveats.md).
+
+The current pass rate is **29 944 / 29 944 = 100.00 %** across all 19
+backends (`test_results/summary.json`).
 
 For a single quick check (one file, one backend, no QEMU):
 
 ```bash
 ./target/release-fast/compile_dump diag x86_64 \
-    tests/gold_standard/pmt_wave2/two_states.vuma
+    tests/gold_standard/pmt_state/two_states.vuma
 ```
 
 For unit / integration tests: `cargo test --workspace` or
@@ -110,11 +145,10 @@ bash scripts/kernel_smoke.sh
 # Expected: "PASS: kernel boots, prints banner, exits 0"
 ```
 
-For the 19-backend kernel parity sweep:
+For the 19-backend sweep:
 
 ```bash
-bash scripts/kernel_parity.sh            # full sweep (~10 minutes)
-bash scripts/kernel_parity.sh --quick    # arena_basic + kernel smoke only
+bash scripts/vuma_test_matrix_19backends.sh   # full 19-backend matrix
 ```
 
 ### Verify the setup
@@ -122,7 +156,7 @@ bash scripts/kernel_parity.sh --quick    # arena_basic + kernel smoke only
 A clean checkout should pass these three from the repo root:
 
 ```bash
-cargo build --workspace                       # compiles
+cargo build --workspace                       # compiles (requires libz3-dev)
 cargo fmt --all -- --check                    # no formatting diffs
 cargo clippy --workspace -- -D warnings       # no clippy warnings
 ```
@@ -175,13 +209,16 @@ Run `cargo fmt --all` before every commit.
 - Prefer `&str` / `&[T]` over `String` / `Vec<T>` in function signatures.
 - No `unsafe` blocks without a `// SAFETY:` comment explaining the invariant.
 
-### Zero external dependencies
+### Zero external dependencies (with one exception: Z3)
 
-The workspace depends on **no external crates** — only `std` and the internal
-`vuma-*` path crates. There is no `serde`, no `clap`, no `libc`, no `rayon`.
-Do not add `[dependencies]` entries for external crates; if you need a
-capability, hand-write it. `Cargo.lock` after your change should contain only
-`vuma-*` packages.
+The workspace depends on **no external Rust crates other than Z3** —
+only `std`, the internal `vuma-*` path crates, and `z3 = "0.20"` (the
+SMT solver, hard-linked from the system `libz3` so it does not appear
+as a Cargo registry dependency). There is no `serde`, no `clap`, no
+`libc`, no `rayon`. Do not add `[dependencies]` entries for external
+crates; if you need a capability, hand-write it. `Cargo.lock` after
+your change should contain only `vuma-*` packages (plus the `z3` crate
+that wraps the system library).
 
 This rule applies to the standard library (`womb/`) too. The womb tree is
 written in PMT syntax and uses no `extern "C"` other than the kernel's own
@@ -205,7 +242,7 @@ VUMA 2.0 is **PMT-only**. All new tests MUST be written in PMT syntax:
 A minimal PMT test:
 
 ```vuma
-// two_states — PMT Wave 2: two independent states
+// two_states — two independent PMT states
 // Expected exit code: 30
 //
 // Allocates two Points, sets x=10 on the first and x=20 on the second,
@@ -227,16 +264,19 @@ transform main() -> i32 {
 
 - **Pointer syntax** — `*ptr = expr`, `&x`, `allocate(n)`, `free(p)` — is
   legacy and not accepted by the 2.0 test runner. Pointer-dialect programs
-  from 1.x have either been migrated to PMT (see `pmt_wave7/` for migrations
-  of `concurrency/conc_swap.vuma` and friends) or removed.
+  from 1.x have either been migrated to PMT (see `pmt_state/`,
+  `pmt_basic/`, `pmt_advanced/`, `pmt_buffer/`, `pmt_liveness/`,
+  `pmt_session/`, `pmt_transform/`, `pmt_negative/` for the current PMT
+  test layout) or removed.
 - **Tests that bypass the type checker** — every PMT test must type-check
   cleanly; the IVE runs only the three state verifiers (`state_read`,
-  `state_write`, `state_transform`).
+  `state_write`, `state_transform`) and emits `contract_assert(…)`
+  obligations that Z3 discharges at compile time.
 - **Tests without an `// Expected exit code: N` header** — the runner reads
   this line and compares it against the process exit status.
 
 If you are migrating a legacy pointer test to PMT, put the result under the
-appropriate `pmt_wave*` directory (see
+appropriate PMT category directory (see
 [`building.md` §5](building.md#5-test-categories)).
 
 > Note: the `womb/crypto/` and `womb/net/` libraries still use the legacy
@@ -282,11 +322,11 @@ so the CLI accepts the new backend name.
 
 ### Step 3 — add the QEMU mapping to the test runner
 
-Edit [`scripts/kernel_parity.sh`](../scripts/kernel_parity.sh) and
+Edit [`scripts/vuma_test_matrix_19backends.sh`](../scripts/vuma_test_matrix_19backends.sh)
+and
 [`scripts/pi5_test_suite.sh`](../scripts/pi5_test_suite.sh) and add a new
-entry to the `QEMU_MAP` array (in `kernel_parity.sh`) or the `binfmt_misc`
-`entries` array (in `pi5_test_suite.sh`). Each entry has the form
-`backend:qemu_binary` or `name|qemu_binary|magic_hex|mask_hex`:
+entry to the `binfmt_misc` `entries` array. Each entry has the form
+`name|qemu_binary|magic_hex|mask_hex`:
 
 ```bash
 "qemu-<arch>|qemu-<arch>|<elf_magic>|<elf_mask>"
@@ -304,15 +344,19 @@ existing category if the test exercises a general feature) with an
 gold-standard suite to confirm agreement with the other 18 backends:
 
 ```bash
-scripts/pi5_test_suite.sh --workers 8 --backends <arch> --verify
+scripts/pi5_test_suite.sh --workers 8 --backends <arch>
 ```
 
 Also confirm the kernel compiles on the new backend:
 
 ```bash
 ./target/release-fast/compile_dump womb/kernel/kernel.vuma \
-    /tmp/kernel-<arch>.bin <arch> --verify
+    /tmp/kernel-<arch>.bin <arch>
 ```
+
+> Verification is always on; the `--verify` flag has been removed from the
+> CLI. The pipeline runs IVE state verifiers + Z3 contract discharge
+> unconditionally.
 
 The full backend-adding guide (with worked examples for x86_64, aarch64, and
 riscv64) is in [`src/README.md` §Adding a new backend](../src/README.md).
@@ -325,10 +369,22 @@ riscv64) is in [`src/README.md` §Adding a new backend](../src/README.md).
 
 Tests live under [`tests/gold_standard/`](../tests/gold_standard/) in
 category directories. Pick the most specific one (see
-[`building.md` §5](building.md#5-test-categories) for the full list). If the
-test exercises a PMT-specific feature, use the matching `pmt_wave*` directory.
-If it exercises the arena runtime, use `arena_wave*`. If it exercises the
-FFI marshal matrix, use `ffi_wave*`.
+[`building.md` §5](building.md#5-test-categories) for the full list). The
+current categories include:
+
+- **PMT-specific:** `pmt_basic/`, `pmt_state/`, `pmt_buffer/`,
+  `pmt_advanced/`, `pmt_liveness/`, `pmt_session/`, `pmt_transform/`,
+  `pmt_negative/`
+- **Arena runtime:** `arena_alloc/`, `arena_basic/`, `arena_grow/`
+- **FFI marshal matrix:** `ffi_advanced/`, `ffi_basic/`, `ffi_borrow/`,
+  `ffi_call/`, `ffi_consume/`
+- **Floating-point:** `float_arith/`, `float_mem/`, `float_advanced/`,
+  `float_ieee_edge/`, `float_casts/`
+- **General:** `arithmetic/`, `atomics/`, `bitwise/`, `complex_stores/`,
+  `concurrency/`, `control_flow/`, `crypto_patterns/`, `edge_cases/`,
+  `functions/`, `ipc/`, `kernel_crypto/`, `linked_structures/`, `memory/`,
+  `multi_function/`, `nested_loops/`, `pointers/`, `structs/`, `u32_arith/`,
+  `bounds_basic/`, `bounds_safe/`
 
 ### Step 2 — write the `.vuma` file
 
@@ -371,7 +427,7 @@ file an issue against the offending backend instead.
 ### Step 4 — run the full category
 
 ```bash
-scripts/pi5_test_suite.sh --workers 8 --backends x86_64,aarch64,riscv64 --verify
+scripts/pi5_test_suite.sh --workers 8 --backends x86_64,aarch64,riscv64
 ```
 
 See [`tests/README.md`](../tests/README.md) for the test-suite layout and
@@ -382,11 +438,11 @@ the runner-script reference.
 ## 6. Contributing to the VWK Kernel
 
 The VWK kernel under [`womb/kernel/`](../womb/kernel/) is a complete PMT-pure
-kernel written in VUMA's own syntax. It is built across **13 waves (K0–K12)**,
-all complete; K11 is the bare-metal parity sweep (real asm syscall stubs per
-arch, QEMU system-mode boot). Future work (K13+) will replace the stub
-inventory (no-op trap dispatch, no-op syscall indirect-call, AES-NI trampoline
-stubs, etc.) with real implementations.
+kernel written in VUMA's own syntax. It is built across **13 milestones
+(K0–K12)**, all complete; the bare-metal parity milestone added real asm
+syscall stubs per arch, QEMU system-mode boot. Future work (K13+) will
+replace the stub inventory (no-op trap dispatch, no-op syscall indirect-call,
+AES-NI trampoline stubs, etc.) with real implementations.
 
 The full kernel architecture is in [`kernel-architecture.md`](kernel-architecture.md).
 The per-module inventory is in [`womb/kernel/README.md`](../womb/kernel/README.md).
@@ -395,15 +451,15 @@ PMT kernel code; do/don't examples; IVE failure debugging recipe) is in
 [`kernel-developer-guide.md`](kernel-developer-guide.md). The porting guide
 (worked example: x86_64) is in [`kernel-porting-guide.md`](kernel-porting-guide.md).
 
-### 6.1 The wave-based workflow
+### 6.1 The milestone-based workflow
 
-Kernel work is organized into **waves**, each domain-scoped and code-specific.
-Each wave has a `Task ID: K<NN>` marker in the worklog and a contract that
-spells out the deliverables, the test gate, and the K13+ forward-looking
-notes. The 13 waves so far:
+Kernel work is organized into numbered milestones, each domain-scoped and
+code-specific. Each milestone has a `Task ID: K<NN>` marker in the worklog
+and a contract that spells out the deliverables, the test gate, and the
+K13+ forward-looking notes. The 13 milestones so far:
 
-| Wave | Scope | Key subsystems delivered |
-|------|-------|--------------------------|
+| Milestone | Scope | Key subsystems delivered |
+|-----------|-------|--------------------------|
 | **K0** | Arena foundation | `arena_alloc` runtime bounds check, `__arena_overflow` trap on all 19 backends |
 | **K1** | Console + kernel entry | `console.vuma`, `kernel.vuma` (`main → kmain`), hosted-mode `trampoline.vuma` + `bootinfo.vuma` |
 | **K2** | Memory management | `pmm` (buddy allocator), `vmm` (page-table walk), `kmalloc` (slab), `mmap` (VMA tracking), per-arch `mm_trampoline` + `pt` for x86_64/aarch64/riscv64 |
@@ -418,7 +474,7 @@ notes. The 13 waves so far:
 | **K11** | Bare-metal parity | real asm syscall stubs per arch, QEMU system-mode boot |
 | **K12** | Panic + power + shell | `panic`/`kmsg` (ring buffer), `power/pm` (halt/wfi), `shell` |
 
-When you add a new kernel subsystem, **claim the next K-wave** in the
+When you add a new kernel subsystem, **claim the next K-milestone** in the
 worklog. Write the contract first (what the subsystem does, what its test
 gate is, what stubs are allowed, what K13+ will replace), then implement.
 
@@ -427,7 +483,7 @@ gate is, what stubs are allowed, what K13+ will replace), then implement.
 The 6-step recipe (full version in
 [`kernel-developer-guide.md`](kernel-developer-guide.md)):
 
-1. **Pick the wave and write the contract.** Document what the subsystem
+1. **Pick the milestone and write the contract.** Document what the subsystem
    does, which existing modules it depends on (and re-declares layouts from),
    and which stubs you'll need.
 2. **Design the layout.** Every kernel subsystem has at least one
@@ -448,7 +504,7 @@ The 6-step recipe (full version in
    self-test that exercises the module's API surface. Use the convention
    `if <check N fails> { return N; }` so a future CI failure pinpoints the
    broken check by exit code.
-6. **Add the module to `kernel_parity.sh`'s `KERNEL_MODULES` array** if you
+6. **Add the module to `vuma_test_matrix_19backends.sh`'s `KERNEL_MODULES` array** if you
    want it covered by the parity sweep. Add a per-module self-test command
    in the file header so future contributors can re-run it.
 
@@ -472,11 +528,7 @@ let page = pmm_alloc(pmm, order);     // returns u64 page-frame address
 This pattern is documented in `womb/kernel/mm/pmm.vuma::"Why init-style?"`
 and is used by `pmm_init`, `vmm_init`, `trap_frame_init`,
 `task_init_for_switch`, `syscall_args_from_frame`, `kmsg_init`, `pm_init`,
-and every other stateful subsystem. A historical data point: K3e's
-`syscall_args_from_frame` was originally written in return-style and the
-codegen emitted four `WARNING: unsupported FieldAccess (not state-typed)`
-diagnostics; the fix was to flip to init-style. The convention has been
-canonical ever since.
+and every other stateful subsystem.
 
 ### 6.4 Flat byte array pattern
 
@@ -599,14 +651,17 @@ Run a module's self-test:
 
 ```bash
 ./target/release-fast/compile_dump womb/kernel/<subsys>/<module>.vuma \
-    /tmp/<module>.bin x86_64 --verify
+    /tmp/<module>.bin x86_64
 /tmp/<module>.bin; echo "exit=$?"
 # Expected: "IVE: Pass passed=1 failed=0 total=1" + exit=0
 ```
 
+> Verification is always on — the IVE state verifiers + Z3 contract
+> discharge run on every compile. There is no `--verify` flag.
+
 ### 6.8 IVE failure debugging
 
-When `compile_dump ... --verify` reports `IVE: Fail`, the next line names the
+When `compile_dump` reports `IVE: Fail`, the next line names the
 verifier that tripped:
 
 ```
@@ -783,9 +838,7 @@ the decimal path through `parse_int_radix`, which has subtle width-extension
 behavior at the 64-bit boundary. The kernel's convention is to **use decimal
 literals in self-tests** (`4096`, not `0x1000`; `17592186028032`, not
 `0x000FFFFFFFFFF000`). The decimal form lowers to identical machine code;
-the safety gain is avoiding the hex path entirely. This is enforced by the
-K2c / K3d / K4a / K5a / K10a contracts' "IMPORTANT: use decimal constants"
-rule.
+the safety gain is avoiding the hex path entirely.
 
 ### 7.9 No struct literal
 
@@ -813,14 +866,15 @@ that uses them — the layout registry is single-pass.
 1. `cargo fmt --all` — apply formatting.
 2. `cargo clippy --workspace -- -D warnings` — no clippy warnings.
 3. `cargo test --workspace` — unit / integration tests pass.
-4. `scripts/pi5_test_suite.sh --workers 8 --verify` — gold-standard suite
-   passes on every backend you touched.
+4. `scripts/pi5_test_suite.sh --workers 8` — gold-standard suite passes on
+   every backend you touched (29 944 / 29 944 = 100.00 % on `main`).
 5. `bash scripts/kernel_smoke.sh` — kernel boots, prints banner, exits 0
    (required for any PR that touches `womb/kernel/`, the codegen, or the
    parser).
-6. `bash scripts/kernel_parity.sh --quick` — quick parity check (full sweep
-   for kernel-touching PRs).
-7. No external dependencies added (`Cargo.lock` contains only `vuma-*`).
+6. `bash scripts/vuma_test_matrix_19backends.sh` — 19-backend matrix sweep
+   for kernel-touching PRs.
+7. No external dependencies added (`Cargo.lock` contains only `vuma-*`
+   plus the `z3` crate that wraps the system `libz3`).
 8. New public API has a `///` doc comment and, where reasonable, a test.
 9. Bug-fix PRs include a regression test that fails before the fix.
 10. New kernel modules end with a `transform main() -> i32` self-test.
@@ -830,26 +884,39 @@ that uses them — the layout registry is single-pass.
 Every PR targeting `main` runs:
 
 - **Build** — `cargo build --workspace` (matrix: Ubuntu x86_64 + macOS aarch64).
+  Requires `libz3-dev` installed (Z3 is a hard build dependency).
 - **Lint** — `cargo fmt --all -- --check` + `cargo clippy --workspace -- -D warnings`.
-- **Unit tests** — `cargo test --workspace` (13 integration test files under
-  `tests/`: `backend_latency_tests.rs`, `egraph_extraction_tests.rs`,
-  `ive_loop_tests.rs`, `latency_table_tests.rs`, `loop_depth_tests.rs`,
-  `loop_unroll_tests.rs`, `lto_tests.rs`, `parallel_codegen_tests.rs`,
-  `pgo_tests.rs`, `property_tests.rs`, `provenance_tests.rs`,
+- **Unit tests** — `cargo test --workspace` (24 integration test files under
+  `tests/`: `arena_overflow_trap_tests.rs`, `backend_latency_tests.rs`,
+  `egraph_extraction_tests.rs`, `ffi_signature_conformance.rs`,
+  `ive_loop_tests.rs`, `l1l3_collapse_verify.rs`, `latency_table_tests.rs`,
+  `linear_channel_hard_fail.rs`, `linear_check_tests.rs`,
+  `loop_depth_tests.rs`, `loop_unroll_tests.rs`, `lto_tests.rs`,
+  `parallel_codegen_tests.rs`, `pgo_tests.rs`, `pmt_extraction_diff.rs`,
+  `pmt_feature_flag_test.rs`, `pmt_parity_test.rs`,
+  `pmt_parity_test_full.rs`, `pmt_runtime_ffi_smoke.rs`,
+  `property_tests.rs`, `provenance_tests.rs`, `scg_conformance.rs`,
   `scheduler_tests.rs`, `verification_tests.rs`).
 - **Cross-compile** — builds for 8 targets (x86_64, aarch64, riscv64gc, armv7,
   mips64, powerpc64, loongarch64, wasm32).
-- **Gold-standard** — `scripts/pi5_test_suite.sh --workers 8 --verify` across
+- **Gold-standard** — `scripts/pi5_test_suite.sh --workers 8` across
   all 18 QEMU backends + `wasm32` under `wasmtime` (program count is in
-  `tests/gold_standard/manifest.json`).
+  `tests/gold_standard/manifest.json`; current pass rate
+  **29 944 / 29 944 = 100.00 %**).
 - **Kernel smoke** — `scripts/kernel_smoke.sh` (boots `womb/kernel/kernel.vuma`
   on x86_64).
-- **Kernel parity** — `scripts/kernel_parity.sh` (full 19-backend sweep:
-  190 gold checks + 76 kernel module compiles).
+- **19-backend matrix** — `scripts/vuma_test_matrix_19backends.sh` (full
+  19-backend sweep: gold-standard + kernel module compiles).
 - **KAT tests** — `scripts/run_real_kat.sh` (213 cross-architecture crypto
-  known-answer tests; the standalone `run_all_kat.sh` runner was removed
-  during the 2026-07 cleanup).
-- **Proof verify** — `bv_verify`, `proof_artifacts`, `proof_log` subsets.
+  known-answer tests).
+- **Proof verify (Lean, standalone spec)** — `lake build` under `proof/`
+  via `.github/workflows/proof-verify.yml`. This CI job gates the
+  *formal Lean specification*, not the compiler build. The executable
+  verifier is Z3-based and runs in the regular `ci.yml` build / test jobs.
+- **Lean↔Rust parity** — `lean-rust-parity.yml` runs the
+  hand-translation differential test (`tests/pmt_parity_test*.rs`).
+- **Differential testing** — `differential-test.yml` runs the
+  cross-backend differential test harness.
 
 All of them must be green before merge.
 
@@ -871,7 +938,8 @@ separate PRs first.
   self-test (see [§6](#6-contributing-to-the-vwk-kernel)).
 - Large architectural changes should be discussed in an issue first.
 - The default answer to "can we add an external crate?" is "no, reimplement
-  it" (see [§2 Zero external dependencies](#2-code-style)).
+  it" (see [§2 Zero external dependencies](#2-code-style)). The sole
+  exception is Z3, which is the executable IVE verifier.
 
 ---
 

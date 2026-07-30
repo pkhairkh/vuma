@@ -8,6 +8,11 @@
 Test categories, runner architecture, wasm32 host-function shim, CI
 integration, and operational caveats.
 
+> **Current pass rate.** The gold-standard suite is **29 944 / 29 944 =
+> 100.00 %** across all 19 backends (`test_results/summary.json`,
+> 2026-07-30). Per-backend totals are 1 576 tests, all matching, 0
+> skipped, 0 failures.
+
 ---
 
 ## 1. Test Categories
@@ -15,12 +20,13 @@ integration, and operational caveats.
 ### 1.1 Gold Standard — 1 589 `.vuma` files
 `tests/gold_standard/` holds 1 589 VUMA source files in 41 categories
 (`find tests/gold_standard -name '*.vuma' | wc -l`), including
-`arena_wave0/1/2`, `arithmetic`, `atomics`, `bitwise`, `concurrency`,
-`control_flow`, `crypto_patterns`, `edge_cases`, `ffi_wave0–4`,
-`float_*` (5 categories), `functions`, `ipc`, `kernel_crypto`,
-`linked_structures`, `memory`, `pmt_wave1/2/5/7/8/9/10`,
-`pmt_wave3_negative`, `pointers`, `structs`, `u32_arith`. Each test
-carries a header:
+`arena_alloc/`, `arena_basic/`, `arithmetic`, `atomics`, `bitwise`,
+`complex_stores/`, `concurrency`, `control_flow`, `crypto_patterns`,
+`edge_cases`, `ffi_advanced/`, `ffi_call/`, `ffi_consume/`,
+`float_arith/`, `float_mem/`, `float_advanced/`, `float_ieee_edge/`,
+`functions`, `ipc`, `kernel_crypto`, `linked_structures`, `memory`,
+`multi_function/`, `nested_loops/`, `pmt_buffer/`, `pmt_state/`,
+`pointers`, `structs`, `u32_arith`. Each test carries a header:
 
 ```text
 // Expected exit code: 42
@@ -45,7 +51,7 @@ from disk after `.vuma` files are added or removed.
 `ive_loop_tests.rs`, `l1l3_collapse_verify.rs`, `loop_unroll_tests.rs`,
 `parallel_codegen_tests.rs`, `property_tests.rs`,
 `provenance_tests.rs`, `scheduler_tests.rs`, `verification_tests.rs`,
-plus standalone suites like `wave50.rs`, `cross_backend.rs`,
+plus standalone suites like `cross_backend.rs`,
 `full_pipeline.rs`, `final_integration.rs`, `diagnostics_integration.rs`,
 `parser_roundtrip.rs`, and `framework.rs`). Run via `cargo test --workspace`.
 
@@ -78,16 +84,25 @@ driven by `scripts/run_real_kat.sh` and `scripts/gen_real_kat.py` (e.g.
 programs in `examples/` (`arena_allocator.vuma`, `base64_encode.vuma`,
 `bsearch.vuma`, etc.).
 
-### 1.4 Lean Proof Tests
+### 1.4 Lean Proof Tests (standalone — not linked into the binary)
 The Lean proof library at `proof/PMT/Test/` ships 6 Lean test modules
-(808 LOC) that exercise the verified PMT abstraction against valid
+(808 LOC) that exercise the formal PMT abstraction against valid
 programs, UAF/overflow negative cases, empty programs, and multi-step
 simulations. Build: `make proof-test` (= `cd proof && lake exe test`).
 These are **not** counted in the gold-standard `.vuma` totals — they
 are a separate Lean-side test surface that complements (not replaces)
-the QEMU-driven `.vuma` suite. See §12 for the full module inventory
+the QEMU-driven `.vuma` suite. See §11 for the full module inventory
 and the `arena_basic.vuma` ↔ `ArenaBasicSim.lean` simulation-relation
 linkage.
+
+> The Lean proofs are the **formal specification** of the PMT memory
+> model. They are machine-checked (`lake build` passes;
+> `scripts/check_lean.sh` greps for `sorry`), but they are **not linked
+> into the compiler binary**. Build-time and runtime verification go
+> through **Z3** (the SMT solver, hard dependency in
+> `src/ive/Cargo.toml`) and the hand-written Rust verifiers in
+> `src/ive/`. The Lean tests document *what* the Rust verifiers check,
+> not *how the binary checks it*. See [`./caveats.md` §3.2](./caveats.md).
 
 ---
 
@@ -126,7 +141,7 @@ via `--trend [N]` (default last 10) which prints the trend and exits
 without running the suite; `--include-current` also lists the in-place
 `summary.json` as the most-recent row.
 
-**Compile-timeout fix (K11D)** (`:627-670`). The compile step had a
+**Compile-timeout fix** (`:627-670`). The compile step had a
 15 s `subprocess.run` timeout that silently swallowed
 `TimeoutExpired` via a bare `except: pass`, leaving
 `result["actual"] = None` which crashed the report. Fix: raise to
@@ -143,11 +158,19 @@ lacks the D extension, `:713-716`).
 
 **Flags**: `--workers N` (default 4; IPC capped at 3), `--skip-build`,
 `--no-push` (legacy; now equivalent to the new default), `--fresh`,
-`--backends LIST`, `--verify` (no-op — verification always on in VUMA
-2.0, `src/bin/compile_dump.rs:606`), `--release` (LTO; default is
+`--backends LIST`, `--release` (LTO; default is
 `release-fast`), `--profile NAME`, `--commit` (opt-in auto-commit +
 push; default OFF), `--dry-run` (show what would be committed without
 committing), `--trend [N]` (print pass-rate history and exit).
+
+> **Verification is always on.** The `--verify` flag is no longer
+> listed because IVE verification is unconditional in VUMA 2.0
+> (`src/bin/compile_dump.rs:606` always runs the IVE state verifiers
+> + Z3 contract discharge). There is no `--no-verify` opt-out in
+> production builds; the pipeline hard-fails on any contract that Z3
+> cannot discharge. See [`./caveats.md` §5.1](./caveats.md) for the
+> full removed-flag list (including `--safe`, `--no-memory-safety`,
+> and `--repl`).
 
 **Result commit — gated behind `--commit`** (`:1035-1179`).
 Auto-commit is OFF by default. Without `--commit`, the script prints a
@@ -205,10 +228,25 @@ misbehave.
 fields: `timestamp`, `host`, `arch`, `total_runs`, `matches`,
 `skipped`, `pass_rate`, `per_backend{<name>:{total,match,skipped}}`,
 optional `ive_verification{total,pass,fail,pass_rate}`.
-`total_runs = 1 561 × 19 = 29 659`: the runner sees 1 561 tests
-(after subtracting `skip_on` exclusions and adding compile-error
-classifications) even though 1 589 `.vuma` files exist on disk. The
-28-file delta is documented in §6.
+
+**Current snapshot** (`test_results/summary.json`,
+timestamp `2026-07-30 10:24:23 UTC`):
+
+| Field | Value |
+|-------|-------|
+| `total_runs` | **29 944** |
+| `matches` | **29 944** |
+| `skipped` | 0 |
+| `pass_rate` | **100.00 %** |
+| Per-backend `total` | 1 576 |
+| Per-backend `match` | 1 576 |
+| Per-backend `skipped` | 0 |
+| Backends | 19 |
+
+`total_runs = 1 576 × 19 = 29 944`: the runner sees 1 576 tests
+per backend (after subtracting `skip_on` exclusions and
+compile-error classifications) even though 1 589 `.vuma` files
+exist on disk. The 13-file delta is documented in §6.
 
 ### 4.2 `failures.txt`
 Plain-text summary (`pi5_test_suite.sh:1009-1011`). Each failure line
@@ -216,16 +254,25 @@ lists backends with codes `TO`=timed-out, `CR`=crashed,
 `MM`=exit-code mismatch. Header line:
 `Total: N failures across M tests / Skipped: K`.
 
+Current snapshot (`test_results/failures.txt`):
+`Total: 0 failures across 0 tests / Skipped: 0`.
+
 ---
 
 ## 5. CI/CD — GitHub Actions
 
-Six workflows in `.github/workflows/`: `ci.yml` (build + `manifest`
-gate + test matrix + fmt + clippy + docs), `vuma-tests.yml` (Pi-driven
-suite; triggered by pushes to `test_results/`),
-`wave50-hardening.yml` (clippy-advisory + full-test-strict),
-`proof-verify.yml` (Lean proof system), `cross-compile.yml`
-(cross-arch matrix), `release.yml` (tagged-release).
+Eight workflows in `.github/workflows/`:
+
+| Workflow | Role |
+|----------|------|
+| `ci.yml` | build + `manifest` gate + test matrix + fmt + clippy + docs |
+| `vuma-tests.yml` | Pi-driven suite; triggered by pushes to `test_results/` |
+| `hardening.yml` | clippy-advisory + full-test-strict |
+| `proof-verify.yml` | Lean proof system (formal spec — standalone) |
+| `cross-compile.yml` | cross-arch matrix |
+| `release.yml` | tagged-release |
+| `lean-rust-parity.yml` | Lean↔Rust parity (hand-translation differential) |
+| `differential-test.yml` | cross-backend differential testing |
 
 **Manifest CI gate** (`ci.yml:56-64`). A dedicated `manifest` job
 runs in parallel with `build` (no Rust toolchain needed — just Python
@@ -238,7 +285,7 @@ directions). `make regen-manifest` (driven by
 `scripts/regen_manifest.py`) rebuilds the manifest from disk in one
 command.
 
-**Clippy advisory**. `wave50-hardening.yml:54-96` runs
+**Clippy advisory**. `hardening.yml:54-96` runs
 `cargo clippy --workspace --all-targets` and fails only on `error:`
 lines (warnings tolerated — the advisory posture is retained for
 forward compatibility).
@@ -263,33 +310,40 @@ smoke-test log as an artifact on failure for offline triage.
 **fmt + clippy gates.** The `fmt` job (`ci.yml:101-115`) runs
 `cargo fmt --all -- --check` and fails on any diff. The `clippy` job
 (`ci.yml:118-138`) runs `cargo clippy --workspace -- -D warnings`.
-The advisory `clippy-advisory` job in `wave50-hardening.yml:54-96`
+The advisory `clippy-advisory` job in `hardening.yml:54-96`
 runs the broader `--all-targets` clippy pass with warnings tolerated.
+
+**Lean proof-verify CI** (`proof-verify.yml`). Runs `lake build` on
+every push to confirm the formal Lean specification still builds and
+is sorry-free (`scripts/check_lean.sh`). This CI job does **not**
+gate the compiler build — it gates the *formal spec* only. The
+executable verifier is Z3-based and runs in the regular `ci.yml`
+build / test jobs.
 
 ---
 
-## 6. Test Count Discrepancy
+## 6. Test Count Reconciliation
 
 | Source | Count | Notes |
 |-------------------------------------------------|------:|------------------------------------|
 | `tests/gold_standard/manifest.json` (line 6) | 1 589 | Internally consistent; reconciled with disk (`make verify-manifest` passes) |
 | `find tests/gold_standard -name '*.vuma' \| wc -l` | 1 589 | Ground truth; 41 categories |
 | `README.md` | n/a | No longer hardcodes a count; points to `tests/gold_standard/manifest.json` as canonical |
-| `summary.json` `total_runs` | 1 561 × 19 = 29 659 | 28-file delta vs disk: tests skipped because `// Expected exit code:` header is missing or unparseable (`pi5_test_suite.sh:582-620`) |
+| `summary.json` `total_runs` | 1 576 × 19 = **29 944** | 13-file delta vs disk: tests skipped because `// Expected exit code:` header is missing or unparseable (`pi5_test_suite.sh:582-620`) |
+| `summary.json` `matches` | **29 944** | All runs match expected exit code |
+| `summary.json` `pass_rate` | **100.00 %** | 0 failures, 0 skipped |
 
-The 53-file `ipc/` gap (manifest `1536 → 1589`, categories `40 → 41`)
-was closed by `make regen-manifest`. The CI `manifest` job fails on
-any future drift between manifest, per-category `program_count`, and
-the filesystem. The 28-file delta between disk (1 589) and runner
-(1 561) reflects tests skipped at run time because their
-`// Expected exit code:` header is missing or unparseable. See
-`caveats.md` §6.
+The CI `manifest` job fails on any future drift between manifest,
+per-category `program_count`, and the filesystem. The 13-file delta
+between disk (1 589) and runner (1 576) reflects tests skipped at
+run time because their `// Expected exit code:` header is missing or
+unparseable. See `caveats.md` §6.
 
 **Lean proof tests are tracked separately** — the 6 modules under
 `proof/PMT/Test/` (808 LOC, run via `make proof-test`) are *not*
 `.vuma` files and are not counted in any of the four sources above.
 They are a Lean-side test surface that complements the QEMU-driven
-`.vuma` suite; see §12.
+`.vuma` suite; see §11.
 
 ---
 
@@ -300,7 +354,9 @@ They are a Lean-side test surface that complements the QEMU-driven
 Under QEMU user-mode emulation, pipe-close timing is racy: the child
 may write to a pipe whose read end has already been closed in the
 parent, raising `SIGPIPE` (signal 13, exit code -13). The runner
-retries up to 3× on rc=-13 (`pi5_test_suite.sh:720-781`).
+retries up to 3× on rc=-13 (`pi5_test_suite.sh:720-781`). In the
+current snapshot this test passes (0 failures); the retry path is
+retained for future QEMU-version regressions.
 
 **7.2 IPC parallel-load sensitivity**. Any
 `tests/gold_standard/ipc/*.vuma` test using `fork+exec+wait` is
@@ -348,9 +404,10 @@ but `womb/kernel/hosted/` is the only path with full implementations).
 
 1. **Test count is no longer fuzzy**. `find` and
    `tests/gold_standard/manifest.json` both report 1 589; the CI
-   `manifest` gate fails on drift. The only remaining delta is disk
-   (1 589) vs runner `total_runs` (1 561 × 19), caused by run-time
-   `skip_on` / unparseable-header exclusions.
+   `manifest` gate fails on drift. The runner sees 1 576 tests per
+   backend (1 576 × 19 = **29 944** total runs), all matching, 0
+   skipped, 0 failures — **100.00 %** pass rate. The 13-file delta
+   is run-time `skip_on` / unparseable-header exclusions.
 2. **Trend data is preserved**. The checkpoint is still cleared on
    every compiler rebuild (`pi5_test_suite.sh:451-489`), but the prior
    `summary.json` is archived to
@@ -372,10 +429,18 @@ but `womb/kernel/hosted/` is the only path with full implementations).
    (`pi5_test_suite.sh:1035-1179`).
 6. **IPC tests bypass `--workers N`** (forced to ≤3) — throughput
    claims at `--workers 8` are misleading for the IPC subset.
-7. **`--verify` is a no-op** — verification is always on in VUMA 2.0
-   (`src/bin/compile_dump.rs:606`); the flag is accepted for
-   backwards compatibility only. `--no-verify` is the actual opt-out
-   for diagnostic use.
+7. **Verification is always on** — IVE state verifiers + Z3 contract
+   discharge are unconditional in VUMA 2.0
+   (`src/bin/compile_dump.rs:606`); the `--verify` / `--no-verify`
+   flags are no longer in the CLI surface. `--safe`,
+   `--no-memory-safety`, and `--repl` have also been removed (see
+   [`./caveats.md` §5.1](./caveats.md)).
+8. **Z3 is a hard build dependency** — without `libz3-dev`
+   (`apt install libz3-dev` on Debian/Ubuntu), `cargo build` fails at
+   link time. The Lean FFI bridge that previously linked Lean-verified
+   checkers into the binary has been deleted; Z3 + the hand-written
+   Rust verifiers do the executable verification. See
+   [`./caveats.md` §1.1](./caveats.md).
 
 ---
 
@@ -384,22 +449,30 @@ but `womb/kernel/hosted/` is the only path with full implementations).
 - Backend dispatch table & per-backend QEMU quirks: `backends.md`.
 - Backend `Formal` column (all 19 backends read `PMT only`):
   `backends.md`.
-- IPC audit (fork emulation, QEMU workarounds): `caveats.md` §5.
+- IPC audit (fork emulation, two-pipe channel architecture, QEMU
+  workarounds): `caveats.md` §2.3 / §5.
 - Caveats (test-count, flaky tests, CI): `caveats.md` §6.
 - Build & run instructions: `building.md`.
 
 ---
 
-## 11. Lean Proof Tests
+## 11. Lean Proof Tests (standalone formal-spec tests)
 
 The Lean proof library under `proof/PMT/` ships with its own test
 harness in `proof/PMT/Test/` — 6 Lean modules (808 LOC total) that
-exercise the verified PMT semantics by constructing `Program` values
+exercise the formal PMT semantics by constructing `Program` values
 and stepping them through `Exec` / `step`, asserting they reach the
 expected `TrapCode` (or terminate cleanly with the expected return
 value). These tests are the empirical core of the simulation-relation
 claim: they assert that the *abstract* PMT semantics in Lean agree
 with the *runtime* semantics the 19 backends implement.
+
+> These tests exercise the **formal Lean specification**, not the
+> executable verifier. The executable verifier is Z3-based and runs
+> in the QEMU-driven `.vuma` suite (§1.1) and the Rust integration
+> tests (§1.2). The Lean tests document what the Rust verifiers
+> *should* check; they do not run at compile time and are not linked
+> into the binary.
 
 **Build & run.**
 
@@ -423,7 +496,7 @@ builds the proof library), `make proof-check` (verifies the proof is
 | `OverflowProgram.lean` | 141 | Arena overflow detection: `arena_alloc` beyond capacity. Asserts `Except.error TrapCode.arena_overflow` (exit 1). |
 | `EmptyProgram.lean` | 50 | Degenerate empty `Program` (no instructions); `step` is a no-op, return value is the default. |
 | `MultiStepProgram.lean` | 184 | 10+ instruction program exercising multiple arena operations and state writes/reads; verifies the simulation relation holds across multiple `step` invocations. |
-| `ArenaBasicSim.lean` | 199 | Models `tests/gold_standard/arena_wave1/arena_basic.vuma` (21 lines, expected exit 42) as a Lean `Program`. The primary simulation-relation target: hits all 3 IVE entry points (`verify_state_reads`, `verify_state_writes`, `verify_transform…`). |
+| `ArenaBasicSim.lean` | 199 | Models `tests/gold_standard/arena_alloc/arena_basic.vuma` (21 lines, expected exit 42) as a Lean `Program`. The primary simulation-relation target: hits all 3 IVE entry points (`verify_state_reads`, `verify_state_writes`, `verify_transform…`). |
 
 **Coverage.** The 6 modules between them exercise:
 
@@ -438,7 +511,7 @@ builds the proof library), `make proof-check` (verifies the proof is
   `MultiStepProgram`, `ArenaBasicSim`.
 
 **Gold-standard fixture linkage.** The `ArenaBasicSim.lean` module is
-a faithful Lean transcription of `tests/gold_standard/arena_wave1/arena_basic.vuma`
+a faithful Lean transcription of `tests/gold_standard/arena_alloc/arena_basic.vuma`
 — the same 21-line VUMA source that the gold-standard test runner
 (`scripts/pi5_test_suite.sh`) executes under QEMU for each of the 19
 backends. The Lean test asserts that the abstract PMT semantics agree
@@ -468,9 +541,13 @@ hand from `proof/PMT/Extraction.lean` on every test case.
 
 Run with `cargo test --test pmt_parity_test` (or `cargo test --features
 pmt-runtime-check` to also exercise the in-tree checkers at
-`src/codegen/src/runtime/pmt_check.rs`). Note that this is a *parity*
-test, not an FFI extraction test: a future improvement would be to call
-the Lean-compiled C code directly via FFI and compare.
+`src/codegen/src/runtime/pmt_check.rs`).
+
+> Note: this is a *parity* test, not an FFI extraction test. The
+> previous Lean→C FFI extraction pipeline (with `lean_stub.c`,
+> `lean_ffi_linked`, and `lean_verify_*` externs) has been **deleted**.
+> Z3 + the hand-written Rust verifiers do the executable verification;
+> the Lean proofs remain as the formal specification only.
 
 **Feature-flag test (`tests/pmt_feature_flag_test.rs`, 3 tests).**
 Exercises the `pmt-runtime-check` cargo feature wired into

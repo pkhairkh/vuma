@@ -1,398 +1,445 @@
 # Building and Development Guide
 
+This document covers everything you need to build the VUMA compiler,
+run the test suite, and develop against the codebase. For known
+limitations and current caveats, see [`caveats.md`](caveats.md).
+
 ## Prerequisites
 
-### Rust Toolchain
+### Rust toolchain
 
-VUMA requires Rust nightly pinned to `nightly-2026-03-01`:
+VUMA requires Rust nightly pinned to `nightly-2026-03-01`. The
+`rust-toolchain.toml` enforces this automatically — any `cargo`
+invocation in the repo will install and select the pinned toolchain
+on first use.
 
 ```bash
+# Manual install (if you prefer not to rely on rust-toolchain.toml auto-install):
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
 rustup toolchain install nightly-2026-03-01 --profile default
+rustup component add rustfmt clippy rust-src
+rustup target add aarch64-unknown-linux-gnu aarch64-unknown-none
 ```
 
-The `rust-toolchain.toml` file enforces this automatically.
+The toolchain file also pins the `aarch64-unknown-linux-gnu` and
+`aarch64-unknown-none` targets (needed by the bare-metal kernel
+crate and `naked_asm` usage).
 
-### QEMU User-Mode Emulation
+### Z3 SMT solver (hard build dependency)
 
-For cross-architecture testing, install the **14** QEMU static binaries
-(v7.2.0-1, matching the version the compiler's QEMU-quirk workarounds target):
+Z3 is now a **hard** build dependency — the `vuma-ive` crate links
+against the system `libz3` (`z3 = "0.20"` in `src/ive/Cargo.toml`)
+and the build will fail at link time if Z3 is not present. Z3 is what
+discharges the IVE verification conditions (contract / invariant /
+linearity / information-flow); without it the compiler cannot produce
+a verified binary.
 
 ```bash
-for arch in aarch64 arm x86_64 mips64 mipsel ppc64 ppc64le riscv64 \
- s390x sparc64 m68k hppa alpha loongarch64; do
- curl -sL "https://github.com/multiarch/qemu-user-static/releases/download/v7.2.0-1/qemu-${arch}-static" -o ~/.local/bin/qemu-${arch}-static
- chmod +x ~/.local/bin/qemu-${arch}-static
+# Debian / Ubuntu
+sudo apt install libz3-dev
+
+# macOS (Homebrew)
+brew install z3
+
+# Arch Linux
+sudo pacman -S z3
+```
+
+Verify the install:
+
+```bash
+pkg-config --modversion z3     # e.g. "4.13.0"
+```
+
+The `pi5_test_suite.sh` runner also probes for Z3 via `pkg-config`
+and will attempt to install `libz3-dev` automatically on Debian-family
+hosts if it is missing.
+
+### QEMU user-mode emulation (10.0+)
+
+Cross-architecture testing needs one QEMU user-mode binary per
+non-host backend. **QEMU 10.0 or newer is recommended** — older
+7.2.0-1 static builds still work for most backends but several
+workarounds that targeted QEMU 7.2 bugs have been removed, so old
+QEMU may surface encoding-related failures that no longer reproduce
+on 10.0+.
+
+Install via your distribution's package manager (preferred — gives
+you 10.0+ on recent distros):
+
+```bash
+# Debian / Ubuntu (QEMU 10.x is in Debian trixie / Ubuntu 25.04+)
+sudo apt install qemu-user-static
+
+# Arch
+sudo pacman -S qemu-user-static
+```
+
+Or fetch the multiarch static binaries manually:
+
+```bash
+mkdir -p ~/.local/bin
+for arch in aarch64 arm armeb aarch64_be x86_64 i386 \
+            mips64 mips64el mips riscv64 riscv32 \
+            ppc64 ppc64le sparc64 s390x m68k hppa alpha loongarch64; do
+  curl -sL "https://github.com/multiarch/qemu-user-static/releases/latest/qemu-${arch}-static" \
+    -o ~/.local/bin/qemu-${arch}-static
+  chmod +x ~/.local/bin/qemu-${arch}-static
 done
 ```
 
-Then install the additional `qemu-mips64el-static` binary required by the
-`--isa mips64` backend (VUMA emits a **little-endian** MIPS64 ELF — see
-note below):
+The 19-backend test matrix maps VUMA ISA names to QEMU binary names
+as follows (the two non-obvious ones are `arm32 → qemu-arm-static`
+and `mips64 → qemu-mips64el-static`, because VUMA's `mips64` backend
+emits a **little-endian** MIPS64 ELF):
+
+| VUMA ISA | QEMU binary |
+|----------|-------------|
+| `x86_64` | (native; no emulator) |
+| `aarch64` | `qemu-aarch64-static` |
+| `aarch64_be` | `qemu-aarch64_be-static` |
+| `riscv64` | `qemu-riscv64-static` |
+| `riscv32` | `qemu-riscv32-static` |
+| `arm32` | `qemu-arm-static` |
+| `armeb` | `qemu-armeb-static` |
+| `x86_32` | `qemu-i386-static` |
+| `mips64` | `qemu-mips64el-static` (little-endian) |
+| `mips64be` | `qemu-mips64-static` (big-endian) |
+| `ppc64` | `qemu-ppc64-static` |
+| `ppc64le` | `qemu-ppc64le-static` |
+| `sparc64` | `qemu-sparc64-static` |
+| `s390x` | `qemu-s390x-static` |
+| `m68k` | `qemu-m68k-static` |
+| `alpha` | `qemu-alpha-static` |
+| `hppa` | `qemu-hppa-static` |
+| `loongarch64` | `qemu-loongarch64-static` |
+| `wasm32` | (run via `wasmtime`, see below) |
+
+### Wasmtime (for the `wasm32` backend)
+
+The `wasm32` row of the test matrix runs under `wasmtime`. **v29.0 or
+newer is required** — older `wasmtime` does not support the WASI
+preview features the wasm32 backend emits and will reject the module.
 
 ```bash
-curl -sL "https://github.com/multiarch/qemu-user-static/releases/download/v7.2.0-1/qemu-mips64el-static" -o ~/.local/bin/qemu-mips64el-static
-chmod +x ~/.local/bin/qemu-mips64el-static
-```
-
-The 14 arches above plus `mips64el` give the 15-binary set the
-environment-setup script installed and the set the QEMU smoke tests
-(-a/b/c/d, re-run in the QEMU smoke rerun) exercise. Note that VUMA's
-`--isa mips64` emits a
-**little-endian** MIPS64 ELF, so it must be run under
-`qemu-mips64el-static` (NOT `qemu-mips64-static`, which is big-endian).
-
-> **Note:** QEMU 7.2.0-1 is the latest static release. Several QEMU bugs are
-> worked around in the compiler — see
-> [Caveats](caveats.md#5-ipc) for details.
-
-### Wasmtime (for wasm32 backend)
-
-```bash
-# The test suite installs this automatically
-WASMTIME_VER=v47.0.2
-curl -L "https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VER}/wasmtime-${WASMTIME_VER}-aarch64-linux.tar.xz" | tar xJ
+WASMTIME_VER=v29.0.1   # or any newer release
+ARCH=$(uname -m)       # x86_64 or aarch64
+curl -L "https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VER}/wasmtime-${WASMTIME_VER}-${ARCH}-linux.tar.xz" \
+  | tar xJ
 cp wasmtime-*/wasmtime ~/.local/bin/
-pip install wasmtime
+pip install wasmtime   # Python bindings used by scripts/wasm32_runner.py
 ```
 
-Wasmtime **47.0.2** is the pinned version. Older releases
-(e.g. v29.x) are NOT compatible with the wasm32 modules VUMA emits.
+Verify:
+
+```bash
+wasmtime --version     # wasmtime-cli 29.x (or newer)
+```
 
 ## Building
 
-### Release (fast)
+### Quick start
 
 ```bash
-cargo build --profile release-fast --bin compile_dump
+# Iterative build (fast, used by the test suite):
+cargo build --profile release-fast --bin compile_dump --bin dump_ir
+
+# Production build (slow, optimised):
+cargo build --profile release --bin compile_dump
 ```
 
-The `release-fast` profile enables LTO and optimized codegen. Build time:
-~50-90s on a Pi 5.
+The binaries land in `target/release-fast/` or `target/release/`
+respectively.
 
-### Debug
+### Build profiles
+
+| Profile | Use case | LTO | Opt level | Codegen units |
+|---------|----------|-----|-----------|---------------|
+| `dev` (default) | Local development / debugging | off | 0 | 256 |
+| `release-fast` | Test-suite runs, iterative work | **off** | 3 | **16** |
+| `release` | Production / release builds | **on (fat)** | 3 | **1** |
+
+The `release-fast` profile (defined in `Cargo.toml`) deliberately
+disables LTO and bumps `codegen-units` to 16 so a from-scratch build
+that would take 10+ minutes on a Pi 5 with the `release` profile
+completes in ~1–2 minutes. Runtime is still `O3` (so QEMU-emulated
+executions stay fast); only the link-time optimisation pass is
+skipped, costing ~5–10% runtime but ~5–10× build-time speedup. Use
+`release-fast` for everyday work and `release` only when you need
+maximum runtime performance or are cutting a release artifact.
+
+### Verifying the Z3 link
+
+If your build fails with `could not find z3` / `-lz3 not found`,
+confirm the system library is installed and discoverable:
 
 ```bash
-cargo build --bin vuma
+pkg-config --modversion z3     # should print e.g. "4.13.0"
+pkg-config --libs z3           # should print e.g. "-lz3"
 ```
 
-### Build Profiles
+If `pkg-config` succeeds but the link still fails, ensure
+`PKG_CONFIG_PATH` includes the directory containing `z3.pc` (often
+`/usr/lib/<triplet>/pkgconfig` on Debian multiarch).
 
-| Profile | Use Case | LTO | Opt Level |
-|---------|----------|-----|-----------|
-| `dev` (default) | Development | off | 0 |
-| `release-fast` | Production / testing | thin | 3 |
-| `release` | Not used | fat | 3 |
-
-## Lean Proofs (Formal Verification)
-
-VUMA's PMT memory model is formally verified in Lean 4. The proofs live in
-`proof/` and are built with [Lake](https://github.com/leanprover/lake).
-
-### Prerequisites
-
-Install [elan](https://github.com/leanprover/elan) (Lean toolchain manager,
-analogous to `rustup`):
+## Compiler CLI
 
 ```bash
-curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y
-source $HOME/.elan/env
+vuma --help
 ```
 
-The `proof/lean-toolchain` file pins Lean to `leanprover/lean4:v4.21.0`;
-elan picks it up automatically when you run any `lake` command in `proof/`.
-
-Verify:
-```bash
-lean --version # Lean (version 4.21.0, ...)
-lake --version # Lake (version 4.21.0, ...)
-```
-
-### Building
-
-```bash
-# Via Make (recommended)
-make proof # = cd proof && lake build
-make proof-check # = ./scripts/check-lean.sh
-make proof-test # = cd proof && lake exe test
-make proof-clean # = rm -rf proof/.lake proof/build
-
-# Via just
-just proof
-just proof-check
-just proof-test
-
-# Directly via Lake
-cd proof && lake build && lake exe test
-```
-
-### Strict vs Non-Strict Sorry Check
-
-`scripts/check-lean.sh` has two modes:
-
-- **Non-strict** (default): allows sorries that are documented TODOs. Exits 0.
-- **Strict** (`PROOF_CHECK_STRICT=1`): fails on ANY sorry. Use in CI gates.
-
-```bash
-./scripts/check-lean.sh # non-strict (allows documented TODOs)
-PROOF_CHECK_STRICT=1 ./scripts/check-lean.sh # strict (fails on any sorry)
-```
-
-The proof library has been **sorry-free since ** (the last `sorry` in
-`full_simulation_strong` was closed by an empty-`live_vars` UAF-trap argument).
-Strict CI mode (`PROOF_CHECK_STRICT=1`) was enabled in and ran
-continuously through; subsequently added a small number of
-*deliberately documented* hard-proof `sorry` stubs as a depth-over-tidiness
-trade (see `docs/proof/S2-W32-status.md` for the current count
-and `S2-W1-E-soundness-conclusion.md` for per-stub strategies), and the
-`lean-proofs` CI job now runs `check-lean.sh` in advisory mode
-(`PROOF_CHECK_STRICT=0` exported) so the documented stubs do not block CI
-while still surfacing any *undocumented* `sorry` token in the build log. For
-local strict enforcement:
-
-```bash
-PROOF_CHECK_STRICT=1 ./scripts/check-lean.sh # fails on any sorry token
-```
-
-### Troubleshooting
-
-- **`lake: command not found`**: Install elan (see Prerequisites).
-- **`lean: command not found`**: Same as above.
-- **`PMT_Soundness.lean: error: unknown identifier`**: Run `lake build` from
- `proof/`, not the repo root.
-- **`sorry` warning**: Run `./scripts/check-lean.sh` to identify the line.
-
-### `pmt-runtime-check` Cargo Feature (Lean↔Rust Runtime Checkers)
-
-The hand-translated Rust versions of the Lean-verified PMT checkers
-(`verified_capacity_check`, `verified_field_bounds_check`,
-`verified_linearity_check`, `verified_pmt_check`) live at
-`src/codegen/src/runtime/pmt_check.rs`. They are **gated behind the
-`pmt-runtime-check` Cargo feature** (declared in `src/codegen/Cargo.toml`
-and **forwarded from the root `Cargo.toml`** via
-`pmt-runtime-check = ["vuma-codegen/pmt-runtime-check"]`), so they are
-NOT compiled into the default build — downstream consumers opt in
-incrementally. **The feature is now FUNCTIONAL** (not a stub): the
-checkers are wired into `src/codegen/src/runtime/arena.rs`, so when the
-feature is enabled the verified `verified_capacity_check` runs on every
-arena allocation in production. `@[export]` attributes on
-`proof/PMT/Extraction.lean` (`lean_verified_capacity_check`,
-`lean_verified_field_bounds_check`, `lean_verified_linearity_check`,
-`lean_verified_pmt_check`) emit the C symbols used by the FFI bridge.
-
-Enable the feature when you want to exercise the verified checkers
-locally (e.g. to run the parity test against the Lean definitions, or
-to enable the runtime checkers in production builds):
-
-```bash
-# Build with the verified Lean-translated PMT checkers compiled in
-# (works from the repo root — Cargo.toml forwards the feature).
-cargo build --features pmt-runtime-check
-
-# Run the parity test (5 tests, passes):
-# tests/pmt_parity_test.rs — confirms the Rust hand-translations of the
-# Lean `Extraction.lean` checkers match the expected Lean behavior on
-# every test case.
-cargo test --features pmt-runtime-check --test pmt_parity_test
-
-# Run the feature-flag wiring test (3 tests, passes):
-# tests/pmt_feature_flag_test.rs — confirms the feature flag compiles,
-# the checkers are callable from the codegen crate, and the arena
-# overflow check uses the verified path.
-cargo test --features pmt-runtime-check --test pmt_feature_flag_test
-```
-
-The Lean source of truth lives at `proof/PMT/Extraction.lean` (with
-extraction lemmas in `proof/PMT/ExtractionLemmas.lean`); the
-`proof/extracted/pmt_check.rs` artifact is a snapshot of the
-hand-translation for cross-reference. See
-[README ](../README.md#5-formal-verification-lean-4) and
-[docs/caveats.md](architecture/pmt-fix-proposals.md)
-Stage 8 for the full Lean↔Rust integration narrative.
-
-## Compiler CLI Flags 
-
-The following global flags are accepted by `vuma build` / `vuma compile` /
-`vuma emit` / `vuma run` / `vuma check` / `vuma verify` (before or after the
-subcommand):
+Common flags (run `vuma --help` for the full list):
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--safe` | ON (mandatory) | Enables runtime bounds-check IR injection + liveness (UAF) trap injection. **Cannot be disabled** since -a (`main.rs:607` hard-codes `safe: true`); accepted for backwards-compat. `--no-memory-safety` is rejected. |
-| `--strict-ive` | OFF | Promote the `bv_verify` e-graph soundness advisory IVE verifier (Stage 7a) to HARD-FAIL on any unsound rule. The linear-channel verifier is **always** HARD-FAIL as of -a (independent of this flag). |
-| `--max-expr-depth <N>` | `1024` | Maximum expression nesting depth. Raised from 256 in -b to accommodate machine-generated bignum-KAT programs. `0` is rejected. Flows through `CompileConfig::max_expr_depth` → `Parser::with_max_depth` at every parser entry point. |
-| `--allow-inconclusive` | OFF | Soft-pass on `OverallVerdict::Inconclusive` from the PMT IVE verifiers (logs a `SOUNDNESS WAIVER` when `VUMA_LOG=1`). Without this flag, `Inconclusive` is a HARD compile error (-f). |
-| `--opt-level <O0\|O1\|O2\|O3>` | `O3` | Codegen optimization level. |
-| `--isa <isa>` | `aarch64` | Target backend. `aarch64` uses the canonical pipeline (IVE + telemetry); all other ISAs use the direct AST→codegen path (-a). |
+| `--opt-level <O0\|O1\|O2\|O3>` | `O3` | Codegen optimisation level. |
+| `--isa <isa>` | `aarch64` | Target backend. One of the 19 ISAs in the table above. |
+| `--strict-ive` | OFF | Promote the IVE e-graph soundness advisory to a HARD-FAIL. The channel/linearity/information-flow/session-type verifiers always HARD-FAIL. |
+| `--max-expr-depth <N>` | `1024` | Maximum expression nesting depth. `0` is rejected. |
+| `--allow-inconclusive` | OFF | Soft-pass on `OverallVerdict::Inconclusive` from the PMT IVE verifiers. Without it, `Inconclusive` is a HARD compile error. |
 
-Run `vuma --help` for the full list.
+> **Removed flags.** `--safe`, `--no-memory-safety`, and `--repl`
+> have been removed. Runtime bounds-check injection is always on;
+> there is no REPL. See [`caveats.md`](caveats.md) §5 for the full
+> list of removed flags.
 
-## Running Tests
+## Running tests
 
-### Full Test Suite
+### Full test suite (`pi5_test_suite.sh`)
+
+The end-to-end runner. It builds the compiler, probes/installs Z3 and
+QEMU if missing, runs the gold-standard `.vuma` programs across the
+19-backend matrix, and archives the results.
 
 ```bash
 bash scripts/pi5_test_suite.sh --workers 4 --fresh --verify
 ```
 
 Flags:
-- `--workers N` — parallel workers for non-IPC tests (default 4)
-- `--fresh` — clear checkpoint, run all tests from scratch
-- `--verify` — enable IVE verification (always on in production)
-- `--commit` — **opt-in** auto-commit + push of test results to `origin HEAD`
- (default OFF since -c). Without `--commit`, the script prints a
- summary of what *would* be committed (staged files + byte sizes + proposed
- commit message + `git status --porcelain` preview) and manual-commit
- instructions, then exits the commit/push step WITHOUT calling `git commit`
- or `git push`.
-- `--dry-run` — show what would be committed without committing (-c).
- Flag precedence: `--no-push` → `--dry-run` → `--commit` → default-off summary.
-- `--trend [N]` — print a pass-rate trend table over the last N archived runs
- (default 10) from `test_results/history/` and exit without running the suite
- (-c). Includes min/max/mean/Δ stats. No-op on first run (history empty).
-- `--trend-n N` — override the `--trend` default of 10.
-- `--skip-build` — skip the compiler rebuild step.
-- `--no-push` — legacy flag, equivalent to the new default (no commit/push).
 
-#### `VUMA_IPC_WORKER_CAP` environment variable (-e)
+| Flag | Meaning |
+|------|---------|
+| `--workers N` | Parallel workers for non-IPC tests (default 4). |
+| `--fresh` | Clear the checkpoint and run every test from scratch. |
+| `--verify` | Enable IVE verification (always on in production; this just makes the runner assert it). |
+| `--commit` | **Opt-in** auto-stage + commit + push of test results to `origin HEAD`. Default OFF. |
+| `--dry-run` | Show what *would* be committed (staged files, byte sizes, proposed message, `git status --porcelain`) without running `git commit`. |
+| `--no-push` | Legacy flag; equivalent to the new default (no commit/push). |
+| `--trend [N]` | Print a pass-rate trend table over the last N archived runs (default 10) from `test_results/history/` and exit without running the suite. |
+| `--trend-n N` | Override the `--trend` default of 10. |
+| `--skip-build` | Skip the compiler rebuild step. |
+| `--backends LIST` | Restrict to a subset of backends (space-separated). |
+| `--profile NAME` | Use a specific Cargo profile (default `release-fast`). `--release` is a shortcut for `--profile release` (slow LTO build). |
 
-IPC tests (fork+exec+wait) always run with a reduced worker count regardless
-of `--workers` to avoid QEMU translation-cache warm-up latency and
-pipe-buffer contention. The cap defaults to **3** workers and is now
-**configurable via the `VUMA_IPC_WORKER_CAP` environment variable**:
+Flag precedence for the commit step: `--no-push` → `--dry-run` →
+`--commit` → default-off summary.
+
+#### IPC worker cap (`VUMA_IPC_WORKER_CAP`)
+
+IPC tests (`fork + exec + wait` under QEMU) always run with a reduced
+worker count regardless of `--workers` — high parallelism causes
+fork+exec timeouts from QEMU translation-cache warm-up and
+pipe-buffer contention. The cap defaults to **3** and is configurable:
 
 ```bash
-# Default (3 workers for IPC phase)
+# Default (3 workers for the IPC phase, even with --workers 8):
 bash scripts/pi5_test_suite.sh --workers 8
 
 # CI host with ≥16 cores and no QEMU contention:
 VUMA_IPC_WORKER_CAP=8 bash scripts/pi5_test_suite.sh --workers 8
 ```
 
-Invalid/non-integer values fall back to 3; values `<1` are floored to 1. The
-override is logged to stdout (`[K11C] VUMA_IPC_WORKER_CAP=N …`).
+Invalid / non-integer values fall back to 3; values `<1` are floored
+to 1. The chosen value is logged (`[K11C] VUMA_IPC_WORKER_CAP=N …`).
+See [`caveats.md`](caveats.md) §4.1 for the rationale.
 
-> **IPC Phase:** IPC tests always run with `≤VUMA_IPC_WORKER_CAP` workers
-> (default 3) regardless of `--workers` to avoid fork+exec timeouts. See
-> [Testing Overview](testing/overview.md) and
-> [IPC Audit](caveats.md) item 2.
-
-### Individual Tests
+### 19-backend smoke matrix
 
 ```bash
-# Compile a test
-./target/release-fast/compile_dump tests/gold_standard/ipc/simple_send.vuma /tmp/out.bin aarch64 --opt-level=O3
+# Via the dedicated matrix script:
+bash scripts/vuma_test_matrix_19backends.sh
 
-# Run natively (x86_64)
+# Or via the QEMU smoke test (subset of gold-standard programs):
+bash scripts/qemu_smoke_test.sh
+# make qemu-smoke   # equivalent
+```
+
+The matrix script (`scripts/vuma_test_matrix_19backends.sh`) builds
+`compile_dump` once, then compiles and runs every gold-standard IPC
+test on all **19** backends (18 QEMU-emulated + `wasm32` via
+`wasmtime`), reporting a pass/fail matrix. Useful environment-variable
+overrides for `qemu_smoke_test.sh`:
+
+- `VUMA_SMOKE_ISAS="x86_64 aarch64 wasm32"` — restrict to a subset.
+- `VUMA_SMOKE_TESTS="arithmetic/arith_add_basic arithmetic/test_exit"` — restrict tests.
+- `VUMA_SMOKE_NO_BUILD=1` — skip the rebuild step (assume a previously-built binary).
+
+### Individual tests
+
+```bash
+# Compile a single test:
+./target/release-fast/compile_dump \
+  tests/gold_standard/ipc/simple_send.vuma /tmp/out.bin aarch64 --opt-level=O3
+
+# Run natively (x86_64 host):
 chmod +x /tmp/out.bin && /tmp/out.bin
 
-# Run under QEMU
+# Run under QEMU:
 ~/.local/bin/qemu-aarch64-static /tmp/out.bin
 
-# Run wasm32
-./target/release-fast/compile_dump tests/gold_standard/ipc/simple_send.vuma /tmp/out.wasm wasm32 --opt-level=O3
+# Run wasm32:
+./target/release-fast/compile_dump \
+  tests/gold_standard/ipc/simple_send.vuma /tmp/out.wasm wasm32 --opt-level=O3
 python3 scripts/wasm32_runner.py /tmp/out.wasm
 ```
 
-### Test Exit Codes
+### Test exit codes
 
-Each `.vuma` test file has an `// Expected exit code: N` header. The test
-passes if the program exits with code N. See
-[Testing Overview](testing/overview.md) for details.
+Each `.vuma` test file has an `// Expected exit code: N` header. The
+test passes if the program exits with code N. See
+[`testing.md`](testing.md) for the full testing overview.
 
-### QEMU Smoke Test (all 13 backends)
+## Lean proofs (formal specification, standalone)
 
-The QEMU smoke-test matrix (`scripts/qemu_smoke_test.sh`, last re-run as
--qemu-smoke) builds the release `vuma` binary once and then
-compiles a small set of gold-standard `.vuma` programs on every supported
-backend (12 QEMU + wasm32 via wasmtime = **13 backends**, 52 program×backend
-pairs), running each under the appropriate emulator and checking the exit
-code against the `// Expected exit code:` header.
+The Lean 4 specification of the PMT memory model lives in `proof/`
+and builds with [Lake](https://github.com/leanprover/lake) via
+[elan](https://github.com/leanprover/elan). The
+`proof/lean-toolchain` file pins Lean to `leanprover/lean4:v4.21.0`.
+
+> **Note.** The Lean proofs are a **standalone formal specification**.
+> The Lean↔Rust FFI bridge that used to link verified Lean checkers
+> into the runtime has been **removed**. Compile-time verification
+> now goes through Z3 and the hand-written Rust verifiers in
+> `vuma-ive` / `vuma-codegen`. Building the Lean proofs is optional
+> and does **not** affect the compiler binary. See
+> [`caveats.md`](caveats.md) §3 for the full story.
+
+### Prerequisites (optional — only if you want to build the Lean spec)
+
+```bash
+curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y
+source $HOME/.elan/env
+lean --version    # Lean (version 4.21.0, ...)
+lake --version    # Lake (version 4.21.0, ...)
+```
+
+### Building
 
 ```bash
 # Via Make (recommended):
-make qemu-smoke
+make proof         # = cd proof && lake build
+make proof-check   # = ./scripts/check-lean.sh
+make proof-test    # = cd proof && lake exe test
+make proof-clean   # = rm -rf proof/.lake proof/build
 
-# Or invoke the script directly:
-bash scripts/qemu_smoke_test.sh
+# Or directly via Lake:
+cd proof && lake build && lake exe test
 ```
 
-Useful environment-variable overrides (the script honours all of them):
+### Sorry check (`scripts/check-lean.sh`)
 
-- `VUMA_SMOKE_ISAS="x86_64 aarch64 wasm32"` — restrict to a subset of backends.
-- `VUMA_SMOKE_TESTS="arithmetic/arith_add_basic arithmetic/test_exit"` — restrict to a subset of tests.
-- `VUMA_SMOKE_NO_BUILD=1` — skip the `cargo build --release --bin vuma` step (assumes a previously-built binary at `target/release/vuma`).
+The check script runs `lake build` from `proof/` and greps the
+combined stdout+stderr for the literal token `sorry`. It has two
+modes:
 
-The script maps `arm32 → qemu-arm-static` and `mips64 → qemu-mips64el-static`
-(the only two ISAs whose QEMU binary name doesn't directly match the VUMA
-ISA name); every other ISA uses `qemu-<isa>-static`. `wasm32` is routed
-through `wasmtime`. Exit status is 0 iff every (backend, test) pair passes.
+- **Default:** fails on any `sorry` (exit 1) or build failure. Exits 0
+  if the build is clean.
+- **`PROOF_CHECK_STRICT=1`:** same as default but additionally fails
+  on any `unused variable` warning. Use in strict CI gates.
 
-> **Prerequisites:** the smoke test requires all 15 QEMU static binaries
-> listed in [QEMU User-Mode Emulation](#qemu-user-mode-emulation) above
-> (including `qemu-mips64el-static` for the `mips64` LE backend) plus
-> `wasmtime` 47.0.2 on `$PATH` for the `wasm32` row.
+```bash
+./scripts/check-lean.sh                       # default
+PROOF_CHECK_STRICT=1 ./scripts/check-lean.sh  # strict
+```
 
-## Development Workflow
+### `pmt-runtime-check` Cargo feature
 
-### Adding a Test
+The `pmt-runtime-check` Cargo feature is **retained as a no-op at the
+IVE layer** (the Lean FFI bridge is gone) but still has a real effect
+in `vuma-codegen`: it activates the independent pure-Rust `pmt_check`
+module (a parity-tested hand-translation of the Lean definitions in
+`proof/PMT/Extraction.lean`). It does **not** depend on any Lean
+linkage — the build never invokes `lake` or `cc` to compile Lean.
 
-1. Create `tests/gold_standard/<category>/<name>.vuma`
-2. Add `// Expected exit code: N` header
-3. Run the test on all backends:
- ```bash
- for b in aarch64 x86_64 hppa wasm32; do
- ./target/release-fast/compile_dump tests/gold_standard/<category>/<name>.vuma /tmp/t.bin $b --opt-level=O3
- chmod +x /tmp/t.bin
- # run it...
- done
- ```
+```bash
+# Build with the pure-Rust verified PMT checkers compiled in:
+cargo build --features pmt-runtime-check
 
-### Debugging a Failing Backend
+# Parity test against the Lean definitions:
+cargo test --features pmt-runtime-check --test pmt_parity_test
 
-1. Compile with strace:
- ```bash
- ~/.local/bin/qemu-<arch>-static -strace /tmp/out.bin
- ```
+# Feature-flag wiring test:
+cargo test --features pmt-runtime-check --test pmt_feature_flag_test
+```
 
-2. Compile with instruction trace:
- ```bash
- ~/.local/bin/qemu-<arch>-static -d in_asm /tmp/out.bin 2>/tmp/trace.log
- ```
-
-3. Check the backend's known quirks in
- [Backend Matrix](backends/matrix.md) and
- [Caveats](caveats.md).
-
-### Useful Binaries
+## Useful binaries
 
 | Binary | Purpose |
 |--------|---------|
-| `vuma` | Main compiler CLI |
-| `compile_dump` | Compile + dump IR/ELF (used by test suite) |
-| `dump_ir` | Dump IR for a .vuma file |
-| `scg_dump` | Dump SCG for a .vuma file |
+| `vuma` | Main compiler CLI. |
+| `compile_dump` | Compile a `.vuma` file and dump IR/ELF. Used by the test suite. |
+| `dump_ir` | Dump IR for a `.vuma` file. |
+| `scg_dump` | Dump SCG for a `.vuma` file. |
 
-## Project Structure
+## Development workflow
+
+### Adding a test
+
+1. Create `tests/gold_standard/<category>/<name>.vuma`.
+2. Add an `// Expected exit code: N` header.
+3. Compile and run on a representative subset of backends:
+
+   ```bash
+   for b in aarch64 x86_64 hppa wasm32; do
+     ./target/release-fast/compile_dump \
+       tests/gold_standard/<category>/<name>.vuma /tmp/t.bin $b --opt-level=O3
+     chmod +x /tmp/t.bin
+     # run via native, qemu, or wasmtime as appropriate
+   done
+   ```
+
+4. Once it passes on the subset, run the full 19-backend matrix:
+
+   ```bash
+   bash scripts/vuma_test_matrix_19backends.sh <name>
+   ```
+
+### Debugging a failing backend
+
+```bash
+# Strace under QEMU:
+~/.local/bin/qemu-<arch>-static -strace /tmp/out.bin
+
+# Instruction trace under QEMU:
+~/.local/bin/qemu-<arch>-static -d in_asm /tmp/out.bin 2>/tmp/trace.log
+```
+
+Then check the backend's known quirks in
+[`backends.md`](backends.md) / [`fp_backends.md`](fp_backends.md)
+and [`caveats.md`](caveats.md).
+
+## Project structure
 
 ```
 vuma/
 ├── src/
-│ ├── parser/ # Lexer + parser + AST
-│ ├── scg/ # Structured Call Graph
-│ ├── ive/ # Intermediate Verification Engine
-│ ├── codegen/ # IR + optimizer + 19 backends
-│ ├── cor/ # Continuous Optimization Runtime
-│ ├── bd/ # Behavioral Descriptors
-│ ├── proof/ # Proof system
-│ ├── vuma/ # CLI + REPL
-│ ├── pipeline.rs # Compilation pipeline
-│ └── main.rs # Entry point
-├── tests/ # Gold standard test programs
-├── scripts/ # Test runner + wasm32 runner
-├── womb/ # Standard library
-├── examples/ # Example programs
-└── docs/ # This documentation
+│   ├── parser/      # Lexer + parser + AST
+│   ├── scg/         # Structured Call Graph
+│   ├── ive/         # Intermediate Verification Engine (Z3-backed)
+│   ├── codegen/     # IR + optimizer + 19 backends
+│   ├── cor/         # Continuous Optimisation Runtime
+│   ├── bd/          # Behavioural Descriptors
+│   ├── proof/       # Rust-side proof artifacts (Lean spec lives in /proof)
+│   ├── vuma/        # CLI
+│   ├── pipeline.rs  # Compilation pipeline
+│   └── main.rs      # Entry point
+├── tests/           # Gold-standard test programs
+├── scripts/         # Test runner, wasm32 runner, 19-backend matrix
+├── proof/           # Lean 4 formal spec of the PMT memory model (standalone)
+├── womb/            # Standard library
+├── examples/        # Example programs
+└── docs/            # This documentation
 ```
 
-See [Architecture Overview](architecture/overview.md) for details.
+See [`architecture.md`](architecture.md) and
+[`kernel-architecture.md`](kernel-architecture.md) for details.

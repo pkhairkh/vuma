@@ -9,9 +9,12 @@ the relevant VUMA language docs ([`architecture.md`](./architecture.md) §3
 State Type System, §9 FFI Marshal Pass).
 
 The kernel is **PMT-only**. There is no pointer syntax, no `allocate`/`free`,
-no escape hatch. Every contribution must compile cleanly with `--verify`
-(IVE Pass, no `flatten_expr` warnings) and exit 0 on its self-test. The
-do/don't examples below illustrate the patterns established by waves K0–K12.
+no escape hatch. Every contribution must compile cleanly (IVE Pass, no
+`flatten_expr` warnings) and exit 0 on its self-test. IVE state
+verification is unconditional in VUMA 2.0 — the `--verify` flag is
+retained for the runner, but the IVE state verifiers + Z3 contract
+discharge always run; there is no opt-out. The do/don't examples below
+illustrate the patterns established by milestones K0–K12.
 
 ---
 
@@ -691,8 +694,12 @@ reports IVE: Fail), the failure mode is usually one of:
 
 ### 6.1 Interpreting IVE failures
 
-The `--verify` flag runs three IVE verifiers (`StateRead`, `StateWrite`,
-`StateTransform`) plus the arena-bounds check. Output format:
+The IVE state verifiers (`StateRead`, `StateWrite`,
+`StateTransform`) plus the arena-bounds check run on every compile
+(verification is unconditional; the `--verify` flag is retained for
+the runner but is a no-op in production). The verifiers emit
+`contract_assert(…)` obligations that **Z3 discharges** at compile
+time. Output format:
 
 ```
     IVE: Pass passed=1 failed=0 total=1       ← green
