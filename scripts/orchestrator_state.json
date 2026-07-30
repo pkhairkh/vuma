@@ -1,60 +1,27 @@
 {
-  "current_wave": 4,
-  "wave_status": {
-    "F0": "pass",
-    "F1": "pass",
-    "F2": "pass",
-    "F3": "pass",
-    "F4": "in_progress"
-  },
-  "task_index": [
-    "F0-orchestrator",
-    "F0-a-install",
-    "F0-b-install",
-    "F0-c-install",
-    "F0-d-install",
-    "F0-e-install",
-    "F0-f-verify",
-    "F1-a-audit",
-    "F1-b-fix",
-    "F1-b2-fix",
-    "F1-b3-fix",
-    "F1-e-verify",
-    "F2-a-audit",
-    "F2-b-impl",
-    "F2-c-test",
-    "F2-g-doc",
-    "F2-h-verify",
-    "F3-a-investigate",
-    "F3-b-fix",
-    "F3-d-run",
-    "F3-e-verify",
-    "F4-a-doc",
-    "F4-b-tag",
-    "F4-d-verify"
-  ],
+  "current_wave": 0,
+  "wave_status": {},
+  "task_index": [],
   "aborted": false,
   "abort_reason": null,
   "pushed_to_origin": true,
   "pushed_at": "2026-07-30T13:25:00Z",
   "origin_main_sha": "5513a107",
   "pushed_tag": "v0.2.0-alpha.1-caveats-remediation",
-  "run": "followup-remediation",
+  "run": "regalloc-endianness-remediation",
   "prior_run": {
-    "tag": "v0.2.0-alpha.1-caveats-remediation",
-    "final_sha": "7f67fcfd",
+    "tag": "v0.2.0-alpha.2-followup-remediation",
+    "final_sha": "4398dfcc",
     "waves_passed": [
       0,
       1,
       2,
       3,
-      4,
-      5,
-      6,
-      7,
-      8
+      4
     ]
   },
   "final_tag": "v0.2.0-alpha.2-followup-remediation",
-  "final_matrix_pass_rate": "570/570 tolerant (100%); Pi5 cluster full 29963/29963 pending next run"
+  "final_matrix_pass_rate": "570/570 tolerant (100%); Pi5 cluster full 29963/29963 pending next run",
+  "backends_with_regalloc_default_on": [],
+  "endianness_bugs_fixed": 0
 }
