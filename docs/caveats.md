@@ -41,22 +41,68 @@ nightly; building on stable is unsupported.
 
 ## 2. Code generation
 
-### 2.1 Stack-slot ISel on 15 of 19 backends
+### 2.1 Stack-slot ISel is the only production code-emission path
 
-| Backend | Allocator |
-|---------|-----------|
-| `aarch64` | Real linear-scan (`LinearScanAllocator` in `src/codegen/src/regalloc.rs`) |
-| `x86_64` | Real target-agnostic linear-scan (`TargetAgnosticRegAlloc`) |
-| `riscv64` | Real target-agnostic linear-scan |
-| `ppc64` | Real target-agnostic linear-scan |
-| `arm32`, `armeb`, `aarch64_be`, `mips64`, `mips64be`, `ppc64le`, `riscv32`, `x86_32`, `sparc64`, `s390x`, `m68k`, `alpha`, `hppa`, `loongarch64`, `wasm32` | Stack-slot ISel: every vreg is assigned a stack slot and operands are loaded/stored through memory for each instruction. |
+Per the allocator classification audit
+([`scripts/audit/allocator_classification.md`](../scripts/audit/allocator_classification.md),
+commit `83846368`), the 19 backends split 6 / 12 / 1 by what
+`allocate_registers` actually invokes:
 
-**Implication.** On the 15 stack-slot backends, every arithmetic /
-load / store operation performs two extra memory accesses (load
-operands → operate → store result). Performance is therefore bounded
-by the spill path even when physical registers are free. Generated
-code is correct, but ~2–5× slower than the linear-scan backends on
-register-pressure-heavy workloads.
+| Backend(s) | Allocator wired in `allocate_registers` | Encoded bytes come from |
+|------------|------------------------------------------|-------------------------|
+| `aarch64` (direct), `aarch64_be` (inherits via wrapper delegation) | Real — `TargetAgnosticRegAlloc` via `try_real_regalloc` (`backend.rs:3099`, `TargetAgnosticRegAlloc::new` at `:3114`) | Stack-slot ISel baseline (`emitter.emit_function(func, None)`, `backend.rs:3180`) |
+| `x86_64` (direct) | Real — `TargetAgnosticRegAlloc` via `try_real_regalloc` (`x86_64/mod.rs:4081`) | Stack-slot ISel baseline (`stack_slot_isel::allocate_registers`, `x86_64/mod.rs:4143`) |
+| `riscv64` (direct) | Real — `TargetAgnosticRegAlloc` via `try_real_regalloc` (`riscv64.rs:6542`) | Stack-slot ISel baseline |
+| `ppc64` (direct), `ppc64le` (inherits via wrapper delegation) | Real — `TargetAgnosticRegAlloc` via `try_real_regalloc` (`ppc64/mod.rs:3011`) | Stack-slot ISel baseline |
+| `arm32`, `armeb`, `mips64`, `mips64be`, `riscv32`, `x86_32`, `loongarch64`, `sparc64`, `s390x`, `m68k`, `alpha`, `hppa` | Stack-slot ISel (pure; or `use_real_regalloc=false` default whose `_real` greedy-stub branch is taken only inside `#[cfg(test)]` modules) | Stack-slot ISel |
+| `wasm32` | Wasm-structured — no registers; vregs → Wasm locals; IR lowered directly to Wasm bytecode via `lower_function` (`wasm32/mod.rs:4631`) | Wasm bytecode |
+
+**Counts.** 6 backends wire a real `TargetAgnosticRegAlloc` (4 direct —
+`aarch64`, `x86_64`, `riscv64`, `ppc64` — plus 2 inherited via wrapper
+delegation — `aarch64_be` → aarch64, `ppc64le` → ppc64). 12 backends are
+pure stack-slot ISel (`arm32`, `armeb`, `mips64`, `mips64be`, `riscv32`,
+`x86_32`, `loongarch64`, `sparc64`, `s390x`, `m68k`, `alpha`, `hppa`).
+1 backend (`wasm32`) is Wasm-structured and has no registers to allocate.
+Total: 19. (The pre-audit caveat text counted "15 of 19" by mis-bucketing
+`aarch64_be`, `ppc64le`, and `wasm32` into the stack-slot column.)
+
+**Metadata-only caveat (critical).** Even on the 6 backends with a real
+allocator wired, the real allocator runs **only as an annotation pass**:
+it computes a `RegAllocResult` which
+`regalloc_emit::annotate_with_regalloc` (`regalloc_emit.rs:82-92`) uses
+to overwrite each `AllocatedInstruction`'s `reads` / `writes`
+physical-register metadata. **The `encoded` byte stream is NOT modified**
+— it always comes from the stack-slot ISel baseline invoked *before*
+`try_real_regalloc`. The `reads` / `writes` metadata is consumed by
+disassemblers, debuggers, and downstream tooling; it does not affect
+emitted code. As a result **no VUMA backend emits register-based code in
+production today**: all 18 native backends emit stack-slot-spill bytes
+and `wasm32` emits Wasm bytecode. The `emit_function_regalloc` plumbing
+that would re-emit bytes from a `RegAllocResult` exists at `emit.rs:1056`
+but is unused in production — it is reachable only via
+`emitter.emit_function(func, Some(alloc))`, which no production
+`allocate_registers` calls. `LinearScanAllocator` (`regalloc.rs:1208`,
+the older AArch64-specific linear-scan allocator with hardcoded
+caller/callee-saved GPR+SIMD lists) is **test-only**:
+`LinearScanAllocator::new` is invoked only inside `#[cfg(test)]` modules
+(`regalloc.rs:4738+`, `emit.rs:9188+`).
+
+**Implication.** On the 12 pure stack-slot backends every arithmetic /
+load / store operation performs two extra memory accesses (load operands
+→ operate → store result), so runtime performance is bounded by the
+spill path even when physical registers are free. Generated code is
+correct (verified by the 12-backend stack-slot correctness sweep,
+468/468 PASS — see
+[`scripts/audit/wave2_stackslot_results.md`](../scripts/audit/wave2_stackslot_results.md))
+but is not benchmark-grade. **There is currently no performance gap
+between the 6 "real" and 12 stack-slot backends**, because the "real"
+path is metadata-only: every backend emits stack-slot-spill code at
+runtime. A `~2–5×` speedup relative to today remains *theoretical* and
+would require a future wave to make `emit_function_regalloc` consume
+the `RegAllocResult` and re-emit register-based bytes (the plumbing
+exists; the call site does not). The previous caveat wording ("~2–5×
+slower than the linear-scan backends") was misleading and has been
+removed.
 
 **Why it's still in place.** The `TargetAgnosticRegAlloc` is
 `TargetDesc`-driven, and wiring each remaining backend up requires
@@ -64,7 +110,12 @@ populating a complete, validated `TargetDesc` (register classes,
 caller/callee-saved sets, ABI register roles, frame layout). Until
 that work is finished for a given backend, the stack-slot path is the
 safe fallback. See `src/codegen/src/target_desc.rs` and
-`src/codegen/src/regalloc.rs` (`TargetAgnosticRegAlloc`).
+`src/codegen/src/regalloc.rs` (`TargetAgnosticRegAlloc`). The full
+per-backend classification with file:line citations for all 19 backends
+lives in
+[`scripts/audit/allocator_classification.md`](../scripts/audit/allocator_classification.md);
+[`docs/backends.md`](backends.md) §1 carries the matching `Regalloc`
+column.
 
 ### 2.2 wasm32 fork emulation is non-isolating
 
