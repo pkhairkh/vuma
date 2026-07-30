@@ -1,0 +1,60 @@
+=== elan install start 2026-07-30T13:45:49Z ===
+=== fetched 377 lines ===
+info: downloading installer
+info: default toolchain set to 'leanprover/lean4:v4.21.0'
+=== elan install exit=0 end 2026-07-30T13:45:51Z ===
+warning: could not canonicalize path: '/home/z/.elan/toolchains'
+warning: could not canonicalize path: '/home/z/.elan/toolchains'
+warning: could not canonicalize path: '/home/z/.elan/toolchains'
+warning: could not canonicalize path: '/home/z/.elan/toolchains'
+info: downloading https://releases.lean-lang.org/lean4/v4.21.0/lean-4.21.0-linux.tar.zst
+info: installing /home/z/.elan/toolchains/leanprover--lean4---v4.21.0
+Lean (version 4.21.0, x86_64-unknown-linux-gnu, commit 6741444a63ee, Release)
+Lake version 5.0.0-6741444 (Lean version 4.21.0)
+leanprover/lean4:v4.21.0 (default)
+Lean (version 4.21.0, x86_64-unknown-linux-gnu, commit 6741444a63ee, Release)
+elan 4.2.3 (b6cec7e10 2026-06-08)
+=== lake build smoke test start 2026-07-30T13:47:24Z ===
+=== lake build exit=0 end 2026-07-30T13:47:45Z ===
+
+=== Wave 0 / Task 0-e-install — verification block ===
+DoD-1: lean --version
+  -> Lean (version 4.21.0, x86_64-unknown-linux-gnu, commit 6741444a63ee, Release)  [exit 0]
+
+DoD-2: lake --version
+  -> Lake version 5.0.0-6741444 (Lean version 4.21.0)  [exit 0]
+
+DoD-3: elan show
+  -> leanprover/lean4:v4.21.0 (default)
+     Lean (version 4.21.0, x86_64-unknown-linux-gnu, commit 6741444a63ee, Release)  [exit 0]
+
+elan --version
+  -> elan 4.2.3 (b6cec7e10 2026-06-08)
+
+ELAN_HOME layout:
+  /home/z/.elan/bin/  — elan, lean, lake, leanc, leanchecker, leanmake, leanpkg shims
+  /home/z/.elan/settings.toml  — default_toolchain = "leanprover/lean4:v4.21.0"
+  /home/z/.elan/env            — `export PATH="$HOME/.elan/bin:$PATH"`
+  /home/z/.elan/toolchains/leanprover--lean4---v4.21.0/  — actual toolchain (fetched on first lean invocation)
+
+proof/lean-toolchain pin (read-only, NOT edited):
+  -> leanprover/lean4:v4.21.0
+
+rc-file updates:
+  ~/.profile  — elan installer added `export PATH="$HOME/.elan/bin:$PATH"` (line 19)
+  ~/.bashrc   — [0-e-install] appended idempotent `case…esac` PATH-prepend block (mirrors 0-c/0-d convention)
+
+Smoke test: lake build in /home/z/my-project/vuma/proof/
+  -> BUILD_STATUS=PASS (exit 0)
+  -> 112/112 targets built (PMT lib, check-pmt exe, Pmt lib, test modules)
+  -> "Build completed successfully." in ~21 seconds (13:47:24Z → 13:47:45Z)
+  -> no sorry warnings surfaced; no timeouts
+
+lean-env.sh wrapper smoke test (fresh non-login shell, PATH=/usr/bin:/bin only):
+  -> source scripts/env/lean-env.sh
+  -> which lean lake elan  ->  all under /home/z/.elan/bin
+  -> lean --version        ->  Lean (version 4.21.0, ...)
+  -> lake --version        ->  Lake version 5.0.0-6741444 (Lean version 4.21.0)
+  -> elan show             ->  leanprover/lean4:v4.21.0 (default)
+
+All three DoD criteria PASS. lake build of proof/ PASSED (Wave 1's DoD, not Wave 0's, but reported for completeness).
