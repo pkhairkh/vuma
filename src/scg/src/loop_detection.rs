@@ -113,10 +113,12 @@
 //!    it (plus the algorithm) into a future shared `vuma-core` crate
 //!    is now a mechanical move-and-rename once the codegen side is
 //!    ready to adopt it. That move is intentionally **not** done in
+//!
 //! to avoid changing `vuma-codegen`'s public surface.
 //!
 //! 3. **IR-side adoption.** `vuma-codegen::regalloc::LoopDetector`
 //!    still has its own copy of the algorithm. Migrating it to the
+//!
 //! shared trait is left to a future effort.
 
 use std::collections::{HashMap, HashSet};
