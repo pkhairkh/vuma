@@ -21,7 +21,7 @@
 //! | `verified_linearity_check` | `lean_linearity_check` (pub) | `verified_linearity_check` (pub) |
 //! | `verified_pmt_check` (composed) | manual `&&` composition | `verified_pmt_check` (pub) |
 //!
-//! ## Linkage strategy
+//! ## Import strategy
 //!
 //! Copy A lives in `tests/pmt_parity_test.rs` and its functions are
 //! **private** (not `pub`). To enable the diff test, we added `pub` to
@@ -29,25 +29,18 @@
 //! they're in a test crate, not a library). Copy A is included via
 //! `#[path]` so its public functions are reachable as `parity_test::*`.
 //!
-//! Copy B lives in `proof/extracted/pmt_check.rs` which is **not compiled
-//! into any crate** (see Wave 4-B NEEDS_FOLLOWUP #3, documented in
-//! `tests/pmt_runtime_ffi_smoke.rs`). We include it via `#[path]` so its
-//! public `verified_*` functions are reachable as `pmt_check::*`.
+//! Copy B is the canonical in-tree `vuma_codegen::runtime::pmt_check`
+//! module (follow-up Wave 1 / F1-b-fix: switched from the standalone
+//! `proof/extracted/pmt_check.rs` to drop the `lean_ffi` extern block
+//! and the `#[link]` anchor dependency). Its public `verified_*`
+//! functions are reachable as `pmt_check::*`.
 //!
 //! ## Feature gate
 //!
 //! The test is gated behind `#[cfg(feature = "pmt-runtime-check")]` per the
-//! task spec. Copy B's file also contains a `lean_ffi` module (extern "C"
-//! declarations for the 7 Lean `@[export]` symbols) that is compiled when
-//! this feature is on. The stub archive `liblean_extraction.a` (compiled
-//! by `build.rs` from `proof/extracted/lean_stub.c`) provides those
-//! symbols. Because `cargo:rustc-link-lib` from `build.rs` does not
-//! propagate to integration-test crates (rlib limitation — see
-//! `pmt_runtime_ffi_smoke.rs` comment), we add an explicit
-//! `#[link(name = "lean_extraction", kind = "static")]` anchor below so the
-//! linker searches the stub archive and resolves `lean_ffi`'s extern
-//! symbols. The stub returns hardcoded values that are never read by this
-//! test — we only compare the two **pure-Rust** copies.
+//! task spec. Both copies are now pure Rust under every feature config
+//! (F1-b-fix: no `lean_ffi` extern surface, no `liblean_extraction.a`
+//! link dependency).
 //!
 //! ## State verifiers — NOT diffed here
 //!
@@ -63,11 +56,15 @@
 #![cfg(feature = "pmt-runtime-check")]
 
 // ===========================================================================
-// Copy B — proof/extracted/pmt_check.rs (public `verified_*` functions).
-// Included via #[path] because this file is not part of any crate.
+// Copy B — canonical `vuma_codegen::runtime::pmt_check` (public `verified_*`
+// functions). Follow-up Wave 1 (F1-b-fix): switched from the standalone
+// `proof/extracted/pmt_check.rs` (which carried its own `lean_ffi` extern
+// block + `#[link]` anchor dependency) to the canonical in-tree module
+// where `lean_ffi` was already removed (Wave 3 `3-b-audit`). The
+// `proof/extracted/pmt_check.rs` file remains on disk as documentation
+// (per `proof/extracted/README.md`); it is no longer compiled by any test.
 // ===========================================================================
-#[path = "../proof/extracted/pmt_check.rs"]
-mod pmt_check;
+use vuma_codegen::runtime::pmt_check;
 
 // ===========================================================================
 // Copy A — tests/pmt_parity_test.rs (public `lean_*` functions).
@@ -79,22 +76,6 @@ mod pmt_check;
 // ===========================================================================
 #[path = "pmt_parity_test.rs"]
 mod parity_test;
-
-// ===========================================================================
-// Link anchor — ensure `liblean_extraction.a` (the stub) is searched by
-// the linker so that `pmt_check::lean_ffi`'s `extern "C"` declarations
-// resolve. Without this, the build.rs `cargo:rustc-link-lib` directive
-// (which targets the library crate, not integration tests) does not
-// propagate, causing "undefined symbol" link errors for the 7 Lean export
-// symbols. The anchor function is never called; it exists solely to
-// attach the `#[link]` attribute. See `pmt_runtime_ffi_smoke.rs` for the
-// same pattern.
-// ===========================================================================
-#[link(name = "lean_extraction", kind = "static")]
-extern "C" {
-    #[link_name = "lean_verify_state_writes"]
-    fn _diff_link_anchor() -> u8;
-}
 
 // ===========================================================================
 // Corpus — 30 inputs total (20 edge cases + 10 deterministic random-ish)
@@ -253,16 +234,4 @@ fn diff_pmt_check_composed() {
     }
 }
 
-/// Sanity check: verify the link anchor compiles and the stub archive is
-/// linked (i.e. the `lean_ffi` extern symbols resolve). If this test
-/// compiles, the linkage strategy works.
-#[test]
-fn link_anchor_compiles() {
-    // If this function compiles and the binary links, the #[link] anchor
-    // successfully pulled in liblean_extraction.a and resolved lean_ffi's
-    // extern declarations. We do NOT call _diff_link_anchor (it maps to
-    // the stub's lean_verify_state_writes which ignores its args and
-    // returns 1 — calling it would be safe but pointless). The mere fact
-    // that the binary linked is the assertion.
-    let _ = std::mem::size_of::<fn() -> u8>();
-}
+

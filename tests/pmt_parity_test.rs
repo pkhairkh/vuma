@@ -108,124 +108,15 @@ fn lean_wf_layout_bool(l: &Layout) -> bool {
     true
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Wave 6-A: cfg-polymorphic Lean FFI binding for the IVE state verifiers.
-// ─────────────────────────────────────────────────────────────────────
-//
-// Three of the verifiers below — `verify_transform`, `verify_state_reads`,
-// `verify_state_writes` — are `@[export]`-ed from
-// `proof/PMT/Extraction.lean` §8 as the C symbols `lean_verify_transform`,
-// `lean_verify_state_reads`, `lean_verify_state_writes`. The hand-translated
-// Rust duplicates of those three previously SHADOWED the extern names (Wave
-// 0-B finding), so the parity test could never tell whether it was
-// exercising the hand translation or the real Lean extraction.
-//
-// Wave 6-A resolves the shadowing with a cfg-polymorphic binding:
-//
-//   * `pmt-runtime-check` ON  → `lean_verify_*` is a thin typed wrapper
-//     that calls the real Lean export via the `lean_ffi` extern block
-//     below (mirroring `src/ive/src/verification.rs::lean_ffi`). The
-//     hand-translated bodies are renamed to `hand_*` and retained under
-//     `cfg(not(feature = "pmt-runtime-check"))` only (FFI_BRIDGE_PLAN §4).
-//   * `pmt-runtime-check` OFF → `lean_verify_*` delegates to `hand_*`,
-//     so the parity tests still run without Lean installed (the
-//     pre-Wave-6 safety net, unchanged).
-//
-// The `_v2` variants have NO Lean `@[export]` counterpart (only the
-// non-`_v2` names are exported from Extraction.lean §8); they therefore
-// stay hand-translated under BOTH cfgs and are excluded from the FFI
-// bridge — see NEEDS_FOLLOWUP in the worklog.
-//
-// Marshalling Rust `Layout`/`Field`/`TransformKind` into boxed Lean
-// objects (`LayoutRegistry`, `StateTransform`, `List (String × LayoutInfo)`,
-// …) is Wave 5-C TODO (FFI_BRIDGE_PLAN §1, §3). Until then the FFI
-// wrappers pass null placeholders — identical to the REAL sub-path in
-// `src/ive/src/verification.rs`. With build.rs's STUB
-// (`proof/extracted/lean_stub.c`, used whenever `lake`/`LEAN_HOME` are
-// unavailable) the linked symbols return hardcoded `1` (true); parity
-// tests expecting `false` therefore FAIL on the stub. That is the
-// intended "clear failure" signal: the FFI call path reaches the linked
-// C symbol, but the artifact is the inert stub rather than real Lean
-// extraction. Real all-green parity requires `lean_ffi_linked` (real
-// `lake build` → `lean --emit-c`) plus the Wave 5-C marshaller.
-
-#[cfg(feature = "pmt-runtime-check")]
-#[allow(dead_code)] // externs/LeanObject unused on the STUB sub-path
-mod lean_ffi {
-    use std::ffi::c_void;
-
-    pub type LeanObject = c_void;
-
-    #[link(name = "lean_extraction", kind = "static")]
-    extern "C" {
-        pub fn lean_verify_transform(layouts: *mut LeanObject, t: *mut LeanObject) -> u8;
-        pub fn lean_verify_state_reads(env_list: *mut LeanObject, reads: *mut LeanObject) -> u8;
-        pub fn lean_verify_state_writes(env_list: *mut LeanObject, consumed: *mut LeanObject, writes: *mut LeanObject) -> u8;
-
-        // _prim wrappers (String-based, C-marshallable) — parse §9 format internally
-        pub fn lean_verify_transform_prim(
-            registry: *mut LeanObject,
-            input_layout: *mut LeanObject,
-            output_layout: *mut LeanObject,
-            kind: *mut LeanObject,  // NEW: "identity" | "reinterpret" | "copy"
-        ) -> u8;
-        pub fn lean_verify_state_reads_prim(registry: *mut LeanObject, reads: *mut LeanObject) -> u8;
-        pub fn lean_verify_state_writes_prim(registry: *mut LeanObject, consumed: *mut LeanObject, writes: *mut LeanObject) -> u8;
-
-        #[cfg(lean_ffi_linked)]
-        pub fn lean_mk_string(s: *const std::ffi::c_char) -> *mut LeanObject;
-    }
-
-    #[cfg(lean_ffi_linked)]
-    pub fn str_to_lean(s: &str) -> *mut LeanObject {
-        use std::ffi::CString;
-        let sanitized: String = s.chars().map(|c| if c == '\0' { '?' } else { c }).collect();
-        let c_str = CString::new(sanitized).unwrap_or_else(|_| CString::new("").unwrap());
-        unsafe { lean_mk_string(c_str.as_ptr()) }
-    }
-
-    #[cfg(not(lean_ffi_linked))]
-    pub fn str_to_lean(_s: &str) -> *mut LeanObject { std::ptr::null_mut() }
-}
-
-// Serializers: Rust test data -> Lean section-9 string format
-fn field_name(f: &Field) -> String { format!("f_{}_{}", f.offset, f.size) }
-
-fn serialize_registry(env: &[(&str, Layout)]) -> String {
-    let mut s = String::new();
-    for (name, layout) in env {
-        s.push_str(&format!("{}\t{}\t{}\n", name, layout.total_size, layout.fields.len()));
-        for f in &layout.fields {
-            s.push_str(&format!("{}\t{}\t{}\tu64\n", field_name(f), f.offset, f.size));
-        }
-    }
-    s
-}
-
-fn serialize_reads(reads: &[(&str, Field)]) -> String {
-    let mut s = String::new();
-    for (var, f) in reads {
-        // expected_type "u64" matches the registry's field type_name (see
-        // serialize_registry); an empty value caused verify_state_reads to
-        // fail on a type mismatch, breaking the reads-pass parity tests.
-        s.push_str(&format!("{}\t{}\tu64\n", var, field_name(f)));
-    }
-    s
-}
-
-fn serialize_writes(writes: &[(&str, Field)]) -> String {
-    let mut s = String::new();
-    for (var, f) in writes {
-        s.push_str(&format!("{}\t{}\tu64\t0\n", var, field_name(f)));
-    }
-    s
-}
-
-fn serialize_consumed(consumed: &[&str]) -> String {
-    consumed.join("\n")
-}
-
 // ─── verify_transform ───────────────────────────────────────────────
+// Follow-up Wave 1 (F1-b-fix): the `mod lean_ffi` extern block, the
+// cfg-polymorphic FFI routing wrappers, the `mod lean_init` module
+// initialiser, and the `lean_ffi_linked`-gated `#[cfg_attr(ignore)]`
+// annotations were removed — `pmt-runtime-check` is now a true no-op for
+// this test file too (matching the canonical `vuma_codegen::runtime::
+// pmt_check` end-state). The three `lean_verify_*` names below are the
+// sole definitions: pure-Rust hand-translations of the Lean semantics.
+// See `scripts/audit/followup_wave1_ffi_audit.md` for the per-file plan.
 /// Hand-translated from Lean: `PMT.IVE.Soundness.verify_transform`
 /// (Transform.lean). Returns true iff:
 /// (1) in_layout is well-formed,
@@ -234,13 +125,7 @@ fn serialize_consumed(consumed: &[&str]) -> String {
 ///     - Identity: in_layout = out_layout (same total_size AND same fields),
 ///     - Reinterpret: in_layout.total_size = out_layout.total_size,
 ///     - Copy: no constraint (any pair accepted).
-///
-/// Retained under `cfg(not(feature = "pmt-runtime-check"))` so the parity
-/// tests run without Lean installed; renamed from `lean_verify_transform`
-/// to `hand_verify_transform` so it no longer shadows the extern name
-/// (Wave 6-A).
-#[cfg(not(feature = "pmt-runtime-check"))]
-fn hand_verify_transform(
+fn lean_verify_transform(
     in_layout: &Layout,
     out_layout: &Layout,
     kind: TransformKind,
@@ -256,49 +141,12 @@ fn hand_verify_transform(
     }
 }
 
-/// Polymorphic `lean_verify_transform` binding. With `pmt-runtime-check`
-/// ON, route through the extracted Lean export via FFI; otherwise delegate
-/// to the hand-translated `hand_verify_transform`.
-#[cfg(feature = "pmt-runtime-check")]
-fn lean_verify_transform(
-    in_layout: &Layout,
-    out_layout: &Layout,
-    kind: TransformKind,
-) -> bool {
-    // Serialize BOTH layouts under DIFFERENT names ("in" and "out"), then call
-    // lean_verify_transform_prim with the registry + layout names + the explicit
-    // kind string. The Lean _prim wrapper now takes an explicit kind and performs
-    // wf_layout + kind-specific checks (mirroring hand_verify_transform), rather
-    // than inferring the kind from layout-name/size comparison.
-    let registry = serialize_registry(&[("in", in_layout.clone()), ("out", out_layout.clone())]);
-    let kind_str = match kind {
-        TransformKind::Identity => "identity",
-        TransformKind::Reinterpret => "reinterpret",
-        TransformKind::Copy => "copy",
-    };
-    let reg_lean = lean_ffi::str_to_lean(&registry);
-    let in_lean = lean_ffi::str_to_lean("in");
-    let out_lean = lean_ffi::str_to_lean("out");
-    let kind_lean = lean_ffi::str_to_lean(kind_str);
-    unsafe { lean_ffi::lean_verify_transform_prim(reg_lean, in_lean, out_lean, kind_lean) != 0 }
-}
-
-#[cfg(not(feature = "pmt-runtime-check"))]
-fn lean_verify_transform(
-    in_layout: &Layout,
-    out_layout: &Layout,
-    kind: TransformKind,
-) -> bool {
-    hand_verify_transform(in_layout, out_layout, kind)
-}
-
 // ─── verify_state_reads ─────────────────────────────────────────────
 /// Hand-translated from Lean: `PMT.IVE.Soundness.verify_state_reads`
 /// (StateReads.lean). Returns true iff every read accesses a registered,
 /// in-bounds field. `env` maps var name → layout (None for unknown vars
 /// maps to emptyLayout, matching Lean's `layout_env_from_list`).
-#[cfg(not(feature = "pmt-runtime-check"))]
-fn hand_verify_state_reads(
+fn lean_verify_state_reads(
     env: &[(&str, Layout)],
     reads: &[(&str, Field)],
 ) -> bool {
@@ -317,31 +165,11 @@ fn hand_verify_state_reads(
     })
 }
 
-/// Polymorphic `lean_verify_state_reads` binding (FFI when feature ON).
-#[cfg(feature = "pmt-runtime-check")]
-fn lean_verify_state_reads(
-    env: &[(&str, Layout)],
-    reads: &[(&str, Field)],
-) -> bool {
-    let reg = lean_ffi::str_to_lean(&serialize_registry(env));
-    let rds = lean_ffi::str_to_lean(&serialize_reads(reads));
-    unsafe { lean_ffi::lean_verify_state_reads_prim(reg, rds) != 0 }
-}
-
-#[cfg(not(feature = "pmt-runtime-check"))]
-fn lean_verify_state_reads(
-    env: &[(&str, Layout)],
-    reads: &[(&str, Field)],
-) -> bool {
-    hand_verify_state_reads(env, reads)
-}
-
 // ─── verify_state_writes ────────────────────────────────────────────
 /// Hand-translated from Lean: `PMT.IVE.Soundness.verify_state_writes`
 /// (StateWrites.lean). Returns true iff every write is to a live
 /// (non-consumed) variable with a registered, in-bounds field.
-#[cfg(not(feature = "pmt-runtime-check"))]
-fn hand_verify_state_writes(
+fn lean_verify_state_writes(
     env: &[(&str, Layout)],
     consumed: &[&str],
     writes: &[(&str, Field)],
@@ -361,28 +189,6 @@ fn hand_verify_state_writes(
         let in_bounds = lean_field_bounds_check(f.offset, f.size, layout.total_size);
         registered && in_bounds
     })
-}
-
-/// Polymorphic `lean_verify_state_writes` binding (FFI when feature ON).
-#[cfg(feature = "pmt-runtime-check")]
-fn lean_verify_state_writes(
-    env: &[(&str, Layout)],
-    consumed: &[&str],
-    writes: &[(&str, Field)],
-) -> bool {
-    let reg = lean_ffi::str_to_lean(&serialize_registry(env));
-    let con = lean_ffi::str_to_lean(&serialize_consumed(consumed));
-    let wrt = lean_ffi::str_to_lean(&serialize_writes(writes));
-    unsafe { lean_ffi::lean_verify_state_writes_prim(reg, con, wrt) != 0 }
-}
-
-#[cfg(not(feature = "pmt-runtime-check"))]
-fn lean_verify_state_writes(
-    env: &[(&str, Layout)],
-    consumed: &[&str],
-    writes: &[(&str, Field)],
-) -> bool {
-    hand_verify_state_writes(env, consumed, writes)
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -500,79 +306,6 @@ fn lean_verify_state_writes_v2(
     hand_verify_state_writes_v2(env, ft_env, consumed, writes)
 }
 
-// ===========================================================================
-// Lean module initialiser (Wave C-2).
-//
-// Mirrors `tests/pmt_runtime_ffi_smoke.rs::lean_init` (Wave C-1) so the 8
-// state-verifier parity tests below can run `initialize_PMT` before their
-// boxed-`lean_object*` FFI calls (`lean_verify_transform` /
-// `lean_verify_state_reads` / `lean_verify_state_writes`).
-//
-// Unlike Wave C-1's smoke test — whose whole `mod smoke` is `#[cfg(feature =
-// "pmt-runtime-check")]` — this file's `mod tests` is compiled under EVERY
-// feature config (the no-feature path runs the hand-translated checkers, the
-// feature+stub path runs the stub-backed FFI, the feature+real-Lean path runs
-// the real extracted FFI). The `lean_init` module therefore has NO outer
-// feature gate; instead the two `ensure_init` variants are selected by
-// `lean_ffi_linked` alone:
-//   * `lean_ffi_linked` (real Lean only) -> invokes `initialize_PMT(1, null)`
-//     exactly once via a `Once` guard. Required so the Lean runtime tables are
-//     registered before any boxed-`lean_object*` extern call.
-//   * `not(lean_ffi_linked)` (stub-with-feature AND no-feature hand path) ->
-//     no-op: the stub needs no Lean runtime init, and the hand-translation
-//     path makes no FFI calls at all.
-//
-// The 8 tests are currently `#[ignore]`-d on BOTH paths (see the `cfg_attr`
-// pairs below): under the stub the FFI returns a hardcoded `true` so the
-// `_fail_*` assertions would spuriously fail; under real Lean the boxed-String
-// args are passed as NULL, which SIGSEGVs once `initialize_PMT` has run. The
-// `lean_init::ensure_init();` calls are nonetheless in place at the head of
-// each of the 8 tests so they are ready to enable the moment Rust->Lean
-// `String` marshalling (`lean_mk_string`) is wired into this test harness
-// (Wave C-1 NEEDS_FOLLOWUP). `initialize_PMT` is defined in
-// `proof/.lake/build/ir/PMT.c` and pulled in by the `#[link]` on the `lean_ffi`
-// extern block above, so no separate `#[link]` is needed here (mirrors C-1).
-// ===========================================================================
-mod lean_init {
-    #[cfg(lean_ffi_linked)]
-    use std::ffi::c_void;
-
-    /// Guards exactly-once execution of `initialize_PMT` across threads.
-    #[cfg(lean_ffi_linked)]
-    static INIT: std::sync::Once = std::sync::Once::new();
-
-    // `initialize_PMT` is exported by `proof/.lake/build/ir/PMT.c` (Lean's C
-    // backend) and is present in `liblean_extraction.a` ONLY on the real-Lean
-    // path (when `lean_ffi_linked` is set by build.rs). The linkage stub does
-    // NOT define this symbol, so the extern must be gated to avoid an
-    // undefined-symbol link error on the stub path.
-    #[cfg(lean_ffi_linked)]
-    extern "C" {
-        fn initialize_PMT(builtin: u8, w: *mut c_void) -> *mut c_void;
-    }
-
-    /// Invoke `initialize_PMT` exactly once (thread-safe via `Once`) before
-    /// any boxed-`lean_object*` FFI call. Required on the real-Lean path so
-    /// the Lean runtime is initialised; a no-op under the stub / hand path.
-    #[cfg(lean_ffi_linked)]
-    pub fn ensure_init() {
-        INIT.call_once(|| {
-            // `builtin = 1` => run Lean's standard builtin initialisers.
-            // A null return indicates init failure (Lean convention); we
-            // proceed regardless -- the subsequent extern call will then
-            // surface the failure as a test abort rather than a silent skip.
-            let _res = unsafe { initialize_PMT(1, std::ptr::null_mut()) };
-        });
-    }
-
-    /// No-op stub/hand-path variant: used when `lean_ffi_linked` is NOT set
-    /// (linkage stub with `pmt-runtime-check`, OR the no-feature hand-
-    /// translation path). Neither exports `initialize_PMT` nor needs Lean
-    /// runtime initialisation.
-    #[cfg(not(lean_ffi_linked))]
-    pub fn ensure_init() {}
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -668,17 +401,14 @@ mod tests {
     }
     #[test]
     fn parity_verify_transform_identity_pass() {
-        lean_init::ensure_init();
         // Lean: verify_transform ⟨_, _, in, in, identity⟩ where in = ⟨16, [⟨0,4⟩]⟩
         let f = Field { offset: 0, size: 4 };
         let l = Layout { total_size: 16, fields: vec![f] };
         assert_eq!(lean_verify_transform(&l, &l, TransformKind::Identity), true);
     }
 
-    #[cfg_attr(all(feature = "pmt-runtime-check", not(lean_ffi_linked)), ignore = "FFI stub returns hardcoded true; needs real Lean linkage (lean_ffi_linked)")]
     #[test]
     fn parity_verify_transform_identity_fail_different_fields() {
-        lean_init::ensure_init();
         // Lean: verify_transform ⟨_, _, in, out, identity⟩ where in ≠ out
         let f1 = Field { offset: 0, size: 4 };
         let f2 = Field { offset: 0, size: 8 };
@@ -688,7 +418,6 @@ mod tests {
     }
     #[test]
     fn parity_verify_transform_reinterpret_pass() {
-        lean_init::ensure_init();
         // Lean: verify_transform ⟨_, _, in, out, reinterpret⟩ where in.total_size = out.total_size
         let f1 = Field { offset: 0, size: 4 };
         let f2 = Field { offset: 4, size: 4 };
@@ -697,10 +426,8 @@ mod tests {
         assert_eq!(lean_verify_transform(&in_l, &out_l, TransformKind::Reinterpret), true);
     }
 
-    #[cfg_attr(all(feature = "pmt-runtime-check", not(lean_ffi_linked)), ignore = "FFI stub returns hardcoded true; needs real Lean linkage (lean_ffi_linked)")]
     #[test]
     fn parity_verify_transform_reinterpret_fail_size_mismatch() {
-        lean_init::ensure_init();
         // Lean: verify_transform ⟨_, _, in, out, reinterpret⟩ where in.total_size ≠ out.total_size
         let f1 = Field { offset: 0, size: 4 };
         let f2 = Field { offset: 0, size: 8 };
@@ -710,7 +437,6 @@ mod tests {
     }
     #[test]
     fn parity_verify_transform_copy_pass_any() {
-        lean_init::ensure_init();
         // Lean: verify_transform ⟨_, _, in, out, copy⟩ — any pair accepted (after WF check)
         let f1 = Field { offset: 0, size: 4 };
         let f2 = Field { offset: 0, size: 8 };
@@ -719,10 +445,8 @@ mod tests {
         assert_eq!(lean_verify_transform(&in_l, &out_l, TransformKind::Copy), true);
     }
 
-    #[cfg_attr(all(feature = "pmt-runtime-check", not(lean_ffi_linked)), ignore = "FFI stub returns hardcoded true; needs real Lean linkage (lean_ffi_linked)")]
     #[test]
     fn parity_verify_transform_rejects_ill_formed_in_layout() {
-        lean_init::ensure_init();
         // Lean: verify_transform ⟨_, _, in, out, copy⟩ where in is ill-formed → false
         let f_bad = Field { offset: 12, size: 8 };  // 12 + 8 = 20 > 16
         let in_l = Layout { total_size: 16, fields: vec![f_bad] };
@@ -731,7 +455,6 @@ mod tests {
     }
     #[test]
     fn parity_verify_state_reads_pass() {
-        lean_init::ensure_init();
         // Lean: verify_state_reads env [⟨"x", ⟨0,4⟩⟩] where env "x" = ⟨16, [⟨0,4⟩]⟩
         let f = Field { offset: 0, size: 4 };
         let l = Layout { total_size: 16, fields: vec![f] };
@@ -740,10 +463,8 @@ mod tests {
         assert_eq!(lean_verify_state_reads(&env, &reads), true);
     }
 
-    #[cfg_attr(all(feature = "pmt-runtime-check", not(lean_ffi_linked)), ignore = "FFI stub returns hardcoded true; needs real Lean linkage (lean_ffi_linked)")]
     #[test]
     fn parity_verify_state_reads_fail_unregistered_field() {
-        lean_init::ensure_init();
         // Lean: verify_state_reads env [⟨"x", ⟨8,4⟩⟩] where env "x" = ⟨16, [⟨0,4⟩]⟩
         // Field ⟨8,4⟩ is in bounds (8+4=12 ≤ 16) but NOT registered → fail.
         let f_registered = Field { offset: 0, size: 4 };
@@ -754,10 +475,8 @@ mod tests {
         assert_eq!(lean_verify_state_reads(&env, &reads), false);
     }
 
-    #[cfg_attr(all(feature = "pmt-runtime-check", not(lean_ffi_linked)), ignore = "FFI stub returns hardcoded true; needs real Lean linkage (lean_ffi_linked)")]
     #[test]
     fn parity_verify_state_reads_fail_out_of_bounds() {
-        lean_init::ensure_init();
         // Lean: verify_state_reads env [⟨"x", ⟨12,8⟩⟩] where env "x" = ⟨16, [⟨12,8⟩]⟩
         // Field ⟨12,8⟩ is registered but NOT in bounds (12+8=20 > 16) → fail.
         let f = Field { offset: 12, size: 8 };
@@ -768,7 +487,6 @@ mod tests {
     }
     #[test]
     fn parity_verify_state_writes_pass() {
-        lean_init::ensure_init();
         // Lean: verify_state_writes env [] [⟨"x", ⟨0,4⟩⟩] where env "x" = ⟨16, [⟨0,4⟩]⟩
         let f = Field { offset: 0, size: 4 };
         let l = Layout { total_size: 16, fields: vec![f] };
@@ -778,10 +496,8 @@ mod tests {
         assert_eq!(lean_verify_state_writes(&env, &consumed, &writes), true);
     }
 
-    #[cfg_attr(all(feature = "pmt-runtime-check", not(lean_ffi_linked)), ignore = "FFI stub returns hardcoded true; needs real Lean linkage (lean_ffi_linked)")]
     #[test]
     fn parity_verify_state_writes_fail_consumed_var() {
-        lean_init::ensure_init();
         // Lean: verify_state_writes env ["x"] [⟨"x", ⟨0,4⟩⟩] — "x" is consumed → fail
         let f = Field { offset: 0, size: 4 };
         let l = Layout { total_size: 16, fields: vec![f] };
@@ -791,10 +507,8 @@ mod tests {
         assert_eq!(lean_verify_state_writes(&env, &consumed, &writes), false);
     }
 
-    #[cfg_attr(all(feature = "pmt-runtime-check", not(lean_ffi_linked)), ignore = "FFI stub returns hardcoded true; needs real Lean linkage (lean_ffi_linked)")]
     #[test]
     fn parity_verify_state_writes_fail_unregistered_field() {
-        lean_init::ensure_init();
         // Lean: verify_state_writes env [] [⟨"x", ⟨8,4⟩⟩] where env "x" = ⟨16, [⟨0,4⟩]⟩
         let f_registered = Field { offset: 0, size: 4 };
         let f_unregistered = Field { offset: 8, size: 4 };
@@ -805,10 +519,8 @@ mod tests {
         assert_eq!(lean_verify_state_writes(&env, &consumed, &writes), false);
     }
 
-    #[cfg_attr(all(feature = "pmt-runtime-check", not(lean_ffi_linked)), ignore = "FFI stub returns hardcoded true; needs real Lean linkage (lean_ffi_linked)")]
     #[test]
     fn parity_verify_state_writes_mixed() {
-        lean_init::ensure_init();
         // Mixed: one write passes, one fails (consumed var) → overall fail.
         let f = Field { offset: 0, size: 4 };
         let l = Layout { total_size: 16, fields: vec![f] };
