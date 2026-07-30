@@ -138,10 +138,8 @@ impl QuerySystem {
             }
             visited.insert(node);
             deps.insert(node);
-            if let Some(payload) = scg.node_payload(node) {
-                if let NodePayload::Deallocation(_) = &payload {
-                    return true;
-                }
+            if let Some(NodePayload::Deallocation(_)) = scg.node_payload(node) {
+                return true;
             }
             // Follow ControlFlow edges
             for edge in scg.edges() {

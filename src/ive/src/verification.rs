@@ -2067,6 +2067,7 @@ enum Z3Result {
     /// Z3 returned unknown (e.g. timeout, quantifiers).
     Unknown(String),
     /// Z3 encountered an error (e.g. parse failure).
+    #[allow(dead_code)] // reserved for future error reporting
     Error(String),
 }
 
@@ -2127,10 +2128,10 @@ fn extract_smt_variables(smt: &str) -> Vec<String> {
         // Skip SMT keywords
         if keywords.contains(t) { continue; }
         // Must be a valid identifier (starts with letter or _, alphanumeric)
-        if t.chars().all(|c| c.is_alphanumeric() || c == '_') {
-            if t.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false) {
-                vars.insert(t.to_string());
-            }
+        if t.chars().all(|c| c.is_alphanumeric() || c == '_')
+            && t.chars().next().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
+        {
+            vars.insert(t.to_string());
         }
     }
     vars.into_iter().collect()
