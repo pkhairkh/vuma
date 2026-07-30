@@ -863,9 +863,11 @@ relies on the same Linux syscalls — but the syscall numbers differ per arch
 
 ### Debugging tips
 
-1. **`--verify` first, then run.** Always compile with `--verify` and
-   confirm `IVE: Pass` before trying to run. If IVE fails, the runtime
-   behavior is undefined.
+1. **Verify first, then run.** IVE state verification is unconditional
+   in VUMA 2.0 (the `--verify` flag is retained for the runner but is
+   a no-op in production — the IVE state verifiers + Z3 contract
+   discharge always run). Confirm `IVE: Pass` before trying to run. If
+   IVE fails, the runtime behavior is undefined.
 
 2. **Check for `flatten_expr` warnings.** Even if IVE passes, scan the
    compiler's stderr for `WARNING: unsupported FieldAccess (not

@@ -487,8 +487,15 @@ for `pte_read`/`pte_write` (called in a loop by `vmm_walk_idx`) and
 
 ## 7. IVE Guarantees for Kernel State
 
-The kernel relies on three compile-time IVE verifiers (`docs/architecture.md`
-§4). Every `.vuma` file in `womb/kernel/` is verified with `--verify` in CI:
+The kernel relies on three compile-time IVE state verifiers
+(`docs/architecture.md` §4). Every `.vuma` file in `womb/kernel/` is
+verified in CI (the `--verify` flag is retained for the runner, but
+IVE state verification is unconditional in VUMA 2.0 — there is no
+opt-out). The IVE state verifiers emit `contract_assert(…)` obligations
+that **Z3 discharges** at compile time; the current discharge rate is
+**100 % on the gold-standard suite (29 944 / 29 944 = 100.00 % across
+all 19 backends)**. When Z3 cannot discharge a contract, the pipeline
+hard-fails with `VumaError::Verification`.
 
 - **`StateReadVerifier`** — every `state.field` read is in-bounds against the
   registered layout. Catches: typos like `state.lennth` (no such field),
@@ -513,7 +520,7 @@ field value, wrong syscall return code, wrong scheduling decision) and
 resource exhaustion (arena overflow → trap, slot pool exhausted → return
 error).
 
-The K0–K12 wave history records the IVE pass count for every committed file:
+The K0–K12 milestone history records the IVE pass count for every committed file:
 `IVE: Pass passed=1 failed=0 total=1` is the canonical green signal. Any
 file that emits `WARNING: unsupported FieldAccess (not state-typed)` from
 `flatten_expr` is non-compliant and was fixed before commit (e.g. K3e's

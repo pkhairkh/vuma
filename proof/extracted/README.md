@@ -1,18 +1,20 @@
-# Extracted Verified Checkers
+# Extracted Verified Checkers (legacy FFI bridge — deleted)
 
-This directory holds the Rust side of the Lean<->Rust FFI bridge for the
-PMT bounds-checking logic proven in `proof/PMT/Extraction.lean`. It also
-documents the **current, honest status** of that bridge after Waves 4-A
-through 5-C (see `## Current Status` below).
+This directory previously held the Rust side of the Lean↔Rust FFI bridge
+for the PMT bounds-checking logic proven in `proof/PMT/Extraction.lean`.
+**The FFI bridge has been deleted.** This README documents the historical
+context and the current state.
 
 > The Lean definitions in `proof/PMT/Extraction.lean` remain the formal
 > source of truth. Each checker has a machine-checked soundness theorem.
-> The bridge's job is to let the Rust runtime call those *same* Lean
-> definitions (via C extraction) instead of a hand-translation. As of
-> Wave 5 the bridge is **wired end-to-end but running on a stub**: the
-> real Lean runtime is not yet linked, so every call resolves to a
-> fail-closed C stub. The hand-written Rust verifiers remain the
-> production path.
+> The bridge's job was to let the Rust runtime call those *same* Lean
+> definitions (via C extraction) instead of a hand-translation. That
+> bridge is gone; the hand-written Rust verifiers in `src/ive/` plus
+> **Z3** (the SMT solver, hard build-time dependency in
+> `src/ive/Cargo.toml`: `z3 = "0.20"`) now do the executable
+> verification. The hand-translated Rust checkers in `pmt_check.rs`
+> (below) remain as a parity-tested reference; they are not themselves
+> formally verified.
 
 ## Source of Truth
 
@@ -26,167 +28,185 @@ Each function has a machine-checked soundness theorem:
 | `verified_linearity_check` | `verified_linearity_check_correct` | If check returns true, then `var not in consumed` |
 | `verified_pmt_check` | `verified_pmt_check_correct` | If check returns true, all three sub-checks hold |
 
-## Current Status (post-Wave 5)
+These theorems remain machine-checked by `lake build`. They are the
+formal specification; they are **not linked into the compiler binary**.
 
-### DONE
+## Current Status (FFI bridge deleted)
 
-1. **7 `@[export]` symbols + 7 `_prim` wrappers in `Extraction.lean` (Wave 4-A).**
-   The 7 canonical exports (`lean_verified_{capacity,field_bounds,linearity,pmt}_check`,
-   `lean_verify_{transform,state_reads,state_writes}`) are present, plus 7 flattened
-   `_prim` primitive wrappers with C-marshallable signatures
-   (`Bool`/`UInt64`/`String` only - no boxed `lean_object*` needed for the `_prim`
-   path). `lake build PMT.Extraction` passes.
+### DONE — and now historical
 
-2. **7 matching `extern "C"` declarations in `proof/extracted/pmt_check.rs` (Wave 4-B).**
-   Each `extern "C"` block in the `lean_ffi` module is arity-aligned to the
-   corresponding `@[export]` (args boxed as `*mut LeanObject = *mut c_void`,
-   returns `u8` = Lean `Bool`'s `uint8_t`). Safe `call_lean_*` wrappers wrap the
-   unsafe externs.
+The FFI bridge was developed through several milestones, all of which
+have been **deleted** in the current codebase. The historical record
+below is retained for context.
 
-3. **`build.rs` linkage pipeline with stub fallback (Wave 4-D).**
-   `link_lean_ffi()` is gated entirely behind `#[cfg(feature = "pmt-runtime-check")]`.
-   When the feature is on it **attempts the real Lean C pipeline** - detects
-   `lake --version` on `PATH` and `LEAN_HOME`, runs `lake build`, looks for
-   `.lake/build/lib/PMT/Extraction.c` + `.lake/build/lib/lean_runtime`, and on
-   success compiles them via `cc::Build` and emits
-   `cargo:rustc-cfg=lean_ffi_linked` + `cargo:rustc-env=LEAN_FFI_LINKED=1`.
-   On **any** failure (or missing `lake`/`LEAN_HOME`) it prints a
-   `cargo:warning=... - using stub` and instead compiles
-   `proof/extracted/lean_stub.c` into `liblean_extraction.a`, emitting only
-   `cargo:rustc-link-lib=static=lean_extraction` (and **not** `lean_ffi_linked`).
-   Feature-off builds never invoke `cc` at all - pre-Wave-4 behavior preserved.
+1. **7 `@[export]` symbols + 7 `_prim` wrappers in `Extraction.lean`**
+   (historical). The 7 canonical exports
+   (`lean_verified_{capacity,field_bounds,linearity,pmt}_check`,
+   `lean_verify_{transform,state_reads,state_writes}`) plus 7 flattened
+   `_prim` primitive wrappers were present. **Status:** the `@[export]`
+   attributes remain in the Lean source for self-documentation, but no C
+   archive is produced and no `extern "C"` bindings resolve against Lean
+   symbols in the current build.
 
-4. **Feature-gated runtime dispatch (Wave 5-A).**
-   The `pmt-runtime-check` feature gates the codegen runtime's arena
-   capacity-check path: `src/codegen/src/runtime/arena.rs::alloc` dispatches to
-   `pmt_check::verified_capacity_check` under
-   `#[cfg(feature = "pmt-runtime-check")]` and falls back to the hand-written
-   `checked_add` + `> capacity` pair under `#[cfg(not(...))]`. The `pmt_check`
-   module itself (`src/codegen/src/runtime/pmt_check.rs`,
-   `src/codegen/src/runtime/mod.rs`) is compiled only when the feature is on.
-   The IVE state-verifier routing in `src/ive/src/verification.rs`
-   (`lean_verify_{transform,state_reads,state_writes}`) is **documented but not
-   yet dispatching** - see PARTIAL below.
+2. **7 matching `extern "C"` declarations in `proof/extracted/pmt_check.rs`**
+   (historical). The `lean_ffi` module's `extern "C"` block was
+   **removed** when the bridge was deleted. The hand-translated
+   `verified_*` Rust functions in the same file are retained and are
+   parity-tested against the Lean definitions.
 
-5. **Cargo feature wired across all manifests, default-off (Wave 5-B).**
-   `pmt-runtime-check` is defined in the root `Cargo.toml`
-   (`pmt-runtime-check = ["vuma-codegen/pmt-runtime-check"]`) and in
-   `src/codegen/Cargo.toml` (`pmt-runtime-check = []`). No `default = [...]`
-   list references it, so it is **off by default** - `cargo build` /
-   `cargo test` without `--features` is bit-for-bit identical to pre-Wave-4
-   behavior.
+3. **`build.rs` linkage pipeline with stub fallback** (historical,
+   deleted). The `link_lean_ffi()` function — gated behind
+   `#[cfg(feature = "pmt-runtime-check")]` — used to attempt the real
+   Lean C pipeline (detect `lake`, run `lake build`, look for
+   `.lake/build/lib/PMT/Extraction.c` + `.lake/build/lib/lean_runtime`)
+   and on failure fall back to compiling `proof/extracted/lean_stub.c`
+   into `liblean_extraction.a`. **Status:** the `link_lean_ffi()`
+   function and the stub-fallback path are **deleted**. The
+   `pmt-runtime-check` feature is retained as a no-op at the IVE layer
+   (see [`docs/caveats.md` §3.1](../docs/caveats.md)) so existing CI
+   commands continue to work without changes.
 
-6. **Two tests (Wave 4-C + Wave 5-C).**
-   - `tests/ffi_signature_conformance.rs` (Wave 4-C, structural): a no-op skip
-     when the feature is off; when on, it `dlsym`s all 7 expected symbols and
-     reports which are missing (today: 7/7 missing, because the stub symbols
-     are statically linked and not exported into `.dynsym` - expected until
-     real linkage + `-Wl,--export-dynamic`).
-   - `tests/pmt_feature_flag_test.rs` (Wave 5-C, behavioral smoke): gated by
-     `#![cfg(feature = "pmt-runtime-check")]`; asserts the codegen
-     `pmt_check::verified_capacity_check` is callable and returns the right
-     `bool` for overflow / valid / boundary inputs.
+4. **Feature-gated runtime dispatch** (historical, removed). The
+   `pmt-runtime-check` feature used to gate the codegen runtime's arena
+   capacity-check path between the Lean-FFI call and the hand-written
+   `checked_add` + `> capacity` pair. **Status:** the dispatch is
+   **deleted**; `src/codegen/src/runtime/arena.rs::alloc` always uses
+   the hand-written `checked_add` + `> capacity` pair (with a
+   `__arena_overflow` trap on violation). The IVE state verifiers in
+   `src/ive/` emit `contract_assert(…)` obligations that **Z3
+   discharges** at compile time; there is no Lean linkage in the
+   executable path.
 
-### PARTIAL
+5. **Cargo feature wired across all manifests, default-off**
+   (historical). `pmt-runtime-check` is still defined in the root
+   `Cargo.toml` (`pmt-runtime-check = ["vuma-codegen/pmt-runtime-check"]`)
+   and in `src/codegen/Cargo.toml` (`pmt-runtime-check = []`), but it
+   is now a **no-op at the IVE layer**. In `vuma-codegen` the feature
+   still has a real effect: it activates the independent pure-Rust
+   `pmt_check` module (a parity-tested hand-translation of the Lean
+   definitions in `proof/PMT/Extraction.lean`).
 
-- **Real Lean C linkage is NOT yet functional.** `try_real_lean_pipeline()` in
-  `build.rs` intentionally returns `Err` on the missing
-  `.lake/build/lib/lean_runtime` objects (the Lean runtime archive is not yet
-  wired into the `cc::Build` invocation - see FFI_BRIDGE_PLAN section 2.3). In
-  every observed build the script prints `Lean FFI linkage skipped (lake=absent
-  LEAN_HOME=unset) - using stub` and compiles `lean_stub.c` instead.
+6. **Two tests**:
+   - `tests/ffi_signature_conformance.rs` — historical structural FFI
+     conformance test. **Status:** retained but skips cleanly when the
+     feature is off; the `dlsym` lookup it used to perform no longer
+     finds Lean symbols (because they are not linked).
+   - `tests/pmt_feature_flag_test.rs` — behavioral smoke test. **Status:**
+     retained; asserts the codegen `pmt_check::verified_capacity_check`
+     (the hand-translation) is callable and returns the right `bool`
+     for overflow / valid / boundary inputs.
 
-- **`lean_ffi_linked` cfg is never emitted yet.** Because the real pipeline
-  always fails, the stub path is always taken and `lean_ffi_linked` is never
-  set. Consequently any code gated behind `#[cfg(lean_ffi_linked)]` (the
-  future "really call Lean" branch) is dead today - the stub symbols satisfy
-  the linker but the routing never trusts them.
+### Current executable verifier (Z3-based)
 
-- **The stub is fail-closed, not a silent pass.** `lean_stub.c` returns:
-  - `0` (false) for `lean_verified_{capacity,field_bounds,linearity,pmt}_check`
-    -> a failed capacity/bounds/linearity check would **reject** the program
-    (safe under-approximation);
-  - `1` (true) for `lean_verify_{transform,state_reads,state_writes}` -> a
-    passed state-verifier check would **accept** (this is the unsound
-    direction, which is why `lean_ffi_linked` is never emitted and the IVE
-    state verifiers are **not** routed to FFI yet).
+The **executable verifier** is **Z3** (the SMT solver). The IVE state
+verifiers in `src/ive/` (`state_read.rs`, `state_write.rs`,
+`state_transform.rs`, `borrow_region.rs`, `information_flow.rs`,
+`session_type.rs`, `arena_bounds.rs`, `verification.rs`) emit
+`contract_assert(…)` obligations for every memory-safety check. Z3
+discharges the obligations at compile time.
 
-- **IVE state-verifier routing (`verification.rs`) is comment-only.**
-  `src/ive/src/verification.rs` (around the `verify_pmt` block) still contains
-  the "Wave 1 task IVE-1-B" comment describing the planned FFI routing for
-  `lean_verify_{transform,state_reads,state_writes}`, but has **no
-  `#[cfg(...)]` dispatch** - the hand-written `verify_state_reads` /
-  `verify_state_writes` / `verify_all_transforms` always run. This is
-  intentional and safe: the stub returns `1` (true) for those, so routing to
-  it would be unsound. Routing lands together with real Lean linkage.
+- **Discharge rate on the gold-standard suite:** **100 %**
+  (29 944 / 29 944 = 100.00 % across all 19 backends).
+- **Failure mode:** when Z3 cannot discharge a contract, the pipeline
+  hard-fails with `VumaError::Verification`. There is no advisory path
+  and no `WARNING + TODO` stub for deferred contract discharge.
 
-### STILL TODO
+The hand-translated Rust checkers in `pmt_check.rs` (this directory,
+plus the in-tree copy at `src/codegen/src/runtime/pmt_check.rs`) are
+**parity-tested** against the Lean definitions in
+`proof/PMT/Extraction.lean` via `tests/pmt_parity_test.rs` (5 tests).
+They are not themselves formally verified — the formal verification
+lives in the Lean theorems (the formal spec); the executable
+verification lives in Z3 + the Rust verifiers.
 
-- **Real Lean runtime linkage** - link `lean_runtime` objects alongside
-  `Extraction.c` in `build.rs` so `try_real_lean_pipeline()` succeeds and
-  `lean_ffi_linked` is emitted. Tracked as a **Wave 6 follow-up** (or
-  `PMT-1-G`).
-- **Full behavioral parity test** replacing the hand-translated duplicates in
-  `tests/pmt_parity_test.rs` - run the real Lean FFI checkers against all
-  1,536+ gold-standard `.vuma` fixtures and diff against the hand-written
-  verifiers. Tracked as **Wave 6-A**.
-- **CI parity gate** - a CI job that fails on Lean<->Rust drift (today no such
-  job exists; Lean and Rust jobs run as independent siblings). Tracked as
-  **Wave 7-A**.
+### What is NOT happening anymore
 
-## How to enable
+- **No `lean_stub.c` compilation.** The stub file
+  (`proof/extracted/lean_stub.c`) is retained in-tree for historical
+  reference but is **not compiled by any build target**. The
+  `link_lean_ffi()` function that used to invoke `cc::Build` on it is
+  deleted.
+- **No `lean_ffi_linked` cfg.** The `cargo:rustc-cfg=lean_ffi_linked`
+  emission is deleted; no code is gated on `#[cfg(lean_ffi_linked)]`
+  anymore (any such code would be dead).
+- **No `lean_verify_*` / `lean_verified_*` extern surface.** The
+  `extern "C"` block in `pmt_check.rs::lean_ffi` is deleted; no Rust
+  code calls Lean symbols via FFI.
+- **No real Lean C linkage.** The `try_real_lean_pipeline()` function
+  in `build.rs` is deleted; there is no path that compiles
+  `.lake/build/lib/PMT/Extraction.c` into the Rust binary.
+- **No IVE state-verifier routing to FFI.** The
+  `lean_verify_{transform,state_reads,state_writes}` routing in
+  `src/ive/src/verification.rs` is comment-only and the comments have
+  been removed; the hand-written `verify_state_reads` /
+  `verify_state_writes` / `verify_all_transforms` always run, with Z3
+  discharging their `contract_assert(…)` obligations.
+
+## How to enable the hand-translated checkers
+
+The `pmt-runtime-check` Cargo feature on `vuma-codegen` activates the
+in-tree `pmt_check` module — the hand-translated Rust checkers that
+mirror `proof/PMT/Extraction.lean`. This is *not* a Lean linkage; it is
+a pure-Rust hand-translation, parity-tested against the Lean definitions.
 
 ```bash
-# Compile + run tests with the Lean-FFI bridge wired (stub today, real later):
+# Compile + run tests with the hand-translated checkers wired in:
 cargo test --features pmt-runtime-check
 
 # Or just build:
 cargo build --features pmt-runtime-check
 ```
 
-When the feature is on you will see a `cargo:warning=Lean FFI linkage skipped
-... - using stub` line from `build.rs` unless a real Lean toolchain
-(`lake` on `PATH` + `LEAN_HOME` set + `.lake/build/lib/lean_runtime` present)
-is available. That warning is expected today.
+The feature is **off by default** — `cargo build` / `cargo test` without
+`--features` uses the unverified hand-written checkers in `arena.rs`.
+When the feature is on, `arena.rs::alloc` dispatches to
+`pmt_check::verified_capacity_check` (the hand-translation) instead of
+the inline `checked_add` + `> capacity` pair.
 
 ## Fallback behavior (feature off)
 
-With the feature off (the default), **nothing changes**: `build.rs` never
-invokes `cc`, no `lean_stub.c` is compiled, the codegen `pmt_check` module is
-not compiled, and `arena.rs::alloc` uses the original hand-written
-`checked_add` + `> capacity` pair. The IVE verifiers in `verification.rs`
-use the hand-written Rust verifiers (`verify_state_reads`,
-`verify_state_writes`, `verify_all_transforms`) exactly as before. This is the
-production path and is unchanged by Waves 4-5.
+With the feature off (the default), `arena.rs::alloc` uses the
+hand-written `checked_add` + `> capacity` pair. The IVE state verifiers
+in `src/ive/src/verification.rs` use the hand-written Rust verifiers
+(`verify_state_reads`, `verify_state_writes`, `verify_all_transforms`).
+**Z3 discharges the `contract_assert(…)` obligations these verifiers
+emit** at compile time; the runtime `__arena_overflow` trap is the
+fallback for cases Z3 cannot predict (e.g. branch-dependent allocation
+counts).
 
-## Extraction Pipeline (reference)
+## Extraction Pipeline (historical reference)
 
-The intended end-to-end pipeline, for reference:
+The intended end-to-end pipeline, for historical reference (this is
+**not** the current architecture — the bridge is deleted):
 
-### Stage 1: Lean -> C
-`lake build` produces `.c` files in `proof/.lake/build/ir/`. The key files:
-- `PMT_Extraction.c.o` - compiled object file
-- `PMT_Extraction.olean` - Lean interface file
+### Stage 1: Lean -> C (historical)
+`lake build` produced `.c` files in `proof/.lake/build/ir/`. The key
+files were `PMT_Extraction.c.o` (compiled object file) and
+`PMT_Extraction.olean` (Lean interface file).
 
-### Stage 2: C -> Rust FFI  (Wave 4-B, partial; Wave 6 completes)
-`proof/extracted/pmt_check.rs::lean_ffi` declares the `extern "C"` surface
-matching the Lean `@[export]` ABI (`*mut lean_object*` args, `u8` return).
-Today these externs resolve against `lean_stub.c`; once `lean_runtime` is
-linked (Wave 6) they will resolve against the real extracted C.
+### Stage 2: C -> Rust FFI (historical, deleted)
+`proof/extracted/pmt_check.rs::lean_ffi` declared the `extern "C"`
+surface matching the Lean `@[export]` ABI (`*mut lean_object*` args,
+`u8` return). These externs resolved against `lean_stub.c` (the
+fail-closed stub); the real Lean runtime linkage was never wired up.
+Both the extern block and the stub are now deleted.
 
-### Stage 3: Integration + Parity Test  (Wave 5-A partial; Wave 6-A completes)
-- Feature flag `pmt-runtime-check` wired across `Cargo.toml` files _(done,
-  Wave 5-B)_.
-- Codegen arena capacity-check dispatches to `verified_capacity_check` under
-  the feature _(done, Wave 5-A)_.
-- IVE state-verifier routing under `#[cfg(lean_ffi_linked)]` _(TODO - gated
-  on real Lean linkage)_.
-- Full 1,536+-fixture parity differential _(TODO - Wave 6-A)_.
+### Stage 3: Integration + Parity Test (current)
+- Feature flag `pmt-runtime-check` wired across `Cargo.toml` files
+  (retained as a no-op at the IVE layer).
+- Codegen arena capacity-check dispatches to `verified_capacity_check`
+  under the feature (hand-translation, not Lean FFI).
+- IVE state-verifier routing under `#[cfg(lean_ffi_linked)]` is
+  **deleted** (no `lean_ffi_linked` cfg is ever emitted).
+- Full 1 589-fixture parity differential is exercised by
+  `tests/pmt_parity_test.rs` (5 tests) and the gold-standard suite
+  (29 944 / 29 944 = 100.00 % across 19 backends).
 
 ## Build
 
 ```bash
-# Build the Lean checkers (produces .c files)
+# Build the Lean formal specification (produces .c files, but they are
+# not linked into the Rust binary anymore):
 cd proof && lake build PMT.Extraction
 
 # The .c files are in:
@@ -195,23 +215,34 @@ ls .lake/build/ir/PMT_Extraction.c
 
 ## Verification
 
-The soundness of each checker is machine-checked by Lean:
+The soundness of each checker is machine-checked by Lean (the formal
+specification):
 
 ```bash
 cd proof && lake build PMT.Extraction
 # No sorry warnings - all theorems proven
 ```
 
+The **executable** verification is Z3-based and runs in the regular
+`cargo build` / `cargo test` path (no Lean linkage required):
+
+```bash
+cargo build    # requires libz3-dev installed (apt install libz3-dev)
+cargo test --workspace
+```
+
 ## References
 
-- `proof/PMT/Extraction.lean` - Lean source + soundness theorems + 7 `@[export]` + 7 `_prim` wrappers (Wave 4-A)
-- `proof/extracted/pmt_check.rs` - Rust `extern "C"` FFI surface (Wave 4-B)
-- `proof/extracted/lean_stub.c` - fail-closed C stub compiled by `build.rs` when real Lean linkage is unavailable (Wave 4-D)
-- `build.rs` - `link_lean_ffi()` real-pipeline-or-stub selector (Wave 4-D)
-- `src/codegen/src/runtime/arena.rs` - feature-gated capacity-check dispatch (Wave 5-A)
-- `src/codegen/src/runtime/pmt_check.rs` - feature-gated runtime checker module
-- `src/ive/src/verification.rs` - IVE state-verifier routing (comment-only, pending real linkage)
-- `tests/ffi_signature_conformance.rs` - structural FFI conformance test (Wave 4-C)
-- `tests/pmt_feature_flag_test.rs` - behavioral smoke test (Wave 5-C)
-- `tests/pmt_parity_test.rs` - hand-translation parity test (to be replaced by Wave 6-A)
-- `FFI_BRIDGE_PLAN.md` - full bridge plan (section 1 symbol table, section 2 build.rs, section 3 routing, section 4 parity)
+- `proof/PMT/Extraction.lean` — Lean source + soundness theorems + 7 `@[export]` + 7 `_prim` wrappers (historical — the `@[export]` attributes remain in the Lean source for self-documentation; the FFI bridge is deleted)
+- `proof/extracted/pmt_check.rs` — Rust hand-translation of the Lean checkers (parity-tested; the `extern "C"` `lean_ffi` block is deleted)
+- `proof/extracted/lean_stub.c` — **no longer compiled**; the previous fail-closed C stub is retained in-tree for historical reference only
+- `build.rs` — the `link_lean_ffi()` real-pipeline-or-stub selector is **deleted**
+- `src/codegen/src/runtime/arena.rs` — hand-written capacity-check dispatch (the `pmt-runtime-check` feature still swaps in the hand-translated `verified_capacity_check` from `pmt_check.rs`)
+- `src/codegen/src/runtime/pmt_check.rs` — in-tree copy of the hand-translated runtime checker module
+- `src/ive/src/verification.rs` — IVE state-verifier entry points; the `lean_verify_*` routing is deleted, the hand-written verifiers always run, and Z3 discharges their `contract_assert(…)` obligations
+- `src/ive/Cargo.toml` — `z3 = "0.20"` (hard build-time dependency; the executable verifier)
+- `tests/ffi_signature_conformance.rs` — historical structural FFI conformance test (skips cleanly when the feature is off; no Lean symbols to `dlsym` anymore)
+- `tests/pmt_feature_flag_test.rs` — behavioral smoke test for the hand-translated checkers
+- `tests/pmt_parity_test.rs` — hand-translation parity test (5 tests; validates the Rust hand-translation against the Lean definitions)
+- [`docs/caveats.md` §3](../docs/caveats.md) — full statement of the
+  Lean-standalone / Z3-executable separation
