@@ -1,4 +1,5 @@
-VUMA Test Failures — 2026-07-30 10:24:23 UTC
-Total: 0 failures across 0 tests
+VUMA Test Failures — 2026-07-30 17:25:00 UTC
+Total: 6 failures across 1 tests
 Skipped: 0 (architecturally unavailable on target)
 
+  ipc                  half_closed_channel.vuma                      exp=   0 [('aarch64_be', 1, 'MM'), ('mips64be', 1, 'MM'), ('ppc64', 1, 'MM'), ('s390x', 1, 'MM'), ('m68k', 1, 'MM'), ('hppa', 1, 'MM')]
