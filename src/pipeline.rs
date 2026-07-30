@@ -313,7 +313,8 @@ pub struct CompileConfig {
     /// site. Default 40 — generous enough to inline small helpers like
     /// `fn add_one(x) { x + 1 }` while preventing runaway code growth.
     pub inline_threshold: u32,
-    /// Enable runtime bounds checks for array accesses (--safe flag).
+    /// Enable runtime bounds checks for array accesses (always on in VUMA 2.0;
+    /// the `--safe` flag has been removed).
     pub runtime_bounds_checks: bool,
     /// Force section headers in the ELF output (--sections flag).
     pub section_headers: bool,
@@ -2122,8 +2123,9 @@ pub fn compile_with_path(
 
         // checkbounds (Stage 2): `length_expr` is now populated
         // by `find_bounds_check_sites_with_bounds` using the `alloc_sizes`
-        // table built from `AllocationNode::Stack` statements. When
-        // `--safe` is set, `inject_bounds_check_ir` mutates the codegen
+        // table built from `AllocationNode::Stack` statements. In VUMA 2.0
+        // (where the `--safe` flag has been removed and bounds-check IR is
+        // always injected), `inject_bounds_check_ir` mutates the codegen
         // SCG to insert `__oob_trap` traps before every bounded access,
         // mirroring the proven `__arena_overflow` lowering pattern. The
         // `__oob_trap` stubs (exit 134) exist on all 19 backends.
@@ -5344,7 +5346,8 @@ pub fn attrs_to_attr_infos(
 /// [`vuma_codegen::memory_safety::find_bounds_check_sites_with_bounds`]
 /// to populate `length_expr`, and by
 /// [`vuma_codegen::memory_safety::inject_bounds_check_ir`] to emit
-/// `__oob_trap` IR when `--safe` is set.
+/// `__oob_trap` IR (always injected in VUMA 2.0; the `--safe` flag has
+/// been removed).
 pub fn build_alloc_sizes(scg: &Scg) -> std::collections::HashMap<String, u64> {
     let mut table = std::collections::HashMap::new();
     for node in &scg.nodes {
@@ -8063,7 +8066,8 @@ pub fn flatten_expr(
             //                     offset: Some(data_offset + scaled_idx) }`.
             // This makes the access visible to `inject_bounds_check_ir` as a
             // `Seq` access (the state var is in `alloc_sizes`), so an
-            // out-of-bounds index triggers `__oob_trap` under `--safe`.
+            // out-of-bounds index triggers `__oob_trap` (always injected in
+            // VUMA 2.0; formerly gated by `--safe`, now removed).
             if let Some((base_var, data_offset, elem_size, elem_ir_type)) =
                 resolve_state_array_access(expr, ctx)
             {
@@ -9398,7 +9402,8 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                 // `AccessNode::Store { ptr: Var(base_var),
                 //                       offset: Some(data_offset + scaled_idx) }`
                 // so `inject_bounds_check_ir` classifies it as `Seq` and
-                // inserts a `__oob_trap` check under `--safe`.
+                // inserts a `__oob_trap` check (always injected in VUMA 2.0;
+                // formerly gated by `--safe`, now removed).
                 if let Some((base_var, data_offset, elem_size, elem_ir_type)) =
                     resolve_state_array_access(expr, ctx)
                 {

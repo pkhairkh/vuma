@@ -1,17 +1,19 @@
-// oob_dynamic_index — Dynamic index out of bounds (requires --safe)
+// oob_dynamic_index — Dynamic index out of bounds (requires bounds-check IR, always on in VUMA 2.0)
 // Expected exit code: 134
-// Compile: compile_dump <file> <out> <backend> --opt-level=O3 --safe
+// Compile: compile_dump <file> <out> <backend> --opt-level=O3
 //
 // Bounds SAFE-ONLY negative test: allocate an 8-byte buffer
 // (`[u8; 8]`), seed indices 0/1, then compute `idx = 1 + 2 + 3 + 4 = 10`
-// at runtime and read `b.data[idx]`. With `--safe`, the injected
-// `UGe(idx, 8)` check evaluates to true (10 >= 8) and dispatches to
-// `__oob_trap`, aborting with exit 134 (SIGABRT, 128 + 6).
+// at runtime and read `b.data[idx]`. With bounds-check IR (always on in
+// VUMA 2.0), the injected `UGe(idx, 8)` check evaluates to true
+// (10 >= 8) and dispatches to `__oob_trap`, aborting with exit 134
+// (SIGABRT, 128 + 6).
 //
 // IMPORTANT: This test is NOT in the regular `bounds_wave1/` gold
-// standard suite because it only passes when compiled with `--safe`.
-// Without `--safe`, the OOB access is undefined behaviour. The
-// expected exit code below assumes `--safe` was passed at compile time.
+// standard suite because it only passes with bounds-check IR injected
+// (always on in VUMA 2.0). Without bounds-check IR (legacy mode), the
+// OOB access is undefined behaviour. The expected exit code below
+// assumes bounds-check IR is injected.
 //
 // VUMA Key Concepts:
 //   - state_new(Layout) allocation

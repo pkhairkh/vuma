@@ -375,7 +375,7 @@
       ]
     },
     "bounds_safe": {
-      "title": "Bounds Wave 1 (OOB negative, requires --safe)",
+      "title": "Bounds Wave 1 (OOB negative; requires bounds-check IR, always on in VUMA 2.0)",
       "program_count": 7,
       "programs": [
         "oob_array_read.vuma",

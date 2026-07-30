@@ -2,10 +2,10 @@
 // Expected exit code: 99
 //
 // Bounds positive test: allocate a 16-byte buffer, write 99
-// to index 0, read it back. With `--safe`, the Store at index 0 is
-// in-bounds so the `__oob_trap` check (UGe 0, 16) is false and no
-// trap fires. Without `--safe`, the Store is well-defined and the
-// Load returns 99.
+// to index 0, read it back. With bounds-check IR (always on in VUMA 2.0),
+// the Store at index 0 is in-bounds so the `__oob_trap` check (UGe 0, 16)
+// is false and no trap fires. (In legacy mode without bounds-check IR,
+// the Store is well-defined and the Load returns 99.)
 //
 // VUMA Key Concepts:
 //   - state_new(Layout) allocation
