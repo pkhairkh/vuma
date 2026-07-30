@@ -3204,9 +3204,13 @@ impl Backend for AArch64Backend {
         // smoke tests pass.  The §7.2 `EmitResult` API change is deferred
         // to keep this wire-up minimal.
         let mut emitter = crate::emit::Emitter::new();
+        // W2-c-impl: VUMA_REAL_REGALLOC_AARCH64 now defaults to ON.
+        // The regalloc path passes 30/30 curated tests (W2-fix: CSEL flag-
+        // setting + W1-fix: determinism). Set VUMA_REAL_REGALLOC_AARCH64=0
+        // to opt out (fall back to stack-slot ISel) for debugging.
         let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_AARCH64")
-            .map(|v| v == "1")
-            .unwrap_or(false);
+            .map(|v| v != "0")
+            .unwrap_or(true);
         let verify_callee_saved = std::env::var("VUMA_VERIFY_CALLEE_SAVED")
             .map(|v| v == "1")
             .unwrap_or(false);
