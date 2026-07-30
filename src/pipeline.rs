@@ -33,7 +33,7 @@
 //! }
 //! ```
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 // Parallel register allocation across functions.
 // Replaced rayon with std::thread::scope (no external dep).
 use std::fmt;
@@ -66,16 +66,16 @@ type LayoutRegistry = HashMap<String, (u64, Vec<LayoutField>)>;
 use vuma_bd::{repd::RepD, BD};
 use vuma_codegen::{
     emit::{emit_binary, EmitConfig},
-    ir::{BinOpKind as IrBinOpKind, IRFunction, IRProgram},
+    ir::{IRFunction, IRProgram},
     regalloc::{AllocationResult, LinearScanAllocator},
     scg_to_ir::{
         AccessNode, AllocationNode, CallNode, CastNode, ChannelCloseStmt, ChannelOpenStmt,
         ChannelRecvResultStmt, ChannelRecvStmt, ChannelSendStmt, CodegenEdge, ComputationNode,
-        ConstantTimeStatement, ControlNode, EnumAccessNode, ForeignConsumeStmt, GetAddressNode,
-        IRBuilder, PmtOpStmt, Scg, ScgData, ScgExpr, ScgFunction, ScgNode, ScgParam, ScgStatement,
-        ScgType, StructAccessNode, SwitchArm, SyscallCallNode, TryStmt, UnaryComputationNode,
+        ControlNode, EnumAccessNode, GetAddressNode, IRBuilder, PmtOpStmt, Scg, ScgData, ScgExpr,
+        ScgFunction, ScgNode, ScgParam, ScgStatement, ScgType, StructAccessNode, SwitchArm,
+        SyscallCallNode, TryStmt, UnaryComputationNode,
     },
-    CastKind as CodegenCastKind, CodegenError, DataSectionKind,
+    CodegenError, DataSectionKind,
 };
 // Escape analysis + effect analysis are wired into the O2+
 // codegen-opt stage.  We import the modules so the pipeline can call
@@ -103,9 +103,8 @@ use vuma_parser::{
     AstToScg, Item, ModuleResolver, ParseError, Parser, Program as AstProgram, ResolveError,
 };
 use vuma_scg::{
-    AccessMode, CommonSubexpressionElimination, ComputationKind, ConstantFolding, ControlKind,
-    DeadCodeElimination, DeadRegionElimination, EdgeData, EdgeKind, InliningPass,
-    LoopInvariantCodeMotion, NodeData, NodeId, NodePayload, NodeType, PassManager,
+    CommonSubexpressionElimination, ConstantFolding, DeadCodeElimination, DeadRegionElimination,
+    EdgeData, EdgeKind, InliningPass, LoopInvariantCodeMotion, NodeId, NodePayload, PassManager,
     PipelineResult as ScgPipelineResult, SCGPass, StrengthReduction, TailCallOptDetection, SCG,
 };
 
@@ -820,6 +819,10 @@ impl fmt::Display for PipelineStage {
 /// Pre-computed edge index for efficient graph traversal during bridge
 /// conversion. Built once from all edges in the SCG and then queried
 /// by node ID and edge kind.
+//
+// Reserved for upcoming SCG traversal fast-paths in the AST→codegen
+// bridge; currently no caller exercises it yet, hence the silence.
+#[allow(dead_code)]
 struct EdgeIndex {
     /// Outgoing edges keyed by source node.
     outgoing: HashMap<NodeId, Vec<EdgeData>>,
@@ -827,6 +830,7 @@ struct EdgeIndex {
     incoming: HashMap<NodeId, Vec<EdgeData>>,
 }
 
+#[allow(dead_code)]
 impl EdgeIndex {
     /// Build the edge index from all edges in the SCG.
     fn build(scg: &SCG) -> Self {
@@ -904,6 +908,11 @@ fn parse_scg_type(type_str: &str) -> Option<ScgType> {
 /// `access_size` matching the field's width). Returns `None` for sizes that
 /// don't map to a standard integer type — the IR builder's heuristics then
 /// pick a sensible default (typically U8).
+//
+// Reserved helper: not yet wired into the lowering path, retained so the
+// access-size → IRType mapping is available when state-field Access nodes
+// are revisited.
+#[allow(dead_code)]
 fn access_size_to_ir_type(size: u64) -> Option<vuma_codegen::ir::IRType> {
     match size {
         1 => Some(vuma_codegen::ir::IRType::U8),
@@ -1987,7 +1996,7 @@ pub fn compile_with_path(
                                 || c
                                     .label
                                     .as_ref()
-                                    .map_or(false, |l| l.starts_with("fn_"));
+                                    .is_some_and(|l| l.starts_with("fn_"));
                             if is_fn_exit {
                                 events.push(vuma_ive::borrow_region::ChannelEvent {
                                     vreg: String::new(),
@@ -3560,7 +3569,7 @@ pub fn compile_with_recovery(
                                 || c
                                     .label
                                     .as_ref()
-                                    .map_or(false, |l| l.starts_with("fn_"));
+                                    .is_some_and(|l| l.starts_with("fn_"));
                             if is_fn_exit {
                                 events.push(vuma_ive::borrow_region::ChannelEvent {
                                     vreg: String::new(),
@@ -5864,7 +5873,7 @@ pub fn bridge_ast_to_codegen_scg_with_meta(program: &AstProgram) -> (Scg, Vec<vu
         }
         // (Task 2-A) Drain any meta produced by top-level state ops and
         // carry the program-wide vreg counter forward.
-        program_meta.extend(tl_ctx.meta.drain(..));
+        program_meta.append(&mut tl_ctx.meta);
         program_meta_vreg = tl_ctx.meta_vreg;
     }
 
@@ -5950,7 +5959,7 @@ pub fn bridge_ast_to_codegen_scg_with_meta(program: &AstProgram) -> (Scg, Vec<vu
             // (Task 2-A) Drain this function's typed-state meta into the
             // program-level accumulator, and carry the program-wide vreg
             // counter forward to the next function.
-            program_meta.extend(ctx.meta.drain(..));
+            program_meta.append(&mut ctx.meta);
             program_meta_vreg = ctx.meta_vreg;
 
             // Ensure every function ends with a Return statement.
