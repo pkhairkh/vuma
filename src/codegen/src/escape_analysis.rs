@@ -138,6 +138,7 @@ fn terminator_used_regs(term: &IRTerminator) -> Vec<u32> {
 ///     syscall, returning, branching on it, etc. — marks the allocation as
 ///     escaping. This prevents SROA / alloc-elision from removing an
 ///     allocation whose address is observed through a derived alias (the
+///
 /// root cause of the SIGSEGV regressions on `mem_copy_buffer`,
 ///     `doubly_linked_list`, `mf_address_return`, etc.).
 pub fn analyze_escapes(func: &IRFunction) -> HashMap<u32, EscapeResult> {

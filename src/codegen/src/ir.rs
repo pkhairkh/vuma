@@ -3099,17 +3099,11 @@ pub enum VumaGrade {
 /// `vuma::pipeline::populate_vreg_grades`). Entries that cannot be
 /// attributed to a concrete IR vreg are simply absent, which the
 /// allocator treats as "grade unknown" -> liveness fallback.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct VregMeta {
     /// The proof-directed grade for this vreg, or `None` when unknown
     /// (regalloc falls back to liveness-only interference).
     pub grade: Option<VumaGrade>,
-}
-
-impl Default for VregMeta {
-    fn default() -> Self {
-        Self { grade: None }
-    }
 }
 
 /// A function in the IR.
