@@ -63,6 +63,13 @@ echo ""
 # ── Step 1: Install prerequisites ──
 echo "▸ Checking prerequisites..."
 
+# Check/install Z3 SMT solver (HARD dependency for IVE contract discharge)
+if ! pkg-config --exists z3 2>/dev/null; then
+    echo "  Installing Z3 (required for IVE verification)..."
+    apt update -qq && apt install -y libz3-dev 2>/dev/null || sudo apt install -y libz3-dev 2>/dev/null || true
+fi
+echo "  ✓ Z3: $(pkg-config --modversion z3 2>/dev/null || echo 'NOT FOUND')"
+
 # Check/install Rust
 if ! command -v cargo &>/dev/null; then
     echo "  Installing Rust..."
