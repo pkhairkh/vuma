@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # qemu-env.sh — source this to put the 18 VUMA-required `qemu-<isa>-static`
 # user-mode emulation binaries on PATH.
-# Installed by wave 0, task 0-c-install.
+# Installed by wave 0, task 0-c-install; re-verified by follow-up F0-c-install.
 #
 # Caveat §4.2 requires QEMU user-mode ≥ 10.0 for the 18 ISAs listed below.
 # Debian 13 (trixie) ships `qemu-user` 1:10.0.11+ds-0+deb13u1, whose binaries
@@ -10,6 +10,16 @@
 # `$HOME/.local/bin/` and exposed under both `qemu-<isa>` and
 # `qemu-<isa>-static` names (the latter via symlinks, mirroring Debian's own
 # `qemu-user-static` transitional package).
+#
+# Follow-up F0-c-install (2026-07-30) re-queried the latest stable:
+#   - apt trixie/main     : 1:10.0.11+ds-0+deb13u1  <- matches installed
+#   - apt trixie-security : 1:10.0.2+ds-2+deb13u1    (older)
+#   - upstream qemu.org   : 11.0.3 stable + 11.1.0-rc2 (RC)
+# Per protocol step 5, since the apt repo's latest stable == 10.0.11 (already
+# installed), the upgrade is a NO-OP. Upstream 11.0.3 would require a source
+# build for 18 targets (out of scope: 10-min budget, no ninja/meson/cross-dev,
+# no root). All 18 binaries re-verified reporting 10.0.11; runtime smoke
+# (`qemu-x86_64-static /bin/true` -> 0) and env-shim smoke test both PASS.
 #
 # ISAs covered (18):
 #   aarch64 aarch64_be alpha arm armeb hppa i386 loongarch64 m68k
