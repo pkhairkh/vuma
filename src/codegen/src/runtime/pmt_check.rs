@@ -19,21 +19,21 @@
 /// Soundness: verified_capacity_check_correct (proof/PMT/Extraction.lean)
 #[inline]
 pub fn verified_capacity_check(used: u64, size: u64, capacity: u64) -> bool {
-    used.checked_add(size).map_or(false, |sum| sum <= capacity)
+    used.checked_add(size).is_some_and(|sum| sum <= capacity)
 }
 
 /// Verified field-bounds check: returns true iff offset + size ≤ total.
 /// Lean: `verified_field_bounds_check(f : Field) (layout : Layout) : Bool`
 #[inline]
 pub fn verified_field_bounds_check(offset: u64, size: u64, total: u64) -> bool {
-    offset.checked_add(size).map_or(false, |sum| sum <= total)
+    offset.checked_add(size).is_some_and(|sum| sum <= total)
 }
 
 /// Verified linearity check: returns true iff var is NOT in consumed.
 /// Lean: `verified_linearity_check(var : String) (consumed : List String) : Bool`
 #[inline]
 pub fn verified_linearity_check(var: &str, consumed: &[&str]) -> bool {
-    !consumed.iter().any(|c| *c == var)
+    !consumed.contains(&var)
 }
 
 /// Composed PMT check: all three sub-checks.
