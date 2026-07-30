@@ -570,7 +570,7 @@ pub fn verify_information_flow_from_ir(
                         if name == "channel_send" || name == "channel_send_cap" =>
                     {
                         let channel_label = args
-                            .get(0)
+                            .first()
                             .map(|v| label_of_vreg(v, &func.vregs, secret_vars))
                             .unwrap_or(SecurityLabel::Public);
                         let msg_label = args
