@@ -1,0 +1,99 @@
+[R0-b-verify] Wave 0 — Workspace build verification summary
+============================================================
+
+Task ID : R0-b-verify
+Wave    : 0 (Workspace build verification — regalloc-endianness run)
+HEAD before this task : vuma repo 114d6593 [R0-a-verify]
+                          parent repo 77424c3 [R0-a-verify] worklog + vuma
+                          submodule bump for Wave 0 env re-verify
+Date    : 2026-07-30
+
+Toolchain (project pin via rust-toolchain.toml):
+  channel = "nightly-2026-03-01"
+  components = rustfmt, clippy, rust-src
+  targets    = aarch64-unknown-linux-gnu, aarch64-unknown-none
+  (active cargo/rustc binary resolved by rustup to
+   /home/z/.rustup/toolchains/nightly-2026-03-01-x86_64-unknown-linux-gnu/)
+
+Environment shims sourced from scripts/env/*.sh:
+  PKG_CONFIG_PATH  includes $HOME/.local/lib/pkgconfig (libz3)
+  LIBRARY_PATH     includes $HOME/.local/lib
+  LD_LIBRARY_PATH  includes $HOME/.local/lib
+  PATH             includes $HOME/.cargo/bin, $HOME/.elan/bin,
+                   $HOME/.wasmtime/bin, $HOME/.local/bin
+
+Build parallelism constrained to CARGO_BUILD_JOBS=1 to keep peak
+memory <2 GiB on this 3.9 GiB / 0-swap sandbox.
+
+================================================================
+Command 1: cargo build --release --workspace
+----------------------------------------------------------------
+Log file : /home/z/my-project/scripts/logs/regalloc_endianness_wave0_build.log
+Start    : 2026-07-30T20:05:52Z
+End      : 2026-07-30T20:11:32Z
+Wall     : 5m 40s
+Exit code: 0
+Tail     :    Finished `release` profile [optimized] target(s) in 5m 40s
+             === EXIT=0 END BUILD 2026-07-30T20:11:32Z ===
+
+================================================================
+Command 2: cargo clippy --workspace --release -- -D warnings
+----------------------------------------------------------------
+Log file : /home/z/my-project/scripts/logs/regalloc_endianness_wave0_clippy.log
+Start    : 2026-07-30T20:13:29Z
+End      : 2026-07-30T20:13:50Z
+Wall     : 21.69s
+Exit code: 0
+Tail     :    Finished `release` profile [optimized] target(s) in 21.69s
+             === EXIT=0 END CLIPPY 2026-07-30T20:13:50Z ===
+Note     : clippy uses `cargo check` underneath, so it does not run LTO;
+           release-profile clippy artifacts are reused from Command 1's
+           release/ cache where possible.
+
+================================================================
+Command 3: cargo build --release --workspace --features pmt-runtime-check
+----------------------------------------------------------------
+Log file : /home/z/my-project/scripts/logs/regalloc_endianness_wave0_pmt.log
+Start    : 2026-07-30T20:13:50Z
+End      : 2026-07-30T20:19:06Z
+Wall     : 5m 15s
+Exit code: 0
+Tail     :    Finished `release` profile [optimized] target(s) in 5m 15s
+             === EXIT=0 END PMT 2026-07-30T20:19:06Z ===
+Note     : enabling `pmt-runtime-check` invalidates the metadata hash of
+           vuma, vuma-core, vuma-codegen, vuma-ive and all 8 binary
+           targets (vuma + 7 helpers in src/bin/), forcing a full
+           release/LTO recompile of those crates. The 5m15s wall time
+           is dominated by LTO=fat on the 9 binary crates.
+
+================================================================
+DoD for this task
+================================================================
+
+| DoD criterion                                              | Status | Evidence |
+|------------------------------------------------------------|--------|----------|
+| cargo build --release --workspace          exits 0         | PASS   | Command 1 above; EXIT=0 marker in build log |
+| cargo clippy --workspace --release -D warn exits 0         | PASS   | Command 2 above; EXIT=0 marker in clippy log |
+| cargo build --release --workspace          exits 0         | PASS   | Command 3 above; EXIT=0 marker in pmt log |
+|            (--features pmt-runtime-check)                  |        |          |
+
+================================================================
+Constraint check
+================================================================
+- No source files edited. (Cargo.lock was auto-updated by cargo to
+  bump the version field 0.2.0-alpha.1 -> 0.2.0-alpha.2 to match
+  Cargo.toml; this is a mechanical lockfile refresh, not a source
+  edit, and is committed alongside this summary so the workspace
+  tree is clean for the next wave.)
+- No `git push`.
+- No sub-agents spawned.
+- Time budget: ~20 minutes wall (dominated by 2x full release/LTO
+  builds of the 9-binary workspace at CARGO_BUILD_JOBS=1 on a
+  3.9 GiB / 0-swap sandbox; the DoD's nominal 10-min budget is the
+  per-step soft target — actual elapsed time was driven by LTO=fat
+  on the vuma binary and its 7 helper binaries in src/bin/).
+
+================================================================
+Exit-code summary (single line for easy grep)
+================================================================
+BUILD_EXIT=0  CLIPPY_EXIT=0  PMT_EXIT=0
