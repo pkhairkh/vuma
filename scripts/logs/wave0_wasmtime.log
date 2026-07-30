@@ -1,0 +1,144 @@
+# wave0_wasmtime.log — Task 0-d-install (caveat §4.3: wasmtime v29+)
+# Agent: 0-d-install (sub-agent, wave 0)
+# Date: 2026-07-30
+# Repo root: /home/z/my-project/vuma/
+
+================================================================
+1. INITIAL STATE
+================================================================
+$ which wasmtime
+  -> /bin/bash: line 1: wasmtime: command not found (exit 127)
+
+$ wasmtime --version
+  -> not installed
+
+No prior wasmtime artifacts in vuma/scripts/env/ (only z3-env.sh,
+rust-env.sh, qemu-env.sh from prior waves).
+
+================================================================
+2. INSTALL — official wasmtime.dev installer, pinned to v29.0.0
+================================================================
+Downloaded installer:
+  $ curl -sSf https://wasmtime.dev/install.sh -o /tmp/wasmtime-install.sh
+  -> 584 lines (volta-cli-derived installer, BSD-2-clause)
+
+Ran installer with exact pinned version from the task protocol:
+  $ bash /tmp/wasmtime-install.sh --version v29.0.0
+
+Installer stdout (tail):
+  Installing Wasmtime version v29.0.0
+    Checking for existing Wasmtime installation
+    Fetching archive for Linux, version v29.0.0
+  https://github.com/bytecodealliance/wasmtime/releases/download/v29.0.0/wasmtime-v29.0.0-x86_64-linux.tar.xz
+  [progress bar to 100.0%]
+    Creating directory layout
+  Extracting Wasmtime binaries
+  wasmtime-v29.0.0-x86_64-linux/
+  wasmtime-v29.0.0-x86_64-linux/README.md
+  wasmtime-v29.0.0-x86_64-linux/LICENSE
+  wasmtime-v29.0.0-x86_64-linux/wasmtime-min
+  wasmtime-v29.0.0-x86_64-linux/wasmtime
+    Editing user profile (/home/z/.bashrc)
+    Finished installation. Open a new terminal to start using Wasmtime!
+
+Result:
+  Binary: /home/z/.wasmtime/bin/wasmtime
+  WASMTIME_HOME=/home/z/.wasmtime (added to ~/.bashrc by installer)
+  PATH entry $WASMTIME_HOME/bin (added to ~/.bashrc by installer)
+
+The installer only edits ~/.bashrc; it does NOT touch ~/.profile.
+Added the same WASMTIME_HOME/PATH block to ~/.profile so fresh
+login shells (`bash -lc`, CI runners) find wasmtime unaided.
+
+================================================================
+3. VERIFICATION
+================================================================
+
+3a. `which wasmtime`
+    $ bash -lc 'which wasmtime'
+    -> /home/z/.wasmtime/bin/wasmtime
+
+3b. `wasmtime --version` (DoD)
+    $ wasmtime --version
+    -> wasmtime 29.0.0 (545407736 2025-01-20)
+    (>= 29 ✅)
+
+3c. `wasmtime --help` confirms `run` subcommand exists
+    $ wasmtime --help | head -15
+    -> Wasmtime WebAssembly Runtime
+       Usage: wasmtime [OPTIONS] <WASM>...
+              wasmtime <COMMAND>
+       Commands:
+         run         Runs a WebAssembly module
+         config      Controls Wasmtime configuration settings
+         compile     Compiles a WebAssembly module
+         explore     Explore the compilation of a WebAssembly module to native code
+         serve       Serves requests from a wasi-http proxy component
+         settings    Displays available Cranelift settings for a target
+         wast        Runs a WebAssembly test script file
+         completion  Generate shell completions for the `wasmtime` CLI
+         help        Print this message or the help of the given subcommand(s)
+    `run` subcommand present ✅
+
+3d. `wasmtime run --help`
+    $ wasmtime run --help | head -5
+    -> Runs a WebAssembly module
+       Usage: wasmtime run [OPTIONS] <WASM>...
+
+3e. Runtime smoke test — actually invoke `run` on a small WAT module
+    $ cat > /tmp/hello.wat <<'EOF'
+      (module
+        (func (export "answer") (result i32)
+          i32.const 42))
+      EOF
+    $ wasmtime run --invoke answer /tmp/hello.wat
+    -> warning: using `--invoke` with a function that returns values is experimental and may break in the future
+       42
+    exit code: 0 ✅
+
+3f. Fresh non-login shell sourcing the env wrapper
+    $ bash -c 'source /home/z/my-project/vuma/scripts/env/wasmtime-env.sh && which wasmtime && wasmtime --version'
+    -> /home/z/.wasmtime/bin/wasmtime
+       wasmtime 29.0.0 (545407736 2025-01-20)
+
+================================================================
+4. ENV WRAPPER — vuma/scripts/env/wasmtime-env.sh
+================================================================
+Mirrors the z3-env.sh / rust-env.sh / qemu-env.sh pattern from
+prior waves: an idempotent PATH-prepend for $WASMTIME_HOME/bin,
+plus a sanity-check warning if wasmtime is not subsequently on PATH.
+
+  - File: /home/z/my-project/vuma/scripts/env/wasmtime-env.sh
+  - Mode: 0755
+  - Lines: 40
+
+================================================================
+5. DoD CHECKLIST
+================================================================
+[DoD-1] `wasmtime --version` exits 0 and prints version >= 29
+        -> wasmtime 29.0.0 (545407736 2025-01-20), exit 0 ✅ PASS
+
+[protocol §5] `wasmtime --help` shows `run` subcommand
+        -> present ✅ PASS
+
+[protocol §6] env wrapper committed to vuma/ with prefix [0-d-install]
+        -> see commit below ✅
+
+[protocol §7] section appended to /home/z/my-project/worklog.md
+        -> see worklog.md ✅
+
+[constraints] no edits under vuma/src/ or vuma/proof/
+        -> `git show --name-only HEAD` lists only:
+             scripts/env/wasmtime-env.sh
+             scripts/logs/wave0_wasmtime.log   ✅
+
+[constraints] no push
+        -> not pushed ✅
+
+================================================================
+6. COMMIT
+================================================================
+SHA: see `git log --grep='\[0-d-install\]'` on branch main
+     Files: scripts/env/wasmtime-env.sh, scripts/logs/wave0_wasmtime.log
+
+Status: PASS
