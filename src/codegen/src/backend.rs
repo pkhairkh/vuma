@@ -3087,11 +3087,78 @@ fn build_aarch64_runtime() -> (Vec<u8>, usize, usize, usize) {
     (code, hex_offset, int_offset, newline_offset)
 }
 
+// ── Real regalloc helper (Wave 12 wiring) ───────────────────────────────
+//
+// Mirrors the `try_real_regalloc` helper in `x86_64/mod.rs` (Wave 5) but
+// targets the `aarch64` `TargetDesc`.  See the doc on the x86_64 version
+// for the full rationale — the short version: this runs the target-agnostic
+// linear-scan allocator on `func` and returns `Some(RegAllocResult)` on
+// success, or `None` (so the caller falls back to the unannotated
+// stack-slot ISel output) if the target description is missing or the
+// allocator errored.
+fn try_real_regalloc(
+    func: &IRFunction,
+) -> Option<crate::regalloc::RegAllocResult> {
+    let registry = crate::target_desc::TargetDescRegistry::new();
+    let target = match registry.get("aarch64") {
+        Some(t) => t,
+        None => {
+            vuma_log!(
+                debug,
+                "aarch64 allocate_registers: target 'aarch64' not in TargetDescRegistry, \
+                 falling back to stack-slot ISel"
+            );
+            return None;
+        }
+    };
+    let allocator = crate::regalloc::TargetAgnosticRegAlloc::new(target);
+    match allocator.allocate_function(func) {
+        Ok(result) => Some(result),
+        Err(e) => {
+            vuma_log!(
+                debug,
+                "aarch64 allocate_registers: real regalloc failed for '{}': {}, \
+                 falling back to stack-slot ISel",
+                func.name,
+                e
+            );
+            None
+        }
+    }
+}
+
 impl Backend for AArch64Backend {
     fn target_info(&self) -> &dyn TargetInfo {
         &self.target_info
     }
 
+    /// Allocate physical registers for an IR function on AArch64.
+    ///
+    /// This method drives the **real** target-agnostic linear-scan
+    /// register allocator ([`crate::regalloc::TargetAgnosticRegAlloc`])
+    /// in addition to the existing stack-slot ISel path (the
+    /// [`crate::emit::Emitter`]-based emission).  The translation from
+    /// the allocator's [`crate::regalloc::RegAllocResult`] to the
+    /// backend's [`AllocatedFunction`] is performed by
+    /// [`crate::regalloc_emit::annotate_with_regalloc`].
+    ///
+    /// # Algorithm
+    ///
+    /// 1. **Always** run the existing Emitter-based emission first.
+    ///    This produces a correct `AllocatedFunction` whose `encoded`
+    ///    bytes are real AArch64 machine code (with every vreg kept in
+    ///    a stack slot), with a correct `frame_size` and `callee_saved`
+    ///    set.  This is the safety net for the fallback path and also
+    ///    the source of the encoded machine code (the real allocator
+    ///    produces register *assignments* but not raw bytes).
+    /// 2. Run [`try_real_regalloc`] to obtain a
+    ///    [`crate::regalloc::RegAllocResult`].  If it returns `Some`,
+    ///    call [`crate::regalloc_emit::annotate_with_regalloc`] to fold
+    ///    the real register assignments into the `AllocatedFunction`.
+    /// 3. If `try_real_regalloc` returns `None` (target description
+    ///    missing or allocator errored), the unannotated stack-slot ISel
+    ///    output is returned unchanged — preserving the previous
+    ///    behaviour so no existing tests regress.
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
         // Pre-lowering float-op verification is now wired
         // CENTRALLY in the compilation drivers (`compile_to_binary_direct`
@@ -3156,7 +3223,10 @@ impl Backend for AArch64Backend {
         // Capture relocations from the Emitter so encode_program can patch BL offsets.
         let relocations = emitter.relocations().to_vec();
 
-        Ok(AllocatedFunction {
+        // Step 1 (baseline): always produce a correct AllocatedFunction from
+        // the Emitter-based stack-slot ISel path.  Its `encoded` bytes are
+        // real AArch64 machine code with every vreg in a stack slot.
+        let mut allocated = AllocatedFunction {
             name: func_name,
             blocks: vec![AllocatedBlock {
                 label: "entry".to_string(),
@@ -3170,7 +3240,17 @@ impl Backend for AArch64Backend {
             relocations,
             wasm_func_type: None,
             wasm_locals: None,
-        })
+        };
+
+        // Step 2: run the real target-agnostic linear-scan allocator and,
+        // on success, annotate the AllocatedFunction with its decisions.
+        // On failure (or missing target desc), fall back to the unannotated
+        // stack-slot ISel output so existing behaviour is preserved.
+        if let Some(alloc) = try_real_regalloc(func) {
+            crate::regalloc_emit::annotate_with_regalloc(&mut allocated, &alloc);
+        }
+
+        Ok(allocated)
     }
 
     fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError> {
