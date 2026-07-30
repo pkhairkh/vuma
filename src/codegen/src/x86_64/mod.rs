@@ -4139,6 +4139,79 @@ impl Backend for X86_64Backend {
     /// the real allocator's decisions for downstream consumers (disassemblers,
     /// debuggers, future codegen waves).
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
+        // ── X1-impl: VUMA_REAL_REGALLOC_X86_64 env-var gate ───────────────
+        //
+        // Mirrors the aarch64 wire-up at `backend.rs:3207` (commit 51ae66be
+        // / W2-c-impl flipped that gate to default-ON). x86_64 stays
+        // default-OFF because the byte-changing register-based emitter is
+        // not yet implemented — see "Limitation" below. The gate exists
+        // so that future wave 2 work (`x86_64/reg_isel.rs` per design doc
+        // §5.1, `scripts/audit/regalloc_endianness_wave2_x86_64_design.md`)
+        // can flip the default once the new emitter passes the curated
+        // test suite.
+        //
+        // When unset (default): today's behaviour — stack-slot ISel bytes
+        // + target-agnostic allocator metadata annotation (additive, no
+        // byte changes).
+        //
+        // When set to "1": same as above PLUS the `contains_fork`
+        // opt-out (see below). A future wave will dispatch to a real
+        // register-based byte emitter here; today the gate is wired but
+        // the byte path is the same as the default (documented).
+        let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_X86_64")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+
+        // ── X1-impl: contains_fork opt-out ───────────────────────────────
+        //
+        // Same hazard as aarch64's R1-b2-fix (`backend.rs:3218-3242`): a
+        // register-based prologue's callee-saved `push rbx; push r12; ...`
+        // / `pop ...; pop rbx` doesn't interact correctly with `clone()`
+        // because the child process runs with a different register state
+        // than the parent.
+        //
+        // x86_64 syscall numbers (Linux/x86_64) — DIFFERENT from aarch64:
+        //   clone  = 56   (aarch64: 220)
+        //   vfork  = 58   (aarch64: 221)
+        //
+        // spawn_worker is lowered by `expand_spawn_worker` (ipc_lowering.rs)
+        // to `Syscall{nr: 56, ...}` on x86_64. By the time
+        // `allocate_registers` runs, the `Call{func: "spawn_worker"}` has
+        // been replaced; we still detect both forms defensively.
+        let contains_fork = func.blocks.iter().any(|block| {
+            block.instructions.iter().any(|inst| {
+                match inst {
+                    crate::ir::IRInstr::Call { func: fname, .. } => {
+                        fname == "spawn_worker" || fname == "fork"
+                    }
+                    // clone=56, vfork=58 on Linux/x86_64.
+                    crate::ir::IRInstr::Syscall { nr, .. } => *nr == 56 || *nr == 58,
+                    _ => false,
+                }
+            })
+        });
+
+        if real_regalloc {
+            if contains_fork {
+                vuma_log!(
+                    debug,
+                    "x86_64 regalloc: function '{}' contains spawn_worker/fork \
+                     (clone=56/vfork=58 on Linux/x86_64); falling back to stack-slot \
+                     ISel (fork+regalloc not supported — same hazard as aarch64 R1-b2-fix)",
+                    func.name
+                );
+            } else {
+                vuma_log!(
+                    debug,
+                    "x86_64 regalloc: function '{}' eligible for register-based path \
+                     (gate=ON, no fork). NOTE: byte-changing register-based emitter is \
+                     not yet implemented (wave 2 future work, design doc §5.1); emitting \
+                     stack-slot bytes with regalloc metadata annotation only.",
+                    func.name
+                );
+            }
+        }
+
         // Step 1: baseline stack-slot ISel — always produces correct bytes.
         let mut allocated = stack_slot_isel::allocate_registers(func)?;
 
@@ -4146,6 +4219,23 @@ impl Backend for X86_64Backend {
         // on success, annotate the AllocatedFunction with its decisions.
         // On failure (or missing target desc), fall back to the unannotated
         // stack-slot ISel output so existing behaviour is preserved.
+        //
+        // Limitation (X1-impl): the encoded bytes remain stack-slot-based
+        // even when `VUMA_REAL_REGALLOC_X86_64=1` is set. The
+        // `reads`/`writes`/`spill_slots` metadata accurately reflects the
+        // real allocator's decisions for downstream consumers
+        // (disassemblers, debuggers, future codegen waves). A complete
+        // register-based x86_64 byte emitter that consumes
+        // `RegAllocResult.vreg_to_preg` and emits register-to-register
+        // machine code (with spill/reload instructions inserted at the
+        // positions recorded in `RegAllocResult.spill_code`, plus a
+        // callee-saved prologue/epilogue honouring `used_callee_saved`)
+        // is deferred to wave 2 — see design doc §5.1 (`reg_isel.rs`).
+        // Until then, the env-var gate is a no-op at the byte level: the
+        // same `try_real_regalloc` + `annotate_with_regalloc` step runs
+        // in both modes. The gate exists so the future byte-changing
+        // emitter can be flipped on without touching this call site
+        // again.
         if let Some(alloc) = try_real_regalloc(func) {
             crate::regalloc_emit::annotate_with_regalloc(&mut allocated, &alloc);
         }
