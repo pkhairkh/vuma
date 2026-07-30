@@ -2999,11 +2999,88 @@ fn ss_emit_typed_store(value_reg: Gpr, addr_reg: Gpr, offset: i32, ty: &IRType) 
     code
 }
 
+// ── Real regalloc helper (Wave 12 wiring) ───────────────────────────────
+//
+// Mirrors the `try_real_regalloc` helper in `x86_64/mod.rs` (Wave 5) but
+// targets the `ppc64` `TargetDesc`.  See the doc on the x86_64 version
+// for the full rationale — the short version: this runs the target-agnostic
+// linear-scan allocator on `func` and returns `Some(RegAllocResult)` on
+// success, or `None` (so the caller falls back to the unannotated
+// stack-slot ISel output) if the target description is missing or the
+// allocator errored.
+fn try_real_regalloc(
+    func: &IRFunction,
+) -> Option<crate::regalloc::RegAllocResult> {
+    let registry = crate::target_desc::TargetDescRegistry::new();
+    let target = match registry.get("ppc64") {
+        Some(t) => t,
+        None => {
+            vuma_log!(
+                debug,
+                "ppc64 allocate_registers: target 'ppc64' not in TargetDescRegistry, \
+                 falling back to stack-slot ISel"
+            );
+            return None;
+        }
+    };
+    let allocator = crate::regalloc::TargetAgnosticRegAlloc::new(target);
+    match allocator.allocate_function(func) {
+        Ok(result) => Some(result),
+        Err(e) => {
+            vuma_log!(
+                debug,
+                "ppc64 allocate_registers: real regalloc failed for '{}': {}, \
+                 falling back to stack-slot ISel",
+                func.name,
+                e
+            );
+            None
+        }
+    }
+}
+
 impl Backend for PPC64Backend {
     fn target_info(&self) -> &dyn TargetInfo {
         &self.target_info
     }
 
+    /// Allocate physical registers for an IR function on PowerPC 64-bit.
+    ///
+    /// This method now drives the **real** target-agnostic linear-scan
+    /// register allocator ([`crate::regalloc::TargetAgnosticRegAlloc`])
+    /// in addition to the existing in-method stack-slot ISel path.  The
+    /// translation from the allocator's
+    /// [`crate::regalloc::RegAllocResult`] to the backend's
+    /// [`AllocatedFunction`] is performed by
+    /// [`crate::regalloc_emit::annotate_with_regalloc`].
+    ///
+    /// # Algorithm
+    ///
+    /// 1. **Always** run the existing in-method stack-slot ISel first
+    ///    (the body below that collects vregs, computes stack layout,
+    ///    emits prologue/epilogue, and lowers every IR instruction to
+    ///    PowerPC machine code with vregs in stack slots).  This
+    ///    produces a correct `AllocatedFunction` with encoded bytes,
+    ///    `frame_size`, and `callee_saved` set.  This is the safety net
+    ///    for the fallback path and also the source of the encoded
+    ///    machine code (the real allocator produces register
+    ///    *assignments* but not raw bytes).
+    /// 2. Run [`try_real_regalloc`] to obtain a
+    ///    [`crate::regalloc::RegAllocResult`].  If it returns `Some`,
+    ///    call [`crate::regalloc_emit::annotate_with_regalloc`] to fold
+    ///    the real register assignments into the `AllocatedFunction`.
+    /// 3. If `try_real_regalloc` returns `None` (target description
+    ///    missing or allocator errored), the unannotated stack-slot ISel
+    ///    output is returned unchanged — preserving the previous
+    ///    behaviour so no existing tests regress.
+    ///
+    /// The previous per-backend `use_real_regalloc` flag (which drove a
+    /// fake "round-robin vregs into the first 8 GPRs" heuristic) has
+    /// been superseded: the real allocator is now always attempted and
+    /// its result is folded into the AllocatedFunction via
+    /// `annotate_with_regalloc`.  The flag itself is retained on the
+    /// struct for API compatibility (existing tests that set it still
+    /// compile), but it no longer gates the allocation path.
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
         let func_name = func.name.clone();
 
@@ -4772,52 +4849,20 @@ impl Backend for PPC64Backend {
             wasm_locals: None,
         };
 
-        // If real register allocation is enabled, post-process the
-        // AllocatedFunction to record physical register assignments in the
-        // reads/writes fields. The instruction encoding still uses stack slots
-        // (safe, correct), but the metadata records which vregs COULD be in
-        // real registers.
-        if self.use_real_regalloc {
-            let max_real_regs = 8u32;
-            let mut all_vreg_ids: Vec<u32> = Vec::new();
-            for &id in func.vregs.keys() {
-                all_vreg_ids.push(id);
-            }
-            for param in &func.params {
-                if let Some(id) = param.as_register() {
-                    all_vreg_ids.push(id);
-                }
-            }
-            for block in &func.blocks {
-                for instr in &block.instructions {
-                    for id in instr.defined_regs() {
-                        all_vreg_ids.push(id);
-                    }
-                    for id in instr.used_regs() {
-                        all_vreg_ids.push(id);
-                    }
-                }
-            }
-            all_vreg_ids.sort();
-            all_vreg_ids.dedup();
-
-            for (i, &_vreg_id) in all_vreg_ids.iter().enumerate() {
-                if (i as u32) < max_real_regs {
-                    let preg =
-                        crate::backend::PhysicalReg::new(crate::backend::RegClass::Gpr, i as u32);
-                    for block in &mut allocated.blocks {
-                        for instr in &mut block.instructions {
-                            if !instr.writes.contains(&preg) {
-                                instr.writes.push(preg);
-                            }
-                            if !instr.reads.contains(&preg) {
-                                instr.reads.push(preg);
-                            }
-                        }
-                    }
-                }
-            }
-            allocated.spill_slots = all_vreg_ids.len().saturating_sub(max_real_regs as usize);
+        // Step 2: run the real target-agnostic linear-scan allocator and,
+        // on success, annotate the AllocatedFunction with its decisions.
+        // On failure (or missing target desc), fall back to the unannotated
+        // stack-slot ISel output so existing behaviour is preserved.
+        //
+        // This supersedes the previous `use_real_regalloc`-gated fake
+        // "round-robin vregs into the first 8 GPRs" heuristic.  The real
+        // allocator is now always attempted (matching the x86_64 / aarch64 /
+        // riscv64 backends), and `annotate_with_regalloc` folds the real
+        // physical-register assignments + spill-slot count into the
+        // AllocatedFunction.  The `use_real_regalloc` struct field is
+        // retained for API compatibility but no longer gates this path.
+        if let Some(alloc) = try_real_regalloc(func) {
+            crate::regalloc_emit::annotate_with_regalloc(&mut allocated, &alloc);
         }
 
         Ok(allocated)

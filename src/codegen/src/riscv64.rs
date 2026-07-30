@@ -6530,11 +6530,80 @@ fn compute_fnv1a_64(data: &[u8]) -> u64 {
     vuma_scg::hash::fnv1a_64(data)
 }
 
+// ── Real regalloc helper (Wave 12 wiring) ───────────────────────────────
+//
+// Mirrors the `try_real_regalloc` helper in `x86_64/mod.rs` (Wave 5) but
+// targets the `riscv64` `TargetDesc`.  See the doc on the x86_64 version
+// for the full rationale — the short version: this runs the target-agnostic
+// linear-scan allocator on `func` and returns `Some(RegAllocResult)` on
+// success, or `None` (so the caller falls back to the unannotated
+// stack-slot ISel output) if the target description is missing or the
+// allocator errored.
+fn try_real_regalloc(
+    func: &IRFunction,
+) -> Option<crate::regalloc::RegAllocResult> {
+    let registry = crate::target_desc::TargetDescRegistry::new();
+    let target = match registry.get("riscv64") {
+        Some(t) => t,
+        None => {
+            vuma_log!(
+                debug,
+                "riscv64 allocate_registers: target 'riscv64' not in TargetDescRegistry, \
+                 falling back to stack-slot ISel"
+            );
+            return None;
+        }
+    };
+    let allocator = crate::regalloc::TargetAgnosticRegAlloc::new(target);
+    match allocator.allocate_function(func) {
+        Ok(result) => Some(result),
+        Err(e) => {
+            vuma_log!(
+                debug,
+                "riscv64 allocate_registers: real regalloc failed for '{}': {}, \
+                 falling back to stack-slot ISel",
+                func.name,
+                e
+            );
+            None
+        }
+    }
+}
+
 impl Backend for RiscV64Backend {
     fn target_info(&self) -> &dyn crate::backend::TargetInfo {
         &self.target_info
     }
 
+    /// Allocate physical registers for an IR function on RISC-V 64-bit.
+    ///
+    /// This method now drives the **real** target-agnostic linear-scan
+    /// register allocator ([`crate::regalloc::TargetAgnosticRegAlloc`])
+    /// in addition to the existing in-method stack-slot ISel path.  The
+    /// translation from the allocator's
+    /// [`crate::regalloc::RegAllocResult`] to the backend's
+    /// [`AllocatedFunction`] is performed by
+    /// [`crate::regalloc_emit::annotate_with_regalloc`].
+    ///
+    /// # Algorithm
+    ///
+    /// 1. **Always** run the existing in-method stack-slot ISel first
+    ///    (the body below that collects vregs, computes stack layout,
+    ///    emits prologue/epilogue, and lowers every IR instruction to
+    ///    RISC-V machine code with vregs in stack slots).  This
+    ///    produces a correct `AllocatedFunction` with encoded bytes,
+    ///    `frame_size`, and `callee_saved` set.  This is the safety net
+    ///    for the fallback path and also the source of the encoded
+    ///    machine code (the real allocator produces register
+    ///    *assignments* but not raw bytes).
+    /// 2. Run [`try_real_regalloc`] to obtain a
+    ///    [`crate::regalloc::RegAllocResult`].  If it returns `Some`,
+    ///    call [`crate::regalloc_emit::annotate_with_regalloc`] to fold
+    ///    the real register assignments into the `AllocatedFunction`.
+    /// 3. If `try_real_regalloc` returns `None` (target description
+    ///    missing or allocator errored), the unannotated stack-slot ISel
+    ///    output is returned unchanged — preserving the previous
+    ///    behaviour so no existing tests regress.
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
         let func_name = func.name.clone();
 
@@ -10211,7 +10280,10 @@ impl Backend for RiscV64Backend {
 
         let code_size: usize = instructions.iter().map(|i| i.encoded.len()).sum();
 
-        Ok(AllocatedFunction {
+        // Step 1 (baseline): always produce a correct AllocatedFunction from
+        // the in-method stack-slot ISel path above.  Its `encoded` bytes are
+        // real RISC-V machine code with every vreg in a stack slot.
+        let mut allocated = AllocatedFunction {
             name: func_name,
             blocks: vec![AllocatedBlock {
                 label: "entry".to_string(),
@@ -10225,7 +10297,17 @@ impl Backend for RiscV64Backend {
             relocations,
             wasm_func_type: None,
             wasm_locals: None,
-        })
+        };
+
+        // Step 2: run the real target-agnostic linear-scan allocator and,
+        // on success, annotate the AllocatedFunction with its decisions.
+        // On failure (or missing target desc), fall back to the unannotated
+        // stack-slot ISel output so existing behaviour is preserved.
+        if let Some(alloc) = try_real_regalloc(func) {
+            crate::regalloc_emit::annotate_with_regalloc(&mut allocated, &alloc);
+        }
+
+        Ok(allocated)
     }
 
     fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError> {
