@@ -6,6 +6,63 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 where applicable.
 
+## [0.2.0-alpha.4] — Regalloc Completion & Design Docs
+
+This release completes the achievable items from the regalloc-endianness
+run's "What's Next" list: aarch64_be verification, try_recv investigation,
+and design docs for riscv64 and ppc64 register-based emitters.
+
+### Wave A — aarch64_be Verification
+
+- aarch64_be inherits aarch64's Wave 1 regalloc fix (callee-saved spill
+  code, fork-detection, syscall-position tracking). 29/30 regalloc pass
+  (try_recv is the 1 known edge case), 30/30 stack-slot pass. No source
+  edits required — aarch64_be delegates to aarch64's allocate_registers.
+
+### Wave B — try_recv Investigation
+
+- Root-caused (CB-a-investigate) the try_recv regalloc exit-0 bug to a
+  CSEL operand swap in the regalloc path's Select/CtSelect lowering
+  (emit.rs:2174-2182, 2274-2280).
+- Attempted fix (CB-b-impl) swapped rn/rm operands. This fixed try_recv
+  (exit 0 -> 77) but broke 17 other tests (regalloc dropped from 29/30
+  to 13/30). The root cause is more nuanced: the flag-setting before
+  CSEL differs between the regalloc and stack-slot paths.
+- Fix reverted. Investigation documented at
+  scripts/audit/completion_wave_b_try_recv_investigation.md.
+  Deferred to human developer (requires debugger + full emit.rs context).
+- VUMA_REAL_REGALLOC_AARCH64 env-var gate remains OFF by default.
+
+### Wave C — riscv64 Register-Based Emitter Design Doc
+
+- 696-line design doc at scripts/audit/completion_wave_c_riscv64_design.md.
+- Covers RISC-V calling convention (s0-s11 callee-saved, a0-a7/t0-t6
+  caller-saved, x0 hardwired zero).
+- Key risk: Zero-register hazard (gen_spill_reload uses PhysicalReg index 0
+  = x0 = hardwired zero on riscv64; spill would be a silent no-op).
+- Effort estimate: 4.5-6.5 developer-weeks. Deferred to human developer.
+
+### Wave D — ppc64 Register-Based Emitter Design Doc
+
+- 727-line design doc at scripts/audit/completion_wave_d_ppc64_design.md.
+- Covers PPC SVR4 ABI (R14-R31 callee-saved, R2=TOC, LR=Link Register).
+- ppc64le inherits automatically via one-line delegation.
+- Key risks: R0 hazard, big-endian U8-load workaround, LR-save-in-callee-frame.
+- Important finding: syscall numbers 220/221 are GENERIC (used by all
+  backends), not native — the contains_fork detection is portable.
+- Effort estimate: 5.5-7.5 developer-weeks. Deferred to human developer.
+
+### Notes
+
+- All 3 design docs (x86_64 from R2-a-audit, riscv64 from CC-a-audit,
+  ppc64 from CD-a-audit) are now complete and ready for a human developer.
+- aarch64 regalloc path: 29/30 pass with VUMA_REAL_REGALLOC_AARCH64=1
+  (env-var gated, OFF by default).
+- Production impact: ZERO. Default code path unchanged (stack-slot ISel).
+- Full 29963-test Pi5 cluster matrix: 29963/29963 (100%).
+
+---
+
 ## [0.2.0-alpha.3] — Register-Based Emission & Endianness Remediation
 
 This release addresses the two critical findings from the follow-up
