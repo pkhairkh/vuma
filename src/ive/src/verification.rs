@@ -946,545 +946,42 @@ impl Clone for VerificationEngine {
 }
 
 // ---------------------------------------------------------------------------
-// Lean FFI routing for the 3 PMT state verifiers (Wave 5-A)
+// Lean FFI bridge removed.
+//
+//   Lean FFI bridge removed. Z3-based contract discharge replaces it.
+//   PMT state verification uses hand-written Rust verifiers.
+//
+// History (kept for reference): the Wave 5-A "Lean FFI routing" pipeline
+// routed the 3 PMT state verifiers (`verify_state_reads`,
+// `verify_state_writes`, `verify_all_transforms`) through Lean-extracted
+// `lean_verify_*_prim` externs. Two sub-paths existed, selected by the
+// `lean_ffi_linked` cfg (emitted by `build.rs` only when the real Lean C
+// output was linked):
+//
+//   - STUB (default, `lean_ffi_linked` NOT set): `build.rs` linked
+//     `proof/extracted/lean_stub.c`, which hardcodes success (return 1)
+//     for every `lean_verify_*` symbol. `verify_pmt_via_lean` mirrored
+//     that by returning all-empty (all-pass) result Vecs. This was the
+//     most dangerous false positive — every program's PMT state
+//     verification "passed" regardless of actual safety — so the entire
+//     bridge has been deleted.
+//
+//   - REAL (`lean_ffi_linked` set): called the extracted `lean_verify_*`
+//     externs via `lean_mk_string`-marshalled Lean strings. Marshalling
+//     was incomplete; the branch was effectively dead code (build.rs
+//     never emitted `lean_ffi_linked` in the default build).
+//
+// The `pmt-runtime-check` Cargo feature is RETAINED as a no-op so
+// existing CI commands (`cargo build --features pmt-runtime-check`,
+// `cargo test --features pmt-runtime-check`) do not break, but it no
+// longer routes anything through Lean. The feature still activates the
+// independent pure-Rust `pmt_check` module in `vuma-codegen` (which is a
+// real hand-translation of the Lean checkers, parity-tested, and does
+// NOT depend on the stub).
+//
+// `proof/extracted/lean_stub.c` and `proof/extracted/pmt_check.rs` are
+// kept on disk for reference but are no longer compiled or linked.
 // ---------------------------------------------------------------------------
-//
-// When the `pmt-runtime-check` feature is enabled, `verify_pmt` routes the
-// 3 hand-written Rust verifiers (`verify_state_reads`,
-// `verify_state_writes`, `verify_all_transforms`) through the Lean-extracted
-// equivalents declared in the `lean_ffi` module below.
-//
-// Two sub-paths, selected by the `lean_ffi_linked` cfg (emitted by build.rs
-// only when the real Lean C output is linked):
-//
-//   - STUB (default, `lean_ffi_linked` NOT set): build.rs linked
-//     `proof/extracted/lean_stub.c`, which hardcodes success for every
-//     `lean_verify_*` symbol. `verify_pmt_via_lean` mirrors that by
-//     returning all-empty (all-pass) result Vecs. This is the path Wave 5-C
-//     tests assert: "Lean verifier ran but stub returned success".
-//
-//   - REAL (`lean_ffi_linked` set): calls the extracted `lean_verify_*`
-//     externs. Marshalling Rust types to boxed Lean objects is Wave 5-C
-//     work; until then the args are null placeholders and this branch is
-//     dead code (build.rs never emits `lean_ffi_linked` in the current
-//     build).
-//
-// When `pmt-runtime-check` is OFF, the hand-written Rust verifiers are used
-// directly (the parity-tested path) - unchanged from pre-Wave-5 behaviour.
-#[cfg(feature = "pmt-runtime-check")]
-#[allow(dead_code)] // externs/LeanObject unused in the STUB sub-path
-mod lean_ffi {
-    use std::ffi::c_void;
-
-    /// Opaque pointer to a Lean boxed object (`lean_object *` in Lean's C
-    /// ABI). Matches the `LeanObject` alias in `proof/extracted/pmt_check.rs`.
-    pub type LeanObject = c_void;
-
-    extern "C" {
-        /// `@[export lean_verify_state_reads]` - Lean signature
-        /// `(env_list : List (String x LayoutInfo)) (reads : List StateRead)
-        /// : Bool`. Returns `uint8_t` (1 iff all reads pass).
-        pub fn lean_verify_state_reads(
-            env_list: *mut LeanObject,
-            reads: *mut LeanObject,
-        ) -> u8;
-
-        /// `@[export lean_verify_state_writes]` - Lean signature
-        /// `(env_list) (consumed : List String) (writes : List StateWrite)
-        /// : Bool`. Returns `uint8_t` (1 iff all writes pass).
-        pub fn lean_verify_state_writes(
-            env_list: *mut LeanObject,
-            consumed: *mut LeanObject,
-            writes: *mut LeanObject,
-        ) -> u8;
-
-        /// `@[export lean_verify_transform]` - Lean signature
-        /// `(layouts : LayoutRegistry) (t : StateTransform) : Bool`.
-        /// Returns `uint8_t` (1 iff the transform is valid).
-        pub fn lean_verify_transform(
-            layouts: *mut LeanObject,
-            t: *mut LeanObject,
-        ) -> u8;
-    }
-
-    // ─────────────────────────────────────────────────────────────
-    // `_prim` wrappers (VERIF-SIGSEGV-FIX). These are the String-based,
-    // C-marshallable exports that parse the §9 serialization format
-    // internally. Unlike the boxed `lean_verify_*` externs above — which
-    // SIGSEGV under real Lean when handed null `lean_object*` args (the
-    // PMT-1-G / VERIF-SIGSEGV-FIX failure) — the `_prim` wrappers accept
-    // Lean `String`s built via `lean_mk_string` / `str_to_lean`, so they
-    // are safe to call once `lean_ffi::init()` has run. Mirrors the FFI
-    // surface in `tests/pmt_parity_test.rs` and
-    // `proof/extracted/pmt_check.rs`. Declared unconditionally (matching
-    // the boxed externs); only INVOKED under `#[cfg(lean_ffi_linked)]`
-    // in `verify_pmt_via_lean` below. C links by symbol name, so the
-    // 4-arg `kind` variant added by the TRANSFORM-FIX subagent is
-    // compatible with the 3-arg stub definition on the STUB path (which
-    // is never called from here anyway).
-    // ─────────────────────────────────────────────────────────────
-    extern "C" {
-        /// `lean_verify_state_reads_prim(registry, reads) -> u8`.
-        /// `registry` / `reads` are boxed Lean `String`s in §9 format.
-        pub fn lean_verify_state_reads_prim(
-            registry: *mut LeanObject,
-            reads: *mut LeanObject,
-        ) -> u8;
-
-        /// `lean_verify_state_writes_prim(registry, consumed, writes)
-        /// -> u8`. All three args are boxed Lean `String`s in §9 format.
-        pub fn lean_verify_state_writes_prim(
-            registry: *mut LeanObject,
-            consumed: *mut LeanObject,
-            writes: *mut LeanObject,
-        ) -> u8;
-
-        /// `lean_verify_transform_prim(registry, input_layout,
-        /// output_layout, kind) -> u8`. `kind` is a boxed Lean `String`
-        /// ("copy" / "identity" / "reinterpret"). The `kind` parameter
-        /// is added by the TRANSFORM-FIX subagent; verification.rs
-        /// passes "copy" (no TransformKind context here — it is only
-        /// checking validity).
-        pub fn lean_verify_transform_prim(
-            registry: *mut LeanObject,
-            input_layout: *mut LeanObject,
-            output_layout: *mut LeanObject,
-            kind: *mut LeanObject,
-        ) -> u8;
-    }
-
-    /// `initialize_PMT` — Lean module initializer exported by
-    /// `proof/.lake/build/ir/PMT.c`. MUST be invoked exactly once before
-    /// any `lean_verify_*` call: without it the Lean runtime is
-    /// uninitialized and the verifiers SIGSEGV (the PMT-1-G smoke-test
-    /// failure). `builtin = 1` runs Lean's standard builtin initializers;
-    /// the second arg is Lean's reserved `lean_object*` (pass null). On
-    /// success it returns a non-null `lean_object*` (Lean's unit value);
-    /// null denotes failure. Gated on `lean_ffi_linked` because the
-    /// linkage stub (`lean_stub.c`) does not export this symbol.
-    #[cfg(lean_ffi_linked)]
-    extern "C" {
-        fn initialize_PMT(builtin: u8, w: *mut LeanObject) -> *mut LeanObject;
-    }
-
-    /// `lean_mk_string` — Lean C-runtime symbol (`lean.h`) that boxes a
-    /// NUL-terminated C string into a Lean `String`. Only provided when
-    /// the real Lean runtime (`libleanrt.a`) is linked, i.e. under
-    /// `lean_ffi_linked` (the stub `lean_stub.c` does not export it).
-    /// Used by `str_to_lean` below to marshal Rust `&str` into the
-    /// boxed Lean `String` args the `_prim` wrappers expect.
-    #[cfg(lean_ffi_linked)]
-    extern "C" {
-        fn lean_mk_string(s: *const std::ffi::c_char) -> *mut LeanObject;
-    }
-
-    /// Convert a Rust `&str` into a boxed Lean `String` via
-    /// `lean_mk_string`. NUL bytes (not representable in a C string)
-    /// are replaced with `'?'`. Mirrors `str_to_lean` in
-    /// `tests/pmt_parity_test.rs`. Only meaningful under
-    /// `lean_ffi_linked`; the stub variant below is dead code at
-    /// runtime (the sole call site is gated on `lean_ffi_linked`).
-    #[cfg(lean_ffi_linked)]
-    pub fn str_to_lean(s: &str) -> *mut LeanObject {
-        use std::ffi::CString;
-        let sanitized: String =
-            s.chars().map(|c| if c == '\0' { '?' } else { c }).collect();
-        let c_str =
-            CString::new(sanitized).unwrap_or_else(|_| CString::new("").unwrap());
-        unsafe { lean_mk_string(c_str.as_ptr()) }
-    }
-
-    /// Stub variant — never invoked at runtime (the only call site is
-    /// under `#[cfg(lean_ffi_linked)]`). Returns null so the file still
-    /// type-checks on the STUB sub-path.
-    #[cfg(not(lean_ffi_linked))]
-    pub fn str_to_lean(_s: &str) -> *mut LeanObject {
-        std::ptr::null_mut()
-    }
-
-    /// Guards exactly-once execution of `initialize_PMT` across threads.
-    #[cfg(lean_ffi_linked)]
-    static INIT: std::sync::Once = std::sync::Once::new();
-
-    /// Persisted outcome of the one-shot `initialize_PMT` call. `Once`
-    /// only runs the init closure a single time, so the result (null =>
-    /// failure) is recorded here for every subsequent `init()` caller.
-    #[cfg(lean_ffi_linked)]
-    static INIT_FAILED: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(false);
-
-    /// Invoke `initialize_PMT` exactly once (thread-safe via `Once`)
-    /// before any Lean verifier FFI call. Returns `Ok(())` on success
-    /// (non-null return — Lean's unit value) or `Err` describing the
-    /// failure if the initializer returned null.
-    #[cfg(lean_ffi_linked)]
-    pub fn init() -> Result<(), String> {
-        INIT.call_once(|| {
-            // `builtin = 1` => run Lean's standard builtin initializers.
-            let res = unsafe { initialize_PMT(1, std::ptr::null_mut()) };
-            if res.is_null() {
-                INIT_FAILED.store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-        });
-        if INIT_FAILED.load(std::sync::atomic::Ordering::SeqCst) {
-            Err(
-                "Lean module initializer initialize_PMT returned null (init failed)"
-                    .to_string(),
-            )
-        } else {
-            Ok(())
-        }
-    }
-}
-
-/// Result of routing the 3 PMT state verifiers through Lean: the same
-/// `(read, write, transform)` Vec triple the hand-written verifiers return
-/// so the downstream aggregation in `verify_pmt` is unchanged.
-#[cfg(feature = "pmt-runtime-check")]
-type LeanPmtOutcome = (
-    Vec<crate::state_read::StateReadVerification>,
-    Vec<crate::state_write::StateWriteVerification>,
-    Vec<crate::state_transform::StateTransformVerification>,
-);
-
-// ─────────────────────────────────────────────────────────────────────
-// §9 serializers (VERIF-MARSHAL). Adapted from tests/pmt_parity_test.rs
-// serializers for the production data types. Only compiled under
-// `lean_ffi_linked` (the REAL sub-path); the STUB sub-path never invokes
-// them. Each emits the newline/tab-delimited string payloads the Lean
-// `_prim` parsers in proof/PMT/Extraction.lean consume (§9 format):
-//   • registry   : `name \t total_size \t field_count` + field lines
-//                  `fname \t offset \t size \t type_name`
-//   • reads      : `var \t field_name \t expected_type`
-//   • writes     : `var \t field_name \t value_type \t 0|1`
-//   • consumed   : vars joined by `\n`
-//
-// CRITICAL: the Lean `env` model for reads/writes is `String → Option
-// LayoutInfo` keyed by VARIABLE name (`env r.var` / `env w.var` — see
-// StateReads.lean / StateWrites.lean), whereas the transform `_prim`
-// looks up layouts by LAYOUT name (`layouts input_layout`). The merged
-// registry therefore contains BOTH:
-//   1. var-keyed entries — each (var, layout_name) in `state_var_layouts`
-//      resolved to its LayoutInfo so reads/writes env lookups succeed;
-//   2. layout-name-keyed entries — every layout in the 3 layout maps so
-//      transform lookups by name succeed.
-// `List.lookup` returns the first match, so a pathological collision
-// (var name == layout name) prefers the var-keyed entry; in practice
-// variable and layout names are disjoint.
-// ─────────────────────────────────────────────────────────────────────
-
-/// Abstraction over the three identical-shape `LayoutInfo` structs
-/// (state_read / state_write / state_transform) so one serializer can
-/// traverse all three layout maps. All are in the `ive` crate, so a
-/// local trait impl satisfies the orphan rules.
-#[cfg(lean_ffi_linked)]
-trait IveLayoutSer {
-    fn total_size(&self) -> u64;
-    fn fields_ser(&self) -> Vec<(String, u64, u64, String)>;
-}
-
-#[cfg(lean_ffi_linked)]
-impl IveLayoutSer for crate::state_read::LayoutInfo {
-    fn total_size(&self) -> u64 {
-        self.total_size
-    }
-    fn fields_ser(&self) -> Vec<(String, u64, u64, String)> {
-        self.fields
-            .iter()
-            .map(|f| (f.name.clone(), f.offset, f.size, f.type_name.clone()))
-            .collect()
-    }
-}
-
-#[cfg(lean_ffi_linked)]
-impl IveLayoutSer for crate::state_write::LayoutInfo {
-    fn total_size(&self) -> u64 {
-        self.total_size
-    }
-    fn fields_ser(&self) -> Vec<(String, u64, u64, String)> {
-        self.fields
-            .iter()
-            .map(|f| (f.name.clone(), f.offset, f.size, f.type_name.clone()))
-            .collect()
-    }
-}
-
-#[cfg(lean_ffi_linked)]
-impl IveLayoutSer for crate::state_transform::LayoutInfo {
-    fn total_size(&self) -> u64 {
-        self.total_size
-    }
-    fn fields_ser(&self) -> Vec<(String, u64, u64, String)> {
-        self.fields
-            .iter()
-            .map(|f| (f.name.clone(), f.offset, f.size, f.type_name.clone()))
-            .collect()
-    }
-}
-
-/// Append one layout entry (header + field lines) in §9 format.
-#[cfg(lean_ffi_linked)]
-fn push_ive_layout_entry(
-    s: &mut String,
-    name: &str,
-    total_size: u64,
-    fields: &[(String, u64, u64, String)],
-) {
-    s.push_str(&format!("{}\t{}\t{}\n", name, total_size, fields.len()));
-    for (fname, offset, size, type_name) in fields {
-        s.push_str(&format!("{}\t{}\t{}\t{}\n", fname, offset, size, type_name));
-    }
-}
-
-/// Serialize the merged registry (var-keyed + layout-name-keyed entries)
-/// from the var→layout-name map and the 3 layout maps. See the
-/// `IveLayoutSer` block above for the env-keying rationale.
-#[cfg(lean_ffi_linked)]
-fn serialize_ive_registry(
-    state_var_layouts: &HashMap<String, String>,
-    read_layouts: &HashMap<String, crate::state_read::LayoutInfo>,
-    write_layouts: &HashMap<String, crate::state_write::LayoutInfo>,
-    transform_layouts: &HashMap<String, crate::state_transform::LayoutInfo>,
-) -> String {
-    let mut s = String::new();
-
-    // (1) Var-keyed entries: resolve var → layout_name → LayoutInfo so
-    // Lean's `env r.var` / `env w.var` lookups succeed. Prefer
-    // read_layouts, then write_layouts, then transform_layouts (the
-    // LayoutInfo shape is identical across all three).
-    for (var, layout_name) in state_var_layouts {
-        if let Some(l) = read_layouts.get(layout_name) {
-            push_ive_layout_entry(&mut s, var, l.total_size(), &l.fields_ser());
-        } else if let Some(l) = write_layouts.get(layout_name) {
-            push_ive_layout_entry(&mut s, var, l.total_size(), &l.fields_ser());
-        } else if let Some(l) = transform_layouts.get(layout_name) {
-            push_ive_layout_entry(&mut s, var, l.total_size(), &l.fields_ser());
-        }
-        // If layout_name is absent from all 3 maps, skip: Lean's env
-        // lookup returns `none` and the read/write is reported invalid
-        // ("variable not state-typed"), matching the Rust hand-verifier.
-    }
-
-    // (2) Layout-name-keyed entries: every layout in the 3 maps, so the
-    // transform `_prim` can look up `input_layout` / `output_layout` by
-    // name. Duplicate names across maps re-serialize harmlessly
-    // (identical shape); a name equal to a variable name is shadowed by
-    // the var entry above (pathological, see header comment).
-    for (name, l) in read_layouts {
-        push_ive_layout_entry(&mut s, name, l.total_size(), &l.fields_ser());
-    }
-    for (name, l) in write_layouts {
-        push_ive_layout_entry(&mut s, name, l.total_size(), &l.fields_ser());
-    }
-    for (name, l) in transform_layouts {
-        push_ive_layout_entry(&mut s, name, l.total_size(), &l.fields_ser());
-    }
-
-    s
-}
-
-/// Serialize reads as `var \t field_name \t expected_type` lines.
-#[cfg(lean_ffi_linked)]
-fn serialize_ive_reads(reads: &[(String, String, String)]) -> String {
-    let mut s = String::new();
-    for (var, field, expected_type) in reads {
-        s.push_str(&format!("{}\t{}\t{}\n", var, field, expected_type));
-    }
-    s
-}
-
-/// Serialize writes as `var \t field_name \t value_type \t 0|1` lines.
-/// `after_consume` maps to "1" (true) / "0" (false), matching Lean's
-/// `parseBoolField` ("1" or "true" → true).
-#[cfg(lean_ffi_linked)]
-fn serialize_ive_writes(writes: &[crate::state_write::StateWriteOp]) -> String {
-    let mut s = String::new();
-    for w in writes {
-        let ac = if w.after_consume { "1" } else { "0" };
-        s.push_str(&format!(
-            "{}\t{}\t{}\t{}\n",
-            w.var_name, w.field_name, w.value_type, ac
-        ));
-    }
-    s
-}
-
-/// Serialize consumed var names joined by `\n` (Lean `splitLines` drops
-/// empty lines, so an empty set yields `""` → `[]`). Sorted for
-/// determinism (HashSet iteration order is randomized).
-#[cfg(lean_ffi_linked)]
-fn serialize_ive_consumed(consumed_vars: &HashSet<String>) -> String {
-    let mut names: Vec<&String> = consumed_vars.iter().collect();
-    names.sort();
-    names
-        .iter()
-        .map(|n| n.as_str())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Route the 3 PMT state verifiers through the Lean-extracted FFI surface.
-///
-/// Returns the same `(reads, writes, transforms)` Vec triple the
-/// hand-written verifiers produce, so downstream aggregation in `verify_pmt`
-/// is identical. See the `lean_ffi` module doc for the STUB/REAL sub-paths.
-#[cfg(feature = "pmt-runtime-check")]
-fn verify_pmt_via_lean(
-    state_var_layouts: &HashMap<String, String>,
-    read_layouts: &HashMap<String, crate::state_read::LayoutInfo>,
-    reads: &[(String, String, String)],
-    write_layouts: &HashMap<String, crate::state_write::LayoutInfo>,
-    writes: &[crate::state_write::StateWriteOp],
-    consumed_vars: &HashSet<String>,
-    transform_layouts: &HashMap<String, crate::state_transform::LayoutInfo>,
-    transforms: &[(String, String)],
-) -> Result<LeanPmtOutcome, String> {
-    // Mark every argument as used so the STUB sub-path (which does not
-    // touch them) emits no unused-variable warnings. The REAL sub-path
-    // below consumes all 8 for §9 marshalling (VERIF-MARSHAL).
-    let _ = (
-        state_var_layouts,
-        read_layouts,
-        reads,
-        write_layouts,
-        writes,
-        consumed_vars,
-        transform_layouts,
-        transforms,
-    );
-
-    // -- STUB sub-path (default): lean_stub.c hardcodes success -----
-    // build.rs did NOT emit `lean_ffi_linked`, so the extracted symbols
-    // are the stub. Return all-empty Vecs => downstream `.iter().all(|r|
-    // r.valid)` is `true` and `*_errs` is empty. Wave 5-C tests assert
-    // this stub-success behaviour.
-    #[cfg(not(lean_ffi_linked))]
-    let outcome: LeanPmtOutcome = (Vec::new(), Vec::new(), Vec::new());
-
-    // -- REAL sub-path (`lean_ffi_linked` cfg set by build.rs) ------
-    // Initialize the Lean module exactly once BEFORE any verifier call.
-    // `initialize_PMT` sets up the Lean runtime; without it the
-    // `lean_verify_*` externs SIGSEGV (the PMT-1-G smoke-test failure).
-    // `init()` is a no-op after the first call (guarded by `Once`).
-    #[cfg(lean_ffi_linked)]
-    lean_ffi::init().map_err(|e| format!("Lean PMT module init failed: {e}"))?;
-
-    // Call the 3 extracted `_prim` wrappers (String-based,
-    // C-marshallable). Unlike the boxed `lean_verify_*` externs — which
-    // SIGSEGV under real Lean when handed null `lean_object*` args (the
-    // VERIF-SIGSEGV-FIX failure) — the `_prim` wrappers accept Lean
-    // `String`s built via `lean_mk_string` / `str_to_lean` and parse
-    // the §9 serialization format internally. `lean_ffi::init()` above
-    // has already initialized the Lean runtime.
-    //
-    // VERIF-MARSHAL: the 8 IVE pipeline inputs are now fully marshalled
-    // into the §9 string format the `_prim` parsers expect (see the
-    // `serialize_ive_*` helpers above), so the returned `u8` reflects
-    // the real program data rather than empty placeholders.
-    #[cfg(lean_ffi_linked)]
-    let outcome = {
-        // Build the merged §9 registry (var-keyed + layout-name-keyed)
-        // and the reads / writes / consumed payloads.
-        let registry_str = serialize_ive_registry(
-            state_var_layouts,
-            read_layouts,
-            write_layouts,
-            transform_layouts,
-        );
-        let reads_str = serialize_ive_reads(reads);
-        let writes_str = serialize_ive_writes(writes);
-        let consumed_str = serialize_ive_consumed(consumed_vars);
-
-        // Box each payload as a Lean `String` via lean_mk_string.
-        //
-        // TODO(VERIF-MARSHAL ownership): `str_to_lean` returns a
-        // `*mut LeanObject` whose refcount is NOT decremented (no
-        // `lean_dec`), so every call leaks one Lean String. Acceptable
-        // for a verification pass that runs at most once per IVE
-        // pipeline; a long-running driver that re-verifies many
-        // programs would accrue unbounded growth. Proper fix: wrap each
-        // pointer in a newtype that calls `lean_dec` on Drop (requires
-        // declaring `lean_dec` in the `lean_ffi` extern block). `reg`
-        // is reused across all 3 verifier calls; the per-transform
-        // `in_lean` / `out_lean` leak once each.
-        let reg = lean_ffi::str_to_lean(&registry_str);
-        let rds = lean_ffi::str_to_lean(&reads_str);
-        let wrt = lean_ffi::str_to_lean(&writes_str);
-        let con = lean_ffi::str_to_lean(&consumed_str);
-
-        let reads_ok =
-            unsafe { lean_ffi::lean_verify_state_reads_prim(reg, rds) != 0 };
-        let writes_ok =
-            unsafe { lean_ffi::lean_verify_state_writes_prim(reg, con, wrt) != 0 };
-
-        // Transforms: the `_prim` looks up input/output layouts BY NAME
-        // in the registry and applies the kind-specific check.
-        // verification.rs has no TransformKind context here, so pass
-        // "copy" (the permissive default — Copy accepts any layout
-        // pair, mirroring verify_transform when no structural
-        // constraint applies). `kind` is hoisted out of the loop to
-        // leak one Lean String instead of one per transform.
-        let kind_lean = lean_ffi::str_to_lean("copy");
-        let transforms_ok = transforms.iter().all(|(in_l, out_l)| {
-            let in_lean = lean_ffi::str_to_lean(in_l);
-            let out_lean = lean_ffi::str_to_lean(out_l);
-            unsafe { lean_ffi::lean_verify_transform_prim(reg, in_lean, out_lean, kind_lean) != 0 }
-        });
-
-        // The `_prim` wrappers return a single all-or-nothing Bool, not
-        // per-read/write/transform results, so on failure emit one
-        // summary error entry (matching the prior structure). Empty
-        // Vecs on success => downstream `.iter().all(|r| r.valid)` is
-        // true and `*_errs` is empty.
-        let read_results: Vec<crate::state_read::StateReadVerification> = if reads_ok {
-            Vec::new()
-        } else {
-            vec![crate::state_read::StateReadVerification {
-                var_name: String::new(),
-                layout_name: String::new(),
-                field_name: String::new(),
-                valid: false,
-                error: Some(format!(
-                    "Lean lean_verify_state_reads_prim returned false ({} reads checked)",
-                    reads.len()
-                )),
-            }]
-        };
-        let write_results: Vec<crate::state_write::StateWriteVerification> = if writes_ok {
-            Vec::new()
-        } else {
-            vec![crate::state_write::StateWriteVerification {
-                var_name: String::new(),
-                layout_name: String::new(),
-                field_name: String::new(),
-                valid: false,
-                error: Some(format!(
-                    "Lean lean_verify_state_writes_prim returned false ({} writes checked)",
-                    writes.len()
-                )),
-            }]
-        };
-        let transform_results: Vec<crate::state_transform::StateTransformVerification> =
-            if transforms_ok {
-                Vec::new()
-            } else {
-                vec![crate::state_transform::StateTransformVerification {
-                    input_layout: String::new(),
-                    output_layout: String::new(),
-                    valid: false,
-                    transform_kind: crate::state_transform::TransformKind::Copy,
-                    error: Some(format!(
-                        "Lean lean_verify_transform_prim returned false for at least one of {} transforms (kind=copy)",
-                        transforms.len()
-                    )),
-                }]
-            };
-
-        (read_results, write_results, transform_results)
-    };
-
-    Ok(outcome)
-}
 
 impl VerificationEngine {
     /// Construct a new verification engine.
@@ -1581,15 +1078,12 @@ impl VerificationEngine {
         use crate::state_write::{
             FieldInfo as WriteField, LayoutInfo as WriteLayout, StateWriteOp,
         };
-        // The 3 hand-written verifier functions are only called on the
-        // `cfg(not(feature = "pmt-runtime-check"))` path (see the routing
-        // branch below). Gating the imports avoids unused-import warnings
-        // when the feature is on (Lean FFI path is used instead).
-        #[cfg(not(feature = "pmt-runtime-check"))]
+        // The 3 hand-written Rust verifier functions are now ALWAYS used.
+        // (Previously gated on `cfg(not(feature = "pmt-runtime-check"))` for
+        // the Lean FFI routing path; that path has been removed — see the
+        // "Lean FFI bridge removed" comment block above.)
         use crate::state_read::verify_state_reads;
-        #[cfg(not(feature = "pmt-runtime-check"))]
         use crate::state_transform::verify_all_transforms;
-        #[cfg(not(feature = "pmt-runtime-check"))]
         use crate::state_write::verify_state_writes;
         use std::collections::{HashMap, HashSet};
         use vuma_scg::node::{
@@ -1964,50 +1458,15 @@ impl VerificationEngine {
 
         // ┬─ Run the 3 verifiers ───────────────────────────────────────────────────
         //
-        // Wave 5-A: the 3 PMT state verifiers are now routed. When the
-        // `pmt-runtime-check` feature is ON, `verify_pmt_via_lean` drives
-        // them through the Lean-extracted FFI surface (stub-success path
-        // by default; real extraction when the `lean_ffi_linked` cfg is
-        // emitted by build.rs). When the feature is OFF, the hand-written
-        // Rust verifiers are used (the parity-tested path) - unchanged.
-        #[cfg(feature = "pmt-runtime-check")]
-        let (read_results, write_results, transform_results) = match verify_pmt_via_lean(
-            &state_var_layouts,
-            &read_layouts,
-            &reads,
-            &write_layouts,
-            &writes,
-            &consumed_vars,
-            &transform_layouts,
-            &transforms,
-        ) {
-            Ok(triple) => triple,
-            Err(e) => {
-                // Lean module init failed (only reachable on the
-                // `lean_ffi_linked` real-Lean path). Surface it as a hard
-                // Violation rather than silently passing verification.
-                return VerificationResult::new(
-                    "pmt-state",
-                    VerificationStatus::Violated {
-                        counterexample: CounterExample::new(
-                            Vec::new(),
-                            default_program_point(),
-                            e.clone(),
-                        ),
-                    },
-                    e,
-                );
-            }
-        };
-
-        #[cfg(not(feature = "pmt-runtime-check"))]
-        let (read_results, write_results, transform_results) = {
-            let read_results = verify_state_reads(&state_var_layouts, &read_layouts, &reads);
-            let write_results =
-                verify_state_writes(&state_var_layouts, &write_layouts, &writes, &consumed_vars);
-            let transform_results = verify_all_transforms(&transform_layouts, &transforms);
-            (read_results, write_results, transform_results)
-        };
+        // Lean FFI bridge removed: PMT state verification ALWAYS uses the
+        // hand-written Rust verifiers (the parity-tested path). The
+        // `pmt-runtime-check` Cargo feature is now a no-op for IVE — it no
+        // longer routes through `verify_pmt_via_lean`. See the "Lean FFI
+        // bridge removed" comment block above for the rationale.
+        let read_results = verify_state_reads(&state_var_layouts, &read_layouts, &reads);
+        let write_results =
+            verify_state_writes(&state_var_layouts, &write_layouts, &writes, &consumed_vars);
+        let transform_results = verify_all_transforms(&transform_layouts, &transforms);
 
         // Wave 2 task IVE-2-A: arena_bounds verifier is now ACTIVE.
         // Walk the SCG for ArenaAlloc nodes and verify each references a
