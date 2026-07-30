@@ -212,8 +212,40 @@ and pushing to `origin HEAD`. Without `--commit`, the script prints a
 preview (staged files + byte sizes + proposed commit message + `git
 status --porcelain`) and stops short of running `git commit` /
 `git push`. `--dry-run` is the same preview without the commit step.
-Flag precedence: `--no-push` → `--dry-run` → `--commit` →
-default-off summary.
+Flag precedence: `--no-push` > `--dry-run` > `--commit` >
+default-off — the first matching flag in this order wins, and the elif
+chain in `scripts/pi5_test_suite.sh` (L1084–1186) is laid out in
+exactly this order.
+
+The full 5-case behaviour matrix (verified against the script's
+decision chain at `scripts/pi5_test_suite.sh:1084–1186`):
+
+| Flags | Commit? | Push? | Behaviour |
+|---|---|---|---|
+| *(default, no flags)* | no | no | preview printed (staged files, sizes, proposed msg, `git status --porcelain`); no commit, no push |
+| `--dry-run` | no | no | same preview as default; no commit, no push |
+| `--commit` | yes | yes | stages result files, writes commit, pushes to `origin HEAD` |
+| `--commit --no-push` | **no** | **no** | `--no-push` wins by precedence and its branch body skips commit entirely — equivalent to the default-off path (see note below) |
+| `--commit --dry-run` | no | no | `--dry-run` wins by precedence; preview only, no commit, no push |
+
+> **Note on `--commit --no-push` (intentional behaviour).** Although
+> combining `--commit` with `--no-push` reads as "commit locally,
+> suppress push", the script's `--no-push` branch is the **first**
+> clause of the elif chain and, when it fires, it skips the commit
+> step entirely rather than falling through to the `--commit` branch.
+> This is intentional per the inline comment at
+> `scripts/pi5_test_suite.sh:1047–1048`:
+>
+> > `--no-push` is retained for backward compatibility and is now
+> > equivalent to the new default (no commit/push) but prints its own
+> > message.
+>
+> In other words, `--no-push` is a **default-off synonym** (it
+> suppresses the whole commit/push step), not a push-only suppressor.
+> Operators who want "commit locally, don't push" have no single-flag
+> way to express it with this script — they must either commit
+> manually outside the script, or apply the restructure sketched in
+> `scripts/audit/wave5_flag_precedence.md` §6.
 
 ---
 
