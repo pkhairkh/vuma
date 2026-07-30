@@ -3210,7 +3210,34 @@ impl Backend for AArch64Backend {
         let verify_callee_saved = std::env::var("VUMA_VERIFY_CALLEE_SAVED")
             .map(|v| v == "1")
             .unwrap_or(false);
-        let code = if real_regalloc {
+
+        // R1-b2-fix: detect functions containing spawn_worker/fork IPC calls.
+        // The regalloc path's prologue/epilogue assumes a single function
+        // invocation; fork() breaks this assumption because the child process
+        // runs with a different register state than the parent. For functions
+        // that contain spawn_worker or fork calls (lowered to clone syscall
+        // nr=220 on aarch64), fall back to the stack-slot path (which doesn't
+        // have this issue). This is a targeted opt-out, not a global disable.
+        //
+        // spawn_worker is lowered by expand_spawn_worker (ipc_lowering.rs) to
+        // Syscall{nr: 220, ...} (clone). By the time allocate_registers runs,
+        // the Call{func: "spawn_worker"} has been replaced; we detect the
+        // lowered form instead.
+        let contains_fork = func.blocks.iter().any(|block| {
+            block.instructions.iter().any(|inst| {
+                match inst {
+                    crate::ir::IRInstr::Call { func: fname, .. } => {
+                        fname == "spawn_worker" || fname == "fork"
+                    }
+                    // clone syscall (nr=220 on aarch64/linux) — spawn_worker
+                    // lowers to this. Also catch vfork (nr=221) just in case.
+                    crate::ir::IRInstr::Syscall { nr, .. } => *nr == 220 || *nr == 221,
+                    _ => false,
+                }
+            })
+        });
+
+        let code = if real_regalloc && !contains_fork {
             let allocator = crate::regalloc::LinearScanAllocator::new();
             match allocator.allocate_function(func) {
                 Ok(alloc) => {
@@ -3240,6 +3267,19 @@ impl Backend for AArch64Backend {
                     emitter.emit_function(func, None)
                 }
             }
+        } else if real_regalloc && contains_fork {
+            // R1-b2-fix: function contains spawn_worker/fork — fall back to
+            // stack-slot path. The regalloc path's callee-saved prologue/epilogue
+            // doesn't interact correctly with fork() (child process runs with
+            // different register state). This is a known limitation documented
+            // in docs/caveats.md §2.1.1.
+            vuma_log!(
+                debug,
+                "aarch64 regalloc: function '{}' contains spawn_worker/fork; \
+                 falling back to stack-slot ISel (fork+regalloc not supported)",
+                func.name
+            );
+            emitter.emit_function(func, None)
         } else {
             emitter.emit_function(func, None)
         }
