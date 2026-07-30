@@ -1,0 +1,174 @@
+⚠ [14/112] Replayed PMT.SimRel
+warning: PMT/SimRel.lean:195:28: `List.get!` has been deprecated: Use `a[i]!` instead.
+warning: PMT/SimRel.lean:195:55: `List.get!` has been deprecated: Use `a[i]!` instead.
+warning: PMT/SimRel.lean:203:17: `List.get!` has been deprecated: Use `a[i]!` instead.
+warning: PMT/SimRel.lean:203:38: `List.get!` has been deprecated: Use `a[i]!` instead.
+warning: PMT/SimRel.lean:209:20: `List.get!` has been deprecated: Use `a[i]!` instead.
+warning: PMT/SimRel.lean:209:44: `List.get!` has been deprecated: Use `a[i]!` instead.
+⚠ [16/112] Replayed PMT.IRLemmas
+warning: PMT/IRLemmas.lean:112:30: `List.get!` has been deprecated: Use `a[i]!` instead.
+warning: PMT/IRLemmas.lean:112:57: `List.get!` has been deprecated: Use `a[i]!` instead.
+warning: PMT/IRLemmas.lean:129:19: `List.get!` has been deprecated: Use `a[i]!` instead.
+warning: PMT/IRLemmas.lean:129:40: `List.get!` has been deprecated: Use `a[i]!` instead.
+warning: PMT/IRLemmas.lean:143:22: `List.get!` has been deprecated: Use `a[i]!` instead.
+warning: PMT/IRLemmas.lean:143:46: `List.get!` has been deprecated: Use `a[i]!` instead.
+⚠ [19/112] Replayed PMT.IVE.Soundness.StateWrites
+warning: PMT/IVE/Soundness/StateWrites.lean:106:5: unused variable `hwf_env`
+note: this linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [31/112] Replayed PMT.PillarSoundness
+warning: PMT/PillarSoundness.lean:301:5: unused variable `h_no_externs`
+note: this linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [36/112] Replayed PMT.Iris.Composition
+warning: PMT/Iris/Composition.lean:81:53: Local variable 'live' resembles constructor 'PMT.Liveness.live' - write '.live' (with a dot) or 'PMT.Liveness.live' to use the constructor.
+note: this linter can be disabled with `set_option linter.constructorNameAsVariable false`
+warning: PMT/Iris/Composition.lean:116:45: Local variable 'live' resembles constructor 'PMT.Liveness.live' - write '.live' (with a dot) or 'PMT.Liveness.live' to use the constructor.
+note: this linter can be disabled with `set_option linter.constructorNameAsVariable false`
+warning: PMT/Iris/Composition.lean:148:32: Local variable 'live' resembles constructor 'PMT.Liveness.live' - write '.live' (with a dot) or 'PMT.Liveness.live' to use the constructor.
+note: this linter can be disabled with `set_option linter.constructorNameAsVariable false`
+warning: PMT/Iris/Composition.lean:159:32: Local variable 'live' resembles constructor 'PMT.Liveness.live' - write '.live' (with a dot) or 'PMT.Liveness.live' to use the constructor.
+note: this linter can be disabled with `set_option linter.constructorNameAsVariable false`
+⚠ [38/112] Replayed PMT.Iris.FractionalPerm
+warning: PMT/Iris/FractionalPerm.lean:116:5: unused variable `h`
+note: this linter can be disabled with `set_option linter.unusedVariables false`
+warning: PMT/Iris/FractionalPerm.lean:139:5: unused variable `h1`
+note: this linter can be disabled with `set_option linter.unusedVariables false`
+warning: PMT/Iris/FractionalPerm.lean:139:32: unused variable `h2`
+note: this linter can be disabled with `set_option linter.unusedVariables false`
+warning: PMT/Iris/FractionalPerm.lean:149:14: unused variable `h1le1`
+note: this linter can be disabled with `set_option linter.unusedVariables false`
+warning: PMT/Iris/FractionalPerm.lean:185:5: unused variable `hperm`
+note: this linter can be disabled with `set_option linter.unusedVariables false`
+ℹ [45/112] Replayed PMT.Test.SorryFreeAudit
+info: PMT/Test/SorryFreeAudit.lean:40:0: pmt_soundness : ∀ (prog : Program),
+  WellTyped prog →
+    ∀ (s : ExecState),
+      (∀ (st : Step), st ∈ prog → WF_Layout st.layout ∧ s.live st.in_var = Liveness.live) →
+        CapacityInvariant s.arena →
+          ∃ r,
+            exec prog s = r ∧
+              match r with
+              | Result.ok final_used => final_used ≤ s.arena.capacity
+              | Result.trap code => code = 1 ∨ code = 134 ∨ code = 135
+info: PMT/Test/SorryFreeAudit.lean:47:0: no_oob_trap_for_well_typed_strong : ∀ (prog : Program) (initial_var : String),
+  WellTypedStrong prog initial_var →
+    ∀ (s : ExecState),
+      (∀ (st : Step), st ∈ prog → WF_Layout st.layout ∧ s.live st.in_var = Liveness.live) →
+        CapacityInvariant s.arena →
+          s.live initial_var = Liveness.live → ∀ (r : Result), exec prog s = r → r ≠ Result.trap 134
+info: PMT/Test/SorryFreeAudit.lean:54:0: IVE.Soundness.verify_transform_sound : ∀ (layouts : IVE.Soundness.LayoutRegistry) (input_layout output_layout : String),
+  (IVE.Soundness.verify_transform layouts input_layout output_layout).valid = true →
+    (∃ in_info, layouts input_layout = some in_info) ∧
+      (∃ out_info, layouts output_layout = some out_info) ∧
+        (input_layout = output_layout ∧
+            (IVE.Soundness.verify_transform layouts input_layout output_layout).transform_kind =
+              IVE.Soundness.TransformKind.identity ∨
+          (∃ in_info out_info,
+              layouts input_layout = some in_info ∧
+                layouts output_layout = some out_info ∧
+                  input_layout ≠ output_layout ∧
+                    in_info.total_size = out_info.total_size ∧
+                      (IVE.Soundness.verify_transform layouts input_layout output_layout).transform_kind =
+                        IVE.Soundness.TransformKind.reinterpret) ∨
+            ∃ in_info out_info,
+              layouts input_layout = some in_info ∧
+                layouts output_layout = some out_info ∧
+                  input_layout ≠ output_layout ∧
+                    in_info.total_size ≠ out_info.total_size ∧
+                      (IVE.Soundness.verify_transform layouts input_layout output_layout).transform_kind =
+                        IVE.Soundness.TransformKind.copy)
+info: PMT/Test/SorryFreeAudit.lean:58:0: IVE.Soundness.verify_state_reads_sound : ∀ (env : String → Option IVE.Soundness.LayoutInfo)
+  (reads : List IVE.Soundness.StateRead),
+  (∀ (v : IVE.Soundness.StateReadVerification), v ∈ IVE.Soundness.verify_state_reads env reads → v.valid = true) →
+    ∀ (v : IVE.Soundness.StateReadVerification), v ∈ IVE.Soundness.verify_state_reads env reads → v.valid = true
+info: PMT/Test/SorryFreeAudit.lean:62:0: IVE.Soundness.verify_state_writes_sound : ∀ (env : String → Option IVE.Soundness.LayoutInfo) (consumed : List String)
+  (writes : List IVE.Soundness.StateWrite),
+  (∀ (v : IVE.Soundness.StateWriteVerification),
+      v ∈ IVE.Soundness.verify_state_writes env consumed writes → v.valid = true) →
+    ∀ (v : IVE.Soundness.StateWriteVerification),
+      v ∈ IVE.Soundness.verify_state_writes env consumed writes → v.valid = true
+info: PMT/Test/SorryFreeAudit.lean:69:0: arena_sim_preserved_by_alloc : ∀ (lean : Arena) (raw : RawArena) (size : Nat),
+  arena_sim lean raw →
+    ∀ (raw' : RawArena),
+      raw_alloc raw size = Except.ok raw' →
+        lean.used + align8_nat size ≤ lean.capacity →
+          ∃ lean',
+            aligned_alloc lean { name := "alloc", total_size := size, fields := [] } = lean' ∧ arena_sim lean' raw'
+info: PMT/Test/SorryFreeAudit.lean:73:0: initial_state_sim : ∀ (capacity : Nat),
+  capacity < USIZE_BOUND →
+    ∀ (live_vars : List String),
+      ∃ lean raw,
+        lean.arena = { base := 0, capacity := capacity, used := 0 } ∧
+          raw =
+              { base := 0, offset := 0, capacity := capacity, layout := { size := capacity, align := 8 },
+                phase := ArenaPhase.alive, created_thread := 1 } ∧
+            state_sim lean raw live_vars
+info: PMT/Test/SorryFreeAudit.lean:78:0: lean_exec_total_and_canonical : ∀ (lean_prog rust_prog : IRProgram) (env : String → Layout),
+  program_sim lean_prog rust_prog →
+    lean_prog.well_typed env →
+      ∀ (lean_state : ExecState) (raw : RawArena) (live_vars : List String),
+        state_sim lean_state raw live_vars →
+          live_vars ≠ [] →
+            ∃ r,
+              exec lean_prog.to_program lean_state = r ∧
+                match r with
+                | Result.ok a => True
+                | Result.trap c => c = 1 ∨ c = 134 ∨ c = 135
+info: PMT/Test/SorryFreeAudit.lean:82:0: lean_internal_soundness_strong : ∀ (lean_prog rust_prog : IRProgram) (env : String → Layout) (initial_var : String),
+  program_sim lean_prog rust_prog →
+    lean_prog.well_typed env →
+      DataflowOk lean_prog.to_program initial_var →
+        ∀ (lean_state : ExecState) (raw : RawArena) (live_vars : List String),
+          state_sim lean_state raw live_vars →
+            lean_state.live initial_var = Liveness.live →
+              (∀ (st : Step), st ∈ lean_prog.to_program → lean_state.live st.in_var = Liveness.live) →
+                CapacityInvariant lean_state.arena →
+                  lean_prog.functions ≠ [] →
+                    ∃ r,
+                      exec lean_prog.to_program lean_state = r ∧
+                        match r with
+                        | Result.ok fu => fu ≤ lean_state.arena.capacity
+                        | Result.trap c => c = 1 ∨ c = 134 ∨ c = 135
+info: PMT/Test/SorryFreeAudit.lean:89:0: Extraction.verified_capacity_check_correct : ∀ (used size capacity : BitVec 64),
+  Extraction.verified_capacity_check used size capacity = true →
+    size.toNat ≤ (BitVec.allOnes 64).toNat - used.toNat ∧ (used + size).toNat ≤ capacity.toNat
+info: PMT/Test/SorryFreeAudit.lean:90:0: Extraction.verified_field_bounds_check_correct : ∀ (f : Field) (layout : Layout),
+  Extraction.verified_field_bounds_check f layout = true → f.offset + f.size ≤ layout.total_size
+info: PMT/Test/SorryFreeAudit.lean:91:0: Extraction.verified_linearity_check_correct : ∀ (var : String) (consumed : List String),
+  Extraction.verified_linearity_check var consumed = true → ¬var ∈ consumed
+info: PMT/Test/SorryFreeAudit.lean:92:0: Extraction.verified_pmt_check_correct : ∀ (used capacity : Nat) (f : Field) (layout : Layout) (var : String)
+  (consumed : List String),
+  Extraction.verified_pmt_check used capacity f layout var consumed = true →
+    used < 2 ^ 64 →
+      layout.total_size < 2 ^ 64 →
+        capacity < 2 ^ 64 →
+          used + layout.total_size ≤ capacity ∧ f.offset + f.size ≤ layout.total_size ∧ ¬var ∈ consumed
+info: PMT/Test/SorryFreeAudit.lean:101:0: Extraction.capacity_check_sequential : ∀ (used0 size1 size2 capacity : Nat),
+  Extraction.verified_capacity_check (BitVec.ofNat 64 used0) (BitVec.ofNat 64 size1) (BitVec.ofNat 64 capacity) = true →
+    Extraction.verified_capacity_check (BitVec.ofNat 64 (used0 + size1)) (BitVec.ofNat 64 size2)
+          (BitVec.ofNat 64 capacity) =
+        true →
+      used0 < 2 ^ 64 →
+        size1 < 2 ^ 64 → size2 < 2 ^ 64 → capacity < 2 ^ 64 → used0 + size1 < 2 ^ 64 → used0 + size1 + size2 ≤ capacity
+info: PMT/Test/SorryFreeAudit.lean:102:0: Extraction.field_bounds_check_all_fields : ∀ (layout : Layout),
+  (∀ (f : Field), f ∈ layout.fields → Extraction.verified_field_bounds_check f layout = true) →
+    ∀ (f : Field), f ∈ layout.fields → f.offset + f.size ≤ layout.total_size
+info: PMT/Test/SorryFreeAudit.lean:103:0: Extraction.linearity_check_all_writes : ∀ (writes consumed : List String),
+  (∀ (w : String), w ∈ writes → Extraction.verified_linearity_check w consumed = true) →
+    ∀ (w : String), w ∈ writes → ¬w ∈ consumed
+info: PMT/Test/SorryFreeAudit.lean:104:0: Extraction.pmt_check_decomposes : ∀ (used capacity : Nat) (f : Field) (layout : Layout) (var : String)
+  (consumed : List String),
+  Extraction.verified_pmt_check used capacity f layout var consumed = true ↔
+    Extraction.verified_capacity_check (BitVec.ofNat 64 used) (BitVec.ofNat 64 layout.total_size)
+          (BitVec.ofNat 64 capacity) =
+        true ∧
+      Extraction.verified_field_bounds_check f layout = true ∧ Extraction.verified_linearity_check var consumed = true
+info: PMT/Test/SorryFreeAudit.lean:105:0: Extraction.pmt_check_implies_all_invariants : ∀ (used capacity : Nat) (f : Field) (layout : Layout) (var : String)
+  (consumed : List String),
+  Extraction.verified_pmt_check used capacity f layout var consumed = true →
+    used < 2 ^ 64 →
+      layout.total_size < 2 ^ 64 →
+        capacity < 2 ^ 64 →
+          used + layout.total_size < 2 ^ 64 →
+            used + layout.total_size ≤ capacity ∧ f.offset + f.size ≤ layout.total_size ∧ ¬var ∈ consumed
+Build completed successfully.
+LAKE_EXIT_CODE=0
