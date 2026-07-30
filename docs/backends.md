@@ -37,7 +37,7 @@ follow `BackendTier` in `backend.rs`.
 
 | # | Name | File | ISA family | LOC | Tier | Regalloc | ELF | Known limitations | Formal |
 |--:|------|------|------------|----:|------|----------|-----|--------------------|--------|
-|  1 | `aarch64`     | `arm64.rs`              | ARMv8-A (AArch64)    |  6 235 | Complete        | LinearScan (real) | ELF64 LE | None — reference backend. | PMT only |
+|  1 | `aarch64`     | `arm64.rs`              | ARMv8-A (AArch64)    |  6 235 | Complete        | TargetAgnostic (real) | ELF64 LE | None — reference backend. | PMT only |
 |  2 | `aarch64_be`  | `aarch64_be.rs`         | ARMv8-A (BE data)   |    197 | Complete (wrap) | inherits AArch64  | ELF64 BE | BE data, LE instr. fetch (ARM ARM D6.1.3). | PMT only |
 |  3 | `x86_64`      | `x86_64/{mod,stack_slot_isel,disasm}.rs` | x86-64 (amd64) | 10 243 | Complete | TargetAgnostic (real) | ELF64 LE | SIMD codegen emits zero bytes (TODO, `x86_64/mod.rs:934`). | PMT only |
 |  4 | `x86_32`      | `x86_32/{mod,stack_slot_isel,disasm}.rs` | x86 (i386) |  6 277 | Complete | Stack-slot | ELF32 LE | I64 channel handle stored in 4-byte slot (K13A workaround). | PMT only |
@@ -61,9 +61,17 @@ Totals: 15 Complete + 4 Experimental = 19. The 4 Complete wrappers
 (`aarch64_be`, `armeb`, `mips64be`, `ppc64le`) delegate `allocate_registers`
 to their parent in a single line.
 
+> **Annotation-only caveat.** The 6 "real" allocator backends (rows 1, 2,
+> 3, 5, 12, 13) wire `TargetAgnosticRegAlloc` via `try_real_regalloc`, but
+> the encoded bytes still come from the stack-slot ISel baseline — the real
+> allocator annotates `reads` / `writes` metadata only (`regalloc_emit.rs:82-92`).
+> No VUMA backend emits register-based code in production today. See
+> [caveats.md §2.1](./caveats.md#21-stack-slot-isel-is-the-only-production-code-emission-path)
+> and §3 below.
+
 ---
 
-## 2. Stack-Slot ISel Pattern (15 of 19 backends)
+## 2. Stack-Slot ISel Pattern (12 of 19 backends)
 
 The dominant allocation strategy is **stack-slot instruction selection**:
 every virtual register is assigned a fixed slot at `[frame_pointer − offset]`
@@ -71,10 +79,14 @@ at function entry, and a small set of **scratch physical registers** is
 reused as ephemeral operands inside each instruction. The pattern is
 implemented per-backend in
 `{arm32,x86_32,mips64,loongarch64,riscv32,s390x,sparc64,...}/stack_slot_isel.rs`
-or inlined into `{m68k,alpha,hppa}.rs`. The 3 big-endian wrappers
-(`armeb`→`arm32`, `mips64be`→`mips64`, `ppc64le`→`ppc64`) inherit the
-parent's ISel verbatim. The 4th wrapper, `aarch64_be`→`aarch64`, inherits
-AArch64's `LinearScanAllocator` (see §3).
+or inlined into `{m68k,alpha,hppa}.rs`. The 2 big-endian stack-slot
+wrappers (`armeb`→`arm32`, `mips64be`→`mips64`) inherit the parent's
+stack-slot ISel verbatim. The other 2 wrappers (`aarch64_be`→`aarch64`,
+`ppc64le`→`ppc64`) inherit the parent's `TargetAgnosticRegAlloc`
+annotation pass (see §3). NB: even on the 6 backends with a real
+allocator wired, encoded bytes still come from the stack-slot ISel
+baseline — the real allocator annotates `reads` / `writes` metadata only
+(see [caveats.md §2.1](./caveats.md#21-stack-slot-isel-is-the-only-production-code-emission-path)).
 
 An IR op such as `BinOp{Add, dst: v5, lhs: v3, rhs: v4}` is lowered as:
 `load scratch0,[fp+v3_off]; load scratch1,[fp+v4_off]; add
@@ -84,16 +96,25 @@ is ~10–100× slower than a register op; this is acceptable for correctness
 testing but is the primary reason emitted VUMA binaries are not
 benchmark-grade.
 
-The four backends that **do not** use stack-slot ISel are:
-- `aarch64` + `aarch64_be` — `LinearScanAllocator` via `Emitter`
-  (`backend.rs:2212` → `regalloc.rs:1208`); see §3.1.
-- `x86_64` — `TargetAgnosticRegAlloc` (`x86_64/mod.rs:4081`); see §3.2.
+The seven backends whose `allocate_registers` does **more than** pure
+stack-slot ISel are:
+- `aarch64` + `aarch64_be` — `TargetAgnosticRegAlloc` via
+  `try_real_regalloc` (`backend.rs:3099`, `TargetAgnosticRegAlloc::new`
+  at `:3114`); see §3. `aarch64_be` inherits via one-line delegation.
+- `x86_64` — `TargetAgnosticRegAlloc` via `try_real_regalloc`
+  (`x86_64/mod.rs:4081`); see §3.
 - `riscv64` — `TargetAgnosticRegAlloc` via `try_real_regalloc`
-  (`riscv64.rs:6542`); see §3.2.
-- `ppc64` (and `ppc64le` via delegation) — `TargetAgnosticRegAlloc` via
-  `try_real_regalloc` (`ppc64/mod.rs:3011`); see §3.2.
-- `wasm32` — Wasm structured control flow uses locals and a trampoline
-  `br_table` dispatcher (`wasm32/mod.rs:2252-2300`); see §5.
+  (`riscv64.rs:6542`); see §3.
+- `ppc64` + `ppc64le` — `TargetAgnosticRegAlloc` via `try_real_regalloc`
+  (`ppc64/mod.rs:3011`); see §3. `ppc64le` inherits via one-line delegation.
+- `wasm32` — Wasm structured control flow (no registers; vregs → Wasm
+  locals) via `lower_function` (`wasm32/mod.rs:2252-2300`); see §5.
+
+NB: on the 6 "real" backends the `TargetAgnosticRegAlloc` runs only as
+an annotation pass over the stack-slot ISel baseline — encoded bytes
+still come from the stack-slot path. See
+[caveats.md §2.1](./caveats.md#21-stack-slot-isel-is-the-only-production-code-emission-path)
+for the metadata-only caveat.
 
 `loongarch64/reg_alloc_isel.rs` (1.6 K LOC) on disk is **dead code** — the
 module declaration is commented out at `loongarch64/mod.rs:6943` and the
@@ -103,46 +124,55 @@ it is not compiled.
 
 ---
 
-## 3. Real Linear-Scan Backends (4 tier-1 backends)
+## 3. Real Linear-Scan Backends (6 backends: 4 direct + 2 inherited)
 
-Four backends run a real linear-scan register allocator instead of
-stack-slot ISel. Both allocator implementations live in
-`src/codegen/src/regalloc.rs`.
-
-### 3.1 AArch64 — `LinearScanAllocator`
-
-`AArch64Backend::allocate_registers` (`backend.rs:2212`) drives
-`LinearScanAllocator` (`regalloc.rs:1208`), a real linear-scan allocator
-using the full AArch64 register set (caller-saved GPRs X9–X15, X16–X18,
-X8; SIMD V0–V31). Live-interval computation, boundary-safe overlap
-detection (`liveness_interference_from`), spill-weighted eviction
-(`spill_weight_with_pressure`), and copy coalescing
-(`coalesce_copies_post_alloc`). The `aarch64_be` wrapper
-(`aarch64_be.rs`) inherits this verbatim via its one-line
-`allocate_registers` delegation.
-
-### 3.2 x86_64 / riscv64 / ppc64 — `TargetAgnosticRegAlloc`
-
-`TargetAgnosticRegAlloc` (`regalloc.rs:2562`) is a `TargetDesc`-driven
-linear-scan allocator that takes the per-ISA register file from
-`target_desc::TargetDescRegistry::get(<isa>)`. Each of the three tier-1
-backends has a `try_real_regalloc` helper that returns `Some(RegAllocResult)`
-on success or `None` (so the backend falls back to the unannotated
-stack-slot ISel output) if the target description is missing or the
-allocator errored:
+Six backends wire `TargetAgnosticRegAlloc` (`regalloc.rs:2562`), a
+`TargetDesc`-driven linear-scan allocator that takes the per-ISA register
+file from `target_desc::TargetDescRegistry::get(<isa>)` and derives the
+allocatable / caller-saved / callee-saved pools by filtering
+`TargetDesc::registers` on `is_allocatable` / `is_callee_saved`. Each
+direct backend has a `try_real_regalloc` helper that returns
+`Some(RegAllocResult)` on success or `None` (so the backend falls back
+to the unannotated stack-slot ISel output) if the target description is
+missing or the allocator errored:
 
 | Backend | Wired at | TargetDesc lookup |
 |---------|----------|-------------------|
+| `aarch64` | `backend.rs:3099` (`try_real_regalloc`, `TargetAgnosticRegAlloc::new` at `:3114`) | `"aarch64"` |
 | `x86_64`  | `x86_64/mod.rs:4081` (`TargetAgnosticRegAlloc::new(target)`) | `"x86_64"` |
 | `riscv64` | `riscv64.rs:6542` (`try_real_regalloc`) | `"riscv64"` |
 | `ppc64`   | `ppc64/mod.rs:3011` (`try_real_regalloc`) | `"ppc64"` |
 
-`ppc64le` inherits `ppc64`'s allocator via one-line delegation. The
-`RegAllocResult` is merged into the stack-slot output by
-`regalloc_emit::annotate_with_regalloc`, which overwrites the
-`reads` / `writes` physical-register metadata on each
+The two wrappers `aarch64_be` and `ppc64le` inherit their parent's
+allocator via one-line delegation (`aarch64_be.rs:150-152`,
+`ppc64le.rs:400-406`). The `RegAllocResult` is merged into the
+stack-slot output by `regalloc_emit::annotate_with_regalloc`, which
+overwrites the `reads` / `writes` physical-register metadata on each
 `AllocatedInstruction` with the assigned physical registers. Spilled
 vregs keep their stack slot.
+
+**Annotation-only (critical).** The `encoded` bytes are NOT modified
+(`regalloc_emit.rs:82-92`); they always come from the stack-slot ISel
+baseline invoked *before* `try_real_regalloc`
+(`emitter.emit_function(func, None)` on aarch64,
+`stack_slot_isel::allocate_registers` on the others). The
+`reads` / `writes` metadata is consumed by disassemblers, debuggers, and
+downstream tooling — it does not change emitted code. **No VUMA backend
+emits register-based code in production today.** See
+[caveats.md §2.1](./caveats.md#21-stack-slot-isel-is-the-only-production-code-emission-path)
+for the full metadata-only caveat and the (currently unused)
+`emit_function_regalloc` plumbing at `emit.rs:1056` that would re-emit
+bytes from a `RegAllocResult`.
+
+`LinearScanAllocator` (`regalloc.rs:1208`) — an older AArch64-specific
+linear-scan allocator with hardcoded caller/callee-saved GPR+SIMD lists,
+live-interval computation, boundary-safe overlap detection
+(`liveness_interference_from`), spill-weighted eviction
+(`spill_weight_with_pressure`), and copy coalescing
+(`coalesce_copies_post_alloc`) — is **test-only**: `LinearScanAllocator::new`
+is invoked only inside `#[cfg(test)]` modules (`regalloc.rs:4738+`,
+`emit.rs:9188+`). It is retained for test-parity but is not on the
+production code path.
 
 The float-op verifier (`verify_function_float_ops`, `backend.rs:154`) is
 called **centrally** as `verify_program_float_ops(&ir_program)`
@@ -367,8 +397,10 @@ Notable design decisions and QEMU workarounds, with file:line references.
 The full QEMU workaround list (with removal conditions) is in §8;
 only backend-specific items appear here.
 
-**aarch64** (`arm64.rs`). Reference backend. Real `LinearScanAllocator`
-(`regalloc.rs:1208`). FP conversion Rn-field position regression test at
+**aarch64** (`arm64.rs`). Reference backend. Real `TargetAgnosticRegAlloc`
+via `try_real_regalloc` (`backend.rs:3099`, `TargetAgnosticRegAlloc::new`
+at `:3114`; the older `LinearScanAllocator` at `regalloc.rs:1208` is
+test-only — see §3). FP conversion Rn-field position regression test at
 `:5827-5835` (Rn at bits[9:5], not bits[14:10] which is the fixed
 `00000` constant field).
 
