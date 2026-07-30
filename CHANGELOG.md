@@ -6,6 +6,49 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 where applicable.
 
+## [0.2.0-alpha.6] — Aarch64 Regalloc Default-On
+
+This release fixes the LinearScanAllocator non-determinism and the CSEL
+flag-setting bug, enabling the aarch64 register-based emission path to
+become the DEFAULT production path (no env var needed).
+
+### Wave 1 — LinearScanAllocator Determinism Fix
+
+- W1-fix (f1d1c279): Replaced HashMap with BTreeMap for live intervals
+  (regalloc.rs:900) and coalescing groups (regalloc.rs:1137). HashMap
+  iteration order is non-deterministic (random seed), causing the
+  allocator to produce different register assignments on each build.
+  BTreeMap iterates in sorted key order (IRValueId = u32), making the
+  output reproducible. Verified: compiling u32_add twice produces
+  byte-identical binaries.
+
+### Wave 2 — CSEL Flag-Setting Fix + Default-On
+
+- W2-fix (f2baec68): Replaced SUB { rd: XZR } (non-flag-setting) with
+  CMP (SUBS XZR, flag-setting) in the regalloc path's Select/CtSelect
+  lowering. Also fixed rn/rm operand ordering to match the stack-slot
+  path. This fixed try_recv (exit 0 -> 77) and all Select-based tests.
+- W2-c-impl: Flipped VUMA_REAL_REGALLOC_AARCH64 to default-on. Set =0
+  to opt out. Verified: 30/30 curated tests pass with NO env var.
+
+### Production Impact
+
+- aarch64 now uses register-based emission by DEFAULT (no env var needed).
+- The stack-slot path remains available via VUMA_REAL_REGALLOC_AARCH64=0.
+- Binary sizes are ~5-11% smaller with the regalloc path (fewer ldr/str
+  through stack slots).
+- Full Pi5 cluster matrix: 29963/29963 (100%) — the default-on change
+  will be verified by the Pi5 cluster's next run.
+
+### Remaining Work (Deferred to Human Developer)
+
+- x86_64, riscv64, ppc64 register-based emitters: 4.5-7.5 weeks each
+  per design docs (R2-a-audit, CC-a-audit, CD-a-audit). Foundational
+  fixes (RBP/S0/R31 .not_allocatable(), Zero-register hazard) are in
+  place from v0.2.0-alpha.5.
+
+---
+
 ## [0.2.0-alpha.5] — Emitter Foundational Fixes
 
 This release applies the foundational register-allocator fixes identified
