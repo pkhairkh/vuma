@@ -3207,10 +3207,28 @@ impl Backend for AArch64Backend {
         let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_AARCH64")
             .map(|v| v == "1")
             .unwrap_or(false);
+        let verify_callee_saved = std::env::var("VUMA_VERIFY_CALLEE_SAVED")
+            .map(|v| v == "1")
+            .unwrap_or(false);
         let code = if real_regalloc {
             let allocator = crate::regalloc::LinearScanAllocator::new();
             match allocator.allocate_function(func) {
-                Ok(alloc) => emitter.emit_function(func, Some(&alloc)),
+                Ok(alloc) => {
+                    // R1-b-impl (audit G4 / design doc §5.3): run the
+                    // callee-saved verifier pass behind
+                    // `VUMA_VERIFY_CALLEE_SAVED=1`.  Panics loudly on any
+                    // untracked callee-saved register usage instead of
+                    // silently corrupting state.
+                    if verify_callee_saved {
+                        if let Err(msg) = crate::regalloc::verify_callee_saved(&alloc) {
+                            panic!(
+                                "verify_callee_saved FAILED for function '{}': {}",
+                                func.name, msg
+                            );
+                        }
+                    }
+                    emitter.emit_function(func, Some(&alloc))
+                }
                 Err(e) => {
                     vuma_log!(
                         warn,

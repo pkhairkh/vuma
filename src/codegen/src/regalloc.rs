@@ -1216,6 +1216,24 @@ pub struct LinearScanAllocator {
     callee_saved_simd: Vec<SimdFpRegister>,
 }
 
+/// Dedicated spill-scratch GPR for the linear-scan allocator.
+///
+/// `X15` is caller-saved per AAPCS64 (so it needs no prologue/epilogue
+/// save), is not an argument register (X0–X7), and is not used as scratch
+/// by the emitter's large-immediate or address-computation sequences
+/// (which use X9 / X10 / X16 / X17).  It is reserved exclusively for
+/// spill-code sequences emitted by [`LinearScanAllocator::gen_spill_reload`]
+/// and [`LinearScanAllocator::gen_eviction_spill_reload`].
+///
+/// The register is removed from the allocatable pool in
+/// [`LinearScanAllocator::new`] so the linear-scan allocator never
+/// assigns a vreg to X15.  When a vreg is "entirely spilled" or evicted,
+/// it is preassigned to X15 in `vreg_to_preg`, and the spill/reload
+/// code uses X15 — guaranteeing the emitter's `resolve_reg` returns the
+/// same register the spill code loads into / stores from (R1-b-impl fix
+/// for audit gap G2).
+const SPILL_SCRATCH_GPR: Register = Register::X15;
+
 impl LinearScanAllocator {
     /// Create a new linear-scan allocator with the full ARM64 register set.
     ///
@@ -1227,6 +1245,12 @@ impl LinearScanAllocator {
     /// - `X30` (link register)
     /// - `SP`, `XZR`
     pub fn new() -> Self {
+        // NOTE: X15 is reserved as the dedicated spill-scratch register
+        // (see `SPILL_SCRATCH_GPR` below) — it is NOT in the allocatable
+        // pool, so the linear-scan allocator never assigns a vreg to X15.
+        // This prevents collisions between vreg-assigned registers and
+        // the scratch used by `gen_spill_reload` / `gen_eviction_spill_reload`
+        // (R1-b-impl fix for audit gap G2).
         let caller_saved_gprs = vec![
             Register::X0,
             Register::X1,
@@ -1242,7 +1266,6 @@ impl LinearScanAllocator {
             Register::X12,
             Register::X13,
             Register::X14,
-            Register::X15,
         ];
 
         let callee_saved_gprs = vec![
@@ -1318,6 +1341,22 @@ impl LinearScanAllocator {
     pub fn allocate_function(&self, func: &IRFunction) -> Result<AllocationResult> {
         let computer = LiveRangeComputer::new();
         let (mut intervals, call_positions) = computer.compute(func);
+
+        // R1-b-impl debug.
+        if std::env::var("VUMA_LOG").is_ok() {
+            eprintln!(
+                "[debug] allocate_function('{}'): {} intervals, {} call_positions",
+                func.name,
+                intervals.len(),
+                call_positions.len()
+            );
+            for i in &intervals {
+                eprintln!(
+                    "[debug]   interval %v{} [{},{}] crosses_call={} uses={:?} defs={:?}",
+                    i.vreg, i.start, i.end, i.crosses_call, i.use_positions, i.def_positions
+                );
+            }
+        }
 
         // Compute loop-nesting depth for each vreg and set it on
         // the intervals. This makes the spill_weight() loop_multiplier
@@ -1413,6 +1452,7 @@ impl LinearScanAllocator {
                 RegClass::Gpr => {
                     if let Some(preg) = self.try_alloc_gpr(
                         interval,
+                        intervals,
                         &mut free_caller_gprs,
                         &mut free_callee_gprs,
                         &mut active_gprs,
@@ -1473,9 +1513,14 @@ impl LinearScanAllocator {
     }
 
     /// Try to allocate a GPR for the given interval.
+    ///
+    /// `intervals` is the full sorted slice of live intervals (used to look
+    /// up the evicted interval's `use_positions` / `def_positions` when
+    /// generating eviction spill/reload code — R1-b-impl fix for audit G1).
     fn try_alloc_gpr(
         &self,
         interval: &LiveInterval,
+        intervals: &[LiveInterval],
         free_caller: &mut Vec<Register>,
         free_callee: &mut Vec<Register>,
         active: &mut Vec<(IRValueId, Register, u32, u32)>,
@@ -1499,6 +1544,7 @@ impl LinearScanAllocator {
         // heuristic can factor in current live-range pressure.
         Self::spill_gpr(
             interval,
+            intervals,
             active,
             next_spill_idx,
             result,
@@ -1517,6 +1563,7 @@ impl LinearScanAllocator {
     /// the register count) or toward evicting an active one.
     fn spill_gpr(
         interval: &LiveInterval,
+        intervals: &[LiveInterval],
         active: &mut Vec<(IRValueId, Register, u32, u32)>,
         next_spill_idx: &mut u32,
         result: &mut AllocationResult,
@@ -1529,7 +1576,14 @@ impl LinearScanAllocator {
             let offset = Self::spill_offset(slot_idx, RegClass::Gpr);
             let slot = SpillSlot::new(slot_idx, offset, RegClass::Gpr);
 
-            Self::gen_spill_reload(interval, PhysReg::Gpr(Register::X0), &slot, result);
+            // R1-b-impl (G2 fix): preassign the vreg to the dedicated
+            // spill-scratch register (X15) so the emitter's `resolve_reg`
+            // returns the same register the spill code loads into / stores
+            // from.  X15 is caller-saved, so it is NOT added to
+            // `used_callee_saved_gprs` (no prologue/epilogue save needed).
+            let scratch = PhysReg::Gpr(SPILL_SCRATCH_GPR);
+            result.vreg_to_preg.insert(interval.vreg, scratch);
+            Self::gen_spill_reload(interval, scratch, &slot, result);
             result.spill_slots.insert(interval.vreg, slot);
 
             return Ok(None);
@@ -1568,7 +1622,10 @@ impl LinearScanAllocator {
             let offset = Self::spill_offset(slot_idx, RegClass::Gpr);
             let slot = SpillSlot::new(slot_idx, offset, RegClass::Gpr);
 
-            Self::gen_spill_reload(interval, PhysReg::Gpr(Register::X0), &slot, result);
+            // R1-b-impl (G2 fix): preassign the vreg to the spill scratch.
+            let scratch = PhysReg::Gpr(SPILL_SCRATCH_GPR);
+            result.vreg_to_preg.insert(interval.vreg, scratch);
+            Self::gen_spill_reload(interval, scratch, &slot, result);
             result.spill_slots.insert(interval.vreg, slot);
 
             return Ok(None);
@@ -1583,16 +1640,28 @@ impl LinearScanAllocator {
         let slot = SpillSlot::new(slot_idx, offset, RegClass::Gpr);
         result.spill_slots.insert(evict_vreg, slot.clone());
 
-        // Remove the evicted vreg's physical register mapping.
-        result.vreg_to_preg.remove(&evict_vreg);
+        // R1-b-impl (G1/G2 fix): re-map the evicted vreg to the spill
+        // scratch (X15) so future uses/defs go through the scratch and the
+        // spill slot.  The old `evict_reg` is being handed to the new
+        // interval, so the evicted vreg can no longer use it.  X15 is
+        // caller-saved, so it is NOT added to `used_callee_saved_gprs`.
+        let scratch = PhysReg::Gpr(SPILL_SCRATCH_GPR);
+        result.vreg_to_preg.insert(evict_vreg, scratch);
         result.used_callee_saved_gprs.remove(&evict_reg);
 
-        // Generate spill for evicted interval (at the point of eviction,
-        // the value must be stored to its slot) and reloads at each future
-        // use position.
+        // Look up the evicted interval so we can emit reloads at every
+        // future use position and spills at every future def position.
+        let evict_interval: Option<&LiveInterval> =
+            intervals.iter().find(|i| i.vreg == evict_vreg);
+
+        // Generate the boundary spill (at the eviction position, NOT
+        // position 0) saving the old value from `evict_reg` to the slot,
+        // plus reloads/spills for future uses/defs going through X15.
         Self::gen_eviction_spill_reload(
             evict_vreg,
             PhysReg::Gpr(evict_reg),
+            evict_interval,
+            interval.start,
             evict_end,
             &slot,
             result,
@@ -1701,9 +1770,15 @@ impl LinearScanAllocator {
         result.vreg_to_preg.remove(&evict_vreg);
         result.used_callee_saved_simd.remove(&evict_reg);
 
+        // R1-b-impl: SIMD eviction passes `None` for the interval (the
+        // emitter's `emit_spill_reload` currently no-ops SIMD spills, so
+        // emitting reloads would have no effect).  Only the boundary spill
+        // is emitted, matching the prior behaviour.
         Self::gen_eviction_spill_reload(
             evict_vreg,
             PhysReg::SimdFp(evict_reg),
+            None,
+            interval.start,
             evict_end,
             &slot,
             result,
@@ -1798,32 +1873,97 @@ impl LinearScanAllocator {
         }
     }
 
-    /// Generate spill code for an evicted interval.
+    /// Generate spill code for an evicted interval (R1-b-impl fix for G1).
     ///
-    /// When an interval is evicted from a register, we need to:
-    /// 1. Spill the current value to the stack slot.
-    /// 2. Generate reloads at every future use position that falls within
-    ///    the evicted interval's remaining live range.
+    /// When an interval is evicted from a register at `current_pos`, we need
+    /// to:
+    /// 1. **Boundary spill** at `current_pos`: save the value currently
+    ///    held in `evict_preg` to `slot` BEFORE the new interval's first
+    ///    def overwrites `evict_preg`.  This spill is keyed at
+    ///    `current_pos` and is emitted by `emit_function_regalloc` BEFORE
+    ///    the instruction at `current_pos` (the emitter has been extended
+    ///    to emit `SpillCode::Spill` entries at `pos` as boundary spills,
+    ///    in addition to the existing `pos+1` post-instruction spills).
+    /// 2. **Reloads at future use positions**: for each `use_pos >=
+    ///    current_pos` in the evicted interval's `use_positions`, emit a
+    ///    `SpillCode::Reload` keyed at `use_pos` using the spill-scratch
+    ///    register (`SPILL_SCRATCH_GPR` for GPRs).  The evicted vreg has
+    ///    been re-mapped to the scratch in `vreg_to_preg`, so the
+    ///    emitter's `resolve_reg` returns the scratch for the vreg — and
+    ///    the reload loads the slot value into the same scratch the
+    ///    instruction will read.
+    /// 3. **Spills at future def positions**: for each `def_pos >
+    ///    current_pos` in the evicted interval's `def_positions`, emit a
+    ///    `SpillCode::Spill` keyed at `def_pos + 1` (after the def)
+    ///    using the scratch, so the new value is written back to the slot.
+    ///
+    /// If `evict_interval` is `None` (e.g. the SIMD path, where the
+    /// emitter does not yet emit SIMD spill/reload code), only the
+    /// boundary spill is emitted — matching the prior behaviour.
     fn gen_eviction_spill_reload(
         evict_vreg: IRValueId,
         evict_preg: PhysReg,
+        evict_interval: Option<&LiveInterval>,
+        current_pos: u32,
         _evict_end: u32,
         slot: &SpillSlot,
         result: &mut AllocationResult,
     ) {
-        // Spill the evicted value to its slot.
-        let spill = SpillCode::Spill {
+        // 1. Boundary spill at the eviction position (NOT position 0).
+        //    Saves the old value from `evict_preg` to the slot before the
+        //    new interval's first def overwrites `evict_preg`.
+        let boundary_spill = SpillCode::Spill {
             vreg: evict_vreg,
             preg: evict_preg,
             slot: slot.clone(),
         };
-        result.spill_code.entry(0).or_default().push(spill);
+        // Prepend so this spill is emitted before any reload at the same
+        // position (the emitter iterates the Vec in order).
+        result
+            .spill_code
+            .entry(current_pos)
+            .or_default()
+            .insert(0, boundary_spill);
 
-        // For a proper implementation, we would need the use positions of the
-        // evicted interval to generate reloads. Since we only track the vreg
-        // and end position in the active list, we record a generic spill.
-        // The emitter will need to handle reloads when it encounters uses of
-        // spilled vregs.
+        // 2/3. Reloads at future uses + spills at future defs, going
+        //     through the spill-scratch register.  The evicted vreg has
+        //     already been re-mapped to the scratch in `vreg_to_preg` by
+        //     the caller, so the emitter's `resolve_reg` will return the
+        //     scratch for every future use/def of the evicted vreg.
+        let scratch = match evict_preg {
+            PhysReg::Gpr(_) => PhysReg::Gpr(SPILL_SCRATCH_GPR),
+            // SIMD/FP: keep using the evicted register as the "scratch"
+            // for the spill code (the emitter's `emit_spill_reload`
+            // currently no-ops SIMD spills, so this is conservative).
+            PhysReg::SimdFp(r) => PhysReg::SimdFp(r),
+        };
+
+        if let Some(interval) = evict_interval {
+            // Reloads before future uses (use_pos >= current_pos).
+            for &use_pos in interval.use_positions.iter().filter(|&&p| p >= current_pos) {
+                let reload = SpillCode::Reload {
+                    vreg: evict_vreg,
+                    preg: scratch,
+                    slot: slot.clone(),
+                };
+                result.spill_code.entry(use_pos).or_default().push(reload);
+            }
+            // Spills after future defs (def_pos > current_pos — the def
+            // AT current_pos belongs to the new interval, not the evicted
+            // vreg, so it's excluded).
+            for &def_pos in interval.def_positions.iter().filter(|&&p| p > current_pos) {
+                let spill = SpillCode::Spill {
+                    vreg: evict_vreg,
+                    preg: scratch,
+                    slot: slot.clone(),
+                };
+                result
+                    .spill_code
+                    .entry(def_pos + 1)
+                    .or_default()
+                    .push(spill);
+            }
+        }
     }
 
     /// Calculate the stack offset for a spill slot.
@@ -2137,6 +2277,18 @@ pub struct RegAllocator {
     /// Used by the emitter to prevent resolve_reg from spilling a register
     /// that's already been resolved for the current instruction.
     pinned_regs: HashSet<Register>,
+    /// R1-b-impl fix: vregs that have been "materialised" — i.e. returned
+    /// by [`RegAllocator::allocate`] at least once and are therefore
+    /// actually live.  [`RegAllocator::preassign`] does NOT add to this
+    /// set; only `allocate` does.  [`RegAllocator::spill_caller_saved`]
+    /// only spills vregs that are in BOTH `used_regs` and `materialised`,
+    /// so preassigned-but-not-yet-resolved vregs (e.g. a vreg defined by
+    /// an upcoming `Call` instruction that's been preassigned to a
+    /// physical register by the LinearScanAllocator) are NOT spilled
+    /// before the call.  This prevents the call's return value from
+    /// being silently overwritten by a stale reload of a not-yet-live
+    /// vreg.
+    materialised: HashSet<IRValueId>,
 }
 
 impl RegAllocator {
@@ -2183,6 +2335,7 @@ impl RegAllocator {
             callee_saved_pool,
             callee_saved_used: HashMap::new(),
             pinned_regs: HashSet::new(),
+            materialised: HashSet::new(),
         }
     }
 
@@ -2192,6 +2345,9 @@ impl RegAllocator {
     pub fn allocate(&mut self, vreg: IRValueId) -> Result<Arm64RegAllocResult> {
         // If already allocated (in caller-saved pool), return the same register.
         if let Some(&reg) = self.used_regs.get(&vreg) {
+            // R1-b-impl: mark as materialised so spill_caller_saved knows
+            // this vreg is actually live (not just preassigned).
+            self.materialised.insert(vreg);
             return Ok(Arm64RegAllocResult {
                 reg,
                 spilled: None,
@@ -2200,6 +2356,7 @@ impl RegAllocator {
         }
         // If already allocated (in callee-saved pool), return the same register.
         if let Some(&reg) = self.callee_saved_used.get(&vreg) {
+            self.materialised.insert(vreg);
             return Ok(Arm64RegAllocResult {
                 reg,
                 spilled: None,
@@ -2212,6 +2369,7 @@ impl RegAllocator {
 
         if let Some(reg) = self.free_regs.pop() {
             self.used_regs.insert(vreg, reg);
+            self.materialised.insert(vreg);
             return Ok(Arm64RegAllocResult {
                 reg,
                 spilled: None,
@@ -2220,6 +2378,7 @@ impl RegAllocator {
         }
         if let Some(reg) = self.callee_saved_pool.pop() {
             self.callee_saved_used.insert(vreg, reg);
+            self.materialised.insert(vreg);
             return Ok(Arm64RegAllocResult {
                 reg,
                 spilled: None,
@@ -2230,6 +2389,7 @@ impl RegAllocator {
         let spill_info = self.spill()?;
         if let Some(reg) = self.free_regs.pop() {
             self.used_regs.insert(vreg, reg);
+            self.materialised.insert(vreg);
             return Ok(Arm64RegAllocResult {
                 reg,
                 spilled: Some(spill_info),
@@ -2357,14 +2517,27 @@ impl RegAllocator {
     /// callee (e.g. fn_multiple_callers: caller1's return in X15 was
     /// overwritten by caller2's body, giving 5+5=10 instead of 4+5=9).
     pub fn spill_caller_saved(&mut self) -> Vec<(IRValueId, Register, u32)> {
-        let to_spill: Vec<(IRValueId, Register)> =
-            self.used_regs.iter().map(|(id, reg)| (*id, *reg)).collect();
+        // R1-b-impl fix: only spill vregs that are "materialised" — i.e.
+        // have been returned by `allocate` at least once and are therefore
+        // actually live.  Preassigned-but-not-yet-resolved vregs (e.g. a
+        // vreg preassigned to a physical register by the LinearScanAllocator
+        // but defined by an upcoming `Call` instruction) are NOT spilled,
+        // because their value is not yet live and spilling would save
+        // garbage to the slot — then the post-call reload would overwrite
+        // the call's return value with that garbage.
+        let to_spill: Vec<(IRValueId, Register)> = self
+            .used_regs
+            .iter()
+            .filter(|(id, _)| self.materialised.contains(id))
+            .map(|(id, reg)| (*id, *reg))
+            .collect();
         let mut spilled = Vec::new();
         for (vreg, reg) in to_spill {
             let slot = self.next_spill_slot;
             self.next_spill_slot += 1;
             self.spill_map.insert(vreg, slot);
             self.used_regs.remove(&vreg);
+            self.materialised.remove(&vreg);
             self.free_regs.push(reg);
             spilled.push((vreg, reg, slot));
         }
@@ -4646,6 +4819,101 @@ impl LivenessAnalysis {
             .map(|(_, lo)| lo.clone())
             .unwrap_or_default()
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Callee-saved verifier pass (R1-b-impl, audit gap G4 / design doc §5.3)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Verify that every physical register recorded in an [`AllocationResult`] is
+/// either:
+///
+/// - **caller-saved** (X0–X18 per AAPCS64, excluding X29/X30/SP/XZR), OR
+/// - **in `used_callee_saved_gprs` / `used_callee_saved_simd`** (so the
+///   prologue/epilogue will save/restore it), OR
+/// - **X29 (FP), X30 (LR), SP, or XZR** (handled by the standard
+///   prologue/epilogue or special-cased), OR
+/// - **the dedicated spill-scratch register** (`SPILL_SCRATCH_GPR` = X15,
+///   which is caller-saved and used only for spill-code sequences).
+///
+/// This is a static check over the `AllocationResult`'s `vreg_to_preg` and
+/// `spill_code` maps.  It catches the silent callee-saved corruption
+/// described in audit gaps G1/G2/G3: if the spill-code paths ever emit an
+/// untracked callee-saved register again, this verifier flags it loudly
+/// instead of letting the value be silently lost.
+///
+/// Returns `Ok(())` if every physical register is allowed, or
+/// `Err(String)` describing the first violation.
+///
+/// # When to run
+///
+/// - Always in `#[cfg(test)]` (defence in depth).
+/// - In production behind `VUMA_VERIFY_CALLEE_SAVED=1` (panics on
+///   violation — wired in `AArch64Backend::allocate_registers`).
+pub fn verify_callee_saved(result: &AllocationResult) -> std::result::Result<(), String> {
+    // Build the set of allowed GPR encodings.
+    let mut allowed_gprs: HashSet<u32> = (0..=18u32).collect(); // X0–X18 caller-saved
+    allowed_gprs.insert(29); // X29 (FP)
+    allowed_gprs.insert(30); // X30 (LR)
+    allowed_gprs.insert(31); // SP / XZR
+    allowed_gprs.insert(SPILL_SCRATCH_GPR.encoding()); // X15 (already in 0..=18, but explicit)
+    for r in &result.used_callee_saved_gprs {
+        allowed_gprs.insert(r.encoding());
+    }
+
+    // Build the set of allowed SIMD/FP encodings.
+    // Caller-saved: V0–V7 (0–7), V16–V31 (16–31).
+    let mut allowed_simd: HashSet<u32> = (0..=7u32).chain(16..=31u32).collect();
+    for r in &result.used_callee_saved_simd {
+        allowed_simd.insert(r.encoding());
+    }
+
+    let check_preg = |preg: PhysReg| -> Option<String> {
+        match preg {
+            PhysReg::Gpr(r) => {
+                if !allowed_gprs.contains(&r.encoding()) {
+                    return Some(format!(
+                        "verify_callee_saved: physical register {} (X{}) is not caller-saved, \
+                         not in used_callee_saved_gprs, and not X29/X30/SP/XZR",
+                        r,
+                        r.encoding()
+                    ));
+                }
+            }
+            PhysReg::SimdFp(r) => {
+                if !allowed_simd.contains(&r.encoding()) {
+                    return Some(format!(
+                        "verify_callee_saved: physical register {} (V{}) is not caller-saved \
+                         and not in used_callee_saved_simd",
+                        r,
+                        r.encoding()
+                    ));
+                }
+            }
+        }
+        None
+    };
+
+    // 1. Check every vreg → preg mapping.
+    for (&vreg, &preg) in &result.vreg_to_preg {
+        if let Some(msg) = check_preg(preg) {
+            return Err(format!("vreg {} -> {}: {}", vreg, preg, msg));
+        }
+    }
+
+    // 2. Check every spill-code entry.
+    for (pos, codes) in &result.spill_code {
+        for sc in codes {
+            let preg = match sc {
+                SpillCode::Spill { preg, .. } | SpillCode::Reload { preg, .. } => *preg,
+            };
+            if let Some(msg) = check_preg(preg) {
+                return Err(format!("spill_code@{} {:?}: {}", pos, sc, msg));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
