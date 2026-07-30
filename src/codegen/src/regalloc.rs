@@ -944,8 +944,14 @@ impl LiveRangeComputer {
                     interval.extend_to(pos);
                 }
 
-                // Track function call positions.
-                if matches!(instr, IRInstr::Call { .. }) {
+                // Track function call positions AND syscall positions.
+                // R1-b3-fix: syscalls also clobber caller-saved registers per
+                // AAPCS64 (Linux kernel may write X0-X18 on syscall return).
+                // The allocator must treat syscall positions as call positions
+                // so vregs live across syscalls are kept in callee-saved
+                // registers (or spilled). Without this, try_recv (which does
+                // a read syscall) loses vregs in caller-saved registers.
+                if matches!(instr, IRInstr::Call { .. } | IRInstr::Syscall { .. }) {
                     call_positions.insert(pos);
                 }
 
