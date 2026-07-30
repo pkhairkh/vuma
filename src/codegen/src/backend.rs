@@ -3174,14 +3174,61 @@ impl Backend for AArch64Backend {
 
         // Use the existing Emitter to emit the function, which internally
         // performs register allocation and instruction encoding.
+        //
+        // ── F2-b-impl: aarch64 real-regalloc opt-in ────────────────────
+        // When `VUMA_REAL_REGALLOC_AARCH64=1` is set in the environment,
+        // run the ARM64-specific `LinearScanAllocator`
+        // (`regalloc.rs:1318`) to obtain an `AllocationResult`, and feed
+        // it to `Emitter::emit_function` via the `Some(&alloc)` arm —
+        // which dispatches to the byte-changing `emit_function_regalloc`
+        // path at `emit.rs:1056` (callee-saved prologue/epilogue, real
+        // spill/reload insertion, copy elision, real vreg→preg mapping).
+        // On `Err` from the allocator we fall back to the stack-slot path
+        // (today's behaviour) so a single bad function never blocks the
+        // whole compilation — see F2-a-audit design doc §6 Phase 1 and
+        // §7.1 (commit `7083e1c7`).
+        //
+        // When the env var is unset (default), behaviour is unchanged:
+        // `emit_function(func, None)` selects the stack-slot path
+        // (`emit_function_stack_slot`), producing the same bytes as
+        // before this wire-up.  The metadata-only `try_real_regalloc` +
+        // `annotate_with_regalloc` step at the bottom of this method
+        // still runs in both modes — it populates `reads`/`writes` from
+        // a separate target-agnostic allocator pass and is additive.
+        //
+        // Out-of-scope (per design doc §7.2, separate PR): the byte-
+        // changing emitter computes its own `frame_size` at `emit.rs:1146`
+        // (which includes the callee-saved area), but `aarch64_compute_
+        // frame_size` (used below) does not.  The mismatch only affects
+        // debug/unwind info, not the emitted bytes themselves, so QEMU
+        // smoke tests pass.  The §7.2 `EmitResult` API change is deferred
+        // to keep this wire-up minimal.
         let mut emitter = crate::emit::Emitter::new();
-        let code =
-            emitter
-                .emit_function(func, None)
-                .map_err(|e| BackendError::RegisterAllocFailed {
-                    isa: "aarch64",
-                    reason: e.to_string(),
-                })?;
+        let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_AARCH64")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        let code = if real_regalloc {
+            let allocator = crate::regalloc::LinearScanAllocator::new();
+            match allocator.allocate_function(func) {
+                Ok(alloc) => emitter.emit_function(func, Some(&alloc)),
+                Err(e) => {
+                    vuma_log!(
+                        warn,
+                        "aarch64 LinearScanAllocator failed for '{}': {}, \
+                         falling back to stack-slot ISel",
+                        func.name,
+                        e
+                    );
+                    emitter.emit_function(func, None)
+                }
+            }
+        } else {
+            emitter.emit_function(func, None)
+        }
+        .map_err(|e| BackendError::RegisterAllocFailed {
+            isa: "aarch64",
+            reason: e.to_string(),
+        })?;
 
         let func_name = func.name.clone();
         let frame_size = aarch64_compute_frame_size(func);
