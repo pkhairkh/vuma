@@ -1,6 +1,6 @@
 // uaf_compile_time — Compile-time UAF detection baseline (live state)
 // Expected exit code: 42
-// Compile: compile_dump <file> <out> <backend> --opt-level=O3 [--safe]
+// Compile: compile_dump <file> <out> <backend> --opt-level=O3
 //
 // UAF positive test: allocates a state buffer, writes 42 to
 // data[0], and reads it back. The state is LIVE throughout — no
@@ -17,8 +17,9 @@
 // The runtime `__uaf_trap` stub fires only if a future
 // `inject_liveness_check_ir` pass is added to `memory_safety.rs`.
 //
-// This test passes both with and without `--safe` — the state is
-// always live, so no liveness check (even if injected) would trap.
+// This test passes regardless of bounds-check IR injection (always on in
+// VUMA 2.0) — the state is always live, so no liveness check (even if
+// injected) would trap.
 //
 // VUMA Key Concepts:
 //   - state_new(Buf) allocates a typed buffer (LIVE)

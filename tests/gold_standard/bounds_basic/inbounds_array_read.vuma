@@ -3,10 +3,11 @@
 //
 // Bounds positive test: allocate a 16-byte buffer (via PMT
 // state_new of a layout containing a `[u8; 16]` array field), write
-// the value 42 to index 0, then read it back. With `--safe`, the
-// index 0 is within `[0, 16)` so no `__oob_trap` fires and execution
-// proceeds normally. Without `--safe` (this gold-standard mode), the
-// behaviour is identical: in-bounds access is well-defined.
+// the value 42 to index 0, then read it back. With bounds-check IR
+// (always on in VUMA 2.0), the index 0 is within `[0, 16)` so no
+// `__oob_trap` fires and execution proceeds normally. (In legacy mode
+// without bounds-check IR, the behaviour is identical: in-bounds access
+// is well-defined.)
 //
 // VUMA Key Concepts:
 //   - state_new(Layout) allocation (PMT idiom)

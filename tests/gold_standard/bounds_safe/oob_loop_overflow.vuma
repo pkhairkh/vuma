@@ -1,20 +1,21 @@
 // oob_loop_overflow — Loop goes one past array end
 // Expected exit code: 134
-// Compile: compile_dump <file> <out> <backend> --opt-level=O3 --safe
+// Compile: compile_dump <file> <out> <backend> --opt-level=O3
 //
 // Bounds SAFE-ONLY negative test: allocate a 4-byte buffer
 // (`[u8; 4]`) and loop `i` over the closed range [0, 4] (using
 // `i <= 4` as the loop condition — a classic off-by-one in the loop
-// bound). Each iteration writes `i` to `b.data[i]`. With `--safe`,
-// on the final iteration (i == 4) the injected `UGe(i, 4)` bounds
-// check evaluates to true (4 >= 4) and dispatches to `__oob_trap`,
-// which aborts with exit code 134 (SIGABRT, 128 + 6).
+// bound). Each iteration writes `i` to `b.data[i]`. With bounds-check
+// IR (always on in VUMA 2.0), on the final iteration (i == 4) the
+// injected `UGe(i, 4)` bounds check evaluates to true (4 >= 4) and
+// dispatches to `__oob_trap`, which aborts with exit code 134
+// (SIGABRT, 128 + 6).
 //
 // IMPORTANT: This test is NOT in the regular `bounds_wave1/` gold
-// standard suite because it only passes when compiled with `--safe`.
-// Without `--safe`, the OOB write corrupts adjacent memory and
-// behaviour is undefined. The expected exit code below assumes
-// `--safe` was passed at compile time.
+// standard suite because it only passes with bounds-check IR injected
+// (always on in VUMA 2.0). Without bounds-check IR (legacy mode), the
+// OOB write corrupts adjacent memory and behaviour is undefined. The
+// expected exit code below assumes bounds-check IR is injected.
 //
 // VUMA Key Concepts:
 //   - state_new(Layout) allocation (PMT idiom)

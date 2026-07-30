@@ -1,20 +1,22 @@
 // oob_large_index — Very large index
 // Expected exit code: 134
-// Compile: compile_dump <file> <out> <backend> --opt-level=O3 --safe
+// Compile: compile_dump <file> <out> <backend> --opt-level=O3
 //
 // Bounds SAFE-ONLY negative test: allocate an 8-byte buffer
 // (`[u8; 8]`) and read at index 255 — a very large index that is far
-// out of range. With `--safe`, the injected `UGe(idx, 8)` bounds
-// check evaluates to true (255 >= 8) and dispatches to `__oob_trap`,
-// which aborts with exit code 134 (SIGABRT, 128 + 6).
+// out of range. With bounds-check IR (always on in VUMA 2.0), the
+// injected `UGe(idx, 8)` bounds check evaluates to true (255 >= 8) and
+// dispatches to `__oob_trap`, which aborts with exit code 134
+// (SIGABRT, 128 + 6).
 //
 // IMPORTANT: This test is NOT in the regular `bounds_wave1/` gold
-// standard suite because it only passes when compiled with `--safe`.
-// Without `--safe`, the OOB access is undefined behaviour: a 255-byte
-// offset from a stack/heap allocation will typically land in an
-// unmapped page and crash with SIGSEGV (exit 139), but the exact
-// outcome is platform-dependent. The expected exit code below
-// assumes `--safe` was passed at compile time.
+// standard suite because it only passes with bounds-check IR injected
+// (always on in VUMA 2.0). Without bounds-check IR (legacy mode), the
+// OOB access is undefined behaviour: a 255-byte offset from a
+// stack/heap allocation will typically land in an unmapped page and
+// crash with SIGSEGV (exit 139), but the exact outcome is
+// platform-dependent. The expected exit code below assumes
+// bounds-check IR is injected.
 //
 // VUMA Key Concepts:
 //   - state_new(Layout) allocation (PMT idiom)
@@ -30,7 +32,7 @@ layout Buf = { data: [u8; 8] }
 
 transform main() -> i32 {
     let b = state_new(Buf);
-    // Read far past the 8-byte array — should trap with exit 134 when --safe
+    // Read far past the 8-byte array — should trap with exit 134
     let idx: u32 = 255;
     return b.data[idx];
 }

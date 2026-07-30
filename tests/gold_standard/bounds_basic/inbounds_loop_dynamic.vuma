@@ -9,7 +9,8 @@
 // don't propagate" codegen bug — see inbounds_loop.vuma). Returns
 // 1+2+...+9 = 45.
 //
-// With `--safe`, every `buf.data[i]` access is checked at runtime:
+// With bounds-check IR (always on in VUMA 2.0), every `buf.data[i]`
+// access is checked at runtime:
 // `i` ranges over [0,9) and the buffer has 16 bytes, so each
 // `UGe(i, 16)` evaluates to false → no `__oob_trap`.
 //
