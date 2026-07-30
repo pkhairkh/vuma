@@ -21,9 +21,11 @@ transform main() -> i32 {
         channel_close(ch);
         return 0;
     }
-    // Parent: extract write_fd1 (handle[4], lower 32 bits of i64 load).
-    packed: i64 = shared_memory_read(ch, 4);
-    wfd: i64 = packed & 4294967295;
+    // Parent: extract write_fd1 (handle[4]) via a typed native-endian i32
+    // load — endianness-agnostic. See half_closed_channel.vuma for why
+    // the previous `shared_memory_read(ch, 4) & 0xFFFFFFFF` formulation
+    // extracted the wrong fd on big-endian backends.
+    wfd: i64 = shared_memory_read_i32(ch, 4);
 
     // Close the parent's write end.
     syscall(57, wfd);
