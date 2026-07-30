@@ -5,8 +5,8 @@
 // then read back via a runtime-computed index `idx = 2`. Because
 // `idx` is not a compile-time constant, the bounds check is forced
 // to be a genuine runtime `UGe(idx, 32)` test rather than folded by
-// the constant-propagation pass. With `--safe`, the check is false
-// (2 < 32) → no trap, load returns 25.
+// the constant-propagation pass. With bounds-check IR (always on in
+// VUMA 2.0), the check is false (2 < 32) → no trap, load returns 25.
 //
 // NOTE on exit code: the task spec said 55 but a `u8` cell can only
 // hold values 0–255 and `as i32` cast is unnecessary in VUMA — the

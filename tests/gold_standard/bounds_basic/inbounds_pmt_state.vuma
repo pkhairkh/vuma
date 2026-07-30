@@ -7,8 +7,8 @@
 // (no offset, statically-known layout), so the bounds-check injection
 // pass classifies them as `PointerKind::Safe` and emits no `__oob_trap`.
 //
-// With or without `--safe`, field access on a `state_new(MyBuf)`
-// instance is always well-defined: the layout is closed, the offsets
+// In all modes (bounds-check IR is always on in VUMA 2.0), field access
+// on a `state_new(MyBuf)` instance is always well-defined: the layout is closed, the offsets
 // are compile-time constants, and the field-access expression lowers
 // to a fixed-offset Load/Store.
 //

@@ -1,18 +1,19 @@
 // oob_offbyone — Off-by-one: index == length
 // Expected exit code: 134
-// Compile: compile_dump <file> <out> <backend> --opt-level=O3 --safe
+// Compile: compile_dump <file> <out> <backend> --opt-level=O3
 //
 // Bounds SAFE-ONLY negative test: allocate a 4-byte buffer
 // (`[u8; 4]`) and read at index 4 — exactly one past the last valid
-// index (the canonical off-by-one error). With `--safe`, the
-// injected `UGe(idx, 4)` bounds check evaluates to true (4 >= 4) and
-// dispatches to `__oob_trap`, which aborts with exit code 134
-// (SIGABRT, 128 + 6).
+// index (the canonical off-by-one error). With bounds-check IR
+// (always on in VUMA 2.0), the injected `UGe(idx, 4)` bounds check
+// evaluates to true (4 >= 4) and dispatches to `__oob_trap`, which
+// aborts with exit code 134 (SIGABRT, 128 + 6).
 //
 // IMPORTANT: This test is NOT in the regular `bounds_wave1/` gold
-// standard suite because it only passes when compiled with `--safe`.
-// Without `--safe`, the OOB access is undefined behaviour. The
-// expected exit code below assumes `--safe` was passed at compile time.
+// standard suite because it only passes with bounds-check IR injected
+// (always on in VUMA 2.0). Without bounds-check IR (legacy mode), the
+// OOB access is undefined behaviour. The expected exit code below
+// assumes bounds-check IR is injected.
 //
 // VUMA Key Concepts:
 //   - state_new(Layout) allocation (PMT idiom)
@@ -29,7 +30,7 @@ layout Buf = { data: [u8; 4] }
 
 transform main() -> i32 {
     let b = state_new(Buf);
-    // Read one past the 4-byte array — should trap with exit 134 when --safe
+    // Read one past the 4-byte array — should trap with exit 134
     let idx: u32 = 4;
     return b.data[idx];
 }

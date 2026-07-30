@@ -7,7 +7,8 @@
 // known "while-body local assignments don't propagate" codegen bug).
 // Returns 1+2+3+4 = 10.
 //
-// With `--safe`, every `buf.data[i]` access is checked at runtime:
+// With bounds-check IR (always on in VUMA 2.0), every `buf.data[i]`
+// access is checked at runtime:
 // `i` ranges over [0,4) and the buffer has 32 bytes, so each
 // `UGe(i, 32)` evaluates to false → no `__oob_trap`.
 //

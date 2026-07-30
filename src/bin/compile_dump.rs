@@ -82,10 +82,12 @@ fn compile_for_backend(
     kind: BackendKind,
 ) -> Result<(Vec<u8>, Option<String>), String> {
     // VUMA 2.0: verification is MANDATORY — `verify=true` always.
-    // `--safe` is OFF by default here (the diagnostic `diag` path does not
-    // expose it); callers that need bounds-check IR must use
+    // This diagnostic `diag` path does not expose a bounds-check toggle;
+    // callers that need bounds-check IR must use
     // `compile_for_backend_with_path` directly. `allow_inconclusive=false`
     // matches the Gap 1 "full flip" default (Inconclusive is a hard error).
+    // (`--safe` was removed in VUMA 2.0; runtime bounds checks are always on
+    // in the canonical `vuma build` / `vuma compile` pipeline.)
     compile_for_backend_with_path(source, kind, None, true, OptLevel::O3, false, false)
     // O3 always on
 }
@@ -277,9 +279,10 @@ fn compile_for_backend_with_path(
     // Use the unified direct AST→codegen bridge (same path as vuma build/emit/run).
     let mut codegen_scg = bridge_ast_to_codegen_scg(&ast);
 
-    // IMPL-1-safe-mandatory: when `--safe` is set, mutate the codegen SCG to
-    // insert `__oob_trap` bounds-check IR before every statically-bounded
-    // array access. Mirrors the canonical `pipeline.rs:5430-5495` flow:
+    // IMPL-1-safe-mandatory: mutate the codegen SCG to insert `__oob_trap`
+    // bounds-check IR before every statically-bounded array access (always on
+    // in VUMA 2.0; formerly gated by `--safe`, which has been removed).
+    // Mirrors the canonical `pipeline.rs:5430-5495` flow:
     //   1. `build_alloc_sizes` collects stack-allocation sizes (PMT state
     //      buffers + raw `allocate` arrays).
     //   2. `find_bounds_check_sites_with_bounds` is computed (kept for
@@ -584,11 +587,6 @@ fn main() {
         return;
     }
     // Parse flags:
-    //   --safe     accepted for backwards compatibility (no-op — runtime
-    //              bounds-check IR emission is ALWAYS ON in VUMA 2.0;
-    //              `__oob_trap` traps are injected before every
-    //              statically-bounded array access). The flag is accepted
-    //              but ignored, mirroring `--opt-level=O3`.
     //   --opt-level=O3   accepted for backwards compatibility (no-op —
     //              O3 is hardcoded and mandatory; any other value is
     //              rejected).
@@ -623,10 +621,10 @@ fn main() {
     // where Inconclusive was a hard error).
     let mut verify = true;
     let mut allow_inconclusive = false;
-    // IMPL-1-safe-mandatory: `--safe` is now ALWAYS ON. The flag is
-    // accepted for backwards compatibility but is a pure no-op (mirrors
-    // `--opt-level=O3`). Bounds-check + liveness-check IR injection is
-    // unconditionally emitted below.
+    // IMPL-1-safe-mandatory: runtime bounds checks are ALWAYS ON in VUMA 2.0
+    // (the `--safe` flag has been removed and is no longer parsed; callers
+    // passing it will be treated as a positional arg). Bounds-check +
+    // liveness-check IR injection is unconditionally emitted below.
     let safe = true;
     // O3 is **mandatory** in VUMA 2.0 — the `--opt-level` flag is now a
     // pure no-op (the parser only validates that the value is `O3` and
@@ -636,10 +634,7 @@ fn main() {
         .iter()
         .skip(1)
         .filter(|a| {
-            if *a == "--safe" {
-                // No-op: `safe` is always `true`. Accepted for backwards compat.
-                false
-            } else if *a == "--verify" {
+            if *a == "--verify" {
                 // Explicit on-switch (default is already `true`). Accepted
                 // for backwards compat and to make the IVE gate visible on
                 // the command line.
@@ -675,7 +670,7 @@ fn main() {
         .cloned()
         .collect();
     if positional.len() < 2 {
-        eprintln!("Usage: compile_dump <source.vuma> <output.bin> [backend] [--opt-level=O3] [--safe (always on)] [--verify] [--no-verify] [--allow-inconclusive]");
+        eprintln!("Usage: compile_dump <source.vuma> <output.bin> [backend] [--opt-level=O3] [--verify] [--no-verify] [--allow-inconclusive]");
         std::process::exit(1);
     }
     let path = &positional[0];

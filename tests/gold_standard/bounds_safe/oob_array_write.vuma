@@ -1,18 +1,19 @@
-// oob_array_write — Array write out of bounds (requires --safe)
+// oob_array_write — Array write out of bounds (requires bounds-check IR, always on in VUMA 2.0)
 // Expected exit code: 134
-// Compile: compile_dump <file> <out> <backend> --opt-level=O3 --safe
+// Compile: compile_dump <file> <out> <backend> --opt-level=O3
 //
 // Bounds SAFE-ONLY negative test: allocate a 4-byte buffer
-// (`[u8; 4]`) and write past its end at index 10. With `--safe`, the
-// injected `UGe(idx, 4)` check on the Store path evaluates to true
-// (10 >= 4) and dispatches to `__oob_trap`, aborting with exit 134
-// (SIGABRT, 128 + 6).
+// (`[u8; 4]`) and write past its end at index 10. With bounds-check IR
+// (always on in VUMA 2.0), the injected `UGe(idx, 4)` check on the Store
+// path evaluates to true (10 >= 4) and dispatches to `__oob_trap`,
+// aborting with exit 134 (SIGABRT, 128 + 6).
 //
 // IMPORTANT: This test is NOT in the regular `bounds_wave1/` gold
-// standard suite because it only passes when compiled with `--safe`.
-// Without `--safe`, the OOB write is undefined behaviour (may crash
-// or corrupt adjacent memory). The expected exit code below assumes
-// `--safe` was passed at compile time.
+// standard suite because it only passes with bounds-check IR injected
+// (always on in VUMA 2.0). Without bounds-check IR (legacy mode), the
+// OOB write is undefined behaviour (may crash or corrupt adjacent
+// memory). The expected exit code below assumes bounds-check IR is
+// injected.
 //
 // VUMA Key Concepts:
 //   - state_new(Layout) allocation

@@ -1,6 +1,6 @@
 // uaf_negative — UAF prevention via IVE linearity (legal pattern)
 // Expected exit code: 42
-// Compile: compile_dump <file> <out> <backend> --opt-level=O3 --safe
+// Compile: compile_dump <file> <out> <backend> --opt-level=O3
 //
 // UAF SAFE-ONLY positive test: documents the LEGAL transform
 // pattern (consume input → produce output → use output, never the
