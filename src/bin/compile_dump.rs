@@ -3,8 +3,9 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 use vuma::pipeline::{
-    bridge_ast_to_codegen_scg, build_alloc_sizes, build_pmt_layout_specs, collect_secret_vars,
-    run_ir_pipeline, run_scg_transforms, CompileConfig, CompileTarget, OptLevel, VerificationLevel,
+    bridge_ast_to_codegen_scg, build_alloc_sizes, build_pmt_layout_specs, collect_contracts,
+    collect_prove_blocks, collect_secret_vars, run_ir_pipeline, run_scg_transforms, CompileConfig,
+    CompileTarget, OptLevel, VerificationLevel,
 };
 use vuma_codegen::backend::{create_backend, AllocatedProgram, BackendKind};
 use vuma_codegen::scg_to_ir::IRBuilder;
@@ -209,14 +210,30 @@ fn compile_for_backend_with_path(
         // the unsound substring heuristic on labels/filenames.
         let secret_vars = collect_secret_vars(&ast);
         ive_input = ive_input.with_secret_vars(secret_vars);
+        // Collect contracts and prove blocks from the AST so Z3 can
+        // discharge non-trivial requires/ensures/prove clauses.
+        let contracts = collect_contracts(&ast);
+        let prove_blocks = collect_prove_blocks(&ast);
+        ive_input = ive_input
+            .with_contracts(contracts)
+            .with_prove_blocks(prove_blocks);
         let level = vuma_ive::invariant_aggregator::VerificationLevel::Pmt;
         let aggregator =
             vuma_ive::invariant_aggregator::InvariantAggregator::new().with_level(level);
         let result = aggregator.verify_all(&ive_input);
         let verdict = format!("{:?}", result.overall);
         let summary = format!(
-            "passed={} failed={} total={}",
-            result.summary.passed, result.summary.failed, result.summary.total_checked
+            "passed={} failed={} unverified={} total={} discharge_rate={}%",
+            result.summary.passed,
+            result.summary.failed,
+            result.summary.unverified,
+            result.summary.total_checked,
+            if result.summary.passed + result.summary.unverified > 0 {
+                100 * result.summary.passed
+                    / (result.summary.passed + result.summary.unverified)
+            } else {
+                100
+            }
         );
         ive_status = Some(format!("{} {}", verdict, summary));
         eprintln!("IVE: {} {}", verdict, summary);
