@@ -1,5 +1,6 @@
-VUMA Test Failures — 2026-07-30 07:07:38 UTC
-Total: 1 failures across 1 tests
+VUMA Test Failures — 2026-07-30 08:49:02 UTC
+Total: 36 failures across 2 tests
 Skipped: 0 (architecturally unavailable on target)
 
-  ipc                  ffi_basic.vuma                                exp=  42 [('sparc64', 124, 'TO')]
+  ipc                  ping_pong.vuma                                exp=  84 [('aarch64', 124, 'TO'), ('aarch64_be', 124, 'TO'), ('x86_64', 124, 'TO'), ('riscv64', 124, 'TO'), ('arm32', 124, 'TO'), ('armeb', 124, 'TO'), ('mips64', 124, 'TO'), ('mips64be', 124, 'TO'), ('ppc64', 124, 'TO'), ('ppc64le', 124, 'TO'), ('loongarch64', 124, 'TO'), ('riscv32', 124, 'TO'), ('x86_32', 124, 'TO'), ('s390x', 124, 'TO'), ('alpha', 124, 'TO'), ('m68k', 124, 'TO'), ('sparc64', 124, 'TO'), ('hppa', 124, 'TO')]
+  ipc                  session_types.vuma                            exp=  42 [('aarch64', 124, 'TO'), ('aarch64_be', 124, 'TO'), ('x86_64', 124, 'TO'), ('riscv64', 124, 'TO'), ('arm32', 124, 'TO'), ('armeb', 124, 'TO'), ('mips64', 124, 'TO'), ('mips64be', 124, 'TO'), ('ppc64', 124, 'TO'), ('ppc64le', 124, 'TO'), ('loongarch64', 124, 'TO'), ('riscv32', 124, 'TO'), ('x86_32', 124, 'TO'), ('s390x', 124, 'TO'), ('alpha', 124, 'TO'), ('m68k', 124, 'TO'), ('sparc64', 124, 'TO'), ('hppa', 124, 'TO')]
