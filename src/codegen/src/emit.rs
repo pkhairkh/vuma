@@ -1109,7 +1109,41 @@ impl Emitter {
         // (X19–X28) into `callee_saved_used` and removes them from
         // `callee_saved_pool`, so the greedy allocator won't double-assign
         // them.
+        //
+        // R1-b-impl fix: SKIP param vregs here.  Param vregs were already
+        // preassigned to their AAPCS64 argument registers (X0–X7) in the
+        // loop above, and the calling convention REQUIRES them to stay
+        // there — the caller passes args in X0–X7.  The LinearScanAllocator
+        // does not know about the calling convention, so its
+        // `vreg_to_preg` mapping for a param vreg may point to a non-arg
+        // register (e.g. X14).  Allowing that mapping to overwrite the
+        // arg-register preassignment silently breaks parameter passing —
+        // the function reads its argument from the wrong register
+        // (garbage) and returns wrong values.  This was the actual root
+        // cause of the 8 callee-saved-pressure regressions: the linear-
+        // scan allocator freely assigned param vregs to X14, and the
+        // emitter dutifully overwrote the X0 preassignment with X14.
+        let param_vregs: HashSet<u32> = func
+            .params
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| {
+                if i < 8 {
+                    if let IRValue::Register(vid) = p {
+                        Some(*vid)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
         for (&vreg, &preg) in &alloc.vreg_to_preg {
+            if param_vregs.contains(&vreg) {
+                // Param vreg — keep the arg-register preassignment from above.
+                continue;
+            }
             if let PhysReg::Gpr(r) = preg {
                 self.reg_alloc.preassign(vreg, r);
             }
@@ -1224,11 +1258,28 @@ impl Emitter {
                     continue;
                 }
 
-                // (Step 3) Emit reloads BEFORE the instruction.
+                // (Step 3) Emit boundary spills AND reloads BEFORE the
+                // instruction.  Boundary spills (SpillCode::Spill at `pos`)
+                // are eviction-point saves: the evicted register's old value
+                // is stored to its slot before the new interval's first def
+                // overwrites the register.  Reloads (SpillCode::Reload at
+                // `pos`) load a spilled vreg's value into the spill-scratch
+                // register just before the instruction reads it.
+                //
+                // (R1-b-impl fix for audit G1: previously, only Reloads at
+                // `pos` were emitted; Spills were only emitted at `pos+1`
+                // (after the instruction).  This meant the eviction boundary
+                // spill — which must happen BEFORE the overwriting def —
+                // was never emitted, silently losing the evicted value.)
                 if let Some(codes) = alloc.spill_code.get(&pos) {
                     for sc in codes {
-                        if let SpillCode::Reload { preg, slot, .. } = sc {
-                            self.emit_spill_reload(preg, slot, /*is_spill=*/ false)?;
+                        match sc {
+                            SpillCode::Reload { preg, slot, .. } => {
+                                self.emit_spill_reload(preg, slot, /*is_spill=*/ false)?;
+                            }
+                            SpillCode::Spill { preg, slot, .. } => {
+                                self.emit_spill_reload(preg, slot, /*is_spill=*/ true)?;
+                            }
                         }
                     }
                 }
@@ -1241,7 +1292,11 @@ impl Emitter {
                     self.reg_alloc.unpin(reg);
                 }
 
-                // (Step 3) Emit spills AFTER the instruction.
+                // (Step 3) Emit post-instruction spills AFTER the instruction
+                // (SpillCode::Spill at `pos+1`).  These are post-def spills
+                // for entirely-spilled intervals: the instruction wrote the
+                // vreg's new value into the spill-scratch register, and we
+                // now store it to the slot.
                 if let Some(codes) = alloc.spill_code.get(&(pos + 1)) {
                     for sc in codes {
                         if let SpillCode::Spill { preg, slot, .. } = sc {
@@ -1270,6 +1325,28 @@ impl Emitter {
                 func.name,
                 self.frame_size,
                 spill_area_aligned,
+            );
+        }
+
+        // R1-b-impl debug: dump spill_code + vreg_to_preg when VUMA_LOG set.
+        if std::env::var("VUMA_LOG").is_ok() {
+            eprintln!("[debug] emit_function_regalloc('{}'): vreg_to_preg =", func.name);
+            for (&v, &p) in &alloc.vreg_to_preg {
+                eprintln!("[debug]   %v{} -> {}", v, p);
+            }
+            eprintln!("[debug] emit_function_regalloc('{}'): spill_slots =", func.name);
+            for (&v, s) in &alloc.spill_slots {
+                eprintln!("[debug]   %v{} -> slot idx={} offset={}", v, s.index, s.offset);
+            }
+            eprintln!("[debug] emit_function_regalloc('{}'): spill_code =", func.name);
+            for (&pos, codes) in &alloc.spill_code {
+                for sc in codes {
+                    eprintln!("[debug]   @{}: {}", pos, sc);
+                }
+            }
+            eprintln!(
+                "[debug] emit_function_regalloc('{}'): used_callee_saved_gprs = {:?}",
+                func.name, alloc.used_callee_saved_gprs
             );
         }
 
@@ -2236,6 +2313,32 @@ impl Emitter {
                 // architecture this emitter actually lowers for today.
                 let native_nr =
                     crate::syscall_abi::translate_or_warn(self.backend_kind, *nr);
+
+                // R1-b-impl fix: spill all materialised caller-saved
+                // registers before the syscall.  On AArch64 Linux, the
+                // kernel clobbers X0–X18 (argument registers, syscall
+                // number X8, and scratch X9–X18) and preserves only X19–X29.
+                // Any live value in the caller-saved pool must be saved to
+                // the stack to survive the syscall; otherwise the syscall's
+                // clobber silently corrupts live vregs, causing the
+                // segfault seen on simple_send / ping_pong.  This mirrors
+                // the `IRInstr::Call` arm's spill logic at line ~1616.
+                let caller_spilled = self.reg_alloc.spill_caller_saved();
+                for (_vreg, reg, slot) in &caller_spilled {
+                    let sp_offset = 8 + (*slot as i32) * 8;
+                    self.emit_load_immediate(Register::X16, -(sp_offset as i64))?;
+                    self.emit_instruction(Instruction::ADD {
+                        rd: Register::X16,
+                        rn: Register::X29,
+                        rm: Operand::Reg { reg: Register::X16, shift: None },
+                    })?;
+                    self.emit_instruction(Instruction::STR {
+                        rt: *reg,
+                        rn: Register::X16,
+                        offset: 0,
+                    })?;
+                }
+
                 let arg_regs = [Register::X0, Register::X1, Register::X2,
                                 Register::X3, Register::X4, Register::X5];
                 for (i, arg) in args.iter().enumerate().take(6) {
@@ -2899,6 +3002,9 @@ impl Emitter {
 
     fn emit_instruction(&mut self, instr: Instruction) -> Result<()> {
         let word = instr.encode()?;
+        if std::env::var("VUMA_EMIT_TRACE").is_ok() {
+            eprintln!("[emit] {:08x}  {}", word, instr);
+        }
         self.code.push(word);
         Ok(())
     }
