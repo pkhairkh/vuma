@@ -2153,29 +2153,30 @@ impl Emitter {
                 ty,
             } => {
                 let width = RegWidth::from_ir_type(ty.as_ref());
-                // Lower select as: SUBS XZR, cond, #0; CSEL dst, false_val, true_val, NE
+                // Lower select as: CMP cond, #0; CSEL dst, true_val, false_val, NE
+                // W2-fix: use CMP (SUBS XZR, sets flags) instead of SUB (doesn't set flags).
+                // The prior code used SUB { rd: XZR } which is non-flag-setting, leaving
+                // stale flags. Combined with swapped rn/rm (rn=false, rm=true), this caused
+                // try_recv to return 0 instead of -2. Now matches the stack-slot path
+                // (emit.rs:5499): CMP + CSEL rn=true_val, rm=false_val.
                 let rd = self.resolve_reg(dst)?;
                 let rc = self.resolve_reg(cond)?;
                 let rt = self.resolve_reg(true_val)?;
                 let rf = self.resolve_reg(false_val)?;
-                // Compare cond against zero and select.
+                // CMP rc, #0 — sets flags (Z=1 if rc==0, Z=0 if rc!=0)
                 self.emit_instruction_with_width(
-                    Instruction::SUB {
-                        rd: Register::XZR,
+                    Instruction::CMP {
                         rn: rc,
                         rm: Operand::Imm12(0),
                     },
                     width,
                 )?;
-                // Set flags by using a separate CMP (SUB with XZR destination
-                // doesn't set flags; we need a flags-setting variant).
-                // We emulate this with: CMP rc, #0 which is SUBS XZR, rc, #0.
-                // Since we only have SUB, we use the existing CMP pattern.
+                // CSEL: if NE (cond != 0, true), dst = true_val (rn); else false_val (rm)
                 self.emit_instruction_with_width(
                     Instruction::CSEL {
                         rd,
-                        rn: rf,
-                        rm: rt,
+                        rn: rt,
+                        rm: rf,
                         cond: crate::arm64::Condition::NE,
                     },
                     width,
@@ -2265,16 +2266,23 @@ impl Emitter {
                 // On AArch64: Use CSEL for constant-time conditional select.
                 let width = RegWidth::from_ir_type(ty.as_ref());
                 let rd = self.resolve_reg(dst)?;
-                let _rc = self.resolve_reg(cond)?;
+                let rc = self.resolve_reg(cond)?;
                 let rt = self.resolve_reg(true_val)?;
                 let rf = self.resolve_reg(false_val)?;
-                // Use the same CSEL pattern as Select, which is constant-time
-                // on AArch64 (no branch).
+                // W2-fix: use CMP to set flags (same fix as Select above).
+                self.emit_instruction_with_width(
+                    Instruction::CMP {
+                        rn: rc,
+                        rm: Operand::Imm12(0),
+                    },
+                    width,
+                )?;
+                // CSEL: if NE (cond != 0), dst = true_val (rn); else false_val (rm)
                 self.emit_instruction_with_width(
                     Instruction::CSEL {
                         rd,
-                        rn: rf,
-                        rm: rt,
+                        rn: rt,
+                        rm: rf,
                         cond: crate::arm64::Condition::NE,
                     },
                     width,
