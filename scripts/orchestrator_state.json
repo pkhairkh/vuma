@@ -58,5 +58,9 @@
     "8-a-doc"
   ],
   "aborted": false,
-  "abort_reason": null
+  "abort_reason": null,
+  "pushed_to_origin": true,
+  "pushed_at": "2026-07-30T13:25:00Z",
+  "origin_main_sha": "5513a107",
+  "pushed_tag": "v0.2.0-alpha.1-caveats-remediation"
 }
