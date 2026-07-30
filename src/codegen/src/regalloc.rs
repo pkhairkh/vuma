@@ -897,7 +897,7 @@ impl LiveRangeComputer {
         // Phase 1: Assign sequential positions to every instruction.
         // We use 2*N for each instruction N, so that we can insert
         // spill/reload code at positions 2*N+1 if needed.
-        let mut intervals: HashMap<IRValueId, LiveInterval> = HashMap::new();
+        let mut intervals: BTreeMap<IRValueId, LiveInterval> = BTreeMap::new();
         let mut call_positions: BTreeSet<u32> = BTreeSet::new();
         let mut copies: Vec<CopyInfo> = Vec::new();
 
@@ -1134,7 +1134,10 @@ impl LiveRangeComputer {
         }
 
         // Merge intervals that were coalesced.
-        let mut groups: HashMap<IRValueId, Vec<&LiveInterval>> = HashMap::new();
+        // Determinism fix: use BTreeMap (not HashMap) so group iteration
+        // order is deterministic across rebuilds. The prior HashMap caused
+        // non-reproducible register assignment (E1-c-doc regalloc instability).
+        let mut groups: BTreeMap<IRValueId, Vec<&LiveInterval>> = BTreeMap::new();
         for interval in intervals.iter() {
             let root = find(&mut parent, interval.vreg);
             groups.entry(root).or_default().push(interval);
