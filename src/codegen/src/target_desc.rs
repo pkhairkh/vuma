@@ -2370,8 +2370,24 @@ fn ppc64_target_desc() -> TargetDesc {
         RegDesc::gpr("R28", 28).callee_saved(),
         RegDesc::gpr("R29", 29).callee_saved(),
         RegDesc::gpr("R30", 30).callee_saved(),
-        // R31: callee-saved, traditionally used as frame pointer
-        RegDesc::gpr("R31", 31).frame_pointer().callee_saved(),
+        // R31: callee-saved, traditionally used as frame pointer.
+        // Marked `.not_allocatable()` because the ppc64 stack-slot emitter
+        // (ppc64/mod.rs) dedicates R31 as the frame pointer (set up by
+        // `addi r31, r1, frame_size` in the prologue) and indexes every
+        // vreg slot / save-area slot off R31. If the target-agnostic
+        // register allocator ever assigned a vreg to R31, the prologue's
+        // `addi r31, r1, fs` would clobber that vreg, silently corrupting
+        // caller state. `frame_pointer()` alone does NOT clear
+        // `is_allocatable` (see `RegDesc::frame_pointer` at :1140), so the
+        // explicit `.not_allocatable()` is required — same pattern as
+        // x86_64 RBP (E2-a-fix, 00b6318f) and riscv64 x8/S0 (E3-ab-fix,
+        // 8605dc98). CD-a-audit (64212ac4) §6 gap 1 flagged this ppc64
+        // analogue. R1 (SP) and R2 (TOC) are already non-allocatable via
+        // their respective helper setters above.
+        RegDesc::gpr("R31", 31)
+            .frame_pointer()
+            .callee_saved()
+            .not_allocatable(),
         // F0: FP return (caller-saved)
         RegDesc::fpr("F0", 0).return_reg(),
         // F1-F13: FP arguments/return (caller-saved)
