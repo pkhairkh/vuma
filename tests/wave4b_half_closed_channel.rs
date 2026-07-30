@@ -14,9 +14,13 @@
 //! surviving direction (child→parent, offset 8) fully intact. There is no
 //! dedicated `channel_close_send` builtin — `channel_close` closes all 4 fds.
 //! To demonstrate a TRUE half-close, the .vuma test programs use:
-//!   - `shared_memory_read(ch, 4)` — a generic pointer-deref primitive that
-//!     loads i64 from `ch+4` (extracting write_fd1 in the lower 32 bits).
-//!   - `& 4294967295` — mask to isolate write_fd1.
+//!   - `shared_memory_read_i32(ch, 4)` — a typed pointer-deref primitive
+//!     that loads I32 from `ch+4` and zero-extends it to I64. (F3-b-fix,
+//!     commit d35c52c4, replaced the OLD `shared_memory_read(ch, 4)` +
+//!     `& 0xFFFFFFFF` mask with this typed I32 load + Cast ZExt — see
+//!     `scripts/audit/followup_wave3_big_endian_root_cause.md` for the
+//!     F3-a root-cause analysis of why the old mask pattern was a
+//!     big-endian bug.)
 //!   - `syscall(57, wfd)` — raw `close()` (asm-generic nr 57) on the single fd.
 //!
 //! ## Runtime execution gap (pre-existing, documented in Wave 4-c-test)
@@ -43,8 +47,12 @@
 //! 3. Runs `lower_ipc_builtins` (the exact function the canonical pipeline
 //!    calls at pipeline.rs:1171).
 //! 4. Walks the lowered IR and asserts the half-close pattern is present:
-//!    - A `Load I64` from `handle+4` (the `shared_memory_read` expansion).
-//!    - A `BinOp And` with `4294967295` (the mask isolating write_fd1).
+//!    - A `BinOp Add` of `handle + 4` with `Immediate(4)` and `ty: I64`
+//!      (the `shared_memory_read_i32` address computation).
+//!    - A `Load I32` at offset 0 (the typed native-endian 4-byte load
+//!      emitted by `expand_shared_memory_read_i32` — the F3-b-fix shape).
+//!    - A `Cast { kind: ZExt, from_ty: I32, to_ty: I64 }` (the explicit
+//!      zero-extension replacing the OLD `& 0xFFFFFFFF` mask).
 //!    - A `Syscall { nr: 57 }` (the `close(write_fd1)` half-close).
 //!    - A `Load I32` from `handle+8` (the surviving `channel_recv` reading
 //!      read_fd2 — a DIFFERENT offset/fd from the closed write_fd1).
@@ -54,7 +62,7 @@
 
 use vuma::pipeline::bridge_ast_to_codegen_scg;
 use vuma_codegen::backend::BackendKind;
-use vuma_codegen::ir::{IRInstr, IRType, IRValue};
+use vuma_codegen::ir::{CastKind, IRInstr, IRType, IRValue};
 use vuma_codegen::ipc_lowering::lower_ipc_builtins;
 use vuma_codegen::ScgToIr;
 
@@ -109,7 +117,11 @@ fn half_closed_channel_lowers_half_close_then_surviving_recv() {
     let funcs = lower_program("half_closed_channel.vuma");
     let instrs = all_instrs(&funcs);
 
-    // 1. shared_memory_read(ch, 4) → BinOp Add (handle, Immediate(4)) + Load I64.
+    // 1. shared_memory_read_i32(ch, 4) lowers (per F3-b-fix / d35c52c4,
+    //    expand_shared_memory_read_i32 in ipc_lowering.rs) to:
+    //      BinOp Add (handle, Immediate(4)) ty=I64   ; addr = ch + 4
+    //      Load  I32 addr offset=0                  ; typed native-endian 4-byte load
+    //      Cast  ZExt I32→I64                       ; explicit zero-extension
     //    The +4 is in the BinOp Add (the Load itself is at offset 0 from the
     //    summed address). Assert the BinOp Add with I64 + immediate 4 exists.
     let has_shmr_addr = instrs.iter().any(|i| {
@@ -122,23 +134,30 @@ fn half_closed_channel_lowers_half_close_then_surviving_recv() {
     });
     assert!(
         has_shmr_addr,
-        "expected BinOp Add (handle, 4) I64 (shared_memory_read address computation)"
+        "expected BinOp Add (handle, 4) I64 (shared_memory_read_i32 address computation)"
     );
-    // And the resulting Load I64 (reads write_fd1 | read_fd2<<32 from handle+4).
-    let has_load_i64 = instrs.iter().any(|i| {
-        matches!(i, IRInstr::Load { ty: IRType::I64, .. })
+    // And the resulting typed Load I32 (reads the 4-byte write_fd1 from handle+4).
+    // This replaces the OLD `Load I64` + `& 0xFFFFFFFF` mask — the typed I32
+    // load is endianness-agnostic (matches the I32 store in channel_open).
+    let has_load_i32 = instrs.iter().any(|i| {
+        matches!(i, IRInstr::Load { ty: IRType::I32, .. })
     });
-    assert!(has_load_i64, "expected Load I64 (shared_memory_read result)");
+    assert!(has_load_i32, "expected Load I32 (shared_memory_read_i32 result)");
 
-    // 2. Mask: BinOp And with 4294967295 (0xFFFFFFFF)
-    let has_mask = instrs.iter().any(|i| {
-        matches!(i, IRInstr::BinOp {
-            op: vuma_codegen::ir::BinOpKind::And,
-            rhs: IRValue::Immediate(4294967295),
+    // 2. Zero-extension: Cast ZExt I32→I64 (replaces the OLD `& 0xFFFFFFFF` mask
+    //    that F3-a root-caused as a big-endian bug and F3-b-fix removed).
+    let has_zext_cast = instrs.iter().any(|i| {
+        matches!(i, IRInstr::Cast {
+            kind: CastKind::ZExt,
+            from_ty: Some(IRType::I32),
+            to_ty: Some(IRType::I64),
             ..
         })
     });
-    assert!(has_mask, "expected BinOp And with 4294967295 (mask to write_fd1)");
+    assert!(
+        has_zext_cast,
+        "expected Cast ZExt I32→I64 (shared_memory_read_i32 widening; replaces the OLD mask)"
+    );
 
     // 3. close(write_fd1): Syscall nr 57
     let close_count = instrs.iter().filter(|i| {
@@ -173,7 +192,9 @@ fn half_closed_negative_lowers_close_then_write_to_closed_fd() {
     let funcs = lower_program("half_closed_negative.vuma");
     let instrs = all_instrs(&funcs);
 
-    // 1. shared_memory_read(ch, 4) + mask (same as positive case)
+    // 1. shared_memory_read_i32(ch, 4) → BinOp Add (handle, 4) I64 + Load I32 +
+    //    Cast ZExt I32→I64 (same F3-b-fix shape as the positive case; see
+    //    expand_shared_memory_read_i32 in ipc_lowering.rs).
     let has_shmr_addr = instrs.iter().any(|i| {
         matches!(i, IRInstr::BinOp {
             op: vuma_codegen::ir::BinOpKind::Add,
@@ -183,19 +204,20 @@ fn half_closed_negative_lowers_close_then_write_to_closed_fd() {
         })
     });
     assert!(has_shmr_addr, "expected BinOp Add (handle, 4) I64");
-    let has_load_i64 = instrs.iter().any(|i| {
-        matches!(i, IRInstr::Load { ty: IRType::I64, .. })
+    let has_load_i32 = instrs.iter().any(|i| {
+        matches!(i, IRInstr::Load { ty: IRType::I32, .. })
     });
-    assert!(has_load_i64, "expected Load I64");
+    assert!(has_load_i32, "expected Load I32 (shared_memory_read_i32 result)");
 
-    let has_mask = instrs.iter().any(|i| {
-        matches!(i, IRInstr::BinOp {
-            op: vuma_codegen::ir::BinOpKind::And,
-            rhs: IRValue::Immediate(4294967295),
+    let has_zext_cast = instrs.iter().any(|i| {
+        matches!(i, IRInstr::Cast {
+            kind: CastKind::ZExt,
+            from_ty: Some(IRType::I32),
+            to_ty: Some(IRType::I64),
             ..
         })
     });
-    assert!(has_mask, "expected BinOp And with 4294967295");
+    assert!(has_zext_cast, "expected Cast ZExt I32→I64 (replaces the OLD mask)");
 
     // 2. close(write_fd1): Syscall nr 57 (the half-close)
     let close_count = instrs.iter().filter(|i| {
