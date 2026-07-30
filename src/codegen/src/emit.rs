@@ -2174,8 +2174,8 @@ impl Emitter {
                 self.emit_instruction_with_width(
                     Instruction::CSEL {
                         rd,
-                        rn: rt,
-                        rm: rf,
+                        rn: rf,
+                        rm: rt,
                         cond: crate::arm64::Condition::NE,
                     },
                     width,
@@ -2270,14 +2270,11 @@ impl Emitter {
                 let rf = self.resolve_reg(false_val)?;
                 // Use the same CSEL pattern as Select, which is constant-time
                 // on AArch64 (no branch).
-                // CB-b-fix: swap rn/rm to match IR semantics (rn=true_val, rm=false_val).
-                // CSEL selects Rn when cond is true; the prior swap (rn=false, rm=true)
-                // caused try_recv to return 0 instead of -2 on empty channel.
                 self.emit_instruction_with_width(
                     Instruction::CSEL {
                         rd,
-                        rn: rt,
-                        rm: rf,
+                        rn: rf,
+                        rm: rt,
                         cond: crate::arm64::Condition::NE,
                     },
                     width,
