@@ -1575,8 +1575,19 @@ fn riscv64_target_desc() -> TargetDesc {
         RegDesc::gpr("x5", 5),
         RegDesc::gpr("x6", 6),
         RegDesc::gpr("x7", 7),
-        // x8: s0/fp (callee-saved, frame pointer)
-        RegDesc::gpr("x8", 8).frame_pointer().callee_saved(),
+        // x8: s0/fp (callee-saved, frame pointer).
+        // Marked `.not_allocatable()` so the target-agnostic register
+        // allocator (`TargetAgnosticRegAlloc`) cannot assign vregs to the
+        // frame pointer and clobber it. This mirrors the x86_64 RBP fix
+        // (R2-a-audit G7 / commit 00b6318f, E2-a-fix) and the ppc64 R31
+        // fix flagged by CD-a-audit §6 gap 1. `frame_pointer()` alone does
+        // NOT clear `is_allocatable` (see `RegDesc::frame_pointer` at
+        // target_desc.rs:1140), so the explicit `.not_allocatable()` is
+        // required. (Wave 3 foundational fix E3-ab.)
+        RegDesc::gpr("x8", 8)
+            .frame_pointer()
+            .callee_saved()
+            .not_allocatable(),
         // x9: s1 (callee-saved)
         RegDesc::gpr("x9", 9).callee_saved(),
         // x10-x17: arguments a0-a7 (caller-saved)
