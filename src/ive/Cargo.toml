@@ -14,24 +14,15 @@ rust-version.workspace = true
 vuma-bd.workspace = true
 vuma-scg.workspace = true
 vuma-codegen.workspace = true
-# Z3 SMT solver for contract discharge (Wave 1: real verification)
+# Z3 SMT solver — HARD dependency for contract discharge.
+# The "V" in VUMA depends on Z3. Install libz3-dev on the host:
+#   Debian/Ubuntu: apt install libz3-dev
+#   macOS: brew install z3
+#   Arch: pacman -S z3
 z3 = "0.20"
-# serde/serde_json removed in Wave 43 — all IVE types now rely on hand-written
-# Debug + Clone derives only; no JSON serialization is performed inside this
-# crate.
 
 [features]
 default = []
-# pmt-runtime-check: HISTORICALLY activated the Lean↔Rust FFI routing in
-# src/ive/src/verification.rs (verify_pmt_via_lean). The Lean FFI bridge
-# has been REMOVED — see the "Lean FFI bridge removed" comment block in
-# src/ive/src/verification.rs. The feature is retained here as a NO-OP
-# so existing CI commands (`cargo build --features pmt-runtime-check`)
-# and the workspace-level feature forwarding in the root Cargo.toml do
-# not break. PMT state verification in IVE now ALWAYS uses the
-# hand-written Rust verifiers regardless of this flag.
-#
-# NOTE: the feature still has a real effect in the `vuma-codegen` crate
-# (it activates the independent pure-Rust `pmt_check` module — a
-# parity-tested hand-translation, NOT the deleted stub).
+# pmt-runtime-check: retained as a no-op for IVE (Lean FFI bridge removed).
+# Still has a real effect in vuma-codegen (activates pure-Rust pmt_check).
 pmt-runtime-check = []
