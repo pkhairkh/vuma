@@ -1941,8 +1941,10 @@ fn x86_64_target_desc() -> TargetDesc {
         RegDesc::gpr("RBX", 3).callee_saved(),
         // RSP: stack pointer
         RegDesc::gpr("RSP", 4).stack_pointer(),
-        // RBP: frame pointer (callee-saved)
-        RegDesc::gpr("RBP", 5).frame_pointer().callee_saved(),
+        // RBP: frame pointer (callee-saved). Marked not_allocatable so
+        // TargetAgnosticRegAlloc never assigns a vreg to RBP (G7 fix from
+        // R2-a-audit; same pattern as RSP and ppc64 R31).
+        RegDesc::gpr("RBP", 5).frame_pointer().callee_saved().not_allocatable(),
         // RSI: arg2 (caller-saved)
         RegDesc::gpr("RSI", 6).arg(1),
         // RDI: arg1 (caller-saved)
@@ -2883,15 +2885,16 @@ mod tests {
         assert_eq!(gpr.name, "GPR");
         // x86_64 GPRs: RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI, R8-R15 = 16
         assert_eq!(gpr.total_count, 16, "x86_64 should have 16 GPRs total");
-        // RSP is non-allocatable; the other 15 are allocatable.
+        // RSP and RBP are non-allocatable; the other 14 are allocatable.
+        // (RBP is the frame pointer — G7 fix E2-a: marked not_allocatable.)
         assert_eq!(
-            gpr.allocatable_count, 15,
-            "x86_64 should have 15 allocatable GPRs"
+            gpr.allocatable_count, 14,
+            "x86_64 should have 14 allocatable GPRs (RSP + RBP reserved)"
         );
-        // Callee-saved allocatable: RBX, RBP, R12-R15 = 6.
+        // Callee-saved allocatable: RBX, R12-R15 = 5 (RBP is reserved).
         assert_eq!(
-            gpr.callee_saved_count, 6,
-            "x86_64 should have 6 callee-saved allocatable GPRs (RBX, RBP, R12-R15)"
+            gpr.callee_saved_count, 5,
+            "x86_64 should have 5 callee-saved allocatable GPRs (RBX, R12-R15)"
         );
         // Caller-saved allocatable: RAX, RCX, RDX, RSI, RDI, R8-R11 = 9.
         assert_eq!(
@@ -2927,12 +2930,17 @@ mod tests {
         let x86 = registry.get("x86_64").unwrap();
 
         let gprs = x86.allocatable_regs(RegClass::Gpr);
-        // 15 allocatable GPRs (all except RSP).
-        assert_eq!(gprs.len(), 15);
+        // 14 allocatable GPRs (all except RSP and RBP).
+        assert_eq!(gprs.len(), 14);
         // RSP should NOT be in the allocatable list.
         assert!(
             !gprs.iter().any(|r| r.is_stack_pointer),
             "RSP should not be allocatable"
+        );
+        // RBP should NOT be in the allocatable list (G7 fix E2-a).
+        assert!(
+            !gprs.iter().any(|r| r.is_frame_pointer),
+            "RBP (frame pointer) should not be allocatable"
         );
         // RBX should be present and callee-saved.
         assert!(
