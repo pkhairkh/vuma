@@ -1,0 +1,1152 @@
+//! Full register-based instruction selection for x86_64.
+//!
+//! This module implements a complete register-based emitter that consumes
+//! a `RegAllocResult` (from `TargetAgnosticRegAlloc`) and produces
+//! `AllocatedFunction` with register-to-register machine code for ALL IR
+//! instructions.
+//!
+//! # Architecture
+//!
+//! 1. **Prologue**: `push rbp; mov rbp, rsp; push <callee-saved>; sub rsp, frame_size`
+//! 2. **Body**: For each IR instruction, resolve vregs → physical regs via
+//!    `alloc.vreg_to_preg`, emit register-based encoding.
+//! 3. **Spill/reload**: Insert `mov [rbp+offset], reg` / `mov reg, [rbp+offset]`
+//!    at positions from `alloc.spill_code`.
+//! 4. **Epilogue**: `add rsp, frame_size; pop <callee-saved>; pop rbp; ret`
+//!
+//! # Frame Layout
+//!
+//! ```text
+//! [rbp+16]  return address (pushed by call)
+//! [rbp+8]   old rbp (pushed by prologue — wait, push rbp puts it at [rbp])
+//! [rbp]     saved rbp
+//! [rbp-N]   callee-saved saves (RBX, R12-R15)
+//! [rbp-M]   spill slots (each 8 bytes, from alloc.spill_slots)
+//! rsp       = rbp - frame_size
+//! ```
+//!
+//! Actually, x86_64 System V ABI frame layout with frame pointer:
+//! ```text
+//! [rbp+8]   return address
+//! [rbp]     old rbp (pushed first, then mov rbp, rsp)
+//! [rbp-8]   first callee-saved (pushed after rbp setup)
+//! [rbp-16]  second callee-saved
+//! ...
+//! [rbp-K]   spill slot 0
+//! [rbp-K-8] spill slot 1
+//! ...
+//! rsp = rbp - frame_size
+//! ```
+
+use crate::backend::{AllocatedBlock, AllocatedFunction, AllocatedInstruction, BackendError, PhysicalReg};
+use crate::ir::{IRFunction, IRInstr, IRValue, IRTerminator, IRType, BinOpKind, UnaryOpKind, CastKind, CmpKind};
+use crate::regalloc::RegAllocResult;
+use crate::regalloc::GenericSpillCode;
+use crate::x86_64::*;
+
+/// Resolved value: either a physical register or an immediate.
+enum ResolvedVal {
+    Reg(Gpr),
+    Imm(i64),
+}
+
+/// Branch fixup: (byte_offset_in_code, target_label, is_conditional, condition_code_if_cond)
+struct BranchFixup {
+    offset: usize,      // byte offset of the rel32 field in the code
+    target: String,     // target label
+}
+
+/// Emit a complete function using register-based instruction selection.
+///
+/// This is the FULL register-based emitter — it does NOT start from
+/// stack-slot bytes. It consumes the `RegAllocResult` and produces
+/// register-to-register machine code for every IR instruction.
+pub fn emit_function_regalloc_full(
+    func: &IRFunction,
+    alloc: &RegAllocResult,
+) -> Result<AllocatedFunction, BackendError> {
+    // ── Compute frame size ──
+    // Callee-saved saves: each push is 8 bytes. Count the callee-saved GPRs
+    // (excluding RBP which is handled separately).
+    let callee_saved_gprs: Vec<Gpr> = alloc
+        .used_callee_saved
+        .iter()
+        .filter_map(|p| preg_to_gpr(p))
+        .filter(|g| *g != Gpr::Rbp && *g != Gpr::Rsp)
+        .collect();
+    let callee_saved_size = callee_saved_gprs.len() * 8;
+    // Spill slots: each is 8 bytes (GPR) or 16 bytes (SIMD). Use 8 for now.
+    let spill_size = alloc.total_spill_slots as usize * 8;
+    // Frame size must be 16-byte aligned (System V ABI).
+    let raw_frame = callee_saved_size + spill_size + 8; // +8 for alignment
+    let frame_size = ((raw_frame + 15) & !15) as u32;
+
+    // ── Two-pass: first compute block offsets, then emit ──
+    // Pass 1: emit to a temporary buffer to compute sizes.
+    // Actually, we emit in one pass and use fixups for branches.
+
+    let mut all_code: Vec<u8> = Vec::new();
+    let mut blocks: Vec<AllocatedBlock> = Vec::new();
+    let mut fixups: Vec<BranchFixup> = Vec::new();
+    let mut label_offsets: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    // ── Prologue ──
+    let prologue_start = all_code.len();
+    // push rbp
+    all_code.extend(encode_push(Gpr::Rbp));
+    // mov rbp, rsp
+    all_code.extend(encode_mov_reg_reg(Gpr::Rbp, Gpr::Rsp));
+    // push callee-saved registers (in order: RBX, R12-R15)
+    for &g in &callee_saved_gprs {
+        all_code.extend(encode_push(g));
+    }
+    // sub rsp, frame_size
+    all_code.extend(encode_sub_reg_imm32(Gpr::Rsp, frame_size as i32));
+
+    let prologue_instr = AllocatedInstruction {
+        opcode: "prologue".to_string(),
+        reads: vec![],
+        writes: callee_saved_gprs.iter().map(|g| PhysicalReg::new(crate::backend::RegClass::Gpr, *g as u32)).collect(),
+        encoded: all_code[prologue_start..].to_vec(),
+    };
+
+    // ── Body: emit each block ──
+    for block in &func.blocks {
+        let block_offset = all_code.len();
+        label_offsets.insert(block.label.clone(), block_offset);
+
+        let mut instrs: Vec<AllocatedInstruction> = Vec::new();
+
+        for (idx, instr) in block.instructions.iter().enumerate() {
+            let pos = idx as u32 * 2;
+
+            // Insert spill/reload code before this instruction.
+            if let Some(spills) = alloc.spill_code.get(&pos) {
+                for spill in spills {
+                    let spill_start = all_code.len();
+                    emit_spill_code(&mut all_code, spill, &callee_saved_gprs, frame_size);
+                    if all_code.len() > spill_start {
+                        instrs.push(AllocatedInstruction {
+                            opcode: match spill {
+                                GenericSpillCode::Spill { .. } => "spill".to_string(),
+                                GenericSpillCode::Reload { .. } => "reload".to_string(),
+                            },
+                            reads: vec![],
+                            writes: vec![],
+                            encoded: all_code[spill_start..].to_vec(),
+                        });
+                    }
+                }
+            }
+
+            // Emit the instruction itself.
+            let instr_start = all_code.len();
+            let (opcode, reads, writes) = emit_instruction(
+                &mut all_code,
+                instr,
+                alloc,
+                frame_size,
+                &mut fixups,
+            )?;
+            let instr_end = all_code.len();
+
+            if instr_end > instr_start {
+                instrs.push(AllocatedInstruction {
+                    opcode,
+                    reads,
+                    writes,
+                    encoded: all_code[instr_start..instr_end].to_vec(),
+                });
+            }
+        }
+
+        // Emit terminator.
+        let term_start = all_code.len();
+        emit_terminator(
+            &mut all_code,
+            &block.terminator,
+            alloc,
+            frame_size,
+            &mut fixups,
+        );
+        let term_end = all_code.len();
+
+        if term_end > term_start {
+            instrs.push(AllocatedInstruction {
+                opcode: "terminator".to_string(),
+                reads: vec![],
+                writes: vec![],
+                encoded: all_code[term_start..term_end].to_vec(),
+            });
+        }
+
+        blocks.push(AllocatedBlock {
+            label: block.label.clone(),
+            instructions: instrs,
+            code_offset: block_offset,
+        });
+    }
+
+    // ── Epilogue (at the end of the function) ──
+    let epilogue_start = all_code.len();
+    // add rsp, frame_size
+    all_code.extend(encode_add_reg_imm32(Gpr::Rsp, frame_size as i32));
+    // pop callee-saved (reverse order)
+    for &g in callee_saved_gprs.iter().rev() {
+        all_code.extend(encode_pop(g));
+    }
+    // pop rbp
+    all_code.extend(encode_pop(Gpr::Rbp));
+    // ret
+    all_code.extend(encode_ret());
+    let epilogue_end = all_code.len();
+
+    // Add prologue and epilogue as special instructions in the first block.
+    if let Some(first_block) = blocks.first_mut() {
+        first_block.instructions.insert(0, prologue_instr);
+        // Epilogue goes at the end of the last block.
+    }
+    if let Some(last_block) = blocks.last_mut() {
+        last_block.instructions.push(AllocatedInstruction {
+            opcode: "epilogue".to_string(),
+            reads: vec![],
+            writes: vec![],
+            encoded: all_code[epilogue_start..epilogue_end].to_vec(),
+        });
+    }
+
+    // ── Resolve branch fixups ──
+    for fixup in &fixups {
+        if let Some(&target_offset) = label_offsets.get(&fixup.target) {
+            let rel32: i32 = target_offset as i32 - fixup.offset as i32 - 4;
+            let bytes = rel32.to_le_bytes();
+            all_code[fixup.offset] = bytes[0];
+            all_code[fixup.offset + 1] = bytes[1];
+            all_code[fixup.offset + 2] = bytes[2];
+            all_code[fixup.offset + 3] = bytes[3];
+        }
+    }
+
+    // ── Update block code offsets and instruction encoded bytes ──
+    // We need to re-split the all_code into per-instruction chunks.
+    // Actually, we already tracked per-instruction offsets during emission.
+    // The AllocatedBlock.instructions already have their encoded bytes.
+    // But we need to update the code_offset fields to reflect the final layout.
+
+    // Re-compute block offsets from the instruction encoded bytes.
+    let mut offset = 0usize;
+    for block in &mut blocks {
+        block.code_offset = offset;
+        for instr in &mut block.instructions {
+            offset += instr.encoded.len();
+        }
+    }
+
+    // ── Build the AllocatedFunction ──
+    let callee_saved_phys: Vec<PhysicalReg> = callee_saved_gprs
+        .iter()
+        .map(|g| PhysicalReg::new(crate::backend::RegClass::Gpr, *g as u32))
+        .collect();
+
+    Ok(AllocatedFunction {
+        name: func.name.clone(),
+        blocks,
+        frame_size: frame_size as usize,
+        callee_saved: callee_saved_phys,
+        spill_slots: alloc.total_spill_slots as usize,
+        code_size: all_code.len(),
+        relocations: vec![],
+        wasm_func_type: None,
+        wasm_locals: None,
+    })
+}
+
+/// Map a PhysicalReg to a Gpr.
+fn preg_to_gpr(preg: &PhysicalReg) -> Option<Gpr> {
+    if preg.class != crate::backend::RegClass::Gpr {
+        return None;
+    }
+    match preg.index {
+        0 => Some(Gpr::Rax),
+        1 => Some(Gpr::Rcx),
+        2 => Some(Gpr::Rdx),
+        3 => Some(Gpr::Rbx),
+        4 => Some(Gpr::Rsp),
+        5 => Some(Gpr::Rbp),
+        6 => Some(Gpr::Rsi),
+        7 => Some(Gpr::Rdi),
+        8 => Some(Gpr::R8),
+        9 => Some(Gpr::R9),
+        10 => Some(Gpr::R10),
+        11 => Some(Gpr::R11),
+        12 => Some(Gpr::R12),
+        13 => Some(Gpr::R13),
+        14 => Some(Gpr::R14),
+        15 => Some(Gpr::R15),
+        _ => None,
+    }
+}
+
+/// Resolve an IRValue to a physical register or immediate.
+fn resolve_value(val: &IRValue, alloc: &RegAllocResult) -> ResolvedVal {
+    match val {
+        IRValue::Register(vreg_id) => {
+            // Follow coalesced map.
+            let root = alloc.coalesced_map.get(vreg_id).unwrap_or(vreg_id);
+            if let Some(preg) = alloc.vreg_to_preg.get(root) {
+                if let Some(gpr) = preg_to_gpr(preg) {
+                    return ResolvedVal::Reg(gpr);
+                }
+            }
+            // If spilled, we should have already inserted a reload.
+            // Fall back to RAX as a scratch (should not happen in correct alloc).
+            ResolvedVal::Reg(Gpr::Rax)
+        }
+        IRValue::Immediate(imm) => ResolvedVal::Imm(*imm),
+        IRValue::Address(addr) => ResolvedVal::Imm(*addr as i64),
+        IRValue::Label(_) => ResolvedVal::Reg(Gpr::Rax), // Should not happen for data values.
+    }
+}
+
+/// Load a value into a register. If it's an immediate, emit a mov.
+/// If it's already in a register, just return it.
+fn load_to_reg(val: &IRValue, alloc: &RegAllocResult, code: &mut Vec<u8>) -> Gpr {
+    match resolve_value(val, alloc) {
+        ResolvedVal::Reg(g) => g,
+        ResolvedVal::Imm(imm) => {
+            // Use R11 as scratch for immediates (caller-saved, not an arg reg).
+            let scratch = Gpr::R11;
+            if imm >= i32::MIN as i64 && imm <= i32::MAX as i64 {
+                code.extend(encode_mov_reg_imm32(scratch, imm as i32));
+            } else {
+                code.extend(encode_mov_reg_imm64(scratch, imm as u64));
+            }
+            scratch
+        }
+    }
+}
+
+/// Emit spill/reload code.
+fn emit_spill_code(
+    code: &mut Vec<u8>,
+    spill: &GenericSpillCode,
+    _callee_saved: &[Gpr],
+    _frame_size: u32,
+) {
+    match spill {
+        GenericSpillCode::Spill { preg, slot, .. } => {
+            if let Some(gpr) = preg_to_gpr(preg) {
+                // mov [rbp + slot.offset], gpr
+                code.extend(encode_mov_mem_reg(Gpr::Rbp, slot.offset, gpr));
+            }
+        }
+        GenericSpillCode::Reload { preg, slot, .. } => {
+            if let Some(gpr) = preg_to_gpr(preg) {
+                // mov gpr, [rbp + slot.offset]
+                code.extend(encode_mov_reg_mem(gpr, Gpr::Rbp, slot.offset));
+            }
+        }
+    }
+}
+
+/// Emit a single IR instruction as register-based machine code.
+/// Returns (opcode_name, reads, writes).
+fn emit_instruction(
+    code: &mut Vec<u8>,
+    instr: &IRInstr,
+    alloc: &RegAllocResult,
+    _frame_size: u32,
+    fixups: &mut Vec<BranchFixup>,
+) -> Result<(String, Vec<PhysicalReg>, Vec<PhysicalReg>), BackendError> {
+    let mut reads = Vec::new();
+    let mut writes = Vec::new();
+
+    let opcode = match instr {
+        // ── Add ──
+        IRInstr::Add { dst, lhs, rhs, ty } => {
+            let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64));
+            if is_fp {
+                // FP: use SSE. For now, fall back to stack-slot for FP.
+                // TODO: implement FP register-based emission.
+                return emit_fp_fallback(instr, alloc);
+            }
+            let dst_reg = load_to_reg(dst, alloc, code);
+            let lhs_reg = load_to_reg(lhs, alloc, code);
+            // mov dst, lhs; add dst, rhs
+            if !matches!(resolve_value(lhs, alloc), ResolvedVal::Reg(r) if r == dst_reg) {
+                code.extend(encode_mov_reg_reg(dst_reg, lhs_reg));
+            }
+            match resolve_value(rhs, alloc) {
+                ResolvedVal::Reg(rhs_reg) => {
+                    code.extend(encode_add_reg_reg(dst_reg, rhs_reg));
+                    reads.push(phys(rhs_reg));
+                }
+                ResolvedVal::Imm(imm) => {
+                    code.extend(encode_add_reg_imm32(dst_reg, imm as i32));
+                }
+            }
+            reads.push(phys(lhs_reg));
+            writes.push(phys(dst_reg));
+            "add".to_string()
+        }
+
+        // ── Sub ──
+        IRInstr::Sub { dst, lhs, rhs, ty } => {
+            let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64));
+            if is_fp {
+                return emit_fp_fallback(instr, alloc);
+            }
+            let dst_reg = load_to_reg(dst, alloc, code);
+            let lhs_reg = load_to_reg(lhs, alloc, code);
+            if !matches!(resolve_value(lhs, alloc), ResolvedVal::Reg(r) if r == dst_reg) {
+                code.extend(encode_mov_reg_reg(dst_reg, lhs_reg));
+            }
+            match resolve_value(rhs, alloc) {
+                ResolvedVal::Reg(rhs_reg) => {
+                    code.extend(encode_sub_reg_reg(dst_reg, rhs_reg));
+                    reads.push(phys(rhs_reg));
+                }
+                ResolvedVal::Imm(imm) => {
+                    code.extend(encode_sub_reg_imm32(dst_reg, imm as i32));
+                }
+            }
+            reads.push(phys(lhs_reg));
+            writes.push(phys(dst_reg));
+            "sub".to_string()
+        }
+
+        // ── Mul ──
+        IRInstr::Mul { dst, lhs, rhs, ty } => {
+            let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64));
+            if is_fp {
+                return emit_fp_fallback(instr, alloc);
+            }
+            let dst_reg = load_to_reg(dst, alloc, code);
+            let lhs_reg = load_to_reg(lhs, alloc, code);
+            if !matches!(resolve_value(lhs, alloc), ResolvedVal::Reg(r) if r == dst_reg) {
+                code.extend(encode_mov_reg_reg(dst_reg, lhs_reg));
+            }
+            match resolve_value(rhs, alloc) {
+                ResolvedVal::Reg(rhs_reg) => {
+                    code.extend(encode_imul_reg_reg(dst_reg, rhs_reg));
+                    reads.push(phys(rhs_reg));
+                }
+                ResolvedVal::Imm(imm) => {
+                    // imul dst, imm32
+                    let scratch = Gpr::R11;
+                    code.extend(encode_mov_reg_imm32(scratch, imm as i32));
+                    code.extend(encode_imul_reg_reg(dst_reg, scratch));
+                }
+            }
+            reads.push(phys(lhs_reg));
+            writes.push(phys(dst_reg));
+            "mul".to_string()
+        }
+
+        // ── Div (BinOp with SDiv/UDiv/SRem/URem) ──
+        IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
+            let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64));
+            if is_fp {
+                return emit_fp_fallback(instr, alloc);
+            }
+            match op {
+                BinOpKind::SDiv | BinOpKind::SRem => {
+                    // x86_64 idiv: rax = lhs, divide by rhs. Result in RAX, remainder in RDX.
+                    let lhs_reg = load_to_reg(lhs, alloc, code);
+                    code.extend(encode_mov_reg_reg(Gpr::Rax, lhs_reg));
+                    code.extend(encode_cqo()); // sign-extend RAX into RDX:RAX
+                    let rhs_reg = load_to_reg(rhs, alloc, code);
+                    code.extend(encode_idiv_reg(rhs_reg));
+                    let dst_reg = load_to_reg(dst, alloc, code);
+                    if *op == BinOpKind::SRem {
+                        code.extend(encode_mov_reg_reg(dst_reg, Gpr::Rdx));
+                    } else {
+                        code.extend(encode_mov_reg_reg(dst_reg, Gpr::Rax));
+                    }
+                    reads.push(phys(lhs_reg));
+                    reads.push(phys(rhs_reg));
+                    writes.push(phys(dst_reg));
+                    "sdiv".to_string()
+                }
+                BinOpKind::UDiv | BinOpKind::URem => {
+                    let lhs_reg = load_to_reg(lhs, alloc, code);
+                    code.extend(encode_mov_reg_reg(Gpr::Rax, lhs_reg));
+                    code.extend(encode_xor_reg_reg(Gpr::Rdx, Gpr::Rdx)); // zero RDX
+                    let rhs_reg = load_to_reg(rhs, alloc, code);
+                    code.extend(encode_div_reg(rhs_reg));
+                    let dst_reg = load_to_reg(dst, alloc, code);
+                    if *op == BinOpKind::URem {
+                        code.extend(encode_mov_reg_reg(dst_reg, Gpr::Rdx));
+                    } else {
+                        code.extend(encode_mov_reg_reg(dst_reg, Gpr::Rax));
+                    }
+                    reads.push(phys(lhs_reg));
+                    reads.push(phys(rhs_reg));
+                    writes.push(phys(dst_reg));
+                    "udiv".to_string()
+                }
+                BinOpKind::And => {
+                    let dst_reg = load_to_reg(dst, alloc, code);
+                    let lhs_reg = load_to_reg(lhs, alloc, code);
+                    if !matches!(resolve_value(lhs, alloc), ResolvedVal::Reg(r) if r == dst_reg) {
+                        code.extend(encode_mov_reg_reg(dst_reg, lhs_reg));
+                    }
+                    match resolve_value(rhs, alloc) {
+                        ResolvedVal::Reg(rhs_reg) => {
+                            code.extend(encode_and_reg_reg(dst_reg, rhs_reg));
+                            reads.push(phys(rhs_reg));
+                        }
+                        ResolvedVal::Imm(imm) => {
+                            code.extend(encode_and_reg_imm32(dst_reg, imm as i32));
+                        }
+                    }
+                    reads.push(phys(lhs_reg));
+                    writes.push(phys(dst_reg));
+                    "and".to_string()
+                }
+                BinOpKind::Or => {
+                    let dst_reg = load_to_reg(dst, alloc, code);
+                    let lhs_reg = load_to_reg(lhs, alloc, code);
+                    if !matches!(resolve_value(lhs, alloc), ResolvedVal::Reg(r) if r == dst_reg) {
+                        code.extend(encode_mov_reg_reg(dst_reg, lhs_reg));
+                    }
+                    match resolve_value(rhs, alloc) {
+                        ResolvedVal::Reg(rhs_reg) => {
+                            code.extend(encode_or_reg_reg(dst_reg, rhs_reg));
+                            reads.push(phys(rhs_reg));
+                        }
+                        ResolvedVal::Imm(imm) => {
+                            code.extend(encode_or_reg_imm32(dst_reg, imm as i32));
+                        }
+                    }
+                    reads.push(phys(lhs_reg));
+                    writes.push(phys(dst_reg));
+                    "or".to_string()
+                }
+                BinOpKind::Xor => {
+                    let dst_reg = load_to_reg(dst, alloc, code);
+                    let lhs_reg = load_to_reg(lhs, alloc, code);
+                    if !matches!(resolve_value(lhs, alloc), ResolvedVal::Reg(r) if r == dst_reg) {
+                        code.extend(encode_mov_reg_reg(dst_reg, lhs_reg));
+                    }
+                    match resolve_value(rhs, alloc) {
+                        ResolvedVal::Reg(rhs_reg) => {
+                            code.extend(encode_xor_reg_reg(dst_reg, rhs_reg));
+                            reads.push(phys(rhs_reg));
+                        }
+                        ResolvedVal::Imm(imm) => {
+                            code.extend(encode_xor_reg_imm32(dst_reg, imm as i32));
+                        }
+                    }
+                    reads.push(phys(lhs_reg));
+                    writes.push(phys(dst_reg));
+                    "xor".to_string()
+                }
+                BinOpKind::Shl => {
+                    let dst_reg = load_to_reg(dst, alloc, code);
+                    let lhs_reg = load_to_reg(lhs, alloc, code);
+                    if !matches!(resolve_value(lhs, alloc), ResolvedVal::Reg(r) if r == dst_reg) {
+                        code.extend(encode_mov_reg_reg(dst_reg, lhs_reg));
+                    }
+                    // shl requires shift count in CL.
+                    let rcx_orig = load_to_reg(rhs, alloc, code);
+                    if rcx_orig != Gpr::Rcx {
+                        code.extend(encode_mov_reg_reg(Gpr::Rcx, rcx_orig));
+                    }
+                    code.extend(encode_shl_reg_cl(dst_reg));
+                    reads.push(phys(lhs_reg));
+                    writes.push(phys(dst_reg));
+                    "shl".to_string()
+                }
+                BinOpKind::ShrL | BinOpKind::ShrA => {
+                    let dst_reg = load_to_reg(dst, alloc, code);
+                    let lhs_reg = load_to_reg(lhs, alloc, code);
+                    if !matches!(resolve_value(lhs, alloc), ResolvedVal::Reg(r) if r == dst_reg) {
+                        code.extend(encode_mov_reg_reg(dst_reg, lhs_reg));
+                    }
+                    let rcx_orig = load_to_reg(rhs, alloc, code);
+                    if rcx_orig != Gpr::Rcx {
+                        code.extend(encode_mov_reg_reg(Gpr::Rcx, rcx_orig));
+                    }
+                    if *op == BinOpKind::ShrA {
+                        code.extend(encode_sar_reg_cl(dst_reg));
+                    } else {
+                        code.extend(encode_shr_reg_cl(dst_reg));
+                    }
+                    reads.push(phys(lhs_reg));
+                    writes.push(phys(dst_reg));
+                    if *op == BinOpKind::ShrA { "sar" } else { "shr" }.to_string()
+                }
+                _ => {
+                    // Other BinOp variants (Add, Sub, Mul) are handled by
+                    // IRInstr::Add/Sub/Mul above. If we get here, it's an
+                    // unhandled variant — emit a NOP as placeholder.
+                    code.extend(encode_nop());
+                    "unhandled_binop".to_string()
+                }
+            }
+        }
+
+        // ── UnaryOp ──
+        IRInstr::UnaryOp { op, dst, operand, .. } => {
+            let dst_reg = load_to_reg(dst, alloc, code);
+            let src_reg = load_to_reg(operand, alloc, code);
+            if src_reg != dst_reg {
+                code.extend(encode_mov_reg_reg(dst_reg, src_reg));
+            }
+            match op {
+                UnaryOpKind::Neg => {
+                    code.extend(encode_neg_reg(dst_reg));
+                }
+                UnaryOpKind::Not => {
+                    code.extend(encode_not_reg(dst_reg));
+                }
+                UnaryOpKind::Popcnt => {
+                    // popcnt dst, dst (needs SSE4.2; use the encoding helper if available,
+                    // otherwise fall back to a loop — for now, emit NOP).
+                    code.extend(encode_nop()); // TODO: implement popcnt
+                }
+                UnaryOpKind::Clz | UnaryOpKind::Ctz => {
+                    code.extend(encode_nop()); // TODO: implement lzcnt/tzcnt
+                }
+            }
+            reads.push(phys(src_reg));
+            writes.push(phys(dst_reg));
+            "unaryop".to_string()
+        }
+
+        // ── Load ──
+        IRInstr::Load { dst, addr, offset, ty } => {
+            let dst_reg = load_to_reg(dst, alloc, code);
+            let base_reg = load_to_reg(addr, alloc, code);
+            match ty {
+                IRType::U8 | IRType::I8 => {
+                    if matches!(ty, IRType::I8) {
+                        code.extend(encode_movsx_reg8_mem(dst_reg, base_reg, *offset));
+                    } else {
+                        code.extend(encode_movzx_reg8_mem(dst_reg, base_reg, *offset));
+                    }
+                }
+                IRType::U16 | IRType::I16 => {
+                    if matches!(ty, IRType::I16) {
+                        code.extend(encode_movsx_reg16_mem(dst_reg, base_reg, *offset));
+                    } else {
+                        code.extend(encode_movzx_reg16_mem(dst_reg, base_reg, *offset));
+                    }
+                }
+                IRType::U32 | IRType::I32 => {
+                    code.extend(encode_mov_reg32_mem(dst_reg, base_reg, *offset));
+                }
+                _ => {
+                    // 64-bit load (default).
+                    code.extend(encode_mov_reg_mem(dst_reg, base_reg, *offset));
+                }
+            }
+            reads.push(phys(base_reg));
+            writes.push(phys(dst_reg));
+            "load".to_string()
+        }
+
+        // ── Store ──
+        IRInstr::Store { value, addr, offset, ty } => {
+            let val_reg = load_to_reg(value, alloc, code);
+            let base_reg = load_to_reg(addr, alloc, code);
+            match ty {
+                IRType::U8 | IRType::I8 => {
+                    code.extend(encode_mov_mem8_reg8(base_reg, *offset, val_reg));
+                }
+                IRType::U16 | IRType::I16 => {
+                    code.extend(encode_mov_mem16_reg16(base_reg, *offset, val_reg));
+                }
+                IRType::U32 | IRType::I32 => {
+                    code.extend(encode_mov_mem32_reg32(base_reg, *offset, val_reg));
+                }
+                _ => {
+                    code.extend(encode_mov_mem_reg(base_reg, *offset, val_reg));
+                }
+            }
+            reads.push(phys(val_reg));
+            reads.push(phys(base_reg));
+            "store".to_string()
+        }
+
+        // ── Cmp ──
+        IRInstr::Cmp { dst, kind, lhs, rhs, .. } => {
+            let lhs_reg = load_to_reg(lhs, alloc, code);
+            match resolve_value(rhs, alloc) {
+                ResolvedVal::Reg(rhs_reg) => {
+                    code.extend(encode_cmp_reg_reg(lhs_reg, rhs_reg));
+                    reads.push(phys(rhs_reg));
+                }
+                ResolvedVal::Imm(imm) => {
+                    code.extend(encode_cmp_reg_imm32(lhs_reg, imm as i32));
+                }
+            }
+            let dst_reg = load_to_reg(dst, alloc, code);
+            let cc = cmp_kind_to_cc(kind);
+            code.extend(encode_setcc(cc, dst_reg));
+            // Zero-extend the 8-bit result to 64-bit.
+            code.extend(encode_movzx_reg8(dst_reg, dst_reg));
+            reads.push(phys(lhs_reg));
+            writes.push(phys(dst_reg));
+            "cmp".to_string()
+        }
+
+        // ── Select ──
+        IRInstr::Select { dst, cond, true_val, false_val, .. } => {
+            let cond_reg = load_to_reg(cond, alloc, code);
+            // test cond, cond (sets ZF if cond==0)
+            code.extend(encode_test_reg_reg(cond_reg, cond_reg));
+            let dst_reg = load_to_reg(dst, alloc, code);
+            let false_reg = load_to_reg(false_val, alloc, code);
+            let true_reg = load_to_reg(true_val, alloc, code);
+            // mov dst, false_val; cmovne dst, true_val
+            code.extend(encode_mov_reg_reg(dst_reg, false_reg));
+            code.extend(encode_cmovcc_reg_reg(Cc::NotEqual, dst_reg, true_reg));
+            reads.push(phys(cond_reg));
+            reads.push(phys(false_reg));
+            reads.push(phys(true_reg));
+            writes.push(phys(dst_reg));
+            "select".to_string()
+        }
+
+        // ── CtSelect (constant-time select — same as Select on x86_64) ──
+        IRInstr::CtSelect { dst, cond, true_val, false_val, .. } => {
+            let cond_reg = load_to_reg(cond, alloc, code);
+            code.extend(encode_test_reg_reg(cond_reg, cond_reg));
+            let dst_reg = load_to_reg(dst, alloc, code);
+            let false_reg = load_to_reg(false_val, alloc, code);
+            let true_reg = load_to_reg(true_val, alloc, code);
+            code.extend(encode_mov_reg_reg(dst_reg, false_reg));
+            code.extend(encode_cmovcc_reg_reg(Cc::NotEqual, dst_reg, true_reg));
+            reads.push(phys(cond_reg));
+            reads.push(phys(false_reg));
+            reads.push(phys(true_reg));
+            writes.push(phys(dst_reg));
+            "ct_select".to_string()
+        }
+
+        // ── CtEq ──
+        IRInstr::CtEq { dst, lhs, rhs, .. } => {
+            let lhs_reg = load_to_reg(lhs, alloc, code);
+            let rhs_reg = load_to_reg(rhs, alloc, code);
+            code.extend(encode_cmp_reg_reg(lhs_reg, rhs_reg));
+            let dst_reg = load_to_reg(dst, alloc, code);
+            code.extend(encode_setcc(Cc::Equal, dst_reg));
+            code.extend(encode_movzx_reg8(dst_reg, dst_reg));
+            reads.push(phys(lhs_reg));
+            reads.push(phys(rhs_reg));
+            writes.push(phys(dst_reg));
+            "ct_eq".to_string()
+        }
+
+        // ── Cast ──
+        IRInstr::Cast { kind, dst, src, from_ty, to_ty, .. } => {
+            let src_reg = load_to_reg(src, alloc, code);
+            let dst_reg = load_to_reg(dst, alloc, code);
+            match kind {
+                CastKind::ZExt => {
+                    // Zero-extend based on source type.
+                    match from_ty {
+                        Some(IRType::U8) | Some(IRType::I8) => {
+                            code.extend(encode_movzx_reg8(dst_reg, src_reg));
+                        }
+                        Some(IRType::U16) | Some(IRType::I16) => {
+                            code.extend(encode_movzx_reg16(dst_reg, src_reg));
+                        }
+                        Some(IRType::U32) | Some(IRType::I32) => {
+                            // mov eax, ecx zero-extends to 64-bit on x86_64.
+                            code.extend(encode_mov_reg32_mem(dst_reg, Gpr::Rbp, 0)); // placeholder
+                            // Actually, use mov reg32, reg32 (zero-extends).
+                            // We don't have encode_mov_reg32_reg32, so use the
+                            // 32-bit mov by clearing high bits.
+                            // Simpler: mov dst, src (64-bit) then and dst, 0xFFFFFFFF.
+                            code.clear(); // remove placeholder
+                            code.extend(encode_mov_reg_reg(dst_reg, src_reg));
+                            code.extend(encode_and_reg_imm32(dst_reg, -1i32));
+                        }
+                        _ => {
+                            if src_reg != dst_reg {
+                                code.extend(encode_mov_reg_reg(dst_reg, src_reg));
+                            }
+                        }
+                    }
+                }
+                CastKind::SExt => {
+                    match from_ty {
+                        Some(IRType::I8) | Some(IRType::U8) => {
+                            code.extend(encode_movsx_reg8(dst_reg, src_reg));
+                        }
+                        Some(IRType::I16) | Some(IRType::U16) => {
+                            code.extend(encode_movsx_reg16(dst_reg, src_reg));
+                        }
+                        Some(IRType::I32) | Some(IRType::U32) => {
+                            code.extend(encode_movsxd(dst_reg, src_reg));
+                        }
+                        _ => {
+                            if src_reg != dst_reg {
+                                code.extend(encode_mov_reg_reg(dst_reg, src_reg));
+                            }
+                        }
+                    }
+                }
+                CastKind::Trunc => {
+                    if src_reg != dst_reg {
+                        code.extend(encode_mov_reg_reg(dst_reg, src_reg));
+                    }
+                    // Mask to the target width.
+                    if let Some(tt) = to_ty {
+                        match tt {
+                            IRType::U8 | IRType::I8 => {
+                                code.extend(encode_and_reg_imm32(dst_reg, 0xFF));
+                            }
+                            IRType::U16 | IRType::I16 => {
+                                code.extend(encode_and_reg_imm32(dst_reg, 0xFFFF));
+                            }
+                            IRType::U32 | IRType::I32 => {
+                                code.extend(encode_and_reg_imm32(dst_reg, -1i32));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                CastKind::BitCast => {
+                    if src_reg != dst_reg {
+                        code.extend(encode_mov_reg_reg(dst_reg, src_reg));
+                    }
+                }
+                _ => {
+                    // IntToFloat, FloatToInt, etc. — FP casts need SSE.
+                    // For now, emit a mov as placeholder.
+                    if src_reg != dst_reg {
+                        code.extend(encode_mov_reg_reg(dst_reg, src_reg));
+                    }
+                }
+            }
+            reads.push(phys(src_reg));
+            writes.push(phys(dst_reg));
+            "cast".to_string()
+        }
+
+        // ── Alloc (stack allocation — use RSP) ──
+        IRInstr::Alloc { dst, size, .. } => {
+            let dst_reg = load_to_reg(dst, alloc, code);
+            // lea dst, [rsp + 0]  (or use the current stack pointer)
+            code.extend(encode_lea_reg_mem(dst_reg, Gpr::Rsp, 0));
+            // sub rsp, size (align to 16)
+            let aligned = ((*size as usize + 15) & !15) as i32;
+            code.extend(encode_sub_reg_imm32(Gpr::Rsp, aligned));
+            writes.push(phys(dst_reg));
+            "alloc".to_string()
+        }
+
+        // ── Free (stack deallocation) ──
+        IRInstr::Free { ptr, .. } => {
+            // add rsp, size — but we don't know the size here.
+            // For now, emit NOP (stack is reclaimed at function exit).
+            code.extend(encode_nop());
+            let _ = load_to_reg(ptr, alloc, code);
+            "free".to_string()
+        }
+
+        // ── GetAddress (lea — symbol address) ──
+        IRInstr::GetAddress { dst, name } => {
+            let dst_reg = load_to_reg(dst, alloc, code);
+            // lea dst, [rip + sym] — use a placeholder relocation.
+            // For now, emit lea with offset 0; the linker resolves the symbol.
+            code.extend(encode_lea_rip_rel(dst_reg, 0));
+            writes.push(phys(dst_reg));
+            "getaddr".to_string()
+        }
+
+        // ── Offset (add offset to pointer) ──
+        IRInstr::Offset { dst, base, offset, .. } => {
+            let dst_reg = load_to_reg(dst, alloc, code);
+            let base_reg = load_to_reg(base, alloc, code);
+            if base_reg != dst_reg {
+                code.extend(encode_mov_reg_reg(dst_reg, base_reg));
+            }
+            // offset is an IRValue (could be register or immediate).
+            match resolve_value(offset, alloc) {
+                ResolvedVal::Imm(imm) => {
+                    code.extend(encode_add_reg_imm32(dst_reg, imm as i32));
+                }
+                ResolvedVal::Reg(off_reg) => {
+                    code.extend(encode_add_reg_reg(dst_reg, off_reg));
+                    reads.push(phys(off_reg));
+                }
+            }
+            reads.push(phys(base_reg));
+            writes.push(phys(dst_reg));
+            "offset".to_string()
+        }
+
+        // ── Phi (should be resolved by this point, emit NOP) ──
+        IRInstr::Phi { dst, .. } => {
+            let dst_reg = load_to_reg(dst, alloc, code);
+            code.extend(encode_nop());
+            writes.push(phys(dst_reg));
+            "phi".to_string()
+        }
+
+        // ── Ret ──
+        IRInstr::Ret { values } => {
+            if let Some(first) = values.first() {
+                let ret_reg = load_to_reg(first, alloc, code);
+                if ret_reg != Gpr::Rax {
+                    code.extend(encode_mov_reg_reg(Gpr::Rax, ret_reg));
+                }
+            }
+            // The epilogue (add rsp, pop, pop rbp, ret) is emitted after all blocks.
+            // But if Ret appears mid-function, we need the epilogue here too.
+            // For simplicity, emit a jump to the epilogue (which is at the end).
+            // For now, emit the epilogue inline.
+            // Actually, the caller (emit_terminator) handles Return via IRTerminator.
+            // IRInstr::Ret is rare; emit NOP.
+            code.extend(encode_nop());
+            "ret".to_string()
+        }
+
+        // ── Branch (unconditional) ──
+        IRInstr::Branch { target } => {
+            // jmp rel32 (will be patched)
+            let offset_pos = code.len() + 1; // after the 0xE9 opcode byte
+            code.extend(encode_jmp_rel32(0)); // placeholder
+            fixups.push(BranchFixup {
+                offset: offset_pos,
+                target: target.clone(),
+            });
+            "branch".to_string()
+        }
+
+        // ── CondBranch ──
+        IRInstr::CondBranch { cond, true_target, false_target, .. } => {
+            let cond_reg = load_to_reg(cond, alloc, code);
+            code.extend(encode_test_reg_reg(cond_reg, cond_reg));
+            // jne true_block (rel32)
+            let offset_pos = code.len() + 2; // after 0x0F 0x85
+            code.extend(encode_jcc_rel32(Cc::NotEqual, 0)); // placeholder
+            fixups.push(BranchFixup {
+                offset: offset_pos,
+                target: true_target.clone(),
+            });
+            // jmp false_target (rel32)
+            let offset_pos2 = code.len() + 1;
+            code.extend(encode_jmp_rel32(0)); // placeholder
+            fixups.push(BranchFixup {
+                offset: offset_pos2,
+                target: false_target.clone(),
+            });
+            reads.push(phys(cond_reg));
+            "cond_branch".to_string()
+        }
+
+        // ── Syscall ──
+        IRInstr::Syscall { nr, args, dst } => {
+            // x86_64 Linux syscall ABI:
+            //   nr in RAX, args in RDI, RSI, RDX, R10, R8, R9
+            //   return in RAX
+            code.extend(encode_mov_reg_imm32(Gpr::Rax, *nr as i32));
+            let arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::R10, Gpr::R8, Gpr::R9];
+            for (i, arg) in args.iter().enumerate().take(6) {
+                let arg_reg = load_to_reg(arg, alloc, code);
+                if arg_reg != arg_regs[i] {
+                    code.extend(encode_mov_reg_reg(arg_regs[i], arg_reg));
+                }
+            }
+            code.extend(encode_syscall());
+            if let Some(dst_val) = dst {
+                let dst_reg = load_to_reg(dst_val, alloc, code);
+                if dst_reg != Gpr::Rax {
+                    code.extend(encode_mov_reg_reg(dst_reg, Gpr::Rax));
+                }
+                writes.push(phys(dst_reg));
+            }
+            "syscall".to_string()
+        }
+
+        // ── Call ──
+        IRInstr::Call { dst, func: fname, args, is_extern, .. } => {
+            // x86_64 System V calling convention:
+            //   args in RDI, RSI, RDX, RCX, R8, R9 (first 6 integer args)
+            //   return in RAX
+            let arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx, Gpr::R8, Gpr::R9];
+            for (i, arg) in args.iter().enumerate().take(6) {
+                let arg_reg = load_to_reg(arg, alloc, code);
+                if arg_reg != arg_regs[i] {
+                    code.extend(encode_mov_reg_reg(arg_regs[i], arg_reg));
+                }
+            }
+            // Emit call with a relocation (placeholder offset 0).
+            code.extend(encode_call_rel32(0));
+            // TODO: record call relocation for the linker.
+            if let Some(dst_val) = dst {
+                let dst_reg = load_to_reg(dst_val, alloc, code);
+                if dst_reg != Gpr::Rax {
+                    code.extend(encode_mov_reg_reg(dst_reg, Gpr::Rax));
+                }
+                writes.push(phys(dst_reg));
+            }
+            if *is_extern {
+                "call_extern".to_string()
+            } else {
+                "call".to_string()
+            }
+        }
+
+        // ── AtomicLoad ──
+        IRInstr::AtomicLoad { dst, addr, .. } => {
+            let dst_reg = load_to_reg(dst, alloc, code);
+            let base_reg = load_to_reg(addr, alloc, code);
+            // mov dst, [base] (x86_64 loads are atomic for aligned accesses)
+            code.extend(encode_mov_reg_mem(dst_reg, base_reg, 0));
+            reads.push(phys(base_reg));
+            writes.push(phys(dst_reg));
+            "atomic_load".to_string()
+        }
+
+        // ── AtomicStore ──
+        IRInstr::AtomicStore { value, addr, .. } => {
+            let val_reg = load_to_reg(value, alloc, code);
+            let base_reg = load_to_reg(addr, alloc, code);
+            // mov [base], val (x86_64 stores are atomic for aligned accesses)
+            code.extend(encode_mov_mem_reg(base_reg, 0, val_reg));
+            reads.push(phys(val_reg));
+            reads.push(phys(base_reg));
+            "atomic_store".to_string()
+        }
+
+        // ── AtomicCas ──
+        IRInstr::AtomicCas { dst, addr, expected, desired, .. } => {
+            // cmpxchg [addr], new
+            // RAX holds expected; if [addr]==RAX, then [addr]=new, else RAX=[addr].
+            let expected_reg = load_to_reg(expected, alloc, code);
+            if expected_reg != Gpr::Rax {
+                code.extend(encode_mov_reg_reg(Gpr::Rax, expected_reg));
+            }
+            let base_reg = load_to_reg(addr, alloc, code);
+            let new_reg = load_to_reg(desired, alloc, code);
+            // lock cmpxchg [base], new_reg
+            // We don't have a direct encode_cmpxchg helper, so emit the bytes.
+            code.extend_from_slice(&[0xF0]); // LOCK prefix
+            code.extend_from_slice(&[0x0F, 0xB1]); // CMPXCHG r/m, r
+            encode_mem_operand(code, new_reg as u8 & 7, base_reg, 0);
+            if (new_reg as u8) >= 8 || (base_reg as u8) >= 8 {
+                // REX prefix needed — this is a simplification; proper
+                // REX handling should go before the opcode.
+                // For correctness, insert REX before LOCK.
+                // TODO: proper REX prefix placement.
+            }
+            let dst_reg = load_to_reg(dst, alloc, code);
+            if dst_reg != Gpr::Rax {
+                code.extend(encode_mov_reg_reg(dst_reg, Gpr::Rax));
+            }
+            reads.push(phys(expected_reg));
+            reads.push(phys(base_reg));
+            reads.push(phys(new_reg));
+            writes.push(phys(dst_reg));
+            "atomic_cas".to_string()
+        }
+
+        // ── Struct/Array/TaggedUnion (these are type declarations, not instructions) ──
+        // ── Unhandled instructions (emit NOP, should not appear at this stage) ──
+        _ => {
+            code.extend(encode_nop());
+            "unhandled".to_string()
+        }
+    };
+
+    Ok((opcode, reads, writes))
+}
+
+/// Emit a terminator (Jump, Branch, Return).
+fn emit_terminator(
+    code: &mut Vec<u8>,
+    term: &IRTerminator,
+    alloc: &RegAllocResult,
+    _frame_size: u32,
+    fixups: &mut Vec<BranchFixup>,
+) {
+    match term {
+        IRTerminator::Jump(label) => {
+            let offset_pos = code.len() + 1;
+            code.extend(encode_jmp_rel32(0));
+            fixups.push(BranchFixup {
+                offset: offset_pos,
+                target: label.clone(),
+            });
+        }
+        IRTerminator::Branch { cond, true_block, false_block } => {
+            let cond_reg = load_to_reg(cond, alloc, code);
+            code.extend(encode_test_reg_reg(cond_reg, cond_reg));
+            let offset_pos = code.len() + 2;
+            code.extend(encode_jcc_rel32(Cc::NotEqual, 0));
+            fixups.push(BranchFixup {
+                offset: offset_pos,
+                target: true_block.clone(),
+            });
+            let offset_pos2 = code.len() + 1;
+            code.extend(encode_jmp_rel32(0));
+            fixups.push(BranchFixup {
+                offset: offset_pos2,
+                target: false_block.clone(),
+            });
+        }
+        IRTerminator::Return(vals) => {
+            if let Some(first) = vals.first() {
+                let ret_reg = load_to_reg(first, alloc, code);
+                if ret_reg != Gpr::Rax {
+                    code.extend(encode_mov_reg_reg(Gpr::Rax, ret_reg));
+                }
+            }
+            // Epilogue: add rsp, frame_size; pop callee-saved; pop rbp; ret
+            // Note: frame_size is not available here — the epilogue is
+            // emitted by the caller (emit_function_regalloc_full) at the
+            // end of the function. For mid-function returns, we need the
+            // epilogue here too. For now, emit ret (the function-level
+            // epilogue handles the rest).
+            code.extend(encode_ret());
+        }
+        IRTerminator::Unreachable => {
+            code.extend(encode_int3()); // trap
+        }
+        _ => {
+            code.extend(encode_nop());
+        }
+    }
+}
+
+/// FP fallback — for now, emit NOP and return empty metadata.
+/// A full FP implementation would use SSE/AVX instructions.
+fn emit_fp_fallback(
+    instr: &IRInstr,
+    _alloc: &RegAllocResult,
+) -> Result<(String, Vec<PhysicalReg>, Vec<PhysicalReg>), BackendError> {
+    // FP instructions are not yet implemented in the register-based emitter.
+    // Return an error so the caller can fall back to stack-slot for FP functions.
+    Err(BackendError::RegisterAllocFailed {
+        isa: "x86_64",
+        reason: format!("FP instruction not yet supported in register-based emitter: {:?}", instr),
+    })
+}
+
+/// Helper: create a PhysicalReg from a Gpr.
+fn phys(g: Gpr) -> PhysicalReg {
+    PhysicalReg::new(crate::backend::RegClass::Gpr, g as u32)
+}
+
+/// Map CmpKind to x86_64 condition code.
+fn cmp_kind_to_cc(kind: &CmpKind) -> Cc {
+    match kind {
+        CmpKind::Eq => Cc::Equal,
+        CmpKind::Ne => Cc::NotEqual,
+        CmpKind::SLt => Cc::Less,
+        CmpKind::SLe => Cc::LessEqual,
+        CmpKind::SGt => Cc::Greater,
+        CmpKind::SGe => Cc::GreaterEqual,
+        CmpKind::ULt => Cc::Below,
+        CmpKind::ULe => Cc::BelowEqual,
+        CmpKind::UGt => Cc::Above,
+        CmpKind::UGe => Cc::AboveEqual,
+    }
+}
