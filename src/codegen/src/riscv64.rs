@@ -6638,9 +6638,10 @@ fn preg_to_gpr(p: &PhysicalReg) -> Option<Gpr> {
 ///
 /// Currently this only fires for single-block functions whose `Ret`
 /// carries a single immediate operand that fits in 12-bit signed; the
-/// leading `ADDI a0, x0, imm` (4 bytes, produced by `ss_load_imm` case
-/// 1) is replaced with `LUI a0, 0` (4 bytes) + `ADDI a0, a0, imm` (4
-/// bytes) = 8 bytes. The epilogue bytes are preserved verbatim.
+/// leading `ADDI a0, x0, imm` (4 bytes, produced by `ss_load_imm`
+/// case 1) is replaced with `LUI a0, 0` (4 bytes) + `ADDI a0, a0, imm`
+/// (4 bytes) = 8 bytes.  The epilogue bytes are preserved verbatim.
+#[allow(dead_code)] // X6-impl: minimal ISel; kept for fallback/debugging.
 fn reg_isel_rewrite_bytes(
     allocated: &mut AllocatedFunction,
     func: &IRFunction,
