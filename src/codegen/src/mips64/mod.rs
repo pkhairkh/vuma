@@ -56,6 +56,14 @@ use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRVal
 use std::collections::HashMap;
 use std::fmt;
 
+/// Run the target-agnostic linear-scan allocator (Wave 12).
+fn try_real_regalloc(func: &IRFunction) -> Option<crate::regalloc::RegAllocResult> {
+    let registry = crate::target_desc::TargetDescRegistry::new();
+    let target = registry.get("mips64")?;
+    let allocator = crate::regalloc::TargetAgnosticRegAlloc::new(target);
+    allocator.allocate_function(func).ok()
+}
+
 // ===========================================================================
 // MIPS64 Opcode Constants
 // ===========================================================================
@@ -3645,6 +3653,7 @@ fn mips64_allocate_registers_ss(
 /// stack slots (for safety), but the allocation metadata records which vregs
 /// COULD be in real registers. A future effort will use this metadata to emit
 /// register-based instructions directly.
+#[allow(dead_code)]
 fn mips64_allocate_registers_real(
     func: &IRFunction,
     big_endian: bool,
@@ -3718,11 +3727,45 @@ impl Backend for Mips64Backend {
     }
 
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
-        if self.use_real_regalloc {
-            mips64_allocate_registers_real(func, self.big_endian)
-        } else {
-            mips64_allocate_registers_ss(func, self.big_endian)
+        // ── Wave 12: Full register-based emitter dispatch ──
+        let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_MIPS64")
+            .map(|v| v != "0")
+            .unwrap_or(true); // default ON
+
+        let contains_fork = func.blocks.iter().any(|block| {
+            block.instructions.iter().any(|inst| {
+                match inst {
+                    crate::ir::IRInstr::Call { func: fname, .. } => {
+                        fname == "spawn_worker" || fname == "fork"
+                    }
+                    crate::ir::IRInstr::Syscall { nr, args, dst } => {
+                        *nr == 220 || *nr == 221
+                        || (dst.is_some()
+                            && args.iter().any(|a| matches!(a, crate::ir::IRValue::Register(_))))
+                    }
+                    _ => false,
+                }
+            })
+        });
+
+        if real_regalloc && !contains_fork {
+            if let Some(alloc_result) = try_real_regalloc(func) {
+                match reg_isel::emit_function_regalloc_full(func, &alloc_result) {
+                    Ok(full_allocated) => return Ok(full_allocated),
+                    Err(e) => {
+                        vuma_log!(
+                            debug,
+                            "mips64 regalloc: full emitter failed for '{}': {} — \
+                             falling back to stack-slot ISel",
+                            func.name, e
+                        );
+                    }
+                }
+            }
         }
+
+        // Fall back to stack-slot ISel
+        mips64_allocate_registers_ss(func, self.big_endian)
     }
 
     fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError> {
@@ -6180,3 +6223,5 @@ mod tests {
     }
 }
 pub mod disasm;
+/// Full register-based instruction selection (Wave 12).
+pub mod reg_isel;

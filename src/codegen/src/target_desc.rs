@@ -2257,7 +2257,7 @@ fn mips64_target_desc() -> TargetDesc {
         // $29: stack pointer
         RegDesc::gpr("$29", 29).stack_pointer(),
         // $30: frame pointer (callee-saved)
-        RegDesc::gpr("$30", 30).frame_pointer().callee_saved(),
+        RegDesc::gpr("$30", 30).frame_pointer().callee_saved().not_allocatable(),
         // $31: return address (link register)
         RegDesc::gpr("$31", 31).link_register(),
         // $f0-$f1: FP return values (caller-saved)
