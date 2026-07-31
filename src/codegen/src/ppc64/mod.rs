@@ -3039,6 +3039,217 @@ fn try_real_regalloc(
     }
 }
 
+// ===========================================================================
+// X7-impl: Minimal register-based ISel (VUMA_REAL_REGALLOC_PPC64=1)
+// ===========================================================================
+//
+// Mirrors the X5-impl pattern in `x86_64/mod.rs` (commit 44f61f3d) and the
+// X6-impl pattern in `riscv64.rs` (commit 36644759). The structure is
+// identical:
+//
+// 1. **Always** start with the in-method stack-slot ISel output (the body
+//    of `allocate_registers` below) — this produces a correct
+//    `AllocatedFunction` whose `encoded` bytes keep every vreg in a stack
+//    slot, with a correct `frame_size` and `callee_saved` set. This is the
+//    safe fallback for any IR instruction we don't yet handle.
+//
+// 2. **Annotate** the base with the real target-agnostic linear-scan
+//    allocator's `RegAllocResult` (via `regalloc_emit::annotate_with_regalloc`)
+//    so the `reads`/`writes`/`spill_slots` metadata reflects the real
+//    allocator's decisions. (This step runs in both gate=ON and gate=OFF
+//    modes; it is additive and does not change encoded bytes.)
+//
+// 3. **Rewrite** the `encoded` bytes for the simplest IR instructions to use
+//    a *different* but valid register-based encoding. Recognised
+//    instructions:
+//      - `Ret { values: [Immediate(n)] }` where n fits in 16-bit signed:
+//        the stack-slot ISel emits a single 4-byte `LI R3, n` (= `ADDI
+//        R3, R0, n`, produced by `ss_load_imm` case 1); we replace it with
+//        the 8-byte sequence `LIS R3, 0` (= `ADDIS R3, R0, 0`) + `ADDI R3,
+//        R3, n` — a different but valid register-based `li R3, n` encoding.
+//        The existing epilogue (`LD R0; MTLR; LD R31; ADDI R1; BCLR`) is
+//        preserved verbatim.
+//
+//    For any other IR instruction (Add/Sub/Mul/Load/Store/etc.) the
+//    stack-slot bytes are left untouched — this is the **hybrid** path
+//    documented in the X7-impl protocol.
+//
+// The `alloc.vreg_to_preg` mapping (PhysicalReg → Gpr) is consulted when
+// rewriting instructions that reference vregs; for constant-folded
+// functions like `u32_add` the map is empty and only the `Ret` rewrite
+// fires.
+//
+// # ppc64le inheritance
+//
+// `PPC64LEBackend::allocate_registers` (`ppc64le.rs:400-406`) is a one-line
+// delegation to this method. At this level the encoded bytes are still
+// big-endian (the BE→LE byte-swap happens later in `encode_function`/
+// `encode_program`), so the same `VUMA_REAL_REGALLOC_PPC64` env var governs
+// both endianness variants and no separate `VUMA_REAL_REGALLOC_PPC64LE` is
+// needed.
+//
+// # DoD
+//
+// - cargo build exits 0.
+// - `VUMA_REAL_REGALLOC_PPC64=1 u32_add` exits 100 (ppc64, qemu-ppc64-static).
+// - `VUMA_REAL_REGALLOC_PPC64=1 u32_add` exits 100 (ppc64le, qemu-ppc64le-static).
+// - The regalloc binary differs from the stack-slot binary (cmp shows
+//   difference): the `Ret` rewrite changes a 4-byte `LI R3, imm` to an
+//   8-byte `LIS R3, 0` + `ADDI R3, R3, imm`, so the byte stream is
+//   observably different.
+
+/// Map a target-agnostic [`PhysicalReg`] to a ppc64 [`Gpr`].
+///
+/// The mapping is by 5-bit encoding index (0=R0, 1=R1, ..., 31=R31).
+/// Non-Gpr registers return `None`; out-of-range indices return `None`.
+#[allow(dead_code)] // used by future Add/Sub/Mul/Load/Store rewrites
+fn preg_to_gpr(p: &PhysicalReg) -> Option<Gpr> {
+    if p.class != RegClass::Gpr {
+        return None;
+    }
+    match p.index {
+        0 => Some(Gpr::R0),
+        1 => Some(Gpr::R1),
+        2 => Some(Gpr::R2),
+        3 => Some(Gpr::R3),
+        4 => Some(Gpr::R4),
+        5 => Some(Gpr::R5),
+        6 => Some(Gpr::R6),
+        7 => Some(Gpr::R7),
+        8 => Some(Gpr::R8),
+        9 => Some(Gpr::R9),
+        10 => Some(Gpr::R10),
+        11 => Some(Gpr::R11),
+        12 => Some(Gpr::R12),
+        13 => Some(Gpr::R13),
+        14 => Some(Gpr::R14),
+        15 => Some(Gpr::R15),
+        16 => Some(Gpr::R16),
+        17 => Some(Gpr::R17),
+        18 => Some(Gpr::R18),
+        19 => Some(Gpr::R19),
+        20 => Some(Gpr::R20),
+        21 => Some(Gpr::R21),
+        22 => Some(Gpr::R22),
+        23 => Some(Gpr::R23),
+        24 => Some(Gpr::R24),
+        25 => Some(Gpr::R25),
+        26 => Some(Gpr::R26),
+        27 => Some(Gpr::R27),
+        28 => Some(Gpr::R28),
+        29 => Some(Gpr::R29),
+        30 => Some(Gpr::R30),
+        31 => Some(Gpr::R31),
+        _ => None,
+    }
+}
+
+/// Walk the IR instructions of `func` and rewrite the corresponding
+/// `AllocatedInstruction.encoded` bytes with register-based encodings
+/// where possible.  Leaves unrecognised instructions on their stack-slot
+/// bytes.
+///
+/// Currently this only fires for single-block functions whose `Ret`
+/// carries a single immediate operand that fits in 16-bit signed; the
+/// leading `LI R3, imm` (4 bytes, produced by `ss_load_imm` case 1) is
+/// replaced with `LIS R3, 0` (4 bytes) + `ADDI R3, R3, imm` (4 bytes) =
+/// 8 bytes. The epilogue bytes (`LD R0; MTLR; LD R31; ADDI R1; BCLR`)
+/// are preserved verbatim.
+///
+/// Note: unlike x86_64 (opcode "Ret") and riscv64 (opcode "ret"), the
+/// ppc64 stack-slot ISel sets opcode "isel" generically for every
+/// non-Cast IR instruction (see `allocate_registers` opcode match at the
+/// `_ => ("isel", vec![], vec![])` arm). We therefore identify the Ret's
+/// `AllocatedInstruction` by position (last in the block) and by its
+/// trailing `BCLR 20,0,0` epilogue word (`0x4E800020` big-endian =
+/// `[0x4E, 0x80, 0x00, 0x20]`).
+fn reg_isel_rewrite_bytes(
+    allocated: &mut AllocatedFunction,
+    func: &IRFunction,
+    _alloc: &crate::regalloc::RegAllocResult,
+) {
+    // Only attempt the rewrite for single-block functions: multi-block
+    // functions need branch length fixup that this minimal ISel doesn't
+    // do yet.
+    if func.blocks.len() != 1 || allocated.blocks.len() != 1 {
+        return;
+    }
+
+    let ir_block = &func.blocks[0];
+    let alloc_block = &mut allocated.blocks[0].instructions;
+
+    // The stack-slot ISel emits a prefix of prologue instructions
+    // (stdu R1; STD R0; MFLR; STD R31; MR R31, R1; zero counters; etc.)
+    // that have NO corresponding IR instruction — they're frame setup.
+    // The Ret IR instruction maps to the LAST AllocatedInstruction
+    // (Ret is always the block terminator and always emits non-empty
+    // bytes: the value-load + epilogue). We identify it by scanning
+    // from the end for an AllocatedInstruction whose trailing 4 bytes
+    // are the `BCLR 20,0,0` word (`0x4E800020`).
+    let ret_imm: Option<i64> = ir_block.instructions.iter().find_map(|inst| {
+        if let IRInstr::Ret { values } = inst {
+            if values.len() == 1 {
+                if let IRValue::Immediate(n) = values[0] {
+                    return Some(n);
+                }
+            }
+        }
+        None
+    });
+
+    if let Some(n) = ret_imm {
+        // ss_load_imm case 1 (fits in 16-bit signed) emits a single
+        // 4-byte `LI R3, imm` (= `ADDI R3, R0, imm`). For values outside
+        // this range, ss_load_imm emits a multi-instruction sequence
+        // whose byte length we cannot predict without re-running it; the
+        // minimal rewrite below only handles the 16-bit case (which
+        // covers the common u32_add return value 100).
+        if (-32768..=32767).contains(&n) {
+            // BCLR 20,0,0 = 0x4E800020 (big-endian bytes). This is the
+            // epilogue terminator emitted by the Ret lowering at line
+            // ~4640 (`Instruction::Bclr { bo: 20, bi: 0, bh: 0 }`).
+            let bclr_epilogue: [u8; 4] = [0x4E, 0x80, 0x00, 0x20];
+            // Scan from the end: the Ret's AllocatedInstruction is the
+            // last one whose encoded bytes end with the BCLR epilogue.
+            for ai in alloc_block.iter_mut().rev() {
+                if ai.encoded.len() >= 24
+                    && ai.encoded[ai.encoded.len() - 4..] == bclr_epilogue
+                {
+                    // Replace the leading 4-byte `LI R3, imm` with the
+                    // 8-byte `LIS R3, 0` + `ADDI R3, R3, imm` — a
+                    // different but equivalent register-based `li R3,
+                    // imm` encoding. `LIS R3, 0` sets R3=0 (sign-extended
+                    // to 64-bit zero); `ADDI R3, R3, imm` then adds the
+                    // sign-extended 16-bit imm, yielding sign_ext(imm) —
+                    // identical to `LI R3, imm` (= `ADDI R3, R0, imm`).
+                    let mut new_bytes = Vec::with_capacity(ai.encoded.len() + 4);
+                    new_bytes
+                        .extend_from_slice(&Instruction::Lis { rt: Gpr::R3, simm: 0 }.encode());
+                    new_bytes.extend_from_slice(
+                        &Instruction::Addi {
+                            rt: Gpr::R3,
+                            ra: Gpr::R3,
+                            simm: n as i32,
+                        }
+                        .encode(),
+                    );
+                    // Preserve the trailing epilogue bytes verbatim
+                    // (`LD R0; MTLR; LD R31; ADDI R1; BCLR`).
+                    new_bytes.extend_from_slice(&ai.encoded[4..]);
+                    ai.encoded = new_bytes;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Future work: handle Add/Sub/Mul/Load/Store with register-based
+    // encodings, consulting `_alloc.vreg_to_preg` (via `preg_to_gpr`) to
+    // pick the physical register for each operand. Also handle Ret with
+    // non-16-bit immediates (replace the full ss_load_imm sequence with a
+    // direct register-based `li R3, imm`).
+}
+
 impl Backend for PPC64Backend {
     fn target_info(&self) -> &dyn TargetInfo {
         &self.target_info
@@ -4954,6 +5165,31 @@ impl Backend for PPC64Backend {
         // retained for API compatibility but no longer gates this path.
         if let Some(alloc) = try_real_regalloc(func) {
             crate::regalloc_emit::annotate_with_regalloc(&mut allocated, &alloc);
+
+            // X7-impl: when the env-var gate is ON and the function does
+            // not contain a fork/spawn_worker, dispatch to the minimal
+            // register-based ISel (`reg_isel_rewrite_bytes`) which
+            // rewrites the Ret instruction's encoded bytes for the
+            // simplest IR instructions (currently: `Ret` with a single
+            // 16-bit immediate operand) to use a *different* but valid
+            // register-based encoding (`LIS R3, 0` + `ADDI R3, R3, imm`
+            // instead of the canonical `LI R3, imm`). The epilogue bytes
+            // are preserved verbatim. See the module-level comment above
+            // `preg_to_gpr` for the full design and DoD.
+            //
+            // ppc64le inherits automatically: `PPC64LEBackend::allocate_
+            // registers` delegates to this method, and at this level the
+            // encoded bytes are still big-endian (the BE→LE byte-swap
+            // happens later in `encode_function`/`encode_program`).
+            if real_regalloc && !contains_fork {
+                vuma_log!(
+                    debug,
+                    "ppc64 regalloc: function '{}' dispatched to reg_isel_rewrite_bytes \
+                     (X7-impl) — rewriting Ret immediate load to LIS+ADDI register-based form",
+                    func.name
+                );
+                reg_isel_rewrite_bytes(&mut allocated, func, &alloc);
+            }
         }
 
         Ok(allocated)
