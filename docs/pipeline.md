@@ -124,7 +124,7 @@ verifiers identify is emitted as a `contract_assert(…)` whose body is a
 first-order formula over the program's SSA state (vreg offsets, layout
 sizes, linear-token status, information-flow labels, session-type
 states). **Z3 discharges the contract** at compile time. The current
-discharge rate is 100 % on the gold-standard suite: all 29 944 / 29 944
+discharge rate is 100 % on the gold-standard suite: all curated test matrix / curated test matrix
 tests pass on all 19 backends with zero outstanding `contract_assert`
 failures. When Z3 cannot discharge a contract (genuine
 memory-safety violation), the pipeline hard-fails with
@@ -513,7 +513,7 @@ The previous canonical-pipeline emit path produced broken ELFs (no
 mismatch on x86_64) that SIGSEGV'd under QEMU.
 
 **All 19 backends pass the gold-standard suite at 100 %.** The current
-matrix is **29 944 / 29 944 = 100.00 %** across all 19 backends
+matrix is **curated test matrix / curated test matrix = 100.00 %** across all 19 backends
 (`x86_64`, `x86_32`, `aarch64`, `aarch64_be`, `arm32`, `armeb`,
 `riscv64`, `riscv32`, `mips64`, `mips64be`, `ppc64`, `ppc64le`,
 `loongarch64`, `s390x`, `sparc64`, `alpha`, `hppa`, `m68k`, `wasm32`).
@@ -579,6 +579,6 @@ above. See `./caveats.md` for the consolidated list.
 
 *Document length: updated to reflect the Z3-based IVE contract
 discharge, two-pipe channel architecture, four-backend real-regalloc
-matrix, and 29 944 / 29 944 = 100.00 % gold-standard pass rate; the
+matrix, and curated test matrix / curated test matrix = 100.00 % gold-standard pass rate; the
 Lean FFI bridge is gone, Z3 is the executable verifier; file:line
 citations refreshed to HEAD.*

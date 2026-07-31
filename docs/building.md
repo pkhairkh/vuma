@@ -142,13 +142,13 @@ wasmtime --version     # wasmtime-cli 29.x (or newer)
 
 ```bash
 # Iterative build (fast, used by the test suite):
-cargo build --profile release-fast --bin compile_dump --bin dump_ir
+cargo build --profile release --bin compile_dump --bin dump_ir
 
 # Production build (slow, optimised):
 cargo build --profile release --bin compile_dump
 ```
 
-The binaries land in `target/release-fast/` or `target/release/`
+The binaries land in `target/release/` or `target/release/`
 respectively.
 
 ### Build profiles
@@ -156,16 +156,16 @@ respectively.
 | Profile | Use case | LTO | Opt level | Codegen units |
 |---------|----------|-----|-----------|---------------|
 | `dev` (default) | Local development / debugging | off | 0 | 256 |
-| `release-fast` | Test-suite runs, iterative work | **off** | 3 | **16** |
+| `release` | Test-suite runs, iterative work | **off** | 3 | **16** |
 | `release` | Production / release builds | **on (fat)** | 3 | **1** |
 
-The `release-fast` profile (defined in `Cargo.toml`) deliberately
+The `release` profile (defined in `Cargo.toml`) deliberately
 disables LTO and bumps `codegen-units` to 16 so a from-scratch build
 that would take 10+ minutes on a Pi 5 with the `release` profile
 completes in ~1–2 minutes. Runtime is still `O3` (so QEMU-emulated
 executions stay fast); only the link-time optimisation pass is
 skipped, costing ~5–10% runtime but ~5–10× build-time speedup. Use
-`release-fast` for everyday work and `release` only when you need
+`release` for everyday work and `release` only when you need
 maximum runtime performance or are cutting a release artifact.
 
 ### Verifying the Z3 link
@@ -229,7 +229,7 @@ Flags:
 | `--trend-n N` | Override the `--trend` default of 10. |
 | `--skip-build` | Skip the compiler rebuild step. |
 | `--backends LIST` | Restrict to a subset of backends (space-separated). |
-| `--profile NAME` | Use a specific Cargo profile (default `release-fast`). `--release` is a shortcut for `--profile release` (slow LTO build). |
+| `--profile NAME` | Use a specific Cargo profile (default `release`). `--release` is a shortcut for `--profile release` (slow LTO build). |
 
 Flag precedence for the commit step: `--no-push` → `--dry-run` →
 `--commit` → default-off summary.
@@ -278,7 +278,7 @@ overrides for `qemu_smoke_test.sh`:
 
 ```bash
 # Compile a single test:
-./target/release-fast/compile_dump \
+./target/release/compile_dump \
   tests/gold_standard/ipc/simple_send.vuma /tmp/out.bin aarch64 --opt-level=O3
 
 # Run natively (x86_64 host):
@@ -288,7 +288,7 @@ chmod +x /tmp/out.bin && /tmp/out.bin
 ~/.local/bin/qemu-aarch64-static /tmp/out.bin
 
 # Run wasm32:
-./target/release-fast/compile_dump \
+./target/release/compile_dump \
   tests/gold_standard/ipc/simple_send.vuma /tmp/out.wasm wasm32 --opt-level=O3
 python3 scripts/wasm32_runner.py /tmp/out.wasm
 ```
@@ -391,7 +391,7 @@ cargo test --features pmt-runtime-check --test pmt_feature_flag_test
 
    ```bash
    for b in aarch64 x86_64 hppa wasm32; do
-     ./target/release-fast/compile_dump \
+     ./target/release/compile_dump \
        tests/gold_standard/<category>/<name>.vuma /tmp/t.bin $b --opt-level=O3
      chmod +x /tmp/t.bin
      # run via native, qemu, or wasmtime as appropriate

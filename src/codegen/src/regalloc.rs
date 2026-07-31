@@ -3,36 +3,59 @@
 //! Provides register allocators that map IR virtual registers to physical
 //! registers. The module contains two families of allocators:
 //!
-//! ## ARM64-specific allocators (legacy)
-//!
-//! ### `RegAllocator` (legacy greedy)
-//!
-//! A simple greedy allocator that walks the IR and assigns caller-saved
-//! registers first, then callee-saved, spilling when all are exhausted.
-//! Kept for backward-compatibility with the existing emitter.
-//!
-//! ### `LinearScanAllocator` (ARM64 production)
-//!
-//! A real **linear-scan** register allocator for ARM64 that:
-//!
-//! 1. Computes live ranges from the IR (per-function, across all blocks).
-//! 2. Sorts intervals by start point.
-//! 3. Walks intervals in order, assigning free physical registers.
-//! 4. When the pool is exhausted, evicts the interval whose end point is
-//!    farthest in the future (or spills the current one if it ends latest).
-//! 5. Generates spill/reload code as needed — including reloads at each
-//!    use position after eviction.
-//! 6. Applies register coalescing to eliminate redundant copies.
-//!
-//! ## Target-agnostic allocator (new)
+//! ## Target-agnostic allocator (production, 14 backends)
 //!
 //! ### `TargetAgnosticRegAlloc`
 //!
 //! A **target-agnostic** linear-scan register allocator driven by the
 //! `TargetDesc` data from `target_desc.rs`. It derives the available
 //! register pool (caller-saved, callee-saved, per class) from the target
-//! description rather than hard-coding ARM64 registers. Any backend can
-//! use this allocator by passing its `TargetDesc`.
+//! description rather than hard-coding any ISA's registers. Used by 14
+//! of 15 register-based backends (all except aarch64).
+//!
+//! Features:
+//! 1. **Live-range computation** via `LiveRangeComputer::compute()` —
+//!    global position numbering (pos += 2 per instruction + terminator,
+//!    never reset between blocks).
+//! 2. **Sort by start position** (longer intervals first at same start).
+//! 3. **Linear scan**: expire old intervals, try alloc (caller-saved
+//!    first, callee-saved if `crosses_call`), spill/evict if exhausted.
+//! 4. **Spill with eviction**: when all registers are occupied, the
+//!    interval with the lowest spill weight per length is evicted.
+//! 5. **Calling convention awareness**: intervals that cross calls are
+//!    preferentially assigned callee-saved registers.
+//! 6. **Spill with eviction**: when all registers are occupied, the
+//!    interval with the lowest spill weight per length is evicted.
+//! 7. **Post-allocation conflict resolution**:
+//!    `resolve_register_reuse_conflicts()` detects cases where a used
+//!    vreg and a defined vreg at the same instruction share a physical
+//!    register AND the used vreg is live after that instruction. The
+//!    defined vreg is reassigned to a different ALLOCATABLE register
+//!    (checking `caller_saved` + `callee_saved` lists, not arbitrary
+//!    indices that could hit reserved registers like SP/FP). If no
+//!    register is free, the def vreg is spilled to a stack slot. This
+//!    eliminates the need for stack-slot fallbacks on syscall-heavy
+//!    functions.
+//!
+//! ## ARM64-specific allocators (aarch64 only)
+//!
+//! ### `RegAllocator` (legacy greedy)
+//!
+//! A simple greedy allocator used only by aarch64's `Emitter`. Walks the
+//! IR and assigns caller-saved registers first, then callee-saved,
+//! spilling when all are exhausted.
+//!
+//! ### `LinearScanAllocator` (aarch64 production)
+//!
+//! A linear-scan register allocator for aarch64 that:
+//!
+//! 1. Computes live ranges from the IR (per-function, across all blocks).
+//! 2. Sorts intervals by start point.
+//! 3. Walks intervals in order, assigning free physical registers.
+//! 4. When the pool is exhausted, evicts the interval whose end point is
+//!    farthest in the future (or spills the current one if it ends latest).
+//! 5. Generates spill/reload code as needed.
+//! 6. Applies register coalescing to eliminate redundant copies.
 //!
 //! ## ARM64 Register Conventions (AAPCS64)
 //!

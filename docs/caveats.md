@@ -1,7 +1,7 @@
 # Caveats and Known Issues
 
-> Current caveats and known limitations in the VUMA compiler. Each entry
-> is keyed to the file (and where useful, the symbol) where the
+> Current caveats and known limitations in the VUMA compiler (v0.2.0-alpha.10).
+> Each entry is keyed to the file (and where useful, the symbol) where the
 > limitation lives so developers can find and fix it.
 
 **How to use this file.** Every caveat here is a *current, real*
@@ -11,6 +11,15 @@ references a symbol rather than a line, grep for the symbol
 (e.g. `rg -n 'TargetAgnosticRegAlloc' src/codegen/src/regalloc.rs`)
 rather than trusting any line number verbatim, since lines drift as
 code is edited above.
+
+**Notable change in v0.2.0-alpha.10.** The previous version of this
+document carried a long §2.1 titled "Stack-slot ISel is the only
+production code-emission path". That caveat is **no longer true**:
+15 of 19 backends now use full register-based emission as their
+default code path, with no stack-slot fallbacks. The legacy
+stack-slot emitters survive only as the `contains_fork` opt-out
+(see §2.1 below), which is a correctness requirement rather than a
+production fallback.
 
 ---
 
@@ -41,154 +50,42 @@ nightly; building on stable is unsupported.
 
 ## 2. Code generation
 
-### 2.1 Stack-slot ISel is the only production code-emission path
+### 2.1 `contains_fork` opt-out (clone/fork detection)
 
-Per the allocator classification audit
-([`scripts/audit/allocator_classification.md`](../scripts/audit/allocator_classification.md),
-commit `83846368`), the 19 backends split 6 / 12 / 1 by what
-`allocate_registers` actually invokes:
+| Aspect | Detail |
+|--------|--------|
+| Files | Every register-based backend's `allocate_registers` driver — see `src/codegen/src/backend.rs` (aarch64, around `:3230`), and `<isa>/mod.rs` for `x86_64`, `x86_32`, `arm32`, `riscv64`, `riscv32`, `mips64`, `ppc64`, `loongarch64`, `sparc64`, `s390x`, `alpha`, `hppa`, `m68k`. `wasm32/mod.rs` computes the flag for parity but does not act on it. |
+| Default | Register-based emission is **ON by default** (`VUMA_REAL_REGALLOC_<ISA>` defaults to true; setting the env var to `0` is the debugging opt-out). |
+| Opt-out trigger | A function whose IR contains a `clone`/`fork` syscall (Linux generic `nr=220` or `vfork nr=221`, or an unresolved `Call{func: "spawn_worker"}` / `Call{func: "fork"}`) takes the **stack-slot path** instead of the register-based path. |
+| Reason | `clone(2)` creates a child process whose register state diverges from the parent's at the syscall return. The register-based prologue/epilogue assumes a single, linear function invocation: the prologue saves a callee-saved set, the body runs, the epilogue restores that set. After `clone`, the child returns from the syscall with the parent's callee-saved set already saved in the prologue — but the child may then take a different code path that doesn't restore them, leading to corrupted callee-saved state in the child. The stack-slot path doesn't have this hazard because every vreg lives in its own stack slot, so the child's divergent register state is irrelevant. |
+| Classification | **Correctness requirement, NOT a performance fallback.** This is the *only* situation in which the register-based path is bypassed. It is not a fallback for register pressure, unimplemented IR ops, or allocator failure. |
+| Detection | See the code block below. The check matches both the IPC-level `Call` form and the lowered `Syscall` form (because `expand_spawn_worker` in `ipc_lowering.rs` may have replaced the `Call` by the time `allocate_registers` runs). |
+| Implication | Functions that spawn workers (most IPC tests, the `ping_pong` family, anything calling `spawn_worker()` or `fork()`) emit stack-slot code; everything else emits register-based code. For the curated 30-test matrix this means the IPC tests exercise the stack-slot path and the non-IPC tests exercise the register-based path. The two paths are both production-quality — the stack-slot path is correct, just slower under QEMU TCG emulation. |
+| Cross-refs | [backends.md §5](./backends.md#5-contains_fork-opt-out-clonefork-detection) for the per-backend dispatch table; [architecture.md §7.4](./architecture.md#74-contains_fork-opt-out-clonefork-detection) for the algorithm. |
 
-| Backend(s) | Allocator wired in `allocate_registers` | Encoded bytes come from |
-|------------|------------------------------------------|-------------------------|
-| `aarch64` (direct), `aarch64_be` (inherits via wrapper delegation) | Real — `TargetAgnosticRegAlloc` via `try_real_regalloc` (`backend.rs:3099`, `TargetAgnosticRegAlloc::new` at `:3114`); aarch64 **also** has an opt-in `LinearScanAllocator` prototype behind `VUMA_REAL_REGALLOC_AARCH64=1` (see §2.1.1 below) | Stack-slot ISel baseline (`emitter.emit_function(func, None)`, `backend.rs:3226`) **by default**; register-based bytes only when `VUMA_REAL_REGALLOC_AARCH64=1` is set |
-| `x86_64` (direct) | Real — `TargetAgnosticRegAlloc` via `try_real_regalloc` (`x86_64/mod.rs:4081`) | Stack-slot ISel baseline (`stack_slot_isel::allocate_registers`, `x86_64/mod.rs:4143`) |
-| `riscv64` (direct) | Real — `TargetAgnosticRegAlloc` via `try_real_regalloc` (`riscv64.rs:6542`) | Stack-slot ISel baseline |
-| `ppc64` (direct), `ppc64le` (inherits via wrapper delegation) | Real — `TargetAgnosticRegAlloc` via `try_real_regalloc` (`ppc64/mod.rs:3011`) | Stack-slot ISel baseline |
-| `arm32`, `armeb`, `mips64`, `mips64be`, `riscv32`, `x86_32`, `loongarch64`, `sparc64`, `s390x`, `m68k`, `alpha`, `hppa` | Stack-slot ISel (pure; or `use_real_regalloc=false` default whose `_real` greedy-stub branch is taken only inside `#[cfg(test)]` modules) | Stack-slot ISel |
-| `wasm32` | Wasm-structured — no registers; vregs → Wasm locals; IR lowered directly to Wasm bytecode via `lower_function` (`wasm32/mod.rs:4631`) | Wasm bytecode |
+The `contains_fork` detection code (identical in every register-based
+backend's `allocate_registers` driver):
 
-**Counts.** 6 backends wire a real `TargetAgnosticRegAlloc` (4 direct —
-`aarch64`, `x86_64`, `riscv64`, `ppc64` — plus 2 inherited via wrapper
-delegation — `aarch64_be` → aarch64, `ppc64le` → ppc64). 12 backends are
-pure stack-slot ISel (`arm32`, `armeb`, `mips64`, `mips64be`, `riscv32`,
-`x86_32`, `loongarch64`, `sparc64`, `s390x`, `m68k`, `alpha`, `hppa`).
-1 backend (`wasm32`) is Wasm-structured and has no registers to allocate.
-Total: 19. (The pre-audit caveat text counted "15 of 19" by mis-bucketing
-`aarch64_be`, `ppc64le`, and `wasm32` into the stack-slot column.)
+```rust
+let contains_fork = func.blocks.iter().any(|block| {
+    block.instructions.iter().any(|inst| match inst {
+        IRInstr::Call { func: f, .. } => f == "spawn_worker" || f == "fork",
+        // Linux generic clone (nr=220) and vfork (nr=221). spawn_worker
+        // lowers to Syscall{nr: 220, ..} via expand_spawn_worker.
+        IRInstr::Syscall { nr, .. } => *nr == 220 || *nr == 221,
+        _ => false,
+    })
+});
+```
 
-**Default production path (all 6 "real" backends, unchanged).** On the
-6 backends with a real allocator wired, the real allocator runs **only
-as an annotation pass**: it computes a `RegAllocResult` which
-`regalloc_emit::annotate_with_regalloc` (`regalloc_emit.rs:82-92`) uses
-to overwrite each `AllocatedInstruction`'s `reads` / `writes`
-physical-register metadata. **The `encoded` byte stream is NOT modified**
-— it always comes from the stack-slot ISel baseline invoked *before*
-`try_real_regalloc`. The `reads` / `writes` metadata is consumed by
-disassemblers, debuggers, and downstream tooling; it does not affect
-emitted code. As a result **all 6 "real" backends emit stack-slot-spill
-bytes in production** (identical to the 12 pure stack-slot backends);
-`wasm32` emits Wasm bytecode. The byte-changing
-`emit_function_regalloc` plumbing at `emit.rs:1056` is reachable only
-via `emitter.emit_function(func, Some(alloc))`, which **no production
-`allocate_registers` calls by default**. `LinearScanAllocator`
-(`regalloc.rs:1208`, the older AArch64-specific linear-scan allocator
-with hardcoded caller/callee-saved GPR+SIMD lists) is invoked from
-exactly **one** production call site — the env-var-gated aarch64
-prototype in §2.1.1 below — and is otherwise used only inside
-`#[cfg(test)]` modules (`regalloc.rs:4738+`, `emit.rs:9188+`).
-
-#### 2.1.1 aarch64 opt-in register-based prototype (`VUMA_REAL_REGALLOC_AARCH64=1`, OFF by default)
-
-Commit `ee06b362` ([F2-b-impl]) added an **opt-in** register-based
-emission path on `aarch64` only, gated by the environment variable
-`VUMA_REAL_REGALLOC_AARCH64=1`. The default (env var unset or any value
-other than `"1"`) is the stack-slot path described above; **production
-behaviour on aarch64 is unchanged when the env var is unset.** When the
-env var is set, `AArch64Backend::allocate_registers`
-(`backend.rs:3207-3231`) instead invokes the older AArch64-specific
-`LinearScanAllocator` (`regalloc.rs:1208`, `new` at `:1318`) to compute
-an `AllocationResult`, and feeds it to
-`Emitter::emit_function(func, Some(&alloc))` (`backend.rs:3213`), which
-dispatches to the byte-changing `Emitter::emit_function_regalloc` path
-at `emit.rs:1056` (real vreg→preg mapping, callee-saved
-prologue/epilogue, spill/reload insertion, copy elision). On
-`LinearScanAllocator` error the method falls back to the stack-slot
-path with a `vuma_log!(warn, …)` diagnostic so a single bad function
-never blocks the whole compilation.
-
-**This is a research prototype, not production-ready.** The F2-c-test
-verification run (commit `95a2963e`,
-[`scripts/audit/followup_wave2_aarch64_prototype.md`](../scripts/audit/followup_wave2_aarch64_prototype.md))
-ran a curated 30-test matrix on aarch64 under QEMU in both modes:
-
-| Mode | Pass rate | Total emitted bytes |
-|------|-----------|---------------------|
-| Stack-slot baseline (no env var) | **30/30 (100.0%)** | 111 204 |
-| Regalloc prototype (`VUMA_REAL_REGALLOC_AARCH64=1`) | **22/30 (73.3%)** | 98 748 (−11.20%) |
-
-The prototype is correct on **pure-arithmetic** tests (all 6 `u32_arith`
-+ all 5 `crypto_patterns` PASS, each with a 52-byte binary-size
-reduction) and on single-cell `complex_stores` / `concurrency` /
-`try_recv` tests. The **8 regressions** all involve callee-saved
-register pressure:
-
-- `complex_stores`: `cs_overwrite_last`, `cs_two_buf_sum`,
-  `cs_three_cell_sum` (multiple sequential stores to distinct cells —
-  regalloc binaries are *larger* here, suggesting over-spilling).
-- `multi_function`: `mf_pass_through`, `mf_chained_adders`,
-  `mf_square_pair_sum` (caller return value lost across calls).
-- `ipc`: `simple_send`, `ping_pong` (both exit 139 / `SIGSEGV`; both
-  use `spawn_worker()`; `try_recv` without spawn survives).
-
-The failure pattern matches the **§5.3 HIGH-severity risk** flagged in
-the F2-a-audit design doc
-([`scripts/audit/followup_wave2_emit_regalloc_design.md`](../scripts/audit/followup_wave2_emit_regalloc_design.md))
-materialising: `LinearScanAllocator::used_callee_saved_gprs`
-(`regalloc.rs`) is **incomplete** — it does not enumerate every
-physical register the byte-changing `Emitter::emit_function_regalloc`
-actually writes, so the prologue skips save/restore for callee-saved
-registers it clobbers. The chained-adders pattern (each call
-overwrites the previous result) and the `spawn_worker` SIGSEGV are
-textbook callee-saved corruption signatures.
-
-**The env-var gate MUST remain off-by-default** until the §5.3
-mitigation (a verifier pass that asserts every physical register the
-emitter writes is either caller-saved, in `used_callee_saved_gprs`, or
-one of `X29`/`X30`/`SP`) lands and the 30-test matrix reaches ≥ 29/30
-with zero regressions. Production behaviour is unchanged because the
-env var defaults off.
-
-**Other 5 real backends remain metadata-only (out of scope).**
-`x86_64`, `riscv64`, `ppc64`, `ppc64le`, and `aarch64_be` have no
-opt-in register-based path. Per the design doc §3.2-3.5 and Phases
-2-5, each would require a new per-backend register-based emitter
-(2-4 weeks each); this work is out of scope for the current run.
-
-**Implication.** On the 12 pure stack-slot backends every arithmetic /
-load / store operation performs two extra memory accesses (load operands
-→ operate → store result), so runtime performance is bounded by the
-spill path even when physical registers are free. Generated code is
-correct (verified by the 12-backend stack-slot correctness sweep,
-468/468 PASS — see
-[`scripts/audit/wave2_stackslot_results.md`](../scripts/audit/wave2_stackslot_results.md))
-but is not benchmark-grade. **There is currently no performance gap
-between the 6 "real" and 12 stack-slot backends in production**,
-because the "real" path is metadata-only by default: every backend
-emits stack-slot-spill code at runtime. A `~2–5×` speedup relative to
-today remains *theoretical* and would require (a) flipping
-`VUMA_REAL_REGALLOC_AARCH64=1` to default-on — blocked on the §2.1.1
-callee-saved fix — and (b) landing new per-backend register-based
-emitters for the other 5 real backends (design doc Phases 2-5). The
-previous caveat wording ("~2–5× slower than the linear-scan backends")
-was misleading and has been removed.
-
-**Why it's still in place.** The `TargetAgnosticRegAlloc` is
-`TargetDesc`-driven, and wiring each remaining backend up requires
-populating a complete, validated `TargetDesc` (register classes,
-caller/callee-saved sets, ABI register roles, frame layout). Until
-that work is finished for a given backend, the stack-slot path is the
-safe fallback. See `src/codegen/src/target_desc.rs` and
-`src/codegen/src/regalloc.rs` (`TargetAgnosticRegAlloc`). The full
-per-backend classification with file:line citations for all 19 backends
-lives in
-[`scripts/audit/allocator_classification.md`](../scripts/audit/allocator_classification.md);
-[`docs/backends.md`](backends.md) §1 carries the matching `Regalloc`
-column. The phased rollout plan for register-based emission (aarch64
-first, then x86_64 / riscv64 / ppc64 / aarch64_be / ppc64le) is in
-[`scripts/audit/followup_wave2_emit_regalloc_design.md`](../scripts/audit/followup_wave2_emit_regalloc_design.md)
-§6; the aarch64 prototype test results (22/30 PASS, 8 callee-saved
-regressions) are in
-[`scripts/audit/followup_wave2_aarch64_prototype.md`](../scripts/audit/followup_wave2_aarch64_prototype.md).
+**Historical note.** Prior to v0.2.0-alpha.10 the `contains_fork` check
+was a broad "syscall-hazard fallback" that pushed many more functions
+onto the stack-slot path. The post-allocation conflict-resolution pass
+`resolve_register_reuse_conflicts` (`regalloc.rs:2769`,
+[architecture.md §7.3](./architecture.md#73-resolve_register_reuse_conflicts-post-allocation-conflict-resolution))
+eliminated the underlying register-reuse hazard, and the fallback was
+narrowed to *only* `clone`/`fork` detection. The change is documented
+in [CHANGELOG.md](../CHANGELOG.md) under v0.2.0-alpha.10, Wave A.
 
 ### 2.2 wasm32 fork emulation is non-isolating
 
@@ -198,6 +95,7 @@ regressions) are in
 | Behaviour | On wasm32, `spawn_worker` / `fork` cannot create a real isolated process (WASI has no `fork`). The fork-emulation pass rewrites parent/child control flow into a single linear-memory coroutine pair: the parent runs first, sends on its pipe, then the child runs in the *same* linear memory and receives. |
 | Caveat | **There is no memory isolation between parent and child.** A bug in the "child" can corrupt the "parent"'s linear memory and vice-versa. The compiler emits a one-shot `K11A-wasm32-fork-emulation` warning at the first fork site to make this visible. |
 | Mitigation | Use wasm32 only for IR-level / verification testing on host platforms where true isolation is unnecessary. For sandboxed execution, use one of the 18 native QEMU-backed backends instead. |
+| Interaction with §2.1 | `wasm32/mod.rs` *computes* `contains_fork` for parity with the other backends (so audit logs and future fork-emulation hooks can observe it), but the boolean is purely observational on wasm32 — wasm32 is a stack machine with no register-based emitter to fall back from, so its single `lower_function` path runs regardless. The actual fork emulation is handled by `wasm32_fork_emulation_pass`, not by the `contains_fork` dispatch. |
 
 The fork-emulation pass is also why `try_recv` on wasm32 cannot block:
 under emulation the parent always runs first, so the child's
@@ -218,9 +116,29 @@ linear memory.
 
 Most ISA encoding bugs that previously appeared here have been fixed.
 The remaining live per-backend quirks are tracked in
-[`docs/backends.md`](backends.md) and `docs/fp_backends.md`; consult
-those files for the current per-ISA matrix. Anything not listed there
-should be considered a bug, not a known caveat.
+[`docs/backends.md`](backends.md) §9 (QEMU Execution Notes) and
+[`docs/fp_backends.md`](fp_backends.md); consult those files for the
+current per-ISA matrix. The notable live ones:
+
+| Backend | Quirk | Status |
+|---------|-------|--------|
+| `alpha` | QEMU 10.0-alpha rejects `CMPULE` (function `0x3D` on INTA major opcode `0x10`) and raises `SIGILL`. Workaround: emulate `CMPULE(a, b)` as `!CMPULT(b, a)` (a 2-instruction `CMPULT` + `XOR` sequence). Real DEC Alpha 21264 hardware implements `CMPULE`; this is purely a QEMU translator bug. Removal: QEMU 11.x. Cited in `alpha/mod.rs` at the `Instruction::encode` special case for `CMPULE`. | OPEN (QEMU bug) |
+| `m68k` | QEMU 7.2 m68k translator has known bugs that VUMA's encoder works around (variable-length encoding edge cases, `ADDQ`/`Scc` mode-field confusion, MOVEM). QEMU 8.x removes most of them; QEMU 10.x recommended. Cited inline in `m68k/mod.rs`. | OPEN (QEMU bug) |
+| `hppa` | QEMU 7.2 hppa `LDIL`/`BL` decoder had multiple bugs (nullify bit position, 17-bit displacement non-linear split, `D=0` vs `D=1` register selection). VUMA's `hppa/mod.rs` encoder was rewritten to match QEMU's `%assemble_17` decoder. QEMU 8.x removes the bugs. | OPEN (QEMU bug) |
+| `riscv32` | QEMU's default rv32 CPU lacks the D (double-float) extension. Test runs require `qemu-riscv32-static -cpu max`. Not a VUMA bug. | OPEN (QEMU configuration) |
+| `mips64` | VUMA's `mips64` backend emits a *little-endian* ELF, so the LE emulator `qemu-mips64el-static` is required. `qemu-mips64-static` (BE) rejects the binary. Naming mismatch only — not a bug. | OPEN (naming mismatch) |
+
+Anything not listed there should be considered a bug, not a known
+caveat.
+
+### 2.5 Big-endian wrapper backends inherit parent emission byte-for-byte
+
+| Aspect | Detail |
+|--------|--------|
+| Files | `src/codegen/src/aarch64_be.rs`, `armeb.rs`, `mips64be.rs`, `ppc64le.rs` (each 200–530 LOC) |
+| Behaviour | The 4 byte-swap wrappers delegate `allocate_registers` to their parent backend via one-line `self.inner.allocate_registers(func)` calls, then byte-swap the parent's emitted bytes and ELF header at the encoding boundary. They contribute no allocation or emission logic of their own. |
+| Caveat | A bug in the parent's emission automatically affects both endianness variants — there is no LE-only or BE-only path to bisect against. When debugging an `aarch64_be` / `armeb` / `mips64be` / `ppc64le`-specific failure, reproduce on the parent first (LE `aarch64` / `arm32` / `mips64` / BE `ppc64`) and confirm the wrapper is byte-swapping correctly. |
+| Cross-ref | [backends.md §7](./backends.md#7-big-endian-backends) for the per-wrapper byte-swap policy matrix. |
 
 ---
 
@@ -271,8 +189,8 @@ failures on an old QEMU, upgrade to 10.0+ before filing a bug.
 ### 4.3 wasmtime for the `wasm32` row
 
 The `wasm32` row of the 19-backend matrix runs under `wasmtime`
-(v29 or newer). The pinned version in CI is whatever is current on
-the runner; older `wasmtime` (pre-v29) does not support the WASI
+(v47 or newer). The pinned version in CI is whatever is current on
+the runner; older `wasmtime` (pre-v47) does not support the WASI
 preview features the wasm32 backend emits and will reject the
 module. See [`docs/building.md`](building.md) for install
 instructions.
@@ -338,6 +256,22 @@ appear in docs, scripts, or examples:
 If you find a script or doc still using one of these, delete the
 reference rather than re-adding the flag.
 
+### 5.2 Register-allocation env vars (default ON)
+
+Each register-based backend reads `VUMA_REAL_REGALLOC_<ISA>` (e.g.
+`VUMA_REAL_REGALLOC_AARCH64`, `VUMA_REAL_REGALLOC_X86_64`,
+`VUMA_REAL_REGALLOC_PPC64`, `VUMA_REAL_REGALLOC_RISCV64`, …) with a
+default of **ON** (`unwrap_or(true)`). Setting the env var to `0`
+forces the stack-slot path for debugging — this is independent of
+`contains_fork` (§2.1) and exists for bisecting allocator bugs.
+
+The 4 byte-swap wrapper backends do not have their own env-var gate —
+they inherit the parent's allocation result via one-line delegation,
+so the parent's env-var governs both endianness variants.
+
+See [backends.md §5.6](./backends.md#56-env-var-gate) for the full
+table.
+
 ---
 
 ## 6. Cross-references
@@ -349,5 +283,7 @@ reference rather than re-adding the flag.
 - PMT formal specification: [`docs/pmt-formal-spec.md`](pmt-formal-spec.md),
   [`docs/pmt-iris-spec.md`](pmt-iris-spec.md)
 - Test-suite overview: [`docs/testing.md`](testing.md)
-- Architecture: [`docs/architecture.md`](architecture.md),
+- Architecture (incl. register allocation pipeline and
+  `resolve_register_reuse_conflicts`):
+  [`docs/architecture.md`](architecture.md),
   [`docs/kernel-architecture.md`](kernel-architecture.md)

@@ -1,668 +1,778 @@
 # Backend Reference Matrix
 
+**Version:** 0.2.0-alpha.10
 **Stage:** backends
-**Crate:** `vuma-codegen` (`src/codegen/src/backend.rs`,
-`src/codegen/src/{arm64,arm32,x86_64,...}.rs`).
+**Crate:** `vuma-codegen` (`src/codegen/src/backend.rs` + per-backend
+directories under `src/codegen/src/<isa>/`).
 **Cross-refs:** [architecture.md](./architecture.md),
 [pipeline.md](./pipeline.md), [caveats.md](./caveats.md),
 [building.md](./building.md), [testing.md](./testing.md).
 
-Single source of truth for the 19 VUMA backends. ISA family, register
-allocator status, ELF format, key limitations, and QEMU version
-requirements are tabulated; per-backend design notes and the ISA encoding
-audit follow.
+Single source of truth for the 19 VUMA backends. As of v0.2.0-alpha.10,
+**15 of 19 backends have their own emission path** (14 with full
+register-based emission via a per-backend `reg_isel.rs` module, plus
+`wasm32` with structured stack-machine emission), and the remaining **4
+backends** (`aarch64_be`, `armeb`, `mips64be`, `ppc64le`) inherit their
+parent's emission via one-line delegation and a byte-swap wrapper.
 
-> **Formal verification scope.** All 19 backends share the same PMT memory
-> model (arena allocation, `State<T>` management, and the three trap
-> stubs), and that PMT abstraction is formally verified in **Lean 4** under
-> `proof/PMT/` (build: `make proof`; sorry-check: `make proof-check`;
-> tests: `make proof-test`). The Lean proofs are mathematical artefacts
-> only — there is **no Lean→Rust FFI bridge** in the production compiler
-> (see [architecture.md §8.2](./architecture.md#82-lean-ffi-bridge--removed)).
-> The backends themselves are **not** individually verified — there is no
-> per-backend machine-code proof. The matrix below therefore carries a
-> uniform `Formal = "PMT only"` column for all 19 backends.
+There are **no stack-slot fallbacks on the default code path**. The
+target-agnostic linear-scan allocator (`regalloc.rs`) and the per-backend
+`reg_isel::emit_function_regalloc_full` emitters cover every IR
+instruction. The legacy stack-slot ISel lives on only as a **targeted
+opt-out** for functions that contain a `clone`/`fork` syscall — the
+child process's divergent register state is incompatible with the
+register-based prologue/epilogue, so such functions deliberately take
+the stack-slot path. See [§5](#5-contains_fork-opt-out-clonefork-detection)
+for why this is a correctness requirement, not a fallback.
 
-> **Test status.** All 19 backends pass the gold-standard matrix at
-> **100 % (29 944 / 29 944 test runs)** as of HEAD. The matrix is driven by
-> `scripts/vuma_test_matrix_19backends.sh` and `scripts/pi5_test_suite.sh`.
-
----
-
-## 1. Backend Overview Table
-
-LOC measured by `wc -l` of the listed file (or, for directory-style
-backends, the sum of all `.rs` files in the directory). Tier values
-follow `BackendTier` in `backend.rs`.
-
-| # | Name | File | ISA family | LOC | Tier | Regalloc | ELF | Known limitations | Formal |
-|--:|------|------|------------|----:|------|----------|-----|--------------------|--------|
-|  1 | `aarch64`     | `arm64.rs`              | ARMv8-A (AArch64)    |  6 235 | Complete        | TargetAgnostic (real); LS prototype (env-gated, OFF) | ELF64 LE | None — reference backend. | PMT only |
-|  2 | `aarch64_be`  | `aarch64_be.rs`         | ARMv8-A (BE data)   |    197 | Complete (wrap) | inherits AArch64  | ELF64 BE | BE data, LE instr. fetch (ARM ARM D6.1.3). | PMT only |
-|  3 | `x86_64`      | `x86_64/{mod,stack_slot_isel,disasm}.rs` | x86-64 (amd64) | 10 243 | Complete | TargetAgnostic (real) | ELF64 LE | SIMD codegen emits zero bytes (TODO, `x86_64/mod.rs:934`). | PMT only |
-|  4 | `x86_32`      | `x86_32/{mod,stack_slot_isel,disasm}.rs` | x86 (i386) |  6 277 | Complete | Stack-slot | ELF32 LE | I64 channel handle stored in 4-byte slot (K13A workaround). | PMT only |
-|  5 | `riscv64`     | `riscv64.rs`            | RISC-V RV64GC        | 11 057 | Complete        | TargetAgnostic (real) | ELF64 LE | None. | PMT only |
-|  6 | `riscv32`     | `riscv32.rs`            | RISC-V RV32GC        |  9 589 | Complete        | Stack-slot        | ELF32 LE | QEMU run requires `-cpu max` (D extension). | PMT only |
-|  7 | `loongarch64` | `loongarch64/{mod,stack_slot_isel,disasm}.rs` | LoongArch LA64 | 11 220 | Complete | Stack-slot | ELF64 LE | None — FP compare condition codes verified against LoongArch Vol 1 §3.2.2.1. | PMT only |
-|  8 | `arm32`       | `arm32/{mod,disasm}.rs` | ARMv7-A (AArch32)    | 11 786 | Complete        | Stack-slot        | ELF32 LE | None — `preregister_param_types` race-fix applied. | PMT only |
-|  9 | `armeb`       | `armeb.rs`              | ARMv7-A (BE32)       |    242 | Complete (wrap) | inherits Arm32    | ELF32 BE | None — BE32 word-swap applied. | PMT only |
-| 10 | `mips64`      | `mips64/{mod,disasm}.rs`| MIPS64 release 6     |  5 953 | Complete        | Stack-slot        | ELF64 LE | None — N64-ABI syscall sequence implemented. | PMT only |
-| 11 | `mips64be`    | `mips64be.rs`           | MIPS64 release 6 (BE)|    300 | Complete (wrap) | inherits MIPS64   | ELF64 BE | None — word-swap on instr. words applied. | PMT only |
-| 12 | `ppc64`       | `ppc64/{mod,disasm}.rs` | Power ISA v3.1B (BE) |  6 994 | Complete        | TargetAgnostic (real) | ELF64 BE (ELFv2) | QEMU poll-syscall positive-errno workaround for `try_recv`. | PMT only |
-| 13 | `ppc64le`     | `ppc64le.rs`            | Power ISA v3.1B (LE) |    530 | Complete (wrap) | inherits PPC64    | ELF64 LE | None — reuses ppc64 encoders; ELF endianness flipped. | PMT only |
-| 14 | `wasm32`      | `wasm32/{mod,disasm}.rs`| WebAssembly 1.0      |  9 202 | Complete        | Wasm-structured   | Wasm module | Fork emulation is in-process; **no isolation** between parent and child. | PMT only |
-| 15 | `sparc64`     | `sparc64.rs`            | SPARC V9             |  6 030 | Experimental    | Stack-slot        | ELF64 BE | `FloatToUInt` of negatives via `FSTOx → RDY → AND → LDx` sign-clear sequence. | PMT only |
-| 16 | `s390x`       | `s390x.rs`              | z/Architecture ESA/390|  4 239 | Experimental    | Stack-slot        | ELF64 BE | QEMU AGFI/AGHI ambiguity; secondary Ret path restores callee-saved S0–S5. | PMT only |
-| 17 | `m68k`        | `m68k.rs`               | Motorola 68000       |  5 057 | Experimental    | Stack-slot        | ELF32 BE | Two QEMU 7.2.0-m68k translator bugs worked around (MOVEM, ADDI.B/CMPI.B). Removal: QEMU 8.x. | PMT only |
-| 18 | `alpha`       | `alpha.rs`              | DEC Alpha 21264      |  3 365 | Experimental    | Stack-slot        | ELF64 LE | f64→u64 truncation for f≥2⁶³ saturates to `i64::MAX`. QEMU 10.0-alpha rejects CMPULE (function 0x3D); workaround via CMPULT (0x1D). Removal: QEMU 11.x. | PMT only |
-| 19 | `hppa`        | `hppa.rs`               | PA-RISC 1.1 / 2.0    |  6 310 | Experimental    | Stack-slot        | ELF32 BE | QEMU 7.2.0-hppa LDIL decoder bug worked around via format-14 LDO. Removal: QEMU 8.x. | PMT only |
-
-Totals: 15 Complete + 4 Experimental = 19. The 4 Complete wrappers
-(`aarch64_be`, `armeb`, `mips64be`, `ppc64le`) delegate `allocate_registers`
-to their parent in a single line.
-
-> **Annotation-only caveat (default production path).** The 6 "real"
-> allocator backends (rows 1, 2, 3, 5, 12, 13) wire `TargetAgnosticRegAlloc`
-> via `try_real_regalloc`, but the encoded bytes still come from the
-> stack-slot ISel baseline — the real allocator annotates `reads` /
-> `writes` metadata only (`regalloc_emit.rs:82-92`). No VUMA backend
-> emits register-based code in production by default. **aarch64 has an
-> opt-in register-based prototype** behind `VUMA_REAL_REGALLOC_AARCH64=1`
-> (commit `ee06b362`, default OFF, 22/30 PASS on the curated matrix —
-> **not production-ready**; 8 callee-saved regressions, see
-> [caveats.md §2.1 + §2.1.1](./caveats.md#21-stack-slot-isel-is-the-only-production-code-emission-path))
-> and §3 below.
+> **Test status.** All 19 backends pass the curated 30-test matrix
+> (`scripts/vuma_test_matrix_19backends.sh`). The 4 byte-swap wrappers
+> inherit their parent's emission byte-for-byte and only differ in ELF
+> endianness, so they pass whenever the parent passes.
 
 ---
 
-## 2. Stack-Slot ISel Pattern (12 of 19 backends)
+## 1. Backend Matrix
 
-The dominant allocation strategy is **stack-slot instruction selection**:
-every virtual register is assigned a fixed slot at `[frame_pointer − offset]`
-at function entry, and a small set of **scratch physical registers** is
-reused as ephemeral operands inside each instruction. The pattern is
-implemented per-backend in
-`{arm32,x86_32,mips64,loongarch64,riscv32,s390x,sparc64,...}/stack_slot_isel.rs`
-or inlined into `{m68k,alpha,hppa}.rs`. The 2 big-endian stack-slot
-wrappers (`armeb`→`arm32`, `mips64be`→`mips64`) inherit the parent's
-stack-slot ISel verbatim. The other 2 wrappers (`aarch64_be`→`aarch64`,
-`ppc64le`→`ppc64`) inherit the parent's `TargetAgnosticRegAlloc`
-annotation pass (see §3). NB: even on the 6 backends with a real
-allocator wired, encoded bytes still come from the stack-slot ISel
-baseline — the real allocator annotates `reads` / `writes` metadata only
-(see [caveats.md §2.1](./caveats.md#21-stack-slot-isel-is-the-only-production-code-emission-path)).
+| #  | Backend        | ISA            | Endian | Emission        | Inherited | Notes                                            |
+|---:|----------------|----------------|--------|-----------------|-----------|--------------------------------------------------|
+|  1 | `x86_64`       | x86-64         | LE     | register-based  | —         | Native on x86_64 hosts                           |
+|  2 | `x86_32`       | i386           | LE     | register-based  | —         | Runs via `qemu-i386-static` on x86_64            |
+|  3 | `aarch64`      | A64            | LE     | register-based  | —         | Uses `LinearScanAllocator` + `Emitter` (see §6)  |
+|  4 | `aarch64_be`   | A64            | BE     | register-based  | aarch64   | Byte-swap wrapper (ELF header only)              |
+|  5 | `arm32`        | ARMv7-A        | LE     | register-based  | —         |                                                  |
+|  6 | `armeb`        | ARMv7-A        | BE     | register-based  | arm32     | Byte-swap wrapper (BE32 word swap)               |
+|  7 | `riscv64`      | RV64GC         | LE     | register-based  | —         |                                                  |
+|  8 | `riscv32`      | RV32GC         | LE     | register-based  | —         | `qemu-riscv32-static -cpu max` (D extension)     |
+|  9 | `mips64`       | MIPS64         | LE     | register-based  | —         | Emits LE ELF; run via `qemu-mips64el-static`     |
+| 10 | `mips64be`     | MIPS64         | BE     | register-based  | mips64    | Byte-swap wrapper (instruction words only)       |
+| 11 | `ppc64`        | Power ISA v3   | BE     | register-based  | —         | Native BE; ELFv2 ABI                             |
+| 12 | `ppc64le`      | Power ISA v3   | LE     | register-based  | ppc64     | Byte-swap wrapper (BE→LE full swap)              |
+| 13 | `loongarch64`  | LoongArch      | LE     | register-based  | —         |                                                  |
+| 14 | `s390x`        | z/Arch         | BE     | register-based  | —         |                                                  |
+| 15 | `sparc64`      | SPARC V9       | BE     | register-based  | —         | Register windows (`SAVE`/`RESTORE`)              |
+| 16 | `alpha`        | Alpha 21064    | LE     | register-based  | —         |                                                  |
+| 17 | `hppa`         | PA-RISC 1.1    | BE     | register-based  | —         |                                                  |
+| 18 | `m68k`         | Motorola 68k   | BE     | register-based  | —         | D/A register separation                          |
+| 19 | `wasm32`       | WebAssembly    | LE     | stack-machine   | —         | Structured stack emission (not register-based)   |
 
-An IR op such as `BinOp{Add, dst: v5, lhs: v3, rhs: v4}` is lowered as:
-`load scratch0,[fp+v3_off]; load scratch1,[fp+v4_off]; add
-scratch0,scratch0,scratch1; store [fp+v5_off],scratch0` — three memory
-operations per IR op. Under QEMU TCG user-mode emulation each load/store
-is ~10–100× slower than a register op; this is acceptable for correctness
-testing but is the primary reason emitted VUMA binaries are not
-benchmark-grade.
-
-The seven backends whose `allocate_registers` does **more than** pure
-stack-slot ISel are:
-- `aarch64` + `aarch64_be` — `TargetAgnosticRegAlloc` via
-  `try_real_regalloc` (`backend.rs:3099`, `TargetAgnosticRegAlloc::new`
-  at `:3114`); see §3. `aarch64_be` inherits via one-line delegation.
-- `x86_64` — `TargetAgnosticRegAlloc` via `try_real_regalloc`
-  (`x86_64/mod.rs:4081`); see §3.
-- `riscv64` — `TargetAgnosticRegAlloc` via `try_real_regalloc`
-  (`riscv64.rs:6542`); see §3.
-- `ppc64` + `ppc64le` — `TargetAgnosticRegAlloc` via `try_real_regalloc`
-  (`ppc64/mod.rs:3011`); see §3. `ppc64le` inherits via one-line delegation.
-- `wasm32` — Wasm structured control flow (no registers; vregs → Wasm
-  locals) via `lower_function` (`wasm32/mod.rs:2252-2300`); see §5.
-
-NB: on the 6 "real" backends the `TargetAgnosticRegAlloc` runs only as
-an annotation pass over the stack-slot ISel baseline — encoded bytes
-still come from the stack-slot path. See
-[caveats.md §2.1](./caveats.md#21-stack-slot-isel-is-the-only-production-code-emission-path)
-for the metadata-only caveat.
-
-`loongarch64/reg_alloc_isel.rs` (1.6 K LOC) on disk is **dead code** — the
-module declaration is commented out at `loongarch64/mod.rs:6943` and the
-production `allocate_registers` calls `stack_slot_isel::allocate_registers`
-(`loongarch64/mod.rs:2619`). The file is retained for historical reference;
-it is not compiled.
+**Totals:** 14 backends with a direct `reg_isel.rs` emitter
+(`x86_64`, `x86_32`, `arm32`, `riscv64`, `riscv32`, `mips64`, `ppc64`,
+`loongarch64`, `s390x`, `sparc64`, `alpha`, `hppa`, `m68k`) **+**
+`aarch64` (register-based via `Emitter::emit_function_regalloc` in
+`emit.rs`) = **15 backends with full register-based emission**. **+** 4
+byte-swap wrappers that inherit a parent's emission = 19. (`wasm32` is
+listed in row 19 because its structured stack-machine emission is its
+own emission path — not register-based, not inherited, not a fallback.)
 
 ---
 
-## 3. Real Linear-Scan Backends (6 backends: 4 direct + 2 inherited)
+## 2. Per-Backend ISA-Specific Design Decisions
 
-Six backends wire `TargetAgnosticRegAlloc` (`regalloc.rs:2562`), a
-`TargetDesc`-driven linear-scan allocator that takes the per-ISA register
-file from `target_desc::TargetDescRegistry::get(<isa>)` and derives the
-allocatable / caller-saved / callee-saved pools by filtering
-`TargetDesc::registers` on `is_allocatable` / `is_callee_saved`. Each
-direct backend has a `try_real_regalloc` helper that returns
-`Some(RegAllocResult)` on success or `None` (so the backend falls back
-to the unannotated stack-slot ISel output) if the target description is
-missing or the allocator errored:
+| Backend       | Key design points                                                                                                |
+|---------------|------------------------------------------------------------------------------------------------------------------|
+| `x86_64`      | R11 `not_allocatable` (scratch for immediates); 2-operand constraint; REX prefix handling                         |
+| `x86_32`      | Same as x86_64 but 32-bit; args on stack; `int 0x80` syscall                                                     |
+| `aarch64`     | X15 scratch; `CSEL` for conditional moves; AAPCS64 calling convention                                            |
+| `arm32`       | Conditional execution (`MOVcc`); no hardware divide; R12 scratch; `PUSH`/`POP` multiple                          |
+| `riscv64`     | T5/T6 `not_allocatable` (scratch); 3-operand; no delay slots; `ecall`                                            |
+| `riscv32`     | Same as riscv64 but 32-bit (`sw`/`lw` instead of `sd`/`ld`)                                                      |
+| `mips64`      | Branch delay slots (NOP after every branch/jump); HI/LO for mul/div; 4 arg regs                                  |
+| `ppc64`       | R11 scratch; CR0 + `mfcr` for comparisons; `isel` (conditional move); `blr` return                               |
+| `loongarch64` | T7/T8 scratch; `maskeqz`/`masknez` for conditional select; no delay slots                                        |
+| `sparc64`     | Register windows (`SAVE`/`RESTORE`); branch delay slots; `SETHI` for upper immediates                            |
+| `s390x`       | R0 scratch; big-endian; `SVC 0` syscall; 5 arg regs (R2–R6)                                                      |
+| `alpha`       | R27 scratch; 3-operand; `callsys`; branch PC+4 bias                                                              |
+| `hppa`        | `GATE` for syscalls (NOP after); 4 arg regs (R26–R23 reversed); `BV` return                                      |
+| `m68k`        | D/A register separation (only D0–D7 allocatable); 2-operand; variable-length encoding                            |
+| `wasm32`      | Stack machine — structured emission (`local.get`, `local.set`, `i32.add`, etc.)                                  |
 
-| Backend | Wired at | TargetDesc lookup |
-|---------|----------|-------------------|
-| `aarch64` | `backend.rs:3099` (`try_real_regalloc`, `TargetAgnosticRegAlloc::new` at `:3114`) | `"aarch64"` |
-| `x86_64`  | `x86_64/mod.rs:4081` (`TargetAgnosticRegAlloc::new(target)`) | `"x86_64"` |
-| `riscv64` | `riscv64.rs:6542` (`try_real_regalloc`) | `"riscv64"` |
-| `ppc64`   | `ppc64/mod.rs:3011` (`try_real_regalloc`) | `"ppc64"` |
-
-The two wrappers `aarch64_be` and `ppc64le` inherit their parent's
-allocator via one-line delegation (`aarch64_be.rs:150-152`,
-`ppc64le.rs:400-406`). The `RegAllocResult` is merged into the
-stack-slot output by `regalloc_emit::annotate_with_regalloc`, which
-overwrites the `reads` / `writes` physical-register metadata on each
-`AllocatedInstruction` with the assigned physical registers. Spilled
-vregs keep their stack slot.
-
-**Annotation-only (critical, default production path).** The `encoded`
-bytes are NOT modified (`regalloc_emit.rs:82-92`); they always come
-from the stack-slot ISel baseline invoked *before* `try_real_regalloc`
-(`emitter.emit_function(func, None)` on aarch64,
-`stack_slot_isel::allocate_registers` on the others). The `reads` /
-`writes` metadata is consumed by disassemblers, debuggers, and
-downstream tooling — it does not change emitted code. **No VUMA backend
-emits register-based code in production by default.** The
-`emit_function_regalloc` plumbing at `emit.rs:1056` that would re-emit
-bytes from a `RegAllocResult` is reachable from exactly one production
-call site: the aarch64 opt-in prototype
-(`VUMA_REAL_REGALLOC_AARCH64=1`, OFF by default, 22/30 PASS — **not
-production-ready**; see
-[caveats.md §2.1 + §2.1.1](./caveats.md#21-stack-slot-isel-is-the-only-production-code-emission-path)).
-
-`LinearScanAllocator` (`regalloc.rs:1208`) — an older AArch64-specific
-linear-scan allocator with hardcoded caller/callee-saved GPR+SIMD lists,
-live-interval computation, boundary-safe overlap detection
-(`liveness_interference_from`), spill-weighted eviction
-(`spill_weight_with_pressure`), and copy coalescing
-(`coalesce_copies_post_alloc`) — is invoked from exactly **one**
-production call site: the aarch64 opt-in prototype at
-`backend.rs:3207-3231` (env-var `VUMA_REAL_REGALLOC_AARCH64=1`, OFF by
-default, commit `ee06b362`). It is also used inside `#[cfg(test)]`
-modules (`regalloc.rs:4738+`, `emit.rs:9188+`). The prototype has
-**known correctness bugs** (incomplete `used_callee_saved_gprs` —
-8/30 curated tests regress, see
-[caveats.md §2.1.1](./caveats.md#21-stack-slot-isel-is-the-only-production-code-emission-path));
-do not enable the env var in production.
-
-The float-op verifier (`verify_function_float_ops`, `backend.rs:154`) is
-called **centrally** as `verify_program_float_ops(&ir_program)`
-(`backend.rs:187`) in all 5 compilation drivers (`src/main.rs`,
-`src/pipeline.rs`, `src/api.rs`, `src/bin/compile_dump.rs`). All 19
-backends (15 native + 4 wrappers via delegation) are covered; the previous
-AArch64-only call site at `AArch64Backend::allocate_registers`
-(`backend.rs:2748`) has been removed.
+The four byte-swap wrappers (`aarch64_be`, `armeb`, `mips64be`,
+`ppc64le`) inherit their parent's design decisions verbatim; only the
+ELF endianness and (where the ISA requires it) the instruction-word
+byte order are flipped. See [§7](#7-big-endian-backends).
 
 ---
 
-## 4. Big-Endian Backends
+## 3. Register Allocation Pipeline
+
+```
+IRFunction
+    │
+    ▼
+LiveRangeComputer::compute()     ← global position numbering (pos += 2 per instr + terminator)
+    │
+    ├── intervals: Vec<LiveInterval>   (start, end, use_positions, def_positions, crosses_call)
+    ├── call_positions: BTreeSet<u32>  (Call + Syscall positions)
+    └── coalesced_map                 (copy-related vreg merging)
+    │
+    ▼
+TargetAgnosticRegAlloc::allocate_intervals()   ← linear-scan
+    │
+    ├── Sort intervals by start position (longer first at same start)
+    ├── For each interval:
+    │   ├── Expire old intervals (return registers to caller/callee pools)
+    │   ├── Try alloc: caller-saved first, callee-saved if crosses_call
+    │   └── If no free reg: spill_or_evict (lowest weight per length)
+    │
+    ▼
+resolve_register_reuse_conflicts()   ← post-allocation verification
+    │
+    ├── For each instruction, check (use_vreg, def_vreg) pairs:
+    │   ├── If same physical register AND use_vreg is live after → CONFLICT
+    │   └── Reassign def_vreg to a different ALLOCATABLE register
+    │       (checking caller_saved + callee_saved lists, not arbitrary indices)
+    │       If no free register → spill def_vreg to stack slot
+    │
+    ▼
+RegAllocResult
+    ├── vreg_to_preg: HashMap<vreg, PhysicalReg>
+    ├── spill_slots: HashMap<vreg, GenericSpillSlot>
+    ├── spill_code: BTreeMap<pos, Vec<SpillCode>>
+    ├── coalesced_map
+    └── total_spill_slots
+    │
+    ▼
+reg_isel::emit_function_regalloc_full(func, &alloc)   ← per-backend emission
+    │
+    ├── Prologue (SAVE/push/stmg/link — ISA-specific)
+    ├── Argument shuffle (ABI arg regs → allocator-assigned regs)
+    ├── Body: per-IR-instruction emission using Instruction::encode()
+    ├── Spill/reload insertion at positions from alloc.spill_code
+    ├── Epilogue at EVERY Return path (restore SP from FP, pop callee-saved, ret)
+    ├── Branch fixup resolution (patch rel32/rel21/rel16 displacements)
+    └── Re-slice AllocatedInstruction.encoded from patched all_code
+```
+
+Key data structures and the file:line where they live:
+
+| Symbol | File:line |
+|--------|-----------|
+| `LiveRangeComputer` (struct) | `regalloc.rs:863` |
+| `LiveRangeComputer::compute` | `regalloc.rs:896` |
+| `TargetAgnosticRegAlloc` (struct) | `regalloc.rs:2899` |
+| `TargetAgnosticRegAlloc::new` | `regalloc.rs:2919` |
+| `TargetAgnosticRegAlloc::allocate_intervals` | `regalloc.rs:3056` |
+| `resolve_register_reuse_conflicts` | `regalloc.rs:2769` |
+
+`TargetAgnosticRegAlloc` is **target-agnostic** in the literal sense:
+it does not contain a single ISA-specific constant. The per-ISA
+register file (allocatable / caller-saved / callee-saved pools,
+register names, register classes) is supplied at construction time by a
+`TargetDesc` looked up from
+`target_desc::TargetDescRegistry::get(<isa>)`. The allocator filters
+`TargetDesc::registers` on `is_allocatable` / `is_callee_saved` to
+derive its pools, so adding a new ISA requires only a new `TargetDesc`
+entry — no allocator changes.
+
+`resolve_register_reuse_conflicts` is the **post-allocation
+verification** pass that eliminates the need for stack-slot fallbacks
+on syscall-heavy functions. It detects the case where a single
+instruction's `use_vreg` and `def_vreg` would land in the same physical
+register and the `use_vreg` is still live afterwards — a hazard that
+arises naturally on 2-operand ISAs (x86, m68k) and on instructions
+where the allocator coalesced a copy. The fix is to reassign the
+`def_vreg` to a different allocatable register (drawn from the
+`caller_saved_gprs` + `callee_saved_gprs` lists, not from arbitrary
+physical-register indices), or, if every allocatable register is
+taken, to spill the `def_vreg` to a stack slot for that one
+instruction. The pass runs after `allocate_intervals` and patches the
+`RegAllocResult` in place before it is handed to the per-backend
+emitter.
+
+The older AArch64-specific `LinearScanAllocator` (`regalloc.rs:2307`,
+`new` at `:2307`, `allocate_intervals` at `:1426`) is still on the
+aarch64 path — see [§6](#6-per-backend-file-locations) for why aarch64
+is the one backend that does not use `TargetAgnosticRegAlloc`.
+
+---
+
+## 4. How `reg_isel.rs` Works
+
+Every register-based backend (the 14 with a `<isa>/reg_isel.rs` file)
+exposes a single public entry point:
+
+```rust
+pub fn emit_function_regalloc_full(
+    func: &IRFunction,
+    alloc: &RegAllocResult,
+) -> Result<AllocatedFunction, BackendError>;
+```
+
+The function consumes a `RegAllocResult` (produced by
+`TargetAgnosticRegAlloc`) and emits register-to-register machine code
+for **every** IR instruction. It is structured as seven phases:
+
+### 4.1 Prologue (ISA-specific frame setup)
+
+Save callee-saved registers that the allocator has assigned, save the
+return address (LR / `X30` / `RA` / `LR` / `%r0+1`), set up the frame
+pointer, and reserve the stack frame. The frame size is computed from
+`alloc.total_spill_slots` plus the callee-saved-register count plus
+any alignment padding required by the ABI (16 bytes on most ISAs,
+8 on alpha/hppa/m68k/sparc64 pre-V9).
+
+Examples:
+- `x86_64` — `push rbp; mov rbp, rsp; sub rsp, frame_size` + a run of
+  `push` for each callee-saved GPR the allocator touched.
+- `aarch64` (via `emit.rs`) — `stp x29, x30, [sp, #-16]!; mov x29, sp;
+  sub sp, sp, frame_size` + `str` for each callee-saved.
+- `ppc64` — `mflr r0; std r0, 16(r1); stdu r1, -frame_size(r1)` +
+  `std` for each callee-saved.
+- `sparc64` — `save %sp, -frame_size, %sp` (the register-window spin).
+
+### 4.2 Argument shuffle (ABI arg regs → allocator-assigned regs)
+
+The calling convention places incoming arguments in a fixed set of
+ABI argument registers (e.g. `RDI, RSI, RDX, RCX, R8, R9` on x86_64;
+`X0–X7` on aarch64; `R2–R6` on s390x). The register allocator assigns
+each parameter vreg to whatever allocatable register it picks — which
+is usually *not* the ABI register. The shuffle phase emits a run of
+register-to-register moves to bring each argument from its ABI
+location into its allocator-assigned location.
+
+For arguments that don't fit in registers (overflow args, large
+aggregates by value), the shuffle loads them from the caller's stack
+frame at `[fp + abi_offset]`.
+
+### 4.3 Body (per-IR-instruction emission)
+
+Walks each basic block in program order. For each `IRInstr` variant,
+the backend's `Instruction::encode()` produces the bytes for that
+opcode with the allocator-assigned physical registers substituted in
+for the IR's virtual registers. The encoded bytes are appended to a
+growing `all_code: Vec<u8>` (or `Vec<u32>` for fixed-width ISAs).
+
+Branch and call targets that point to forward blocks are recorded as
+**fixups** (see §4.6) because their displacement cannot be computed
+until the target block's offset in `all_code` is known. Calls to
+external symbols are recorded as **relocations** (see §4.7).
+
+Spill/reload positions (from `alloc.spill_code`) are inserted at the
+right place in the instruction stream — typically *before* the
+instruction that needs the reloaded value and *after* the instruction
+that defines a value to be spilled.
+
+### 4.4 Spill/reload insertion
+
+`alloc.spill_code` is a `BTreeMap<pos, Vec<SpillCode>>` keyed by the
+global position number of the instruction at which the spill or
+reload must occur. The emitter, when it reaches position `pos`, emits
+the spill (`store reg, [fp + spill_off]`) or reload
+(`load reg, [fp + spill_off]`) before emitting the instruction at
+that position. This is the **only** place where the register-based
+path touches the stack slot area; the rest of the function is
+register-to-register.
+
+### 4.5 Epilogue (at *every* Return path)
+
+A function may have multiple `IRTerminator::Return` blocks (early
+returns, error paths). The emitter inserts the epilogue at *every*
+return, not just the function's final block. The epilogue:
+
+1. Restores SP from FP (handles dynamic `Alloc` that may have moved
+   SP during execution — the FP-relative frame layout is preserved).
+2. Pops/restores each callee-saved register that the prologue saved.
+3. Restores the return address into the ISA's link register.
+4. Emits the ISA's return instruction (`ret`, `bx lr`, `jr $ra`,
+   `blr`, `b ra`, `br %rp`, `rts`, `jmpi`, etc.).
+
+### 4.6 Branch fixup resolution
+
+After the entire function body is emitted, the emitter walks the list
+of recorded fixups and patches each branch's displacement field to
+point at the now-known offset of its target block in `all_code`. The
+displacement width is ISA-specific:
+
+| ISA family | Displacement width | Encoding |
+|------------|--------------------|----------|
+| x86_64 / x86_32 | rel32 (Jcc) / rel8 (short jmp) | 4 / 1 byte signed |
+| aarch64 | rel26 (B/BL) / rel19 (B.cond) | 26 / 19 bit signed, word-scaled |
+| arm32 | rel24 (B/BL) / rel8 (Bcc) | 24 / 8 bit signed, word-scaled |
+| riscv64 / riscv32 | rel21 (JAL) / rel13 (branch) | 21 / 13 bit signed, word-scaled |
+| mips64 | rel26 (BEQ/BNE/J) | 26 bit signed, word-scaled (delay slot) |
+| ppc64 | rel24 (B/BL) / rel14 (BC) | 24 / 14 bit signed, word-scaled |
+| loongarch64 | rel20 (B) / rel16 (BEQ/BNE) | 20 / 16 bit signed, word-scaled |
+| s390x | rel32 (BRASL) / rel16 (BRCL) | 32 / 16 bit signed, halfword-scaled |
+| sparc64 | rel22 (BPcc) / rel19 (CALL) | 22 / 19 bit signed, word-scaled (delay slot) |
+| alpha | rel21 (BR) / rel23 (BSR) | 21 / 23 bit signed, word-scaled |
+| hppa | rel17 (BL) / rel12 (BLR) | 17 / 12 bit signed, word-scaled |
+| m68k | rel16 (JMP/JSR) / rel8 (Bcc) | 16 / 8 bit signed |
+
+Once every fixup is patched, the emitter re-slices each
+`AllocatedInstruction.encoded` field from the now-final `all_code` so
+that the disassembler, debugger, and relocator see the actual emitted
+bytes.
+
+### 4.7 Relocation recording
+
+Calls to external symbols (other functions in the same compilation
+unit, libcalls, runtime trap stubs) are recorded as relocations so
+that the ELF linker (or Wasm module finaliser) can patch the call
+site once the symbol's final address is known. The relocation type
+is ISA-specific:
+
+| ISA | Relocation type |
+|-----|-----------------|
+| x86_64 | `R_X86_64_PLT32` (PC-rel32) |
+| x86_32 | `R_386_PLT32` (PC-rel32) |
+| aarch64 | `R_AARCH64_CALL26` (BL) / `R_AARCH64_ADR_PREL_PG_HI21` + `R_AARCH64_ADD_ABS_LO12_NC` (ADRP+ADD) |
+| arm32 | `R_ARM_CALL` (BL) / `R_ARM_THM_CALL` (BL Thumb) |
+| riscv64 / riscv32 | `R_RISCV_CALL_PLT` (auipc + jalr pair) |
+| mips64 | `R_MIPS_26` (BAL) / `R_MIPS_HI16` + `R_MIPS_LO16` |
+| ppc64 | `R_PPC64_REL24` (BL) — TOC restore handled by linker |
+| loongarch64 | `R_LARCH_B26` (B/BL) |
+| s390x | `R_390_PC32DBL` (BRASL) |
+| sparc64 | `R_SPARC_WDISP30` (CALL) / `R_SPARC_HI22` + `R_SPARC_LO10` (SETHI+OR) |
+| alpha | `R_ALPHA_BRADDR` (BR/BSR) |
+| hppa | `R_PARISC_PCREL17F` (BL) — far-call fallback for >17-bit displacements |
+| m68k | `R_68K_PC32` (JMP/JSR) |
+| wasm32 | `R_WASM_TABLE_INDEX` (call_indirect function table) |
+
+---
+
+## 5. `contains_fork` Opt-Out (clone/fork detection)
+
+The `contains_fork` opt-out is the **one and only** situation in
+which the register-based path is bypassed. It is a **correctness
+requirement**, not a fallback for register-pressure problems or
+unimplemented IR ops.
+
+### 5.1 The hazard
+
+A `clone(2)` (Linux syscall nr=220 on aarch64) or `vfork(2)` (nr=221)
+creates a child process whose register state diverges from the
+parent's at the syscall return. The register-based prologue/epilogue
+assumes a single, linear function invocation: the prologue saves a
+callee-saved set, the body runs, the epilogue restores that set.
+After `clone`, the child returns from the syscall with the parent's
+callee-saved set already saved in the prologue — but the child may
+then take a completely different code path that doesn't restore them
+correctly, leading to corrupted callee-saved state in the child.
+
+### 5.2 The detection
+
+Every register-based backend's `allocate_registers` computes a
+`contains_fork: bool` over the IR function before deciding which
+emitter to call:
+
+```rust
+let contains_fork = func.blocks.iter().any(|block| {
+    block.instructions.iter().any(|inst| {
+        match inst {
+            crate::ir::IRInstr::Call { func: fname, .. } => {
+                fname == "spawn_worker" || fname == "fork"
+            }
+            // Generic clone/vfork numbers used by the IR before
+            // syscall_abi::translate resolves them to the per-ISA
+            // native number.
+            crate::ir::IRInstr::Syscall { nr, .. } => *nr == 220 || *nr == 221,
+            _ => false,
+        }
+    })
+});
+```
+
+`spawn_worker` is the IPC-level name for `clone` lowered by
+`expand_spawn_worker` (`ipc_lowering.rs`) to `Syscall{nr: 220, ...}`.
+By the time `allocate_registers` runs, the `Call{func: "spawn_worker"}`
+may have been replaced by the lowered `Syscall`, so the detection
+catches both forms.
+
+### 5.3 The dispatch
+
+```rust
+let code = if real_regalloc && !contains_fork {
+    // Default path: register-based emission.
+    if let Some(ar) = try_real_regalloc(func) {
+        if let Ok(full) = reg_isel::emit_function_regalloc_full(func, &ar) {
+            return Ok(full);
+        }
+    }
+    // …fall through to stack-slot path only if the allocator or
+    // emitter itself errored (never on the happy path).
+    stack_slot_isel::allocate_registers(func)
+} else if real_regalloc && contains_fork {
+    // Correctness opt-out: function contains clone/fork. Take the
+    // stack-slot path because the register-based prologue/epilogue
+    // doesn't interact correctly with fork().
+    stack_slot_isel::allocate_registers(func)
+} else {
+    // Env-var opt-out (VUMA_REAL_REGALLOC_<ISA>=0) for debugging.
+    stack_slot_isel::allocate_registers(func)
+};
+```
+
+The `contains_fork` arm runs the legacy stack-slot ISel because the
+stack-slot path doesn't have the callee-saved prologue/epilogue
+hazard — every vreg lives in its own stack slot, so the child's
+divergent register state is irrelevant.
+
+### 5.4 Why this is not "the production path"
+
+The stack-slot path is **only** taken for functions that contain a
+`clone`/`fork` syscall. For the overwhelming majority of compiled
+functions (no fork), the register-based `reg_isel.rs` is the
+production emission path. The `contains_fork` opt-out exists for a
+specific, narrow correctness reason and is not a generic fallback
+for register pressure, unimplemented IR ops, or allocator failure.
+
+### 5.5 `contains_fork` on `wasm32`
+
+`wasm32` computes `contains_fork` for parity with the other backends
+(`wasm32/mod.rs:4632-4676`), but the boolean is **purely
+observational** — wasm32 is a stack machine with no register-based
+emitter to fall back from, so its single `lower_function` path runs
+regardless. The check exists so that downstream tooling (debug logs,
+audit reports, future fork-emulation hooks) can observe that a
+function contains a clone. The actual fork emulation on wasm32 is
+handled separately by `wasm32_fork_emulation_pass`
+(`ipc_lowering.rs:232`), which rewrites the child branch to run
+in-process (see [§8](#8-wasm32-special-handling)).
+
+### 5.6 Env-var gate
+
+Each backend reads `VUMA_REAL_REGALLOC_<ISA>` (e.g.
+`VUMA_REAL_REGALLOC_AARCH64`, `VUMA_REAL_REGALLOC_X86_64`,
+`VUMA_REAL_REGALLOC_PPC64`, `VUMA_REAL_REGALLOC_RISCV64`, …) with a
+default of **ON** (`unwrap_or(true)`). Setting the env var to `0`
+forces the stack-slot path for debugging — this is independent of
+`contains_fork` and exists for bisecting allocator bugs.
+
+| Backend       | Env var                         | Default |
+|---------------|---------------------------------|---------|
+| `x86_64`      | `VUMA_REAL_REGALLOC_X86_64`     | ON      |
+| `x86_32`      | `VUMA_REAL_REGALLOC_X86_32`     | ON      |
+| `aarch64`     | `VUMA_REAL_REGALLOC_AARCH64`    | ON      |
+| `arm32`       | `VUMA_REAL_REGALLOC_ARM32`      | ON      |
+| `riscv64`     | `VUMA_REAL_REGALLOC_RISCV64`    | ON      |
+| `riscv32`     | `VUMA_REAL_REGALLOC_RISCV32`    | ON      |
+| `mips64`      | `VUMA_REAL_REGALLOC_MIPS64`     | ON      |
+| `ppc64`       | `VUMA_REAL_REGALLOC_PPC64`      | ON      |
+| `loongarch64` | `VUMA_REAL_REGALLOC_LOONGARCH64`| ON      |
+| `s390x`       | `VUMA_REAL_REGALLOC_S390X`      | ON      |
+| `sparc64`     | `VUMA_REAL_REGALLOC_SPARC64`    | ON      |
+| `alpha`       | `VUMA_REAL_REGALLOC_ALPHA`      | ON      |
+| `hppa`        | `VUMA_REAL_REGALLOC_HPPA`       | ON      |
+| `m68k`        | `VUMA_REAL_REGALLOC_M68K`       | ON      |
+
+The 4 byte-swap wrappers do not have their own env-var gate — they
+inherit the parent's allocation result via one-line delegation, so
+the parent's env-var governs both endianness variants.
+
+---
+
+## 6. Per-Backend File Locations
+
+All register-based backends except `aarch64` live in a per-backend
+**directory** under `src/codegen/src/<isa>/` containing at minimum
+`mod.rs` (the `Backend` impl, `TargetInfo`, `allocate_registers`
+driver) and `reg_isel.rs` (the `emit_function_regalloc_full`
+emitter). Most also have `disasm.rs` (disassembler) and some retain
+`stack_slot_isel.rs` for the `contains_fork` opt-out path.
+
+### 6.1 Directory-style backends (14 of 15 register-based emitters)
+
+| Backend       | Directory                          | Files in directory                                |
+|---------------|------------------------------------|---------------------------------------------------|
+| `x86_64`      | `src/codegen/src/x86_64/`          | `mod.rs`, `reg_isel.rs`, `disasm.rs`, `stack_slot_isel.rs` |
+| `x86_32`      | `src/codegen/src/x86_32/`          | `mod.rs`, `reg_isel.rs`, `disasm.rs`, `stack_slot_isel.rs` |
+| `arm32`       | `src/codegen/src/arm32/`           | `mod.rs`, `reg_isel.rs`, `disasm.rs`              |
+| `riscv64`     | `src/codegen/src/riscv64/`         | `mod.rs`, `reg_isel.rs`                           |
+| `riscv32`     | `src/codegen/src/riscv32/`         | `mod.rs`, `reg_isel.rs`                           |
+| `mips64`      | `src/codegen/src/mips64/`          | `mod.rs`, `reg_isel.rs`, `disasm.rs`              |
+| `ppc64`       | `src/codegen/src/ppc64/`           | `mod.rs`, `reg_isel.rs`, `disasm.rs`              |
+| `loongarch64` | `src/codegen/src/loongarch64/`     | `mod.rs`, `reg_isel.rs`, `disasm.rs`, `stack_slot_isel.rs`, `reg_alloc_isel.rs`† |
+| `s390x`       | `src/codegen/src/s390x/`           | `mod.rs`, `reg_isel.rs`                           |
+| `sparc64`     | `src/codegen/src/sparc64/`         | `mod.rs`, `reg_isel.rs`                           |
+| `alpha`       | `src/codegen/src/alpha/`           | `mod.rs`, `reg_isel.rs`                           |
+| `hppa`        | `src/codegen/src/hppa/`            | `mod.rs`, `reg_isel.rs`                           |
+| `m68k`        | `src/codegen/src/m68k/`            | `mod.rs`, `reg_isel.rs`                           |
+
+† `loongarch64/reg_alloc_isel.rs` is **dead code** — the module
+declaration is commented out at `loongarch64/mod.rs` and the production
+`allocate_registers` calls `reg_isel::emit_function_regalloc_full`
+through `try_real_regalloc`. The file is retained for historical
+reference; it is not compiled.
+
+### 6.2 `aarch64` — special-case layout (single file + shared emitter)
+
+`aarch64` predates the directory pattern and is split across three
+files:
+
+| File                          | Role                                                                                    |
+|-------------------------------|-----------------------------------------------------------------------------------------|
+| `src/codegen/src/arm64.rs`    | ISA encoder/decoder: `Instruction`, `Register`, `Condition`, `Operand` enums + `encode()`/`decode()`. |
+| `src/codegen/src/backend.rs`  | `AArch64Backend` struct, `TargetInfo` impl, `allocate_registers` driver (at `:3162`). The `contains_fork` check is at `:3230`; the dispatch is at `:3244`/`:3274`. |
+| `src/codegen/src/emit.rs`     | `Emitter::emit_function_regalloc` — the register-based emitter. aarch64 calls `emitter.emit_function(func, Some(&alloc))` (`backend.rs:3261`). |
+
+aarch64 uses the older AArch64-specific `LinearScanAllocator`
+(`regalloc.rs:2307`, `allocate_intervals` at `:1426`) rather than
+`TargetAgnosticRegAlloc`, and the `Emitter::emit_function_regalloc`
+plumbing in `emit.rs` rather than a per-backend `reg_isel.rs`. The
+functionality is equivalent to the directory-style backends — the
+difference is historical: aarch64 was the first register-based
+backend, the `TargetAgnosticRegAlloc` + `reg_isel.rs` pattern was
+extracted from it later, and aarch64 has not yet been ported to the
+new pattern.
+
+### 6.3 The 4 byte-swap wrappers (single files)
+
+Each wrapper is a single `.rs` file under `src/codegen/src/`:
+
+| Backend       | File                                  | Wraps            | `allocate_registers` delegation line |
+|---------------|---------------------------------------|------------------|--------------------------------------|
+| `aarch64_be`  | `src/codegen/src/aarch64_be.rs`       | `AArch64Backend` | `:150-151` (one-line `self.inner.allocate_registers(func)`) |
+| `armeb`       | `src/codegen/src/armeb.rs`            | `Arm32Backend`   | `:185-186`                           |
+| `mips64be`    | `src/codegen/src/mips64be.rs`         | `Mips64Backend`  | `:200-201`                           |
+| `ppc64le`     | `src/codegen/src/ppc64le.rs`          | `PPC64Backend`   | `:400-406`                           |
+
+"One-line" delegation means the wrapper's `allocate_registers` body is
+literally `self.inner.allocate_registers(func)` — the wrapper adds no
+register-allocation logic of its own. The wrapper's job is to
+byte-swap the parent's emitted bytes and ELF header to the target
+endianness (see [§7](#7-big-endian-backends)).
+
+### 6.4 `wasm32` (single directory, no `reg_isel.rs`)
+
+| Backend  | Directory                       | Files in directory                  |
+|----------|---------------------------------|-------------------------------------|
+| `wasm32` | `src/codegen/src/wasm32/`       | `mod.rs`, `disasm.rs`               |
+
+`wasm32` has no `reg_isel.rs` because WebAssembly is a stack machine
+— there are no physical registers to allocate. The backend's
+`allocate_registers` is the IR-to-Wasm-bytecode lowering
+(`lower_function`), which maps each vreg to a Wasm `local` and emits
+structured stack-machine code (`local.get`, `i32.add`, `i32.store`,
+`call`, `br_table`, etc.). See [§8](#8-wasm32-special-handling).
+
+### 6.5 Shared infrastructure files
+
+| File                              | Role                                                              |
+|-----------------------------------|-------------------------------------------------------------------|
+| `src/codegen/src/backend.rs`      | `Backend` trait, `BackendKind` enum, `aarch64`'s backend impl, decode/disasm helpers, ELF builders. |
+| `src/codegen/src/regalloc.rs`     | `LiveRangeComputer`, `TargetAgnosticRegAlloc`, `LinearScanAllocator` (aarch64), `resolve_register_reuse_conflicts`, `RegAllocResult`, `SpillCode`, `verify_callee_saved`. |
+| `src/codegen/src/regalloc_emit.rs`| Helpers for wiring a `RegAllocResult` into an `AllocatedFunction`. |
+| `src/codegen/src/emit.rs`         | `Emitter` — the aarch64 register-based emitter (also provides `emit_function_regalloc` plumbing). |
+| `src/codegen/src/target_desc.rs`  | `TargetDesc`, `TargetDescRegistry` — per-ISA register file metadata consumed by `TargetAgnosticRegAlloc`. |
+| `src/codegen/src/syscall_abi.rs`  | `translate_or_warn(backend, generic_nr) -> u32` — asm-generic → per-ISA syscall number. |
+| `src/codegen/src/riscv_common.rs` | Shared RISC-V opcode tables consumed by both `riscv64` and `riscv32`. |
+| `src/codegen/src/ipc_lowering.rs` | `expand_spawn_worker` (lowers `spawn_worker`/`fork` to `Syscall{nr: 220}`), `wasm32_fork_emulation_pass`. |
+
+---
+
+## 7. Big-Endian Backends
 
 VUMA ships four big-endian backends. Three are thin wrappers around a
-little-endian parent; `ppc64` is natively big-endian. The fourth wrapper
-(`ppc64le`) wraps a big-endian parent (`ppc64`) and produces little-endian
-output.
+little-endian parent; `ppc64` is natively big-endian. The fourth
+wrapper (`ppc64le`) wraps a big-endian parent (`ppc64`) and produces
+little-endian output.
 
-### 4.0 Wrapper backends — byte-swap policy matrix
+### 7.1 Wrapper backends — byte-swap policy matrix
 
-| # | Wrapper | Wraps | Instruction byte-swap | ELF header swap | `allocate_registers` delegation | Syscall status | Float-op verifier coverage |
-|--:|---------|-------|-----------------------|-----------------|---------------------------------|----------------|----------------------------|
-| 2 | `aarch64_be` | `AArch64Backend::new` | **None** (ARM ARM D6.1.3 — instr. fetches always LE) | `swap_le_elf_to_be` (header/PHDR/SHDR only) | one-line (`:150-151`) | **Works** — `MOVZ X8, nr; SVC #0` (`arm64.rs:4758-4783`) | Central driver |
-| 9 | `armeb`      | `Arm32Backend::new`   | **LE→BE** (BE32 mode) | `swap_le_elf32_to_be` (ELF32 header/PHDR/SHDR + instr. words) | one-line (`:185-186`) | **Works** — `MOV R7, nr; SVC #0` (`arm32/mod.rs:7350-7370`) | Central driver |
-| 11 | `mips64be`  | `Mips64Backend::new_be` (parent emits BE header natively) | **LE→BE** (instr. words only — parent already BE on header) | None (parent already BE) | one-line (`:200-201`) | **Works** — N64-ABI `LI V0, nr; SYSCALL; NOP; BEQ A3, Zero, +8; NOP; DSUBU V0, Zero, V0` (`mips64/mod.rs:3472-3532`) | Central driver |
-| 13 | `ppc64le`   | `PPC64Backend::new_le` (parent always ELFv2) | **BE→LE** (instr. words + `EI_DATA` `MSB→LSB` + header/PHDR/SHDR) | `swap_be_elf_to_le` (full) | one-line (`:404-409`) | **Works** — `LI R0, nr; SC; BC 4, 3, +2; NEG R3, R3` (positive→negative-errno conversion, `ppc64/mod.rs:4563`) | Central driver |
+| #  | Wrapper      | Wraps                   | Instruction byte-swap                                 | ELF header swap                            | `allocate_registers` delegation   |
+|---:|--------------|-------------------------|-------------------------------------------------------|--------------------------------------------|-----------------------------------|
+|  4 | `aarch64_be` | `AArch64Backend::new`   | **None** (ARM ARM D6.1.3 — instr. fetches always LE)  | `swap_le_elf_to_be` (header/PHDR/SHDR)     | one-line (`aarch64_be.rs:150-151`)  |
+|  6 | `armeb`      | `Arm32Backend::new`     | **LE→BE** (BE32 mode, every 4-byte instr. word)       | `swap_le_elf32_to_be` (header + instr.)    | one-line (`armeb.rs:185-186`)       |
+| 10 | `mips64be`   | `Mips64Backend::new_be` | **LE→BE** (instr. words only — parent already BE hdr) | None (parent already BE on header)         | one-line (`mips64be.rs:200-201`)    |
+| 12 | `ppc64le`    | `PPC64Backend::new_le`  | **BE→LE** (instr. words + `EI_DATA` `MSB→LSB` + hdr)  | `swap_be_elf_to_le` (full)                 | one-line (`ppc64le.rs:400-406`)     |
 
-**Notes:**
-- "One-line" delegation means the wrapper's `allocate_registers` body is
-  literally `self.inner.allocate_registers(func)` — the wrapper adds no
-  register-allocation logic of its own.
-- "Float-op verifier coverage" refers to `verify_function_float_ops`
-  (`backend.rs:150`). The verifier is called centrally in all 5
-  compilation drivers via `verify_program_float_ops` (`backend.rs:187`),
-  so all 4 wrappers are covered regardless of whether their parent's
-  `allocate_registers` wires the verifier.
-
-### 4.1 `aarch64_be` — ELF-only swap, instructions stay LE
+### 7.2 `aarch64_be` — ELF-only swap, instructions stay LE
 
 Per ARM ARM DDI 0487 §D6.1.3, AArch64 instruction fetches are always
-little-endian regardless of `PSTATE.E`. `aarch64_be.rs:23-33` therefore
-**forwards the parent's instruction bytes unchanged** and only swaps the
+little-endian regardless of `PSTATE.E`. `aarch64_be.rs` therefore
+forwards the parent's instruction bytes unchanged and only swaps the
 ELF header/PHDR/SHDR fields via `swap_le_elf_to_be`.
 
-### 4.2 `armeb` — BE32 word-swap wrapper
+### 7.3 `armeb` — BE32 word-swap wrapper
 
-ARMv7 BE32 mode requires each 4-byte instruction word stored big-endian.
-`armeb.rs:13-27` byte-swaps every 4-byte instruction word LE→BE inside
-`encode_function`, `return_stub`, `trampoline`, and the executable
-`PT_LOAD` segment.
+ARMv7 BE32 mode requires each 4-byte instruction word stored
+big-endian. `armeb.rs` byte-swaps every 4-byte instruction word
+LE→BE inside `encode_function`, `return_stub`, `trampoline`, and the
+executable `PT_LOAD` segment.
 
-### 4.3 `mips64be` — instruction word swap, native BE ELF
+### 7.4 `mips64be` — instruction word swap, native BE ELF
 
-The parent `mips64` backend emits a **big-endian ELF header** natively
+The parent `mips64` backend emits a big-endian ELF header natively
 (`build_mips64_elf_2seg`), so the wrapper only swaps the 32-bit
-instruction words in the `PT_LOAD` segment from LE to BE
-(`mips64be.rs:8-25`).
+instruction words in the `PT_LOAD` segment from LE to BE.
 
-### 4.4 `ppc64` — native big-endian
+### 7.5 `ppc64` — native big-endian
 
-`ppc64/mod.rs` is implemented natively as a big-endian backend (ELFv2
-ABI, `ELFDATA2MSB`, `ppc64/mod.rs:1773`). All encoders write 4-byte
-big-endian words directly (`ppc64/mod.rs:422`). The `ppc64le` wrapper
-(`ppc64le.rs`, 530 LOC) inherits `ppc64`'s encoders and only flips the
-ELF header endianness back to LE.
+`ppc64/mod.rs` is implemented natively as a big-endian backend
+(ELFv2 ABI, `ELFDATA2MSB`). All encoders write 4-byte big-endian
+words directly. The `ppc64le` wrapper inherits `ppc64`'s encoders
+unchanged and flips the ELF header endianness back to LE.
 
 ---
 
-## 5. wasm32 Special Handling
+## 8. `wasm32` Special Handling
 
-`wasm32/mod.rs` (8 150 LOC) is structurally different from every other
-backend because WebAssembly requires **structured control flow** (no
+`wasm32/mod.rs` is structurally different from every other backend
+because WebAssembly requires **structured control flow** (no
 arbitrary jumps). Four design decisions stand out:
 
-### 5.1 Trampoline Loop
+### 8.1 Trampoline loop
 
-All IR basic blocks are nested inside a single `(loop $trampoline
-(block $b_outer ... (block $b_inner (br_table $b_inner ... $b_outer
-$trampoline))))` (`wasm32/mod.rs:2252-2300`). A `local $pc:i32` is
-updated at every terminator; `br_table` dispatches to the right nested
+All IR basic blocks are nested inside a single
+`(loop $trampoline (block $b_outer ... (block $b_inner (br_table
+$b_inner ... $b_outer $trampoline))))`. A `local $pc:i32` is updated
+at every terminator; `br_table` dispatches to the right nested
 block. `Break`/`Continue` map to `br` at the appropriate depth.
-**ARCHITECTURAL, not a QEMU bug** — inline comment tagged
-`[ARCH:wasm32-trampoline]` at `wasm32/mod.rs:2250` (`lower_function`
-trampoline setup) and `:4107` (`lower_terminator_trampoline`).
-WebAssembly's structured control flow permits no arbitrary jump-to-label;
-VUMA's IR is a basic-block CFG with arbitrary successor edges, so the
-trampoline emulates a computed goto. Works on every Wasm runtime
-(wasmtime 47.0.2, wasmer, node.js). Performance cost: one `local.set $pc`
-+ one `br $trampoline` + one `br_table` dispatch per branch. **No removal
-condition** — fundamental IR↔Wasm impedance mismatch.
 
-### 5.2 Ring-Buffer Channels
+This is **architectural**, not a QEMU bug — WebAssembly's structured
+control flow permits no arbitrary jump-to-label, and VUMA's IR is a
+basic-block CFG with arbitrary successor edges, so the trampoline
+emulates a computed goto. Works on every Wasm runtime (wasmtime
+47.0.2, wasmer, node.js). Performance cost: one `local.set $pc` +
+one `br $trampoline` + one `br_table` dispatch per branch. **No
+removal condition** — fundamental IR↔Wasm impedance mismatch.
+
+### 8.2 Ring-buffer channels
 
 `channel_open` lowers to a heap-allocated 8-byte buffer holding
-`{read_fd, write_fd}` (`ipc_lowering.rs:890-914`). On wasm32 there is no
-`pipe2` syscall; the runner (`scripts/wasm32_runner.py`) provides
-host-side `fdio` functions backed by a ring buffer in host memory.
+`{read_fd, write_fd}`. On wasm32 there is no `pipe2` syscall; the
+runner (`scripts/wasm32_runner.py`) provides host-side `fdio`
+functions backed by a ring buffer in host memory.
 
-### 5.3 Fork Emulation (in-process, no isolation)
+### 8.3 Fork emulation (in-process, no isolation)
 
 `vuma_fork` cannot `os.fork` because wasmtime runs background threads
-that break the child's state (`wasm32_runner.py:111-117`). Instead, the
-`wasm32_fork_emulation_pass` (`ipc_lowering.rs:232`) rewrites the child
-branch's `Return` to `Store(exit_val, 4096); Jump(parent_post_block)` and
-rewrites `wait_worker` to `Load(4096)`. `WASM32_CHILD_EXIT_ADDR = 4096`
-(`ipc_lowering.rs:961`).
+that break the child's state. Instead, the
+`wasm32_fork_emulation_pass` (`ipc_lowering.rs:232`) rewrites the
+child branch's `Return` to `Store(exit_val, 4096); Jump(parent_post_block)`
+and rewrites `wait_worker` to `Load(4096)`.
+`WASM32_CHILD_EXIT_ADDR = 4096`.
 
-The parent and child branches therefore run **sequentially in the same
-wasm process**, with **no isolation** between them: the child can read
-and write the parent's memory, and a crash in the child crashes the
-parent. This is a deliberate design trade-off — wasm32 has no process
-primitive, and the in-process emulation is sufficient for the IPC test
-matrix. The wasm32 child-branch code is dead in the emitted binary
-because the rewriter replaces the child's first `Return` with a `Jump`
-back to the parent's post-fork block.
+The parent and child branches therefore run **sequentially in the
+same Wasm process**, with **no isolation** between them: the child
+can read and write the parent's memory, and a crash in the child
+crashes the parent. This is a deliberate design trade-off — wasm32
+has no process primitive, and the in-process emulation is sufficient
+for the IPC test matrix. The wasm32 child-branch code is dead in
+the emitted binary because the rewriter replaces the child's first
+`Return` with a `Jump` back to the parent's post-fork block.
 
-### 5.4 Function Table for `CallIndirect`
+### 8.4 Function table for `CallIndirect`
 
-`IRInstr::CallIndirect` lowers to `WasmInstr::CallIndirect`
-(`wasm32/mod.rs:4026-4059`). Each `GetAddress` of a function emits a
-table-index relocation (`wasm32/mod.rs:2376, 2416-2420`); at module
+`IRInstr::CallIndirect` lowers to `WasmInstr::CallIndirect`. Each
+`GetAddress` of a function emits a table-index relocation; at module
 finalisation, the function table is built and the relocations are
-patched (`wasm32/mod.rs:4383, 4974, 5087`).
+patched.
 
 ---
 
-## 6. ISA Encoding Audit
+## 9. QEMU Execution Notes
 
-All 19 backends' encoders have been verified against the official ISA
-manuals. The audit fixed four classes of encoding bugs and corrected one
-misleading comment; each verified encoding carries a citation to the
-manual section in its inline comment.
+VUMA backends are tested under QEMU user-mode emulation (or wasmtime
+for `wasm32`). The QEMU binary name does not always match the VUMA
+backend name; the canonical mapping lives in
+`scripts/vuma_test_matrix_19backends.sh` (function `qemu_for()`) and
+`scripts/qemu_smoke_test.sh` (associative array `QEMU_BIN`).
 
-### 6.1 LoongArch — FP comparison condition codes
+### 9.1 Per-backend QEMU binary
 
-**Bug.** The LoongArch FP comparison encoder (`FCMP.cond`) used incorrect
-condition-code field values for the `<`, `<=`, `==`, and `!=` operators.
+| #  | Backend        | Emulator binary             | Notes                                                                                              |
+|---:|----------------|-----------------------------|----------------------------------------------------------------------------------------------------|
+|  1 | `x86_64`       | (native, no emulator)       | Runs natively on x86_64 hosts.                                                                     |
+|  2 | `x86_32`       | `qemu-i386-static`          | 32-bit x86 user-mode.                                                                              |
+|  3 | `aarch64`      | `qemu-aarch64-static`       |                                                                                                    |
+|  4 | `aarch64_be`   | `qemu-aarch64_be-static`    | Big-endian AArch64 variant; QEMU recognises the BE ELF header.                                     |
+|  5 | `arm32`        | `qemu-arm-static`           | **Naming mismatch**: VUMA calls it `arm32`, QEMU calls the binary `qemu-arm`.                      |
+|  6 | `armeb`        | `qemu-armeb-static`         | Big-endian ARMv7 variant.                                                                          |
+|  7 | `riscv64`      | `qemu-riscv64-static`       |                                                                                                    |
+|  8 | `riscv32`      | `qemu-riscv32-static -cpu max` | **`-cpu max` required**: QEMU's default rv32 CPU lacks the D (double-float) extension.          |
+|  9 | `mips64`       | `qemu-mips64el-static`      | **Naming mismatch**: VUMA's `mips64` emits a *little-endian* ELF, so the LE emulator is required. `qemu-mips64-static` (BE) rejects it. |
+| 10 | `mips64be`     | `qemu-mips64-static`        | Big-endian MIPS64; the BE emulator matches the BE ELF.                                             |
+| 11 | `ppc64`        | `qemu-ppc64-static`         |                                                                                                    |
+| 12 | `ppc64le`      | `qemu-ppc64le-static`       | Little-endian PowerPC variant.                                                                     |
+| 13 | `loongarch64`  | `qemu-loongarch64-static`   |                                                                                                    |
+| 14 | `s390x`        | `qemu-s390x-static`         |                                                                                                    |
+| 15 | `sparc64`      | `qemu-sparc64-static`       |                                                                                                    |
+| 16 | `alpha`        | `qemu-alpha-static`         | Requires QEMU ≥ 10.0 (alpha support was incomplete in 7.x).                                        |
+| 17 | `hppa`         | `qemu-hppa-static`          |                                                                                                    |
+| 18 | `m68k`         | `qemu-m68k-static`          |                                                                                                    |
+| 19 | `wasm32`       | `wasmtime` (≥ 47.0.2)       | Not QEMU — `wasm32` runs under the Bytecode Alliance wasmtime runtime.                             |
 
-**Fix.** The condition codes are now per LoongArch Vol 1 §3.2.2.1:
+### 9.2 Minimum QEMU versions
 
-| CmpKind                         | Cond | Code  | LoongArch mnemonic |
-|---------------------------------|------|------:|--------------------|
-| `SLt` / `ULt`                   | CLT  | 0x02 | `FCMP.CLT`  fj < fk |
-| `SLe` / `ULe`                   | CLE  | 0x06 | `FCMP.CLE`  fj ≤ fk |
-| `Eq`                            | CEQ  | 0x04 | `FCMP.CEQ`  fj == fk |
-| `Ne`                            | CNE  | 0x10 | `FCMP.CNE`  fj ≠ fk |
-| `SGt` / `UGt` (swapped operands)| CLT  | 0x02 | `FCMP.CLT`  with fj ⇄ fk |
-| `SGe` / `UGe` (swapped operands)| CLE  | 0x06 | `FCMP.CLE`  with fj ⇄ fk |
+| ISA family                           | Minimum QEMU | Recommended | Notes                                                                          |
+|--------------------------------------|-------------:|------------:|--------------------------------------------------------------------------------|
+| `aarch64` / `aarch64_be`             | 7.2          | 10.x        |                                                                                |
+| `arm32` / `armeb`                    | 7.2          | 10.x        |                                                                                |
+| `x86_64` / `x86_32`                  | 7.2          | 10.x        |                                                                                |
+| `riscv64`                            | 7.2          | 10.x        | Uses default CPU; no `-cpu max` needed.                                        |
+| `riscv32`                            | 7.2 + `-cpu max` | 10.x + `-cpu max` | D extension requires `-cpu max`.                                          |
+| `loongarch64`                        | 7.2          | 10.x        |                                                                                |
+| `mips64`                             | 7.2          | 10.x        | Use `qemu-mips64el-static` (LE).                                               |
+| `mips64be`                           | 7.2          | 10.x        | Use `qemu-mips64-static` (BE).                                                 |
+| `ppc64` / `ppc64le`                  | 7.2          | 10.x        |                                                                                |
+| `sparc64`                            | 7.2          | 10.x        |                                                                                |
+| `s390x`                              | 7.2          | 10.x        |                                                                                |
+| `m68k`                               | 7.2          | 8.x+        | QEMU 7.2 m68k has known translator bugs that VUMA works around; 8.x removes them. |
+| `alpha`                              | 10.0         | 11.x        | QEMU 10.0-alpha rejects `CMPULE` (function 0x3D); VUMA emulates via `CMPULT`. Removal: QEMU 11.x. |
+| `hppa`                               | 7.2          | 8.x+        | QEMU 7.2 hppa has an `LDIL` decoder bug VUMA works around; 8.x removes it.     |
+| `wasm32`                             | wasmtime 47.0.2 | wasmtime 47+ | Trampoline loop is architectural, not a runtime bug.                          |
 
-Other condition codes (e.g. `CUN` = 0x08, unordered) are documented at
-`loongarch64/stack_slot_isel.rs:617-620`. The fix lives in
-`loongarch64/stack_slot_isel.rs::fp_cmp_cond` (`:623-632`).
+### 9.3 Smoke runner
 
-### 6.2 Power ISA — 6 XO-field encoding bugs
-
-**Bug.** Six Power ISA instructions used incorrect `XO` (extended-opcode)
-field values, producing undefined encodings on real Power hardware and on
-recent QEMU. Each was traced to a typo against Power ISA v3.1B.
-
-**Fixes.** All six encodings now match Power ISA v3.1B:
-
-| Instruction | Correct XO | Previous (wrong) XO | File:line |
-|-------------|-----------:|--------------------:|-----------|
-| `isel`      |         15 |                 30  | `ppc64/mod.rs:1208` |
-| `divd`      |        489 |                459  | `ppc64/mod.rs:874` (was incorrectly XO=459 which is `divwu`) |
-| `divwu`     |        459 |                489  | `ppc64/mod.rs` (sibling fix) |
-| `fcfidu`    |        974 |               1014  | `ppc64/mod.rs` |
-| `fcmpu`     |          0 |                 32  | `ppc64/mod.rs` |
-| (6th — see `ppc64/mod.rs` XO-table audit comment for the full list) |  |  |  |
-
-The inline comments now cite *"Power ISA v3.1B: <instr> = XO <n> (was
-incorrectly XO=<wrong>)."* Each fix is exercised by the gold-standard FP
-and integer-division test programs.
-
-### 6.3 RISC-V — `OPC_NMADD` opcode
-
-**Bug.** The RISC-V fused negative-multiply-add opcode `NMADD` was
-encoded with the wrong major-opcode value.
-
-**Fix.** `OPC_NMADD = 0x4F` (`riscv_common.rs:391`), per the RISC-V
-Unprivileged ISA manual Table 11.1 (the `MADD` / `NMSUB` / `MSUB` /
-`NMADD` quartet uses opcodes 0x43 / 0x4B / 0x47 / 0x4F respectively).
-The full fused-opcode table:
-
-| Instruction | Opcode | File:line |
-|-------------|-------:|-----------|
-| `OPC_MADD`  | 0x43 | `riscv_common.rs:389` |
-| `OPC_NMSUB` | 0x4B | `riscv_common.rs:390` |
-| `OPC_NMADD` | 0x4F | `riscv_common.rs:391` |
-| `OPC_MSUB`  | 0x47 | `riscv_common.rs:392` |
-
-### 6.4 Alpha — CMPULE comment corrected
-
-**Correction.** The Alpha CMPULE workaround comment previously cited
-"function 0x3F" as the CMPULE function code. The correct code is
-**0x3D** on INTA major opcode 0x10, per the DEC Alpha Architecture
-Reference Manual (the 0x3F slot is reserved).
-
-QEMU 10.0-alpha does not implement CMPULE (function 0x3D) — it raises
-SIGILL ("Illegal instruction") whenever the encoded function field is
-0x3D, even though real DEC Alpha 21264 hardware does implement it. The
-workaround at `alpha.rs:362-382` emulates CMPULE via CMPULT (function
-0x1D, which QEMU supports):
-
-```
-CMPULE(a, b) = (a <= b unsigned)
-             = !(a >  b unsigned)
-             = !(b <  a unsigned)
-             = !CMPULT(b, a)
-```
-
-Implemented as `CMPULT rb, ra, rc` + `XOR rc, 1, rc` (8 bytes instead of
-4). Breaks every `arena_wave*` test without the workaround because the
-arena-overflow check `arena.offset + size <= arena.capacity` lowers to
-CMPULE on alpha. Removal condition: QEMU 11.x implements CMPULE.
+`scripts/qemu_smoke_test.sh` builds the release `vuma` binary once
+and compiles a small set of gold-standard `.vuma` programs on every
+supported backend (12 QEMU + wasm32 via wasmtime), running each
+under the appropriate emulator and checking the exit code against
+the `// Expected exit code:` header. The per-ISA QEMU/wasmtime
+binary mapping lives in the `QEMU_BIN` associative array at the top
+of the script. The full 19-backend matrix is driven by
+`scripts/vuma_test_matrix_19backends.sh`.
 
 ---
 
-## 7. Per-Backend Quirks
+## 10. Syscall ABI Translation
 
-Notable design decisions and QEMU workarounds, with file:line references.
-The full QEMU workaround list (with removal conditions) is in §8;
-only backend-specific items appear here.
-
-**aarch64** (`arm64.rs`). Reference backend. Real `TargetAgnosticRegAlloc`
-via `try_real_regalloc` (`backend.rs:3099`, `TargetAgnosticRegAlloc::new`
-at `:3114`). **Plus an opt-in register-based prototype** behind
-`VUMA_REAL_REGALLOC_AARCH64=1` (commit `ee06b362`, OFF by default) that
-invokes the older `LinearScanAllocator` (`regalloc.rs:1208`, `new` at
-`:1318`) and feeds its `AllocationResult` to `Emitter::emit_function_regalloc`
-(`emit.rs:1056`) via `Emitter::emit_function(func, Some(&alloc))`
-(`backend.rs:3213`). 22/30 PASS on the curated 30-test matrix — **not
-production-ready** (8 callee-saved regressions; see
-[caveats.md §2.1.1](./caveats.md#21-stack-slot-isel-is-the-only-production-code-emission-path)
-and [`scripts/audit/followup_wave2_aarch64_prototype.md`](../scripts/audit/followup_wave2_aarch64_prototype.md)).
-FP conversion Rn-field position regression test at `:5827-5835` (Rn at
-bits[9:5], not bits[14:10] which is the fixed `00000` constant field).
-
-**aarch64_be** (`aarch64_be.rs:23-44`). No instruction byte-swap
-(ARM ARM D6.1.3); only ELF header fields flipped.
-
-**x86_64** (`x86_64/mod.rs:934`). SIMD codegen is a stub; `emit_simd`
-returns zero bytes pending SIMD integration. Real `TargetAgnosticRegAlloc`
-at `:4081`. `materialize_f32_immediates` is a load-bearing pass that
-must run after folding and before codegen to avoid f32-bit-immediate
-corruption.
-
-**x86_32** (`x86_32/stack_slot_isel.rs:3410`). Syscall numbers translated
-via `translate_or_warn` (x86_32 uses a separate table, e.g. `read`=3 vs
-asm-generic `read`=63). I64 channel handle stored in 4-byte slot (K13A
-workaround).
-
-**riscv64 / riscv32** (`riscv64.rs:8360`, `riscv32.rs:5446`). Share
-`riscv_common.rs` for encoding. `riscv64` uses real
-`TargetAgnosticRegAlloc` via `try_real_regalloc` at `:6542`. riscv32
-tests run with `qemu-riscv32 -cpu max` (QEMU's default rv32 CPU lacks the
-D extension, `pi5_test_suite.sh:664-665`).
-
-**loongarch64** (`loongarch64/mod.rs:2619`). Production
-`allocate_registers` calls `stack_slot_isel::allocate_registers`. FP
-compare condition codes verified against LoongArch Vol 1 §3.2.2.1 (§6.1).
-
-**arm32** (`arm32/mod.rs:88-101`). `preregister_param_types` is
-**load-bearing**: it pre-populates a thread-local map of function
-parameter types before the parallel `allocate_registers` loop. Without
-it, function A's `Call` handler can race on function B's registration,
-fall back to "all-64-bit", and corrupt the calling convention (32-bit
-params land in the wrong physical register). Symptoms: `fn_chained_calls`
-returns 3 instead of 15 (`arm32/mod.rs:78-87`).
-
-**armeb** (`armeb.rs:13-27`). BE32 word-swap (see §4.2).
-
-**mips64 / mips64be** (`mips64/mod.rs:3906`, `mips64be.rs:8-25`). Parent
-`mips64` emits a native BE ELF header; wrapper only swaps instruction
-words. N64-ABI syscall sequence implemented at `mips64/mod.rs:3472-3532`.
-
-**ppc64 / ppc64le** (`ppc64/mod.rs:2665-2680`, `ppc64le.rs`). `ppc64` is
-natively big-endian (ELFv2 ABI); real `TargetAgnosticRegAlloc` via
-`try_real_regalloc` at `ppc64/mod.rs:3011`. A pre-pass works around a
-QEMU ppc64 bug where big-endian `LBUZ` (U8 load) silently returns 0; the
-pre-pass replaces every U8 array load with a 32-bit `LBZ` plus explicit
-shift (`ppc64/mod.rs:2678-2680`). QEMU ppc64 also reports `connect` and
-`poll` errors as **positive errno** (§8). 6 Power ISA XO bugs fixed (§6.2).
-`ppc64le` inherits `ppc64` encoders unchanged; flips ELF header to LE only.
-
-**wasm32** (`wasm32/mod.rs`). See §5. Fork emulation is in-process —
-**no isolation** between parent and child.
-
-**sparc64** (`sparc64.rs:2824, 4135, 4148, 4254`). `FloatToUInt` of
-negatives via `FSTOx → RDY → AND → LDx [sign-clear]` sequence.
-Float-compare results are "correct for same-sign non-NaN; TODO G5
-otherwise" (`sparc64.rs:4254`). QEMU sparc64 reports positive errno (§8).
-
-**s390x** (`s390x.rs:1911-1931`). The secondary `IRInstr::Ret { values }`
-arm in `emit_instr` previously emitted the function epilogue but **did not
-restore callee-saved scratch registers S0–S5** (R6–R10/R12 in the ABI),
-causing corrupted S0–S5 when `IRInstr::Ret` was emitted as a real
-instruction. The fix threads `s0_save_off..s5_save_off` (and
-`_frame_size`/`_lr_save_off`/`_fp_save_off`) into `emit_instr`
-(`s390x.rs:1372-1380`) and now emits 6 `LG Sn, n(SP)` restores before
-`adjust_sp` (`s390x.rs:1923-1928`), mirroring the primary
-`IRTerminator::Return` path at `s390x.rs:1110-1130`. Verified end-to-end
-on QEMU s390x via `functions/fibonacci.vuma`: recursive early-returns
-through the secondary Ret path preserve callee-saved state across calls.
-QEMU s390x has known AGFI/AGHI ambiguity (§8).
-
-**m68k** (`m68k.rs:2358, 2521, 3278, 3531, 3787, 4373`). Every FP emitter
-is marked `// TODO G4: needs QEMU-m68k verification — encoding uncertain`.
-Two QEMU 7.2.0-m68k translator bugs are worked around with inline comments
-tagged `[QEMU-WA:…]`:
-
-- (a) **MOVEM SIGILL** at `m68k.rs:3787` (primary comment) + 4 sites —
-  `MOVEM.L Dn,-(SP)` / `MOVEM.L (SP)+,Dn` rejected with "Disassembler
-  disagrees with translator" SIGILL; replaced with individual `MOVE.L`
-  instructions. **Removal: when QEMU 8.x is the minimum supported
-  version.**
-- (b) **ADDI.B/CMPI.B SIGILL** at `m68k.rs:4373` (primary comment) + 3
-  sites — byte-form immediate-to-register ops on `0x06xx`/`0x0Cxx`
-  opcodes rejected; replaced with `MOVEQ #imm, D0 + ADD.L/CMP.L D0, Dn`.
-  **Same removal condition.**
-
-**alpha** (`alpha.rs:278, 1377, 1600`). f64→u64 truncation for `f ≥ 2^63`
-is unimplemented (TODO G5b); the encoder emits a wrong result for
-out-of-range inputs (saturates to `i64::MAX`). One QEMU 10.0-alpha
-translator bug is worked around at `alpha.rs:362-382`
-(`Instruction::encode` CMPULE special case) with inline comment tagged
-`[QEMU-WA:alpha-cmpule]`: QEMU rejects INTA function 0x3D (CMPULE) as a
-reserved encoding with SIGILL; emulated via `CMPULT rb, ra, rc` + `XOR
-rc, 1, rc` (8 bytes instead of 4). Breaks every `arena_wave*` test
-without the workaround. **Removal: when QEMU 11.x is the minimum
-supported version** (QEMU 11.x implements CMPULE).
-
-**hppa** (`hppa.rs:504, 552, 619, 660, 704, 1329, 3424, 3928, 4443, 4539`).
-Mul/Div/Cmp/conditional-branches emit real code; F32 ops are real (not
-stubs). FP load/store encodings verified. One QEMU 7.2.0-hppa translator
-bug is worked around at `hppa.rs:704` (`ss_load_imm`) and `hppa.rs:4539`
-(`GetAddress` relocator) with inline comment tagged `[QEMU-WA:hppa-ldil]`:
-QEMU's LDIL decoder shifts left by 19 instead of 11, making the canonical
-`LDIL+LDO` immediate-materialisation pair unusable; `ss_load_imm`
-materialises 32-bit immediates via `LDO` (format 14) + 11×`ADD` (left
-shift by 11) + `LDO` (add low 11 bits) instead. **Removal: when QEMU 8.x
-is the minimum supported version.** The `patch_call_site` far-call
-fallback at `hppa.rs:1329` (Case 4 `BL,n` 17-bit displacement,
-`[QEMU-WA:hppa-far-call]`) is NOT a QEMU bug — it is the standard
-long-call codegen strategy for binaries > ~32 KB (no removal condition).
-
----
-
-## 8. QEMU Version Requirements
-
-VUMA backends are tested under QEMU user-mode emulation. Each QEMU
-workaround below carries an explicit **removal condition**; the
-workaround is removed when the condition is met (typically when QEMU is
-bumped to a version that fixes the underlying translator bug).
-
-### 8.1 Per-ISA QEMU version matrix
-
-| ISA | Minimum QEMU | Recommended QEMU | Workarounds active | Removal condition |
-|-----|-------------:|-----------------:|--------------------|-------------------|
-| `aarch64` / `aarch64_be` | 7.2 | 10.x | none | — |
-| `arm32` / `armeb`        | 7.2 | 10.x | none | — |
-| `x86_64` / `x86_32`      | 7.2 | 10.x | none | — |
-| `riscv64`                | 7.2 | 10.x | none (uses `-cpu max`) | — |
-| `riscv32`                | 7.2 + `-cpu max` | 10.x + `-cpu max` | none (D extension requires `-cpu max`) | — |
-| `loongarch64`            | 7.2 | 10.x | none | — |
-| `mips64` / `mips64be`    | 7.2 (`qemu-mips64el-static` for LE) | 10.x | none | — |
-| `ppc64` / `ppc64le`      | 7.2 | 10.x | `LBUZ` U8-load pre-pass; positive-errno `connect`/`poll` | QEMU fixes `LBUZ` BE bug and negative-errno reporting |
-| `sparc64`                | 7.2 | 10.x | positive-errno reporting | QEMU reports negative errno |
-| `s390x`                  | 7.2 | 10.x | AGFI/AGHI ambiguity | QEMU disambiguates AGFI/AGHI |
-| `m68k`                   | 7.2 | 8.x+ | MOVEM SIGILL; ADDI.B/CMPI.B SIGILL | QEMU 8.x is the minimum supported version |
-| `alpha`                  | 10.0 | 11.x | CMPULE function 0x3D rejected | QEMU 11.x implements CMPULE |
-| `hppa`                   | 7.2 | 8.x+ | LDIL left-shift-by-19 bug | QEMU 8.x is the minimum supported version |
-| `wasm32`                 | wasmtime 47.0.2 | wasmtime 47+ | none (trampoline loop is architectural, not a QEMU bug) | — |
-
-### 8.2 Workaround inventory
-
-Each workaround below is tagged in the source with an inline comment
-beginning `[QEMU-WA:<tag>]` so they can be located with a single grep
-and removed en masse when the removal condition is met.
-
-| Tag | Backend | File:line | Bug | Removal condition |
-|-----|---------|-----------|-----|-------------------|
-| `[QEMU-WA:alpha-cmpule]` | alpha | `alpha.rs:362-382` | QEMU 10.0-alpha rejects INTA function 0x3D (CMPULE) as reserved encoding; raises SIGILL. Real 21264 hardware implements it. | QEMU 11.x implements CMPULE. |
-| `[QEMU-WA:hppa-ldil]` | hppa | `hppa.rs:704`, `:4539` | QEMU 7.2.0-hppa LDIL decoder shifts left by 19 instead of 11, breaking the canonical `LDIL+LDO` immediate-materialisation pair. | QEMU 8.x is the minimum supported version. |
-| `[QEMU-WA:hppa-far-call]` | hppa | `hppa.rs:1329` | NOT a QEMU bug — standard long-call codegen strategy for binaries > ~32 KB. | **No removal condition** (architectural). |
-| `[QEMU-WA:m68k-movem]` | m68k | `m68k.rs:3787` + 4 sites | QEMU 7.2.0-m68k rejects `MOVEM.L Dn,-(SP)` / `MOVEM.L (SP)+,Dn` with "Disassembler disagrees with translator" SIGILL. | QEMU 8.x is the minimum supported version. |
-| `[QEMU-WA:m68k-addi-cmpi]` | m68k | `m68k.rs:4373` + 3 sites | QEMU 7.2.0-m68k rejects byte-form `ADDI.B`/`CMPI.B` on `0x06xx`/`0x0Cxx` opcodes with SIGILL. | QEMU 8.x is the minimum supported version. |
-| (ppc64 LBUZ pre-pass) | ppc64 | `ppc64/mod.rs:2665-2680` | QEMU ppc64 big-endian `LBUZ` (U8 load) silently returns 0; pre-pass replaces every U8 array load with 32-bit `LBZ` + explicit shift. | QEMU fixes `LBUZ` BE bug. |
-| (ppc64 positive errno) | ppc64 | `ppc64/mod.rs:4563` | QEMU ppc64 reports `connect` and `poll` errors as positive errno; emitted sequence converts positive→negative via `BC 4, 3, +2; NEG R3, R3`. | QEMU reports negative errno. |
-| (sparc64 positive errno) | sparc64 | `sparc64.rs` | QEMU sparc64 reports positive errno. | QEMU reports negative errno. |
-| (s390x AGFI/AGHI ambiguity) | s390x | `s390x.rs` | QEMU s390x disassembler ambiguity between `AGFI` and `AGHI`. | QEMU disambiguates AGFI/AGHI. |
-
----
-
-## 9. Syscall ABI Translation
-
-VUMA IR uses **asm-generic** (Linux generic syscall) numbers internally.
-Each backend translates to its native numbering via
+VUMA IR uses **asm-generic** (Linux generic syscall) numbers
+internally. Each backend translates to its native numbering via
 `syscall_abi::translate_or_warn(backend, generic_nr) -> u32`
 (`syscall_abi.rs:281-300`).
 
-**Identity arches** (no translation): `aarch64`, `riscv64`, `riscv32`,
-`loongarch64`, `arm32`, `wasm32`. These return the input verbatim.
+**Identity arches** (no translation): `aarch64`, `riscv64`,
+`riscv32`, `loongarch64`, `arm32`, `wasm32`. These return the input
+verbatim.
 
 **Translated arches**: `x86_64` (`syscall_abi.rs:304`), `x86_32`
 (`:445`), `mips64` (`:583`), `ppc64` (`:728`), `s390x` (`:870`),
-`sparc64` (`:1013`), `alpha` (`:1153`), `hppa` (`:1293`), `m68k`. The
-MIPS, PPC, s390x, sparc64, alpha, and hppa tables differ significantly
-from asm-generic (e.g. s390x `read`=3 and MIPS `read`=5000 vs asm-generic
-`read`=63).
+`sparc64` (`:1013`), `alpha` (`:1153`), `hppa` (`:1293`), `m68k`.
+The MIPS, PPC, s390x, sparc64, alpha, and hppa tables differ
+significantly from asm-generic (e.g. s390x `read`=3 and MIPS
+`read`=5000 vs asm-generic `read`=63).
 
-**Warning behaviour**: if `translate(backend, generic_nr)` returns `None`
-(unknown syscall), `translate_or_warn` logs a `vuma_log!(warn, ...)` and
-returns the generic number verbatim (`syscall_abi.rs:291-298`). This is
-**non-fatal**: the program is still emitted, and the syscall may be wrong
-on the target arch.
+**Warning behaviour**: if `translate(backend, generic_nr)` returns
+`None` (unknown syscall), `translate_or_warn` logs a
+`vuma_log!(warn, ...)` and returns the generic number verbatim
+(`syscall_abi.rs:291-298`). This is non-fatal: the program is still
+emitted, and the syscall may be wrong on the target arch.
 
-**Production callers**: 16 of 19 backends call `translate_or_warn` (arm32,
-arm64, alpha, x86_32, riscv32, riscv64, hppa, wasm32, ppc64, mips64,
-loongarch64, m68k, s390x, sparc64, x86_64; plus two indirect calls in
-`emit.rs:2188, 5386`). The four wrapper backends inherit the parent's
-call.
+**Production callers**: 16 of 19 backends call `translate_or_warn`
+directly (arm32, aarch64, alpha, x86_32, riscv32, riscv64, hppa,
+wasm32, ppc64, mips64, loongarch64, m68k, s390x, sparc64, x86_64).
+The four wrapper backends inherit the parent's call.
 
 ---
 
-## 10. Runtime Trap Stubs
+## 11. Runtime Trap Stubs
 
-Every backend emits three named syscall-stub symbols that implement the
-runtime side of the PMT safety invariants. The exit codes match the
-Lean `TrapCode.to_exit` mapping (`proof/PMT/Soundness.lean:90-99`):
+Every backend emits three named syscall-stub symbols that implement
+the runtime side of the PMT safety invariants. The exit codes match
+the Lean `TrapCode.to_exit` mapping (`proof/PMT/Soundness.lean:90-99`):
 
-| Runtime stub (emitted by every backend) | Exit code | Lean `TrapCode` constructor |
-|------------------------------------------|----------:|-----------------------------|
+| Runtime stub (emitted by every backend)                | Exit code | Lean `TrapCode` constructor |
+|--------------------------------------------------------|----------:|-----------------------------|
 | `__arena_overflow` (`x86_64/mod.rs:3648-3654`, 18 siblings) |   1 | `TrapCode.arena_overflow` |
 | `__oob_trap`       (`x86_64/mod.rs:3657-3666`, 18 siblings) | 134 | `TrapCode.oob`            |
 | `__uaf_trap`       (`x86_64/mod.rs:3669-3679`, 18 siblings) | 135 | `TrapCode.uaf`            |
 
-The exit codes (1, 134, 135) defined by `TrapCode.to_exit` match the
-runtime stubs byte-for-byte. There is **no Rust `TrapCode` enum** —
-`TrapCode` is Lean-only; the runtime uses named exit-code stubs. Each of
-the 19 backends emits its own copy of each stub (19 × 3 = 57 stub
-definitions).
-
----
-
-## 11. QEMU Smoke Runner
-
-`scripts/qemu_smoke_test.sh` builds the release `vuma` binary once and
-then compiles a small set of gold-standard `.vuma` programs on every
-supported backend (12 QEMU + wasm32 via wasmtime = 13 backends), running
-each under the appropriate emulator and checking the exit code against
-the `// Expected exit code:` header. The per-ISA QEMU/wasmtime binary
-mapping lives in the `QEMU_BIN` associative array at the top of the
-script; the test programs and expected exit codes are listed in the
-`TESTS` array (`scripts/qemu_smoke_test.sh:88-97`).
-
-The script maps `arm32 → qemu-arm-static` and `mips64 → qemu-mips64el-static`
-(the only two ISAs whose QEMU binary name doesn't directly match the VUMA
-ISA name); every other ISA uses `qemu-<isa>-static`. `wasm32` is routed
-through `wasmtime`. Exit status is 0 iff every (backend, test) pair passes.
-
-**Scope & caveats:**
-
-- Only integer-only programs are exercised (arithmetic, control flow,
-  single function calls, while/for loops). FP-heavy, atomics, and
-  memory-heavy tests are skipped per the per-backend budget.
-- Each `vuma build --isa <non-AArch64>` invocation emits the stderr
-  notice `[build] Note: targeting <isa> via direct AST→codegen path
-  (canonical pipeline is AArch64-only; verification/telemetry
-  unavailable)`. This is informational — IVE verification is bypassed
-  on the direct path (a known design limitation, not a correctness bug).
-- The 6 untested backends (`aarch64_be`, `armeb`, `mips64be`, `ppc64le`,
-  `x86_32`, `riscv32`) are either BE wrappers (inherit parent's
-  correctness — see §4) or 32-bit variants (share encoder tables with
-  their 64-bit siblings).
-- `mips64` smoke test requires installing `qemu-mips64el-static` (the LE
-  MIPS64 emulator) since VUMA's `--isa mips64` emits a little-endian ELF;
-  `qemu-mips64-static` (BE) rejects it. The `mips64be` backend exists in
-  source but is not exposed via the `--isa` CLI flag.
+Each of the 19 backends emits its own copy of each stub
+(19 × 3 = 57 stub definitions). There is **no Rust `TrapCode` enum**
+— `TrapCode` is Lean-only; the runtime uses named exit-code stubs.
 
 ---
 
@@ -671,13 +781,10 @@ through `wasmtime`. Exit status is 0 iff every (backend, test) pair passes.
 - [Architecture overview](./architecture.md) — 10-stage pipeline, IVE
   with Z3, two-pipe IPC, register allocation, formal verification scope.
 - [Pipeline](./pipeline.md) — stage-by-stage compilation walkthrough.
-- [Caveats](./caveats.md) — documented surprises for backend developers,
-  each carrying a resolution-status annotation
+- [Caveats](./caveats.md) — documented surprises for backend
+  developers, each carrying a resolution-status annotation
   (`RESOLVED` / `PARTIALLY RESOLVED` / `STALE` / `OPEN`).
-- [Testing](./testing.md) — gold-standard harness, CI, KATs, test matrix.
+- [Testing](./testing.md) — gold-standard harness, CI, KATs, test
+  matrix.
 - [Building](./building.md) — prerequisites (including `libz3-dev`),
   quick start, troubleshooting.
-- [PMT Iris Spec](./pmt-iris-spec.md) — Iris-style separation-logic spec
-  of the PMT memory model (source of truth for the Lean proofs).
-- [PMT Formal Spec](./pmt-formal-spec.md) — Lean signature and
-  axiomatisation of the PMT model (source of truth for the Lean proofs).

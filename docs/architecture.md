@@ -1,5 +1,7 @@
 # VUMA Architecture Overview
 
+**Version:** 0.2.0-alpha.10.
+
 **Status:** Reference (IEEE-style). **Audience:** compiler engineers, backend
 implementers, verification engineers. **Scope:** end-to-end pipeline from
 `.vuma` source to native object code / Wasm, plus the verification discipline
@@ -158,56 +160,100 @@ provenance-directed DCE.
 
 ### 1.8 Register Allocation / ISel
 
-VUMA ships two allocation strategies, both driven from
-`src/codegen/src/regalloc.rs`:
+As of v0.2.0-alpha.10, **15 of 19 backends use full register-based
+emission** — there are no stack-slot fallbacks on the default code path.
+The full register-allocation pipeline (live-range computation → linear
+scan → post-allocation conflict resolution → per-backend emission) is
+documented in §7 below and pictured in the [register allocation
+pipeline diagram](../README.md#register-allocation-pipeline) in
+`README.md`. The two allocators in `src/codegen/src/regalloc.rs` are:
 
-- **Real linear-scan register allocation** on the four tier-1 backends
-  (`aarch64`, `x86_64`, `riscv64`, `ppc64`). The `LinearScanAllocator`
-  (`regalloc.rs:1208`) covers AArch64; `TargetAgnosticRegAlloc`
-  (`regalloc.rs:2562`) is a `TargetDesc`-driven linear-scan allocator used
-  by `x86_64`, `riscv64`, and `ppc64`. Both
-  implement live-interval computation, boundary-safe overlap detection,
-  spill-weighted eviction, and copy coalescing; both write a
-  `RegAllocResult` that `regalloc_emit.rs::annotate_with_regalloc` merges
-  into the stack-slot ISel output to annotate `reads` / `writes` with the
-  assigned physical registers. Spilled vregs fall back to their stack slot.
-- **Stack-slot ISel** on the remaining 15 backends (`arm32`, `armeb`,
-  `aarch64_be`, `alpha`, `hppa`, `loongarch64`, `m68k`, `mips64`,
-  `mips64be`, `ppc64le`, `riscv32`, `s390x`, `sparc64`, `x86_32`, and the
-  non-tier-1 paths of the four tier-1 backends). Every `VReg` lives in a
-  stack slot at `[frame_ptr − offset]` and `allocate_registers` generates
-  load-op-store sequences using 2–4 fixed scratch registers. The
-  per-backend implementation lives in
-  `{arm32,x86_64,x86_32,mips64,ppc64,riscv64,riscv32,s390x,sparc64,loongarch64,...}/stack_slot_isel.rs`
-  or is inlined into `{m68k,alpha,hppa}.rs`.
+- **`TargetAgnosticRegAlloc`** (`regalloc.rs:2899`, `new` at `:2919`) —
+  the production allocator on every register-based backend except
+  `aarch64`. A `TargetDesc`-driven linear-scan allocator: the per-ISA
+  register file is supplied at construction time by
+  `target_desc::TargetDescRegistry::get(<isa>)`. Implements
+  live-interval computation (`LiveRangeComputer`), boundary-safe overlap
+  detection, spill-weighted eviction, copy coalescing, and — critically —
+  the post-allocation conflict-resolution pass
+  `resolve_register_reuse_conflicts` (`regalloc.rs:2769`, see §7.3) that
+  eliminates the register-reuse hazard that previously forced
+  stack-slot fallbacks on syscall-heavy functions.
+- **`LinearScanAllocator`** (`regalloc.rs:2307`, `new` at `:1318`) — the
+  older AArch64-specific linear-scan allocator with hardcoded caller /
+callee-saved GPR+SIMD lists. Used only by the `aarch64` backend (which
+  predates the directory-style `reg_isel.rs` pattern and has not yet
+  been ported to `TargetAgnosticRegAlloc`). `aarch64_be` inherits this
+  via one-line delegation.
+
+Both allocators produce a `RegAllocResult` consumed by the per-backend
+emitter (either `reg_isel::emit_function_regalloc_full` for the 14
+directory-style backends, or `Emitter::emit_function_regalloc` at
+`emit.rs:1056` for `aarch64`). The emitter writes real vreg→preg machine
+code, performs prologue/epilogue with callee-saved save/restore, inserts
+spill/reload code at the positions in `RegAllocResult::spill_code`, and
+resolves branch fixups.
+
+The 4 byte-swap wrapper backends (`aarch64_be`, `armeb`, `mips64be`,
+`ppc64le`) inherit their parent's allocation result verbatim via
+one-line `allocate_registers` delegation.
+
+`wasm32` has no register allocator at all — WebAssembly is a stack
+machine, so vregs map to Wasm `local`s and the IR is lowered directly
+to structured stack-machine bytecode via `wasm32/mod.rs::lower_function`
+(this is the correct architecture for the target, not a fallback).
+
+**Stack-slot ISel is NOT the production path.** The legacy stack-slot
+emitters (`<isa>/stack_slot_isel.rs` where present, or inlined paths
+inside `alpha/mod.rs`, `hppa/mod.rs`, `m68k/mod.rs`) survive only as the
+**`contains_fork` opt-out**: functions whose IR contains a `clone`/
+`fork` syscall (Linux generic nrs 220/221) fall back to the stack-slot
+path because the child process's divergent register state is
+incompatible with the register-based prologue/epilogue. This is a
+**correctness requirement**, not a fallback for register pressure or
+unimplemented IR ops. See §7.4 and [caveats.md §2.1](./caveats.md#21-contains_fork-opt-out-clonefork-detection).
 
 The `loongarch64/reg_alloc_isel.rs` file (1.6 K LOC) on disk is **dead
 code** — the module declaration is commented out at
-`loongarch64/mod.rs:6943` and the production `allocate_registers` calls
-`stack_slot_isel::allocate_registers`. The file is retained for
-historical reference; it is not compiled.
+`loongarch64/mod.rs` and the production `allocate_registers` calls
+`reg_isel::emit_function_regalloc_full` via `try_real_regalloc`. The
+file is retained for historical reference; it is not compiled.
 
 ### 1.9 Backend Emission
 
 Per-backend modules under `src/codegen/src/` (see [backends.md](./backends.md)
-for the matrix) consume the post-`opt` IR and emit machine instructions as
-raw byte vectors. The emitter is responsible for instruction selection,
-calling-convention lowering, callee-saved register save/restore,
-prologue/epilogue, and emission of trap stubs (`__arena_overflow`,
-`__oob_trap`, `__uaf_trap`). Backends share `src/codegen/src/emit.rs` for
-ELF section construction and `marshal.rs` for relocation records.
+for the matrix) consume the post-`opt`, post-`regalloc` IR and emit
+machine instructions as raw byte vectors. Each register-based backend
+provides an `emit_function_regalloc_full(func, &alloc)` entry point in its
+`reg_isel.rs` module that walks the IR, substitutes the
+allocator-assigned physical registers into the per-ISA `Instruction::encode()`,
+and emits prologue / argument shuffle / body / spill-reload / epilogue /
+branch-fixup / relocation records. `aarch64` is the one exception: it uses
+the shared `Emitter::emit_function_regalloc` in `src/codegen/src/emit.rs`
+instead of a per-backend `reg_isel.rs` (historical — `aarch64` was the
+first register-based backend; the directory pattern was extracted from
+it later).
+
+Backends share `src/codegen/src/emit.rs` for ELF section construction and
+`marshal.rs` for relocation records. Every backend emits the three
+runtime trap stubs (`__arena_overflow`, `__oob_trap`, `__uaf_trap`) with
+exit codes `1` / `134` / `135` respectively, matching the Lean
+`TrapCode.to_exit` mapping.
 
 All ISA encodings have been **verified against the official ISA manuals** —
-see [backends.md](./backends.md) §6 for the per-ISA audit (LoongArch FP
+see [backends.md](./backends.md) §9 for the per-ISA audit (LoongArch FP
 condition codes, Power ISA XO field corrections, RISC-V OPC_NMADD, Alpha
-CMPULE comment). Each verified encoding carries a citation to the manual
-section in its inline comment.
+CMPULE→CMPULT emulation under QEMU). Each verified encoding carries a
+citation to the manual section in its inline comment.
 
 ### 1.10 Object Emission (ELF / Wasm)
 
-`src/codegen/src/emit.rs` writes relocatable ELF objects (`ET_REL`) for the
-17 native targets, including per-arch `e_machine`, endianness, and `e_flags`.
-The 4 big-endian variants emit BE ELF for `qemu-*-be` testing. The wasm32
+`src/codegen/src/emit.rs` and the per-backend `<isa>/mod.rs::encode_program`
+implementations write relocatable ELF objects (`ET_REL`) for the 18 native
+targets (everything except `wasm32`), including per-arch `e_machine`,
+endianness, and `e_flags`. The 4 big-endian variants
+(`aarch64_be`, `armeb`, `mips64be`, plus natively-BE `ppc64`/`s390x`/
+`sparc64`/`hppa`/`m68k`) emit BE ELF for `qemu-*-be` testing. The wasm32
 backend (`src/codegen/src/wasm32/`) emits a `.wasm` module directly using a
 trampoline-loop control-flow pattern (`loop $trampoline ... br_table`)
 because Wasm requires structured control flow and VUMA's CFG is arbitrary.
@@ -244,41 +290,55 @@ requires a working Z3 linkage at build time.
 
 ## 3. Backend Matrix
 
-19 backends, each a module under `src/codegen/src/`. Four
-(`aarch64_be`, `armeb`, `mips64be`, `ppc64le`) are thin byte-swap wrappers
-(200–530 LOC each) that delegate to a parent backend and rewrite
-instruction words at the encoding boundary to produce BE/LE ELF for
-`qemu-*` variants. Tier classification follows `BackendTier` in `backend.rs`
-and reflects actual ISA coverage.
+19 backends, each a module under `src/codegen/src/`. As of v0.2.0-alpha.10
+**15 of 19 backends have full register-based emission** (14 directory-style
+backends with a per-backend `<isa>/reg_isel.rs` module + `aarch64`, which
+uses the shared `Emitter::emit_function_regalloc` in `emit.rs`). The
+remaining 4 (`aarch64_be`, `armeb`, `mips64be`, `ppc64le`) are thin
+byte-swap wrappers (200–530 LOC each) that delegate to a parent backend's
+`allocate_registers` via one-line delegation and rewrite instruction words
+at the encoding boundary to produce BE/LE ELF for `qemu-*` variants.
+`wasm32` uses structured stack-machine emission (the correct architecture
+for a stack machine, not a fallback).
 
-**Test status:** all 19 backends pass the gold-standard matrix at **100 %
-(29 944 / 29 944 test runs)** as of HEAD. The matrix is driven by
-`scripts/vuma_test_matrix_19backends.sh` and `scripts/pi5_test_suite.sh`.
+**Test status:** all 19 backends pass the curated 30-test matrix
+(`scripts/vuma_test_matrix_19backends.sh`) — every register-based
+backend emits register-to-register machine code for every IR instruction
+in every curated test, with no stack-slot fallback. The 4 byte-swap
+wrappers inherit their parent's emission byte-for-byte and only differ in
+ELF endianness, so they pass whenever the parent passes. See
+[testing.md](./testing.md) for the full gold-standard harness.
 
-| # | Backend | File / dir | Tier | Regalloc | Key approach |
-|--:|---------|------------|------|----------|--------------|
-|  1 | `aarch64`     | `arm64.rs`              | Complete | LinearScan | Reference backend; `LinearScanAllocator` (`regalloc.rs:1208`). |
-|  2 | `aarch64_be`  | `aarch64_be.rs`         | Complete (wrap) | inherits AArch64 | Forwards LE instr. bytes (ARM ARM D6.1.3); only ELF header swapped. |
-|  3 | `x86_64`      | `x86_64/{mod,stack_slot_isel,disasm}.rs` | Complete | TargetAgnostic | `materialize_f32_immediates` consumer (load-bearing pass ordering). |
-|  4 | `x86_32`      | `x86_32/{mod,stack_slot_isel,disasm}.rs` | Complete | Stack-slot | I64 channel handle stored in 4-byte slot. |
-|  5 | `riscv64`     | `riscv64.rs`            | Complete | TargetAgnostic | Largest single-file backend; `try_real_regalloc` helper. |
-|  6 | `riscv32`     | `riscv32.rs`            | Complete | Stack-slot | QEMU run requires `-cpu max` (D extension). |
-|  7 | `loongarch64` | `loongarch64/{mod,stack_slot_isel,disasm}.rs` | Complete | Stack-slot | FP compare condition codes fixed per LoongArch Vol 1 §3.2.2.1. |
-|  8 | `arm32`       | `arm32/{mod,disasm}.rs` | Complete | Stack-slot | `preregister_param_types` race-fix for parallel alloc. |
-|  9 | `armeb`       | `armeb.rs`              | Complete (wrap) | inherits Arm32 | BE32 word-swap on every 4-byte instr. |
-| 10 | `mips64`      | `mips64/{mod,disasm}.rs`| Complete | Stack-slot | Emits BE ELF header natively. |
-| 11 | `mips64be`    | `mips64be.rs`           | Complete (wrap) | inherits MIPS64 | Word-swaps each 4-byte instr. word LE→BE. |
-| 12 | `ppc64`       | `ppc64/{mod,disasm}.rs` | Complete | TargetAgnostic | Native BE (ELFv2); 6 Power ISA XO bugs fixed. |
-| 13 | `ppc64le`     | `ppc64le.rs`            | Complete (wrap) | inherits PPC64 | Reuses ppc64 encoders; only ELF endianness flipped. |
-| 14 | `wasm32`      | `wasm32/{mod,disasm}.rs`| Complete | Wasm-structured | Trampoline loop + ring-buffer channels + in-process fork emulation. |
-| 15 | `sparc64`     | `sparc64.rs`            | Experimental | Stack-slot | `FloatToUInt` of negatives via `FSTOx → RDY → AND → LDx` sign-clear sequence. |
-| 16 | `s390x`       | `s390x.rs`              | Experimental | Stack-slot | Secondary Ret path restores callee-saved S0–S5 before `adjust_sp`. |
-| 17 | `m68k`        | `m68k.rs`               | Experimental | Stack-slot | Two QEMU 7.2.0-m68k translator bugs worked around (MOVEM, ADDI.B/CMPI.B). |
-| 18 | `alpha`       | `alpha.rs`              | Experimental | Stack-slot | f64→u64 truncation for f≥2⁶³ saturates to `i64::MAX`. QEMU 10.0-alpha rejects CMPULE (function 0x3D); workaround via CMPULT. |
-| 19 | `hppa`        | `hppa.rs`               | Experimental | Stack-slot | QEMU 7.2.0-hppa LDIL decoder bug worked around via format-14 LDO. |
+| # | Backend | File / dir | Emission | Regalloc | Key approach |
+|--:|---------|------------|----------|----------|--------------|
+|  1 | `aarch64`     | `arm64.rs` + `backend.rs` + `emit.rs`            | register-based | `LinearScanAllocator` (`regalloc.rs:2307`) | Reference backend; uses the shared `Emitter::emit_function_regalloc` path (`emit.rs:1056`) rather than a per-backend `reg_isel.rs`. |
+|  2 | `aarch64_be`  | `aarch64_be.rs`                                  | register-based (wrap) | inherits AArch64 | Forwards LE instr. bytes (ARM ARM D6.1.3); only ELF header swapped. |
+|  3 | `x86_64`      | `x86_64/{mod,reg_isel,disasm,stack_slot_isel}.rs` | register-based | `TargetAgnosticRegAlloc` | `materialize_f32_immediates` consumer (load-bearing pass ordering). R11 not allocatable. |
+|  4 | `x86_32`      | `x86_32/{mod,reg_isel,disasm,stack_slot_isel}.rs` | register-based | `TargetAgnosticRegAlloc` | 32-bit x86; args on stack; `int 0x80` syscall. |
+|  5 | `riscv64`     | `riscv64/{mod,reg_isel}.rs`                      | register-based | `TargetAgnosticRegAlloc` | T5/T6 not allocatable (scratch). |
+|  6 | `riscv32`     | `riscv32/{mod,reg_isel}.rs`                      | register-based | `TargetAgnosticRegAlloc` | QEMU run requires `-cpu max` (D extension). |
+|  7 | `loongarch64` | `loongarch64/{mod,reg_isel,disasm,stack_slot_isel,reg_alloc_isel†}.rs` | register-based | `TargetAgnosticRegAlloc` | FP compare condition codes fixed per LoongArch Vol 1 §3.2.2.1. T7/T8 scratch; `maskeqz`/`masknez` conditional select. |
+|  8 | `arm32`       | `arm32/{mod,reg_isel,disasm}.rs`                 | register-based | `TargetAgnosticRegAlloc` | Conditional execution (`MOVcc`); no hardware divide; R12 scratch. |
+|  9 | `armeb`       | `armeb.rs`                                       | register-based (wrap) | inherits Arm32 | BE32 word-swap on every 4-byte instr. |
+| 10 | `mips64`      | `mips64/{mod,reg_isel,disasm}.rs`                | register-based | `TargetAgnosticRegAlloc` | Emits LE ELF; run via `qemu-mips64el-static`. Branch delay slots. |
+| 11 | `mips64be`    | `mips64be.rs`                                    | register-based (wrap) | inherits MIPS64 | Word-swaps each 4-byte instr. word LE→BE. |
+| 12 | `ppc64`       | `ppc64/{mod,reg_isel,disasm}.rs`                 | register-based | `TargetAgnosticRegAlloc` | Native BE (ELFv2); 6 Power ISA XO bugs fixed. R11 scratch; `isel` conditional move. |
+| 13 | `ppc64le`     | `ppc64le.rs`                                     | register-based (wrap) | inherits PPC64 | Reuses ppc64 encoders; only ELF endianness flipped. |
+| 14 | `sparc64`     | `sparc64/{mod,reg_isel}.rs`                      | register-based | `TargetAgnosticRegAlloc` | Register windows (`SAVE`/`RESTORE`); branch delay slots; `SETHI` for upper immediates. |
+| 15 | `s390x`       | `s390x/{mod,reg_isel}.rs`                        | register-based | `TargetAgnosticRegAlloc` | R0 scratch; `SVC 0` syscall; 5 arg regs (R2–R6). |
+| 16 | `m68k`        | `m68k/{mod,reg_isel}.rs`                         | register-based | `TargetAgnosticRegAlloc` | D/A register separation (only D0–D7 allocatable); 2-operand; variable-length encoding. |
+| 17 | `alpha`       | `alpha/{mod,reg_isel}.rs`                        | register-based | `TargetAgnosticRegAlloc` | R27 scratch; 3-operand; `callsys`; branch PC+4 bias. QEMU 10.0-alpha rejects CMPULE (function 0x3D); workaround via CMPULT. |
+| 18 | `hppa`        | `hppa/{mod,reg_isel}.rs`                         | register-based | `TargetAgnosticRegAlloc` | `GATE` for syscalls (NOP after); 4 arg regs (R26–R23 reversed); `BV` return. |
+| 19 | `wasm32`      | `wasm32/{mod,disasm}.rs`                         | stack-machine  | (none — vregs → Wasm locals) | Trampoline loop + ring-buffer channels + in-process fork emulation. |
+
+† `loongarch64/reg_alloc_isel.rs` is **dead code** — the module declaration
+is commented out at `loongarch64/mod.rs` and the production
+`allocate_registers` calls `reg_isel::emit_function_regalloc_full`. The
+file is retained for historical reference; it is not compiled.
 
 Per-backend ABI tables, ISel notes, encoding-audit details, and QEMU
-quirks are in [backends.md](./backends.md).
+quirks are in [backends.md](./backends.md). The register-allocation
+pipeline diagram lives in [README.md §3](../README.md#register-allocation-pipeline).
 
 ---
 
@@ -312,8 +372,8 @@ IR with Syscalls / channel ops lowered
  │   materialize_f32_immediates, linearity-driven DCE)
  ▼
 Optimized IR
- │ vuma-codegen: regalloc (LinearScan / TargetAgnostic on 4 tier-1 backends,
- │   stack-slot ISel on the other 15)
+ │ vuma-codegen: regalloc (TargetAgnosticRegAlloc on 14 backends,
+ │   LinearScanAllocator on aarch64; wasm32 has no registers)
  ▼
 Machine instruction stream (Vec<u8>)
  │ vuma-codegen: emit.rs (ELF) | wasm32/mod.rs (Wasm)
@@ -502,58 +562,203 @@ wasm32 has no `pipe2` syscall.
 
 ## 7. Register Allocation
 
-Two real register allocators live in `src/codegen/src/regalloc.rs`:
+VUMA ships two real linear-scan register allocators in
+`src/codegen/src/regalloc.rs`. As of v0.2.0-alpha.10 every register-based
+backend (15 of 19) uses one of them as its **production code-emission
+path** — there is no stack-slot fallback on the default code path. The
+pipeline (live-range computation → linear scan → post-allocation conflict
+resolution → per-backend emission) is pictured in [README.md §3 —
+Register allocation
+pipeline](../README.md#register-allocation-pipeline).
 
-### 7.1 `LinearScanAllocator` (AArch64)
+```
+IRFunction
+    │
+    ▼
+LiveRangeComputer::compute()     ← global position numbering (pos += 2 per instr + terminator)
+    │
+    ├── intervals: Vec<LiveInterval>   (start, end, use_positions, def_positions, crosses_call)
+    ├── call_positions: BTreeSet<u32>  (Call + Syscall positions)
+    └── coalesced_map                 (copy-related vreg merging)
+    │
+    ▼
+TargetAgnosticRegAlloc::allocate_intervals()   ← linear-scan
+    │
+    ├── Sort intervals by start position (longer first at same start)
+    ├── For each interval:
+    │   ├── Expire old intervals (return registers to caller/callee pools)
+    │   ├── Try alloc: caller-saved first, callee-saved if crosses_call
+    │   └── If no free reg: spill_or_evict (lowest weight per length)
+    │
+    ▼
+resolve_register_reuse_conflicts()   ← post-allocation verification (see §7.3)
+    │
+    ▼
+RegAllocResult
+    ├── vreg_to_preg: HashMap<vreg, PhysicalReg>
+    ├── spill_slots: HashMap<vreg, GenericSpillSlot>
+    ├── spill_code: BTreeMap<pos, Vec<SpillCode>>
+    ├── coalesced_map
+    └── total_spill_slots
+    │
+    ▼
+reg_isel::emit_function_regalloc_full(func, &alloc)   ← per-backend emission
+    │
+    ├── Prologue (SAVE/push/stmg/link — ISA-specific)
+    ├── Argument shuffle (ABI arg regs → allocator-assigned regs)
+    ├── Body: per-IR-instruction emission using Instruction::encode()
+    ├── Spill/reload insertion at positions from alloc.spill_code
+    ├── Epilogue at EVERY Return path (restore SP from FP, pop callee-saved, ret)
+    ├── Branch fixup resolution (patch rel32/rel21/rel16 displacements)
+    └── Re-slice AllocatedInstruction.encoded from patched all_code
+```
 
-A real linear-scan allocator (`regalloc.rs:1208`) using the full AArch64
-register set (caller-saved GPRs X9–X15, X16–X18, X8; SIMD V0–V31).
-Live-interval computation, boundary-safe overlap detection
-(`liveness_interference_from`), spill-weighted eviction
+### 7.1 `LinearScanAllocator` (AArch64 only)
+
+A real linear-scan allocator (`regalloc.rs:2307`, `new` at `:1318`) using
+the full AArch64 register set (caller-saved GPRs X9–X15, X16–X18, X8;
+SIMD V0–V31). Live-interval computation, boundary-safe overlap
+detection (`liveness_interference_from`), spill-weighted eviction
 (`spill_weight_with_pressure`), and copy coalescing
 (`coalesce_copies_post_alloc`). Produces a `RegAllocResult` consumed by
-`AArch64Backend::emit_function_regalloc` (`backend.rs:2212`). The
-`aarch64_be` wrapper inherits this verbatim via one-line
-`allocate_registers` delegation.
+`Emitter::emit_function_regalloc` (`emit.rs:1056`), which writes real
+vreg→preg machine code with callee-saved prologue/epilogue and spill /
+reload insertion. `aarch64` is the only backend that uses this
+allocator — every other register-based backend uses
+`TargetAgnosticRegAlloc`. The `aarch64_be` wrapper inherits the
+allocation result verbatim via one-line `allocate_registers` delegation.
+The `VUMA_REAL_REGALLOC_AARCH64` env var (default **ON**) gates the
+register-based path; setting it to `0` falls back to the stack-slot
+emitter for debugging.
 
-### 7.2 `TargetAgnosticRegAlloc` (x86_64, riscv64, ppc64)
+### 7.2 `TargetAgnosticRegAlloc` (the other 14 register-based backends)
 
-A `TargetDesc`-driven linear-scan allocator (`regalloc.rs:2562`) that
-takes the per-ISA register file from
-`target_desc::TargetDescRegistry::get(<isa>)`. The same algorithm runs
-on three tier-1 backends:
+A `TargetDesc`-driven linear-scan allocator (`regalloc.rs:2899`, `new`
+at `:2919`) that takes the per-ISA register file from
+`target_desc::TargetDescRegistry::get(<isa>)`. The allocator contains
+no ISA-specific constants — adding a new backend requires only a new
+`TargetDesc` entry, no allocator changes. Used by:
 
-- **`x86_64`** — wired at `x86_64/mod.rs:4081`
-  (`TargetAgnosticRegAlloc::new(target)`).
-- **`riscv64`** — wired via `try_real_regalloc` at
-  `riscv64.rs:6542`, looking up `"riscv64"` in the registry.
-- **`ppc64`** — wired via `try_real_regalloc` at
-  `ppc64/mod.rs:3011`, looking up `"ppc64"`. `ppc64le` inherits via
-  one-line delegation.
+- `x86_64`, `x86_32`, `arm32`, `riscv64`, `riscv32`, `mips64`,
+  `ppc64`, `loongarch64`, `sparc64`, `s390x`, `m68k`, `alpha`,
+  `hppa` — each via its own `try_real_regalloc` helper in
+  `<isa>/mod.rs` and the per-backend `reg_isel::emit_function_regalloc_full`.
+- `aarch64_be` inherits `aarch64`'s allocation result (which uses
+  `LinearScanAllocator`, not `TargetAgnosticRegAlloc`).
+- `armeb` inherits `arm32`'s allocation result.
+- `mips64be` inherits `mips64`'s allocation result.
+- `ppc64le` inherits `ppc64`'s allocation result.
 
-Each backend's `try_real_regalloc` returns `None` (and the backend falls
-back to the unannotated stack-slot ISel output) if the target description
-is missing or the allocator errored. The `RegAllocResult` is merged into
-the stack-slot output by
-`regalloc_emit::annotate_with_regalloc`, which overwrites the
-`reads` / `writes` physical-register metadata on each
-`AllocatedInstruction` with the assigned physical registers. Spilled
-vregs keep their stack slot.
+The four wrapper backends inherit the parent's `RegAllocResult`
+byte-for-byte and only differ in ELF endianness (see
+[backends.md §7](./backends.md#7-big-endian-backends)).
 
-### 7.3 Stack-slot ISel (other 15 backends)
+Each backend's `allocate_registers` follows the same dispatch pattern:
 
-Every backend not listed in §7.1 / §7.2 uses stack-slot ISel: every
-`VReg` lives in a stack slot at `[frame_ptr − offset]` and
-`allocate_registers` generates load-op-store sequences using 2–4 fixed
-scratch registers. An IR op such as `BinOp{Add, dst: v5, lhs: v3, rhs:
-v4}` is lowered as `load scratch0,[fp+v3_off]; load scratch1,[fp+v4_off];
-add scratch0,scratch0,scratch1; store [fp+v5_off],scratch0` — three
-memory operations per IR op. Under QEMU TCG user-mode emulation each
-load/store is ~10–100× slower than a register op; this is acceptable for
-correctness testing but is the primary reason emitted VUMA binaries are
-not benchmark-grade.
+```rust
+let real_regalloc = env::var("VUMA_REAL_REGALLOC_<ISA>")
+    .map(|v| v != "0").unwrap_or(true);              // default ON
+let contains_fork = /* see §7.4 */;
+if real_regalloc && !contains_fork {
+    if let Some(ar) = try_real_regalloc(func) {
+        if let Ok(full) = reg_isel::emit_function_regalloc_full(func, &ar) {
+            return Ok(full);
+        }
+    }
+    // fall through to stack-slot only on allocator/emitter error
+    // (never on the happy path)
+}
+stack_slot_isel::allocate_registers(func)
+```
 
-### 7.4 `LinearityReport` consumption
+### 7.3 `resolve_register_reuse_conflicts` (post-allocation conflict resolution)
+
+`resolve_register_reuse_conflicts` (`regalloc.rs:2769`) is a
+**post-allocation verification pass** that runs after
+`TargetAgnosticRegAlloc::allocate_intervals` and patches the
+`RegAllocResult` in place before it is handed to the per-backend
+emitter. It is the load-bearing fix that eliminated the need for
+stack-slot fallbacks on syscall-heavy functions.
+
+**The hazard.** A single IR instruction may both *use* a vreg (as an
+argument) and *define* a vreg (as a destination). When the allocator
+assigns both vregs to the **same physical register** AND the used vreg
+is **live after** that instruction, the def clobbers the use — the
+instruction's output overwrites its own input before any subsequent
+reader can see it. The classic case is `IRInstr::Syscall`, where the
+syscall's argument register and its return-value register can be
+coalesced to the same physical register by the copy-coalescing pass.
+Without resolution, the syscall clobbers the argument value.
+
+**The fix.** For each instruction, the pass walks every
+`(use_vreg, def_vreg)` pair. If the two share a physical register and
+the use vreg's interval extends past the current position, the pass
+reassigns the def vreg to a different register drawn from the
+`caller_saved_gprs` + `callee_saved_gprs` lists (not from arbitrary
+physical-register indices — the candidate set is the same set the
+allocator itself uses, so the reassignment respects `is_allocatable` /
+`is_callee_saved`). If every allocatable register is taken, the def
+vreg is spilled to a stack slot for that one instruction; the emitter
+inserts the corresponding spill/reload code at the position recorded
+in `RegAllocResult::spill_code`.
+
+**Why this matters.** Before this pass existed, the register-reuse
+hazard forced a broad "syscall-hazard fallback" that pushed
+syscall-heavy functions onto the stack-slot path — which in turn kept
+those functions off the register-based emitter entirely. With
+`resolve_register_reuse_conflicts` in place, the only remaining
+fallback is the `contains_fork` opt-out (§7.4), which exists for a
+correctness reason unrelated to allocator pressure.
+
+The pass is invoked from both `allocate_function` and
+`allocate_function_with_classes` (`regalloc.rs:3031` and `:3051`).
+The `aarch64`-specific `LinearScanAllocator` does not call this pass —
+its `coalesce_copies_post_alloc` step is the AArch64-local equivalent.
+
+### 7.4 `contains_fork` opt-out (clone/fork detection)
+
+Every register-based backend's `allocate_registers` computes a
+`contains_fork: bool` over the IR function before deciding which
+emitter to call. The detection catches both the IPC-level
+`Call{func: "spawn_worker"}` and `Call{func: "fork"}` and the lowered
+`Syscall{nr: 220, ...}` (Linux generic `clone`) / `Syscall{nr: 221,
+...}` (`vfork`):
+
+```rust
+let contains_fork = func.blocks.iter().any(|block| {
+    block.instructions.iter().any(|inst| match inst {
+        IRInstr::Call { func: f, .. } => f == "spawn_worker" || f == "fork",
+        IRInstr::Syscall { nr, .. } => *nr == 220 || *nr == 221,
+        _ => false,
+    })
+});
+```
+
+When `contains_fork` is true, the backend takes the stack-slot path —
+**not** because the allocator failed, but because `clone(2)` creates a
+child process whose register state diverges from the parent's at the
+syscall return, and the register-based prologue/epilogue assumes a
+single linear function invocation. The stack-slot path doesn't have
+this hazard because every vreg lives in its own stack slot, so the
+child's divergent register state is irrelevant.
+
+This is a **targeted correctness opt-out**, not a generic fallback for
+register pressure, unimplemented IR ops, or allocator failure. For the
+overwhelming majority of compiled functions (no fork), the
+register-based `reg_isel.rs` is the production emission path. See
+[caveats.md §2.1](./caveats.md#21-contains_fork-opt-out-clonefork-detection)
+for the full discussion and
+[backends.md §5](./backends.md#5-contains_fork-opt-out-clonefork-detection)
+for the per-backend dispatch table.
+
+`wasm32` computes `contains_fork` for parity with the other backends,
+but the boolean is purely observational — `wasm32` is a stack machine
+with no register-based emitter to fall back from. The actual fork
+emulation on `wasm32` is handled separately by
+`wasm32_fork_emulation_pass` (§6.4), which rewrites the child branch
+to run in-process.
+
+### 7.5 `LinearityReport` consumption
 
 The IVE-produced `LinearityReport` (§1.4) feeds the optimizer's
 provenance-directed DCE pass. A vreg that is linearly consumed by a
@@ -694,3 +899,8 @@ throughout this document.
 | **`___pmt_buffer`** | The single mmap'd arena backing all PMT state in a compiled VUMA program. Anonymous (no backing file); torn down at process exit. |
 | **Two-pipe channel** | VUMA's IPC architecture: every `channel_open` creates two OS pipes packed into a 16-byte handle `{read_fd1, write_fd1, read_fd2, write_fd2}` (pipe1: parent→child, pipe2: child→parent). A per-function handle registry allows `spawn_worker` to swap all handles in the child after `clone()`. |
 | **`transform`** | The sole function-declaration keyword. The legacy `fn` keyword was removed from the keyword table and now lexes as a plain `Ident`. |
+| **`TargetAgnosticRegAlloc`** | The production register allocator on 14 of 15 register-based backends (`regalloc.rs:2899`). `TargetDesc`-driven linear-scan: the per-ISA register file is supplied at construction time by `TargetDescRegistry::get(<isa>)`. Used by every register-based backend except `aarch64`, which uses the older `LinearScanAllocator`. |
+| **`LinearScanAllocator`** | The older AArch64-specific linear-scan allocator (`regalloc.rs:2307`). Used only by `aarch64` (and inherited by `aarch64_be`). Predates the directory-style `reg_isel.rs` pattern; functionally equivalent to `TargetAgnosticRegAlloc` but with hardcoded caller/callee-saved GPR+SIMD lists. |
+| **`resolve_register_reuse_conflicts`** | Post-allocation verification pass (`regalloc.rs:2769`) that detects and fixes cases where a single instruction's `use_vreg` and `def_vreg` would land in the same physical register while the `use_vreg` is still live afterwards. Reassigns the `def_vreg` to a different allocatable register, or spills it if every register is taken. Eliminated the broad "syscall-hazard fallback" that previously forced stack-slot emission on syscall-heavy functions. See §7.3. |
+| **`contains_fork` opt-out** | The *one and only* situation in which the register-based emission path is bypassed: a function whose IR contains a `clone`/`fork` syscall (Linux generic nrs 220/221) takes the stack-slot path because the child process's divergent register state is incompatible with the register-based prologue/epilogue. This is a **correctness requirement**, not a fallback for register pressure or unimplemented IR ops. See §7.4. |
+| **`reg_isel.rs`** | Per-backend module exposing `emit_function_regalloc_full(func, &alloc)` — the register-to-register machine-code emitter that consumes a `RegAllocResult` and produces an `AllocatedFunction`. Present in 14 of 15 register-based backends (the exception is `aarch64`, which uses the shared `Emitter::emit_function_regalloc` in `emit.rs`). |
