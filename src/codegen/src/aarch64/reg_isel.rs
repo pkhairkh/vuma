@@ -137,16 +137,26 @@ pub fn emit_function_regalloc_full(
         },
         frame_size,
         |code, imm| {
-            // Fallback for frame_size > 4095: materialise in X9, then
-            // SUB SP, SP, X9 via the ADD-SP-#0 + SUB-X9-X9-X9 + ADD-SP-X9-#0
-            // dance (Rn=31 in shifted-register SUB means XZR, not SP).
             emit_load_imm(code, Register::X9, imm as i64);
-            // X10 = SP
             emit_instr(code, Instruction::ADD { rd: Register::X10, rn: Register::SP, rm: Operand::Imm12(0) });
-            // X10 = X10 - X9
             emit_instr(code, Instruction::SUB { rd: Register::X10, rn: Register::X10, rm: Operand::Reg { reg: Register::X9, shift: None } });
-            // SP = X10
             emit_instr(code, Instruction::ADD { rd: Register::SP, rn: Register::X10, rm: Operand::Imm12(0) });
+        },
+    );
+    // STP X29, X30, [SP, #frame_size-16]  — save CALLER's FP/LR at top
+    // of frame BEFORE setting new FP. This is critical: if we set
+    // MOV X29, SP first, then STP would save the NEW X29 (our own
+    // frame pointer), not the CALLER's X29. On return, the epilogue
+    // would restore our own FP instead of the caller's, causing the
+    // caller to use the wrong SP and read the wrong saved LR → infinite
+    // loop on multi-function call chains.
+    emit_instr(
+        &mut all_code,
+        Instruction::STP {
+            rt1: Register::X29,
+            rt2: Register::X30,
+            rn: Register::SP,
+            offset: frame_size - 16,
         },
     );
     // ADD X29, SP, #0  (FP = SP = bottom of frame)
@@ -156,16 +166,6 @@ pub fn emit_function_regalloc_full(
             rd: Register::X29,
             rn: Register::SP,
             rm: Operand::Imm12(0),
-        },
-    );
-    // STP X29, X30, [SP, #frame_size-16]  — save FP/LR at top of frame.
-    emit_instr(
-        &mut all_code,
-        Instruction::STP {
-            rt1: Register::X29,
-            rt2: Register::X30,
-            rn: Register::SP,
-            offset: frame_size - 16,
         },
     );
     // STP X19, X20, [SP, #frame_size-32]; STP X21, X22, [SP, #frame_size-48]; ...
