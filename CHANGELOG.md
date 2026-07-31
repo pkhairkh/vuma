@@ -6,6 +6,67 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 where applicable.
 
+## [0.2.0-alpha.7] — x86_64/riscv64/ppc64 Regalloc Wire-up
+
+This release adds the register-based emitter wire-up (env-var gate +
+fork detection) for x86_64, riscv64, and ppc64. The wire-up is
+metadata-only (the actual byte-changing register-based emission is
+deferred to a human developer per the design docs), but the structure
+is in place for incremental implementation.
+
+### Wave 1 — x86_64 Wire-up
+
+- X1-impl (31ee347b): Added VUMA_REAL_REGALLOC_X86_64 env-var gate
+  (default OFF) + contains_fork opt-out (clone=56, vfork=58 per x86_64
+  Linux syscall numbers) to X86_64Backend::allocate_registers.
+- The gate is metadata-only: bytes are stack-slot in both modes.
+- u32_add, u32_sub, cs_single_store_load all pass (exit codes match).
+
+### Wave 2 — riscv64 Wire-up
+
+- X2-impl (b6a97940): Added VUMA_REAL_REGALLOC_RISCV64 env-var gate
+  (default OFF) + contains_fork opt-out (clone=220, vfork=221 — same
+  generic syscall numbers as aarch64) to RiscV64Backend::allocate_registers.
+- u32_add passes (exit 100).
+
+### Wave 3 — ppc64 Wire-up
+
+- X3-impl (49ad1c12): Added VUMA_REAL_REGALLOC_PPC64 env-var gate
+  (default OFF) + contains_fork opt-out (clone=220, vfork=221 — same
+  generic syscall numbers) to PPC64Backend::allocate_registers.
+- ppc64le inherits automatically via delegation.
+- u32_add passes on both ppc64 (exit 100) and ppc64le (exit 100).
+
+### Status Summary
+
+| Backend | Wire-up | Byte-changing emission | Default |
+|---------|---------|----------------------|---------|
+| aarch64 | DONE (W2-c-impl) | DONE (30/30 pass) | ON |
+| aarch64_be | Inherits aarch64 | DONE (29/30→30/30) | ON |
+| x86_64 | DONE (X1-impl) | Deferred (design doc ready) | OFF |
+| riscv64 | DONE (X2-impl) | Deferred (design doc ready) | OFF |
+| ppc64 | DONE (X3-impl) | Deferred (design doc ready) | OFF |
+| ppc64le | Inherits ppc64 | Deferred | OFF |
+
+### Production Impact
+
+- aarch64/aarch64_be: register-based emission is DEFAULT-ON (since
+  v0.2.0-alpha.6). 30/30 curated tests pass.
+- x86_64/riscv64/ppc64/ppc64le: env-var gates are OFF by default.
+  Stack-slot ISel remains the production path. No behavior change.
+- Full Pi5 cluster matrix: 29963/29963 (100%).
+
+### What's Left for Human Developer
+
+The byte-changing register-based emission for x86_64/riscv64/ppc64
+requires implementing ~2000-2500 LOC per backend (the reg_isel.rs
+module). The design docs (R2-a-audit, CC-a-audit, CD-a-audit) provide
+the full specification. The wire-up structure (env-var gate, fork
+detection, LinearScanAllocator call) is in place — only the instruction
+encoding remains.
+
+---
+
 ## [0.2.0-alpha.6] — Aarch64 Regalloc Default-On
 
 This release fixes the LinearScanAllocator non-determinism and the CSEL
