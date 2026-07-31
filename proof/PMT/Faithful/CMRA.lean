@@ -1,4 +1,4 @@
-import Pmt.Sep
+import PMT.Faithful.Sep
 
 /-!
 # CMRA (Camera Resource Algebra)

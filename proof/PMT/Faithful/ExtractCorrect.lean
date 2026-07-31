@@ -1,4 +1,4 @@
-import Pmt.Model
+import PMT.Faithful.Model
 
 /-!
 # Theorem 4.3 — Extraction correctness for `Arena.alloc`

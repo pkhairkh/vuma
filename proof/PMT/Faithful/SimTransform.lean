@@ -1,4 +1,4 @@
-import Pmt.IrSubset
+import PMT.Faithful.IrSubset
 
 /-!
 # `SimTransform` — simulation lemma for the `stateTransform` instruction

@@ -64,3 +64,5 @@ import PMT.Test.SorryFreeAudit
 import PMT.Test.PropertyTests
 import PMT.Test.EdgeCases
 import PMT.Test.RealisticProgram
+
+import PMT.Faithful

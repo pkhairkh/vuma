@@ -1,4 +1,4 @@
-import Pmt.IrSubset
+import PMT.Faithful.IrSubset
 
 /-!
 # `SimSound2` — top-level simulation soundness for the 8-instruction IR subset

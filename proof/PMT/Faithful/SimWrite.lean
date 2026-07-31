@@ -1,4 +1,4 @@
-import Pmt.IrSubset
+import PMT.Faithful.IrSubset
 
 /-!
 # `SimWrite` — simulation lemma for the `stateWrite` instruction
