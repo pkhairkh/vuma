@@ -1397,6 +1397,7 @@ impl TargetDescRegistry {
         descs.insert("sparc64", sparc64_target_desc());
         descs.insert("alpha", alpha_target_desc());
         descs.insert("m68k", m68k_target_desc());
+        descs.insert("s390x", s390x_target_desc());
         Self { descs }
     }
 
@@ -2756,7 +2757,7 @@ fn m68k_target_desc() -> TargetDesc {
         RegDesc::gpr("D0", 0).return_reg(),
         RegDesc::gpr("D1", 1),
         // D2: scratch/syscall-arg (caller-saved)
-        RegDesc::gpr("D2", 2),
+        RegDesc::gpr("D2", 2).not_allocatable(),
         // D3-D7: callee-saved
         RegDesc::gpr("D3", 3).callee_saved(),
         RegDesc::gpr("D4", 4).callee_saved(),
@@ -2797,6 +2798,136 @@ fn m68k_target_desc() -> TargetDesc {
         output_format: crate::backend::OutputFormat::Elf32,
         registers, calling_convention, instruction_categories: vec![],
         latency_table: LatencyTable::m68k(),
+    }
+}
+
+// ===========================================================================
+// s390x (IBM System Z / z/Architecture)
+// ===========================================================================
+
+/// s390x target description.
+///
+/// Register convention (Linux ABI):
+/// - R0       — scratch / volatile. NOT allocatable (used as the dedicated
+///    scratch register by reg_isel.rs's `emit_load_imm` /
+///    `emit_add_imm` / `add_to_reg`; also cannot be used as a base
+///    register in load/store encoding — encoding 0 means "no reg").
+/// - R1       — syscall number (Linux s390x); scratch otherwise.
+/// - R2–R6    — argument registers (up to 5 args in registers).
+/// - R7–R10   — scratch / volatile.
+/// - R11      — frame pointer (convention). NOT allocatable (reg_isel.rs
+///    uses it as FP and assumes the allocator won't clobber it).
+/// - R12      — TOC pointer (convention; unused here).
+/// - R13      — base pointer (convention; unused here).
+/// - R14      — link register (return address). NOT allocatable.
+/// - R15      — stack pointer. NOT allocatable.
+///
+/// Callee-saved per the s390x ABI: R6–R13. The reg_isel prologue saves
+/// R6–R13 (those actually used by the allocator) plus R11 (FP) and R14 (LR).
+fn s390x_target_desc() -> TargetDesc {
+    let registers = vec![
+        // R0: scratch / volatile. NOT allocatable (used by reg_isel's
+        // emit_load_imm / emit_add_imm as a scratch, and cannot be used as a
+        // base register in load/store encoding).
+        RegDesc::gpr("R0", 0).not_allocatable(),
+        // R1: syscall number / scratch (caller-saved).
+        RegDesc::gpr("R1", 1).not_allocatable(),
+        // R2-R6: argument registers (caller-saved). R2 is also the return reg.
+        RegDesc::gpr("R2", 2).arg(0).return_reg(),
+        RegDesc::gpr("R3", 3).arg(1).return_reg(),
+        RegDesc::gpr("R4", 4).arg(2),
+        RegDesc::gpr("R5", 5).arg(3),
+        RegDesc::gpr("R6", 6).arg(4).callee_saved(),
+        // R7-R10: scratch / volatile (caller-saved).
+        RegDesc::gpr("R7", 7),
+        RegDesc::gpr("R8", 8),
+        RegDesc::gpr("R9", 9),
+        RegDesc::gpr("R10", 10),
+        // R11: frame pointer (convention). NOT allocatable.
+        RegDesc::gpr("R11", 11).frame_pointer().callee_saved().not_allocatable(),
+        // R12: TOC pointer (convention; unused). Callee-saved per ABI.
+        RegDesc::gpr("R12", 12).callee_saved(),
+        // R13: base pointer (convention; unused). Callee-saved per ABI.
+        RegDesc::gpr("R13", 13).callee_saved(),
+        // R14: link register (return address). NOT allocatable.
+        RegDesc::gpr("R14", 14).link_register(),
+        // R15: stack pointer. NOT allocatable.
+        RegDesc::gpr("R15", 15).stack_pointer(),
+        // F0, F2: FP argument registers (Linux s390x ABI uses F0, F2).
+        RegDesc::fpr("F0", 0).arg(0).return_reg(),
+        RegDesc::fpr("F1", 1),
+        RegDesc::fpr("F2", 2).arg(1).return_reg(),
+        RegDesc::fpr("F3", 3),
+        // F4-F6: callee-saved (per ABI).
+        RegDesc::fpr("F4", 4).callee_saved(),
+        RegDesc::fpr("F5", 5).callee_saved(),
+        RegDesc::fpr("F6", 6).callee_saved(),
+        // F7-F15: scratch / volatile (caller-saved).
+        RegDesc::fpr("F7", 7),
+        RegDesc::fpr("F8", 8),
+        RegDesc::fpr("F9", 9),
+        RegDesc::fpr("F10", 10),
+        RegDesc::fpr("F11", 11),
+        RegDesc::fpr("F12", 12),
+        RegDesc::fpr("F13", 13),
+        RegDesc::fpr("F14", 14),
+        RegDesc::fpr("F15", 15),
+    ];
+
+    let calling_convention = CallingConventionDesc {
+        name: "s390x-linux",
+        int_arg_regs: vec![2, 3, 4, 5, 6],
+        fp_arg_regs: vec![0, 2],
+        int_return_regs: vec![2, 3],
+        fp_return_regs: vec![0, 2],
+        // R6-R13 are callee-saved per the s390x ABI.
+        callee_saved_gprs: vec![6, 7, 8, 9, 10, 11, 12, 13],
+        callee_saved_fps: vec![4, 5, 6],
+        stack_alignment: 8,
+        has_link_register: true,
+        has_branch_delay_slots: false,
+        has_toc_pointer: false,
+    };
+
+    let instruction_categories = vec![
+        InstCategoryDesc {
+            name: "arithmetic",
+            insts: vec!["AGR", "SGR", "MSGR", "DGR", "DLGR", "AGFI", "LGHI", "LGFI"],
+        },
+        InstCategoryDesc {
+            name: "logical",
+            insts: vec!["NRK", "ORK", "XRK", "OGR", "XGR", "LLGFR", "LGFR"],
+        },
+        InstCategoryDesc {
+            name: "shift",
+            insts: vec!["SLLG", "SRLG", "SRAG"],
+        },
+        InstCategoryDesc {
+            name: "load_store",
+            insts: vec!["LG", "STG", "LLGF", "STY", "LLC", "LLH", "STC", "STH", "LGR"],
+        },
+        InstCategoryDesc {
+            name: "branch",
+            insts: vec!["BRC", "BRCL", "BRASL", "BR", "BASR"],
+        },
+        InstCategoryDesc {
+            name: "system",
+            insts: vec!["SVC", "BCR"],
+        },
+    ];
+
+    TargetDesc {
+        name: "s390x",
+        triple: "s390x-ibm-linux-gnu",
+        elf_machine: 22, // EM_S390
+        base_addr: 0x10000,
+        pointer_width: 8,
+        endianness: crate::backend::Endianness::Big,
+        output_format: crate::backend::OutputFormat::Elf64,
+        registers,
+        calling_convention,
+        instruction_categories,
+        latency_table: LatencyTable::s390x(),
     }
 }
 
