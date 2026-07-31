@@ -1394,6 +1394,7 @@ impl TargetDescRegistry {
         descs.insert("arm32", arm32_target_desc());
         descs.insert("mips64", mips64_target_desc());
         descs.insert("ppc64", ppc64_target_desc());
+        descs.insert("sparc64", sparc64_target_desc());
         Self { descs }
     }
 
@@ -2579,6 +2580,122 @@ fn ppc64_target_desc() -> TargetDesc {
 }
 
 // ===========================================================================
+// ===========================================================================
+// SPARC64 (V9)
+// ===========================================================================
+
+fn sparc64_target_desc() -> TargetDesc {
+    let registers = vec![
+        // %g0: hardwired zero
+        RegDesc::gpr("G0", 0).hardwired_zero(),
+        // %g1: scratch / syscall number (not allocatable)
+        RegDesc::gpr("G1", 1).not_allocatable(),
+        // %g2-%g7: application globals (caller-saved)
+        RegDesc::gpr("G2", 2),
+        RegDesc::gpr("G3", 3),
+        RegDesc::gpr("G4", 4),
+        RegDesc::gpr("G5", 5),
+        RegDesc::gpr("G6", 6),
+        RegDesc::gpr("G7", 7),
+        // %o0-%o5: argument registers (caller-saved, 6 args)
+        RegDesc::gpr("O0", 8).arg(0).return_reg(),
+        RegDesc::gpr("O1", 9).arg(1).return_reg(),
+        RegDesc::gpr("O2", 10).arg(2),
+        RegDesc::gpr("O3", 11).arg(3),
+        RegDesc::gpr("O4", 12).arg(4),
+        RegDesc::gpr("O5", 13).arg(5),
+        // %o6: stack pointer
+        RegDesc::gpr("O6", 14).stack_pointer(),
+        // %o7: return address (from CALL)
+        RegDesc::gpr("O7", 15).link_register(),
+        // %l0-%l7: locals (callee-saved via register window)
+        RegDesc::gpr("L0", 16).callee_saved(),
+        RegDesc::gpr("L1", 17).callee_saved(),
+        RegDesc::gpr("L2", 18).callee_saved(),
+        RegDesc::gpr("L3", 19).callee_saved(),
+        RegDesc::gpr("L4", 20).callee_saved(),
+        RegDesc::gpr("L5", 21).callee_saved(),
+        RegDesc::gpr("L6", 22).callee_saved(),
+        RegDesc::gpr("L7", 23).callee_saved(),
+        // %i0-%i5: incoming args (callee-saved via register window).
+        // After SAVE, the caller's %o0-%o5 become %i0-%i5. These are the
+        // arg regs the callee actually reads. (W14-fix)
+        RegDesc::gpr("I0", 24).arg(0).return_reg().callee_saved(),
+        RegDesc::gpr("I1", 25).arg(1).return_reg().callee_saved(),
+        RegDesc::gpr("I2", 26).arg(2).callee_saved(),
+        RegDesc::gpr("I3", 27).arg(3).callee_saved(),
+        RegDesc::gpr("I4", 28).arg(4).callee_saved(),
+        RegDesc::gpr("I5", 29).arg(5).callee_saved(),
+        // %i6: frame pointer (callee-saved via register window)
+        RegDesc::gpr("I6", 30).frame_pointer().callee_saved().not_allocatable(),
+        // %i7: return address (after SAVE)
+        RegDesc::gpr("I7", 31).link_register(),
+        // FP registers (SPARC V9 has 32 double-precision FPRs)
+        RegDesc::fpr("F0", 0).return_reg(),
+        RegDesc::fpr("F1", 1),
+        RegDesc::fpr("F2", 2),
+        RegDesc::fpr("F3", 3),
+        RegDesc::fpr("F4", 4),
+        RegDesc::fpr("F5", 5),
+        RegDesc::fpr("F6", 6),
+        RegDesc::fpr("F7", 7),
+        RegDesc::fpr("F8", 8),
+        RegDesc::fpr("F9", 9),
+        RegDesc::fpr("F10", 10),
+        RegDesc::fpr("F11", 11),
+        RegDesc::fpr("F12", 12),
+        RegDesc::fpr("F13", 13),
+        RegDesc::fpr("F14", 14),
+        RegDesc::fpr("F15", 15),
+        RegDesc::fpr("F16", 16),
+        RegDesc::fpr("F17", 17),
+        RegDesc::fpr("F18", 18),
+        RegDesc::fpr("F19", 19),
+        RegDesc::fpr("F20", 20),
+        RegDesc::fpr("F21", 21),
+        RegDesc::fpr("F22", 22),
+        RegDesc::fpr("F23", 23),
+        RegDesc::fpr("F24", 24),
+        RegDesc::fpr("F25", 25),
+        RegDesc::fpr("F26", 26),
+        RegDesc::fpr("F27", 27),
+        RegDesc::fpr("F28", 28),
+        RegDesc::fpr("F29", 29),
+        RegDesc::fpr("F30", 30),
+        RegDesc::fpr("F31", 31),
+    ];
+
+    let calling_convention = CallingConventionDesc {
+        name: "sparc64-linux",
+        int_arg_regs: vec![24, 25, 26, 27, 28, 29],  // I0-I5 (after SAVE)
+        fp_arg_regs: vec![0, 1, 2, 3, 4, 5, 6, 7],
+        int_return_regs: vec![24, 25],  // I0, I1 (after SAVE)
+        fp_return_regs: vec![0, 1],
+        callee_saved_gprs: vec![16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31], // L0-L7, I0-I7
+        callee_saved_fps: vec![24, 25, 26, 27, 28, 29, 30, 31],
+        stack_alignment: 16,
+        has_link_register: true,
+        has_branch_delay_slots: true,
+        has_toc_pointer: false,
+    };
+
+    let instruction_categories = vec![];
+
+    TargetDesc {
+        name: "sparc64",
+        triple: "sparc64-unknown-linux-gnu",
+        elf_machine: 43, // EM_SPARCV9
+        base_addr: 0x100000,
+        pointer_width: 8,
+        endianness: crate::backend::Endianness::Big,
+        output_format: crate::backend::OutputFormat::Elf64,
+        registers,
+        calling_convention,
+        instruction_categories,
+        latency_table: LatencyTable::sparc64(),
+    }
+}
+
 // Tests
 // ===========================================================================
 

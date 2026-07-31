@@ -62,6 +62,17 @@ use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRVal
 use std::collections::HashMap;
 use std::fmt;
 
+/// Full register-based instruction selection (Wave 14).
+pub mod reg_isel;
+
+/// Run the target-agnostic linear-scan allocator (Wave 14).
+fn try_real_regalloc(func: &IRFunction) -> Option<crate::regalloc::RegAllocResult> {
+    let registry = crate::target_desc::TargetDescRegistry::new();
+    let target = registry.get("sparc64")?;
+    let allocator = crate::regalloc::TargetAgnosticRegAlloc::new(target);
+    allocator.allocate_function(func).ok()
+}
+
 // ===========================================================================
 // SPARC V9 opcode constants
 // ===========================================================================
@@ -2222,6 +2233,7 @@ fn sparc64_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction,
 /// stack slots (for safety), but the allocation metadata records which vregs
 /// COULD be in real registers. A future effort will use this metadata to emit
 /// register-based instructions directly.
+#[allow(dead_code)]
 fn sparc64_allocate_registers_real(func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
     // Run the existing stack-slot allocator to get a working AllocatedFunction.
     let mut allocated = sparc64_allocate_registers_ss(func)?;
@@ -4883,11 +4895,38 @@ impl Backend for Sparc64Backend {
     }
 
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
-        if self.use_real_regalloc {
-            sparc64_allocate_registers_real(func)
-        } else {
-            sparc64_allocate_registers_ss(func)
+        // ── Wave 14: Full register-based emitter dispatch ──
+        let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_SPARC64")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+
+        let contains_fork = func.blocks.iter().any(|block| {
+            block.instructions.iter().any(|inst| {
+                match inst {
+                    crate::ir::IRInstr::Call { func: fname, .. } => {
+                        fname == "spawn_worker" || fname == "fork"
+                    }
+                    crate::ir::IRInstr::Syscall { nr, args, dst } => {
+                        *nr == 220 || *nr == 221
+                        || (dst.is_some()
+                            && args.iter().any(|a| matches!(a, crate::ir::IRValue::Register(_))))
+                    }
+                    _ => false,
+                }
+            })
+        });
+
+        if real_regalloc && !contains_fork {
+            if let Some(alloc_result) = try_real_regalloc(func) {
+                match reg_isel::emit_function_regalloc_full(func, &alloc_result) {
+                    Ok(full) => return Ok(full),
+                    Err(e) => {
+                        vuma_log!(debug, "sparc64 regalloc: full emitter failed for '{}': {} — falling back to stack-slot", func.name, e);
+                    }
+                }
+            }
         }
+        sparc64_allocate_registers_ss(func)
     }
 
     fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError> {
