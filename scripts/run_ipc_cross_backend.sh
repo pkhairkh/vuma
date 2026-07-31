@@ -8,7 +8,7 @@
 
 set -e
 
-REPO="/home/z/vuma-review"
+REPO="/home/z/my-project/vuma"
 QEMU_DIR="$HOME/.local/bin"
 BACKENDS="${@:-x86_64 aarch64 riscv64 arm32 loongarch64}"
 TEST_DIR="$REPO/tests/gold_standard/ipc"

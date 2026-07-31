@@ -64,7 +64,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::arm64::{Condition, Instruction, Operand, RegWidth, Register};
+use crate::aarch64::{Condition, Instruction, Operand, RegWidth, Register};
 use crate::backend::{BackendKind, RelocationEntry};
 use crate::ir::*;
 use crate::regalloc::{AllocationResult, PhysReg, RegAllocator, SpillCode, SpillSlot};
@@ -2177,7 +2177,7 @@ impl Emitter {
                         rd,
                         rn: rt,
                         rm: rf,
-                        cond: crate::arm64::Condition::NE,
+                        cond: crate::aarch64::Condition::NE,
                     },
                     width,
                 )?;
@@ -2232,7 +2232,7 @@ impl Emitter {
                 let fixup_ne = self.code.len();
                 self.fixups.push((fixup_ne, done_label.clone(), BranchFormat::Cond19));
                 self.emit_instruction(Instruction::BCond {
-                    cond: crate::arm64::Condition::NE,
+                    cond: crate::aarch64::Condition::NE,
                     offset: 0,
                 })?;
                 // STLXR rs, desired, [addr] — try to store
@@ -2249,7 +2249,7 @@ impl Emitter {
                     rd,
                     rn: re,
                     rm: scratch_cmp,
-                    cond: crate::arm64::Condition::EQ,
+                    cond: crate::aarch64::Condition::EQ,
                 })?;
             }
 
@@ -2283,7 +2283,7 @@ impl Emitter {
                         rd,
                         rn: rt,
                         rm: rf,
-                        cond: crate::arm64::Condition::NE,
+                        cond: crate::aarch64::Condition::NE,
                     },
                     width,
                 )?;
@@ -2307,7 +2307,7 @@ impl Emitter {
                     rn: rd,
                     rm: Operand::Imm12(0),
                 })?;
-                self.emit_instruction(Instruction::CSET { rd, cond: crate::arm64::Condition::EQ })?;
+                self.emit_instruction(Instruction::CSET { rd, cond: crate::aarch64::Condition::EQ })?;
             }
             // ── Syscall ──────────────────────────────────────────
             IRInstr::Syscall { nr, args, dst } => {
@@ -2378,13 +2378,13 @@ impl Emitter {
             IRInstr::VectorOp { op, .. } => {
                 let (enc, mnemonic): (u32, &'static str) = match op {
                     crate::ir::VectorOpKind::Add => {
-                        (crate::arm64::encode_neon_add_v4s(0, 1, 2), "add v0.4s, v1.4s, v2.4s")
+                        (crate::aarch64::encode_neon_add_v4s(0, 1, 2), "add v0.4s, v1.4s, v2.4s")
                     }
                     crate::ir::VectorOpKind::Sub => {
-                        (crate::arm64::encode_neon_sub_v4s(0, 1, 2), "sub v0.4s, v1.4s, v2.4s")
+                        (crate::aarch64::encode_neon_sub_v4s(0, 1, 2), "sub v0.4s, v1.4s, v2.4s")
                     }
                     crate::ir::VectorOpKind::Mul => {
-                        (crate::arm64::encode_neon_mul_v4s(0, 1, 2), "mul v0.4s, v1.4s, v2.4s")
+                        (crate::aarch64::encode_neon_mul_v4s(0, 1, 2), "mul v0.4s, v1.4s, v2.4s")
                     }
                 };
                 self.emit_instruction(Instruction::NEON_RAW { enc, mnemonic })?;
@@ -5582,7 +5582,7 @@ impl Emitter {
                 // CSET X9, EQ — 1 if all bits matched, 0 otherwise
                 self.emit_instruction(Instruction::CSET {
                     rd: Register::X9,
-                    cond: crate::arm64::Condition::EQ,
+                    cond: crate::aarch64::Condition::EQ,
                 })?;
                 self.ss_store_to_slot(Register::X9, dst_offset)?;
             }
@@ -5657,7 +5657,7 @@ impl Emitter {
                 self.fixups
                     .push((fixup_ne, done_label.clone(), BranchFormat::Cond19));
                 self.emit_instruction(Instruction::BCond {
-                    cond: crate::arm64::Condition::NE,
+                    cond: crate::aarch64::Condition::NE,
                     offset: 0,
                 })?;
                 // STLXR X13, X11, [X9] — try to store desired
@@ -5683,7 +5683,7 @@ impl Emitter {
                     rd: Register::X14,
                     rn: Register::X10,
                     rm: Register::X12,
-                    cond: crate::arm64::Condition::EQ,
+                    cond: crate::aarch64::Condition::EQ,
                 })?;
                 // Store result to dst's stack slot
                 self.ss_store_to_slot(Register::X14, dst_offset)?;
@@ -5730,13 +5730,13 @@ impl Emitter {
             IRInstr::VectorOp { op, .. } => {
                 let (enc, mnemonic): (u32, &'static str) = match op {
                     crate::ir::VectorOpKind::Add => {
-                        (crate::arm64::encode_neon_add_v4s(0, 1, 2), "add v0.4s, v1.4s, v2.4s")
+                        (crate::aarch64::encode_neon_add_v4s(0, 1, 2), "add v0.4s, v1.4s, v2.4s")
                     }
                     crate::ir::VectorOpKind::Sub => {
-                        (crate::arm64::encode_neon_sub_v4s(0, 1, 2), "sub v0.4s, v1.4s, v2.4s")
+                        (crate::aarch64::encode_neon_sub_v4s(0, 1, 2), "sub v0.4s, v1.4s, v2.4s")
                     }
                     crate::ir::VectorOpKind::Mul => {
-                        (crate::arm64::encode_neon_mul_v4s(0, 1, 2), "mul v0.4s, v1.4s, v2.4s")
+                        (crate::aarch64::encode_neon_mul_v4s(0, 1, 2), "mul v0.4s, v1.4s, v2.4s")
                     }
                 };
                 self.emit_instruction(Instruction::NEON_RAW { enc, mnemonic })?;
@@ -8989,7 +8989,7 @@ mod tests {
     /// encoded word, confirming the instruction is properly lowered.
     #[test]
     fn test_arm64_clz_emission_exists() {
-        use crate::arm64::Instruction;
+        use crate::aarch64::Instruction;
 
         // Encode CLZ X0, X1 — the encoded value should be non-zero.
         let clz = Instruction::CLZ {
