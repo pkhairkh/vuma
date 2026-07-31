@@ -1971,9 +1971,9 @@ fn decode_aarch64(word: u32) -> String {
 /// detect the cross-bank register use that proves a real conversion is
 /// happening (rather than a no-op move within one bank).
 fn arm64_instruction_regs(
-    inst: &crate::arm64::Instruction,
+    inst: &crate::aarch64::Instruction,
 ) -> (Vec<PhysicalReg>, Vec<PhysicalReg>) {
-    use crate::arm64::{Instruction, Register};
+    use crate::aarch64::{Instruction, Register};
     let gpr = |r: &Register| PhysicalReg::new(RegClass::Gpr, r.encoding());
     let fp = |r: &Register| PhysicalReg::new(RegClass::SimdFp, r.encoding());
     let fp_idx = |i: u8| PhysicalReg::new(RegClass::SimdFp, i as u32);
@@ -2233,7 +2233,7 @@ impl AArch64Backend {
             .iter()
             .enumerate()
             .map(|(i, &word)| {
-                let (opcode, reads, writes) = match crate::arm64::Instruction::decode(word) {
+                let (opcode, reads, writes) = match crate::aarch64::Instruction::decode(word) {
                     Some(inst) => {
                         let opcode = format!("{}", inst);
                         let (reads, writes) = arm64_instruction_regs(&inst);
@@ -2649,7 +2649,7 @@ fn build_aarch64_runtime() -> (Vec<u8>, usize, usize, usize) {
     // All instructions via `Instruction::encode()` for correct encodings.
     // Stack: 32 bytes (16 for FP/LR, 16 for buffer).
     {
-        use crate::arm64::{Condition, Instruction, Operand, Register};
+        use crate::aarch64::{Condition, Instruction, Operand, Register};
         macro_rules! e {
             ($i:expr) => {
                 code.extend_from_slice(&$i.encode().unwrap().to_le_bytes())
@@ -2813,7 +2813,7 @@ fn build_aarch64_runtime() -> (Vec<u8>, usize, usize, usize) {
     // overwrote past the stack frame → SIGSEGV — the test_print crash on
     // aarch64). This rewrite fixes all branch offsets by construction.
     {
-        use crate::arm64::{Condition, Instruction, Operand, Register};
+        use crate::aarch64::{Condition, Instruction, Operand, Register};
         macro_rules! e {
             ($i:expr) => {
                 code.extend_from_slice(&$i.encode().unwrap().to_le_bytes())
@@ -3017,7 +3017,7 @@ fn build_aarch64_runtime() -> (Vec<u8>, usize, usize, usize) {
     // STRB encoding 0x390021E1 = STRB W1,[X15,#8] instead of [SP,#16]).
     let newline_offset = code.len();
     {
-        use crate::arm64::{Instruction, Operand, Register};
+        use crate::aarch64::{Instruction, Operand, Register};
         macro_rules! e {
             ($i:expr) => {
                 code.extend_from_slice(&$i.encode().unwrap().to_le_bytes())
@@ -3310,7 +3310,7 @@ impl Backend for AArch64Backend {
             .iter()
             .enumerate()
             .map(|(i, &word)| {
-                let (opcode, reads, writes) = match crate::arm64::Instruction::decode(word) {
+                let (opcode, reads, writes) = match crate::aarch64::Instruction::decode(word) {
                     Some(inst) => {
                         let opcode = format!("{}", inst);
                         let (reads, writes) = arm64_instruction_regs(&inst);
@@ -4339,7 +4339,7 @@ impl Backend for AArch64Backend {
                 bytes[offset + 2],
                 bytes[offset + 3],
             ]);
-            let mnemonic = if let Some(instr) = crate::arm64::Instruction::decode(word) {
+            let mnemonic = if let Some(instr) = crate::aarch64::Instruction::decode(word) {
                 format!("{}", instr)
             } else {
                 decode_aarch64(word)
@@ -4695,7 +4695,7 @@ mod tests {
     fn test_aarch64_disassemble_add_imm() {
         let backend = AArch64Backend::new();
         // ADD X0, X1, #42: 0x9100A820
-        use crate::arm64::{Instruction, Operand, Register};
+        use crate::aarch64::{Instruction, Operand, Register};
         let instr = Instruction::ADD {
             rd: Register::X0,
             rn: Register::X1,

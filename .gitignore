@@ -69,3 +69,5 @@ proof/build/
 *.ilean
 *.trace
 .lake/
+scripts/logs/
+scripts/orchestrator_state.json
