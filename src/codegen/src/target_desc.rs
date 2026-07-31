@@ -1395,6 +1395,8 @@ impl TargetDescRegistry {
         descs.insert("mips64", mips64_target_desc());
         descs.insert("ppc64", ppc64_target_desc());
         descs.insert("sparc64", sparc64_target_desc());
+        descs.insert("alpha", alpha_target_desc());
+        descs.insert("m68k", m68k_target_desc());
         Self { descs }
     }
 
@@ -2693,6 +2695,106 @@ fn sparc64_target_desc() -> TargetDesc {
         calling_convention,
         instruction_categories,
         latency_table: LatencyTable::sparc64(),
+    }
+}
+
+// ===========================================================================
+// Alpha (DEC Alpha 21064)
+// ===========================================================================
+
+fn alpha_target_desc() -> TargetDesc {
+    let registers: Vec<RegDesc> = (0..32u32).map(|i| {
+        let name: &'static str = match i {
+            0 => "V0", 9 => "S0", 10 => "S1", 11 => "S2", 12 => "S3", 13 => "S4", 14 => "S5",
+            15 => "FP", 16 => "A0", 17 => "A1", 18 => "A2", 19 => "A3", 20 => "A4", 21 => "A5",
+            26 => "RA", 27 => "PV", 30 => "SP", 31 => "ZERO", _ => "T",
+        };
+        let mut rd = RegDesc::gpr(name, i as usize);
+        match i {
+            0 => { rd = rd.return_reg(); }
+            9..=14 => { rd = rd.callee_saved(); }
+            15 => { rd = rd.frame_pointer().callee_saved().not_allocatable(); }
+            16..=21 => { rd = rd.arg((i-16) as usize); }
+            26 => { rd = rd.link_register(); }
+            27 => { rd = rd.not_allocatable(); }
+            30 => { rd = rd.stack_pointer(); }
+            31 => { rd = rd.hardwired_zero(); }
+            _ => {}
+        }
+        rd
+    }).collect();
+    let calling_convention = CallingConventionDesc {
+        name: "alpha-linux",
+        int_arg_regs: vec![16, 17, 18, 19, 20, 21],
+        fp_arg_regs: vec![0, 1, 2, 3, 4, 5, 6, 7],
+        int_return_regs: vec![0],
+        fp_return_regs: vec![0],
+        callee_saved_gprs: vec![9, 10, 11, 12, 13, 14, 15],
+        callee_saved_fps: vec![],
+        stack_alignment: 8,
+        has_link_register: true,
+        has_branch_delay_slots: false,
+        has_toc_pointer: false,
+    };
+    TargetDesc {
+        name: "alpha", triple: "alpha-unknown-linux-gnu",
+        elf_machine: 36, base_addr: 0x120000000, pointer_width: 8,
+        endianness: crate::backend::Endianness::Little,
+        output_format: crate::backend::OutputFormat::Elf64,
+        registers, calling_convention, instruction_categories: vec![],
+        latency_table: LatencyTable::alpha(),
+    }
+}
+
+// ===========================================================================
+// M68K (Motorola 68000)
+// ===========================================================================
+
+fn m68k_target_desc() -> TargetDesc {
+    let registers = vec![
+        // D0-D1: return/scratch (caller-saved)
+        RegDesc::gpr("D0", 0).return_reg(),
+        RegDesc::gpr("D1", 1),
+        // D2: scratch/syscall-arg (caller-saved)
+        RegDesc::gpr("D2", 2),
+        // D3-D7: callee-saved
+        RegDesc::gpr("D3", 3).callee_saved(),
+        RegDesc::gpr("D4", 4).callee_saved(),
+        RegDesc::gpr("D5", 5).callee_saved(),
+        RegDesc::gpr("D6", 6).callee_saved(),
+        RegDesc::gpr("D7", 7).callee_saved(),
+        // A0-A1: scratch (caller-saved)
+        RegDesc::gpr("A0", 8),
+        RegDesc::gpr("A1", 9),
+        // A2-A6: callee-saved (A6 = frame pointer)
+        RegDesc::gpr("A2", 10).callee_saved(),
+        RegDesc::gpr("A3", 11).callee_saved(),
+        RegDesc::gpr("A4", 12).callee_saved(),
+        RegDesc::gpr("A5", 13).callee_saved(),
+        RegDesc::gpr("A6", 14).frame_pointer().callee_saved().not_allocatable(),
+        // A7: stack pointer
+        RegDesc::gpr("A7", 15).stack_pointer(),
+    ];
+    let calling_convention = CallingConventionDesc {
+        name: "m68k-linux",
+        int_arg_regs: vec![1, 2, 3, 4, 5], // D1-D5
+        fp_arg_regs: vec![0, 1],
+        int_return_regs: vec![0], // D0
+        fp_return_regs: vec![0],
+        callee_saved_gprs: vec![3, 4, 5, 6, 7, 10, 11, 12, 13, 14], // D3-D7, A2-A6
+        callee_saved_fps: vec![],
+        stack_alignment: 4,
+        has_link_register: false,
+        has_branch_delay_slots: false,
+        has_toc_pointer: false,
+    };
+    TargetDesc {
+        name: "m68k", triple: "m68k-unknown-linux-gnu",
+        elf_machine: 4, base_addr: 0x800, pointer_width: 4,
+        endianness: crate::backend::Endianness::Big,
+        output_format: crate::backend::OutputFormat::Elf32,
+        registers, calling_convention, instruction_categories: vec![],
+        latency_table: LatencyTable::m68k(),
     }
 }
 
