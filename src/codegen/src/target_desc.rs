@@ -1387,6 +1387,7 @@ impl TargetDescRegistry {
         let mut descs = std::collections::HashMap::new();
         descs.insert("aarch64", aarch64_target_desc());
         descs.insert("riscv64", riscv64_target_desc());
+        descs.insert("riscv32", riscv32_target_desc());
         descs.insert("wasm32", wasm32_target_desc());
         descs.insert("loongarch64", loongarch64_target_desc());
         descs.insert("x86_64", x86_64_target_desc());
@@ -1715,6 +1716,21 @@ fn riscv64_target_desc() -> TargetDesc {
         instruction_categories,
         latency_table: LatencyTable::riscv64(),
     }
+}
+
+// ===========================================================================
+// RISC-V 32 (RV32IMAC / ILP32D)
+// ===========================================================================
+
+/// riscv32 target description — identical register file to riscv64 but
+/// with 32-bit pointer width and ILP32D ABI.
+fn riscv32_target_desc() -> TargetDesc {
+    let mut td = riscv64_target_desc();
+    td.name = "riscv32";
+    td.triple = "riscv32-unknown-linux-gnu";
+    td.calling_convention.name = "ilp32d";
+    td.pointer_width = 4;
+    td
 }
 
 // ===========================================================================
