@@ -69,7 +69,7 @@ pub fn emit_function_regalloc_full(func: &IRFunction, alloc: &RegAllocResult) ->
     if let Some(lb) = blocks.last_mut() { lb.instructions.push(AllocatedInstruction { opcode: "epilogue_trailing".to_string(), reads: vec![], writes: vec![], encoded: all_code[ep_s..ep_e].to_vec() }); }
 
     // Fixups: alpha branch disp = (target - PC) >> 2, 21-bit
-    for f in &fixups { if let Some(&t) = label_offsets.get(&f.target) { let rel = t as i32 - f.offset as i32; let disp = ((rel >> 2) as u32) & 0x1FFFFF; let instr = u32::from_le_bytes([all_code[f.offset], all_code[f.offset+1], all_code[f.offset+2], all_code[f.offset+3]]); let patched = (instr & 0xFFE00000) | disp; all_code[f.offset..f.offset+4].copy_from_slice(&patched.to_le_bytes()); } }
+    for f in &fixups { if let Some(&t) = label_offsets.get(&f.target) { let rel = t as i32 - f.offset as i32 - 4; let disp = ((rel >> 2) as u32) & 0x1FFFFF; let instr = u32::from_le_bytes([all_code[f.offset], all_code[f.offset+1], all_code[f.offset+2], all_code[f.offset+3]]); let patched = (instr & 0xFFE00000) | disp; all_code[f.offset..f.offset+4].copy_from_slice(&patched.to_le_bytes()); } }
 
     let mut off = 0; for b in &mut blocks { b.code_offset = off; for i in &mut b.instructions { let l = i.encoded.len(); if l > 0 && off + l <= all_code.len() { i.encoded = all_code[off..off+l].to_vec(); } off += l; } }
     let cs_phys: Vec<PhysicalReg> = cs.iter().map(|g| PhysicalReg::new(crate::backend::RegClass::Gpr, *g as u32)).collect();
