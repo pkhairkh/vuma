@@ -127,6 +127,69 @@ pub fn emit_function_regalloc_full(
         encoded: all_code[prologue_start..].to_vec(),
     };
 
+    // ── Argument shuffle (function entry) ──
+    // The System V ABI passes the first 6 integer args in
+    // RDI, RSI, RDX, RCX, R8, R9. The register allocator may assign
+    // these parameter vregs to DIFFERENT physical registers (e.g. vreg 0
+    // → R10). Without an argument shuffle at function entry, the callee
+    // reads its parameters from the wrong registers (garbage) and
+    // produces wrong results. This is the x86_64 equivalent of aarch64's
+    // `reg_alloc.preassign(vreg, X0..X7)` — but since reg_isel.rs
+    // consumes an already-computed RegAllocResult, we emit mov
+    // instructions instead of pre-coloring.
+    let arg_shuffle_start = all_code.len();
+    let arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx, Gpr::R8, Gpr::R9];
+    let mut pending: Vec<(Gpr, Gpr)> = Vec::new(); // (src=ABI reg, dst=allocator reg)
+    for (i, param) in func.params.iter().enumerate() {
+        if i >= 6 {
+            break;
+        }
+        if let IRValue::Register(vreg_id) = param {
+            let root = alloc.coalesced_map.get(vreg_id).unwrap_or(vreg_id);
+            if let Some(preg) = alloc.vreg_to_preg.get(root) {
+                if let Some(dst_gpr) = preg_to_gpr(preg) {
+                    let src = arg_regs[i];
+                    if dst_gpr != src {
+                        pending.push((src, dst_gpr));
+                    }
+                }
+            }
+        }
+    }
+    // Pass 1: move non-conflicting args (dst is not a src for any
+    // unmoved arg). Repeat until no progress.
+    let mut progress = true;
+    while progress && !pending.is_empty() {
+        progress = false;
+        let mut i = 0;
+        while i < pending.len() {
+            let (src, dst) = pending[i];
+            // Check if dst is a src for any other pending move.
+            let mut conflict = false;
+            for (j, (_, other_dst)) in pending.iter().enumerate() {
+                if i != j && *other_dst == src {
+                    conflict = true;
+                    break;
+                }
+            }
+            if !conflict {
+                all_code.extend(encode_mov_reg_reg(dst, src));
+                pending.remove(i);
+                progress = true;
+            } else {
+                i += 1;
+            }
+        }
+    }
+    // Pass 2: handle cycles with R11 scratch.
+    for (src, dst) in pending {
+        // mov r11, src; mov dst, r11
+        all_code.extend(encode_mov_reg_reg(Gpr::R11, src));
+        all_code.extend(encode_mov_reg_reg(dst, Gpr::R11));
+    }
+    let arg_shuffle_end = all_code.len();
+    let has_arg_shuffle = arg_shuffle_end > arg_shuffle_start;
+
     // ── Body: emit each block ──
     // Position keying must match the allocator in regalloc.rs
     // (`LiveRangeComputer::compute`): each instruction and each terminator
@@ -243,9 +306,18 @@ pub fn emit_function_regalloc_full(
     all_code.extend(emit_epilogue_bytes(frame_size, &callee_saved_gprs));
     let epilogue_end = all_code.len();
 
-    // Add prologue to the first block, and the trailing epilogue to the
-    // last block (as a defensive unreachable marker).
+    // Add prologue (and argument shuffle if any) to the first block,
+    // and the trailing epilogue to the last block (as a defensive
+    // unreachable marker).
     if let Some(first_block) = blocks.first_mut() {
+        if has_arg_shuffle {
+            first_block.instructions.insert(0, AllocatedInstruction {
+                opcode: "arg_shuffle".to_string(),
+                reads: vec![],
+                writes: vec![],
+                encoded: all_code[arg_shuffle_start..arg_shuffle_end].to_vec(),
+            });
+        }
         first_block.instructions.insert(0, prologue_instr);
     }
     if let Some(last_block) = blocks.last_mut() {
