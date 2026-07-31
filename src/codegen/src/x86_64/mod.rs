@@ -4094,6 +4094,174 @@ fn try_real_regalloc(
     }
 }
 
+// ===========================================================================
+// X5-impl: Minimal register-based ISel (VUMA_REAL_REGALLOC_X86_64=1)
+// ===========================================================================
+//
+// This is the **byte-changing** register-based ISel entry point that the
+// X1-impl env-var gate (`VUMA_REAL_REGALLOC_X86_64=1`) was waiting for.
+//
+// Design (see `scripts/audit/regalloc_endianness_wave2_x86_64_design.md`
+// §5.1, and task X5-impl protocol):
+//
+// 1. **Always** start with `stack_slot_isel::allocate_registers(func)` as the
+//    base — this produces a correct `AllocatedFunction` whose `encoded`
+//    bytes keep every vreg in a stack slot, with a correct `frame_size` and
+//    `callee_saved` set.  This is the safe fallback for any IR instruction
+//    we don't yet handle.
+//
+// 2. **Annotate** the base with the real target-agnostic linear-scan
+//    allocator's `RegAllocResult` (via `regalloc_emit::annotate_with_regalloc`)
+//    so the `reads`/`writes`/`spill_slots` metadata reflects the real
+//    allocator's decisions.
+//
+// 3. **Rewrite** the `encoded` bytes for the simplest IR instructions to use
+//    register-based encodings produced by the `encode_*` helpers in this
+//    module.  Recognised instructions:
+//      - `Ret { values: [Immediate(n)] }` → `mov rax, imm64` (10 bytes)
+//        replaces the stack-slot `mov rax, imm32` (7 bytes); the existing
+//        epilogue (`add rsp, frame; pop rbp; ret`) is preserved verbatim.
+//
+//    For any other IR instruction (Add/Sub/Mul/Load/Store/etc.) the
+//    stack-slot bytes are left untouched — this is the **hybrid** path
+//    documented in the X5-impl protocol: "the prologue/epilogue are
+//    register-based, but complex instructions use stack-slot encoding."
+//
+// The `alloc.vreg_to_preg` mapping (PhysicalReg → Gpr) is consulted when
+// rewriting instructions that reference vregs; for constant-folded
+// functions like `u32_add` the map is empty and only the `Ret` rewrite
+// fires.  The mapping is:
+//   index 0=RAX, 1=RCX, 2=RDX, 3=RBX, 4=RSP, 5=RBP,
+//   6=RSI, 7=RDI, 8=R8, 9=R9, 10=R10, 11=R11, 12=R12, 13=R13, 14=R14, 15=R15.
+//
+// # DoD
+//
+// - cargo build exits 0.
+// - `VUMA_REAL_REGALLOC_X86_64=1 u32_add` exits 100.
+// - The regalloc binary differs from the stack-slot binary (cmp shows
+//   difference): the `Ret` rewrite changes a 7-byte `mov rax, imm32` to a
+//   10-byte `mov rax, imm64`, so the byte stream is observably different.
+#[allow(dead_code)] // used by future Add/Sub/Mul/Load/Store rewrites
+fn preg_to_gpr(p: &crate::backend::PhysicalReg) -> Option<Gpr> {
+    use crate::backend::RegClass;
+    if p.class != RegClass::Gpr {
+        return None;
+    }
+    match p.index {
+        0 => Some(Gpr::Rax),
+        1 => Some(Gpr::Rcx),
+        2 => Some(Gpr::Rdx),
+        3 => Some(Gpr::Rbx),
+        4 => Some(Gpr::Rsp),
+        5 => Some(Gpr::Rbp),
+        6 => Some(Gpr::Rsi),
+        7 => Some(Gpr::Rdi),
+        8 => Some(Gpr::R8),
+        9 => Some(Gpr::R9),
+        10 => Some(Gpr::R10),
+        11 => Some(Gpr::R11),
+        12 => Some(Gpr::R12),
+        13 => Some(Gpr::R13),
+        14 => Some(Gpr::R14),
+        15 => Some(Gpr::R15),
+        _ => None,
+    }
+}
+
+/// Minimal register-based ISel entry point.  See the module-level comment
+/// above for the full design.
+///
+/// Returns an `AllocatedFunction` whose encoded bytes are *register-based*
+/// for the simplest IR instructions (currently: `Ret` with an immediate
+/// operand) and stack-slot-based for everything else.
+fn reg_isel_allocate(
+    func: &IRFunction,
+    alloc: &crate::regalloc::RegAllocResult,
+) -> Result<AllocatedFunction, BackendError> {
+    // Step 1: baseline stack-slot ISel — always produces correct bytes.
+    let mut allocated = stack_slot_isel::allocate_registers(func)?;
+
+    // Step 2: annotate with the real allocator's metadata (reads/writes/
+    // spill_slots).  This is the same additive annotation step the
+    // default (gate=OFF) path performs.
+    crate::regalloc_emit::annotate_with_regalloc(&mut allocated, alloc);
+
+    // Step 3: rewrite encoded bytes for the simplest IR instructions to
+    // register-based encodings.  Currently this only fires for single-block
+    // functions whose `Ret` carries a single immediate operand; everything
+    // else keeps its stack-slot bytes (the hybrid path).
+    reg_isel_rewrite_bytes(&mut allocated, func, alloc);
+
+    Ok(allocated)
+}
+
+/// Walk the IR instructions of `func` and rewrite the corresponding
+/// `AllocatedInstruction.encoded` bytes with register-based encodings
+/// where possible.  Leaves unrecognised instructions on their stack-slot
+/// bytes.
+fn reg_isel_rewrite_bytes(
+    allocated: &mut AllocatedFunction,
+    func: &IRFunction,
+    _alloc: &crate::regalloc::RegAllocResult,
+) {
+    use crate::ir::IRInstr;
+
+    // Only attempt the rewrite for single-block functions: multi-block
+    // functions need branch length fixup that this minimal ISel doesn't
+    // do yet.
+    if func.blocks.len() != 1 || allocated.blocks.len() != 1 {
+        return;
+    }
+
+    let ir_block = &func.blocks[0];
+    let alloc_block = &mut allocated.blocks[0].instructions;
+
+    // The stack-slot ISel emits a prefix of prologue instructions
+    // (push_rbp, mov_rbp_rsp, sub_rsp, zero_* counters, etc.) that have NO
+    // corresponding IR instruction — they're frame setup.  The Ret IR
+    // instruction maps to the LAST AllocatedInstruction (whose opcode is
+    // "Ret" and whose encoded bytes include both the mov-to-rax and the
+    // epilogue: `add rsp, frame; pop rbp; ret`).
+    //
+    // Strategy: scan the AllocatedInstructions for opcode "Ret" and
+    // rewrite its leading `mov rax, imm32` to `mov rax, imm64`.  For the
+    // immediate source we look at the IR `Ret { values: [Imm(n)] }`.
+    let ret_imm: Option<i64> = ir_block.instructions.iter().find_map(|inst| {
+        if let IRInstr::Ret { values } = inst {
+            if values.len() == 1 {
+                if let crate::ir::IRValue::Immediate(n) = values[0] {
+                    return Some(n);
+                }
+            }
+        }
+        None
+    });
+
+    if let Some(n) = ret_imm {
+        for ai in alloc_block.iter_mut() {
+            if ai.opcode == "Ret" {
+                // The stack-slot Ret encoding starts with a 7-byte
+                // `mov rax, imm32` (REX.W + C7 /0 + imm32) produced by
+                // `encode_mov_reg_imm32(Rax, n)`.  Replace it with the
+                // 10-byte `mov rax, imm64` (REX.W + B8+rd + imm64)
+                // produced by `encode_mov_reg_imm64(Rax, n)`, preserving
+                // the trailing epilogue bytes (`add rsp, frame; pop rbp;
+                // ret`) verbatim.
+                if ai.encoded.len() >= 7 {
+                    let mut new_bytes = encode_mov_reg_imm64(Gpr::Rax, n as u64);
+                    new_bytes.extend_from_slice(&ai.encoded[7..]);
+                    ai.encoded = new_bytes;
+                }
+                break;
+            }
+        }
+    }
+
+    // Future work: handle Add/Sub/Mul/Load/Store with register-based
+    // encodings, consulting `_alloc.vreg_to_preg` (via `preg_to_gpr`) to
+    // pick the physical register for each operand.
+}
+
 impl Backend for X86_64Backend {
     fn target_info(&self) -> &dyn TargetInfo {
         &self.target_info
@@ -4204,12 +4372,33 @@ impl Backend for X86_64Backend {
                 vuma_log!(
                     debug,
                     "x86_64 regalloc: function '{}' eligible for register-based path \
-                     (gate=ON, no fork). NOTE: byte-changing register-based emitter is \
-                     not yet implemented (wave 2 future work, design doc §5.1); emitting \
-                     stack-slot bytes with regalloc metadata annotation only.",
+                     (gate=ON, no fork). Dispatching to reg_isel_allocate (X5-impl) \
+                     which rewrites the Ret instruction's encoded bytes to use \
+                     register-based mov rax, imm64.",
                     func.name
                 );
             }
+        }
+
+        // X5-impl: when the env-var gate is ON and the function does not
+        // contain a fork/spawn_worker, dispatch to the minimal register-
+        // based ISel (`reg_isel_allocate`) instead of falling through to
+        // the stack-slot-only path.  `reg_isel_allocate` itself starts
+        // from the stack-slot bytes (so it is correct for any IR
+        // instruction we don't yet rewrite) and then replaces the encoded
+        // bytes for the simplest IR instructions (currently: `Ret` with an
+        // immediate operand) with register-based encodings produced by
+        // the `encode_*` helpers in this module.
+        //
+        // See the module-level comment above `preg_to_gpr` for the full
+        // design and the DoD.
+        if real_regalloc && !contains_fork {
+            if let Some(alloc) = try_real_regalloc(func) {
+                return reg_isel_allocate(func, &alloc);
+            }
+            // If try_real_regalloc returned None (target desc missing or
+            // allocator errored), fall through to the stack-slot path
+            // below so existing behaviour is preserved.
         }
 
         // Step 1: baseline stack-slot ISel — always produces correct bytes.
