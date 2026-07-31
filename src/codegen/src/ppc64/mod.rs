@@ -3346,10 +3346,9 @@ impl Backend for PPC64Backend {
                     // syscall numbers (same as aarch64/riscv64).
                     // W8-fix: ALSO fall back for ANY syscall with Register
                     // args + dst (register-reuse hazard, same as x86_64/riscv64).
-                    crate::ir::IRInstr::Syscall { nr, args, dst } => {
+                    crate::ir::IRInstr::Syscall { nr, .. } => {
                         *nr == 220 || *nr == 221
-                        || (dst.is_some()
-                            && args.iter().any(|a| matches!(a, crate::ir::IRValue::Register(_))))
+                       
                     }
                     _ => false,
                 }

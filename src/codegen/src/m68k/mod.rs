@@ -4587,7 +4587,7 @@ impl Backend for M68kBackend {
 
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
         let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_M68K").map(|v| v != "0").unwrap_or(true);
-        let contains_fork = func.blocks.iter().any(|b| b.instructions.iter().any(|i| match i { crate::ir::IRInstr::Call { func: f, .. } => f == "spawn_worker" || f == "fork", crate::ir::IRInstr::Syscall { nr, args, dst } => *nr == 220 || *nr == 221 || (dst.is_some() && args.iter().any(|a| matches!(a, crate::ir::IRValue::Register(_)))), _ => false }));
+        let contains_fork = func.blocks.iter().any(|b| b.instructions.iter().any(|i| match i { crate::ir::IRInstr::Call { func: f, .. } => f == "spawn_worker" || f == "fork", crate::ir::IRInstr::Syscall { nr, .. } => *nr == 220 || *nr == 221, _ => false }));
         if real_regalloc && !contains_fork { if let Some(ar) = try_real_regalloc(func) { if let Ok(full) = reg_isel::emit_function_regalloc_full(func, &ar) { return Ok(full); } } }
         m68k_allocate_registers_ss(func)
     }
