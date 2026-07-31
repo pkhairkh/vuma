@@ -1610,11 +1610,18 @@ fn riscv64_target_desc() -> TargetDesc {
         RegDesc::gpr("x25", 25).callee_saved(),
         RegDesc::gpr("x26", 26).callee_saved(),
         RegDesc::gpr("x27", 27).callee_saved(),
-        // x28-x31: temporaries t3-t6 (caller-saved)
+        // x28-x31: temporaries t3-t6 (caller-saved).
+        // x30 (t5) and x31 (t6) are reserved as scratch registers for
+        // load_to_reg's immediate materialization in reg_isel.rs (t6 is
+        // the primary scratch; t5 is used as a secondary scratch when
+        // materializing full 64-bit immediates via LUI+ADDI+SLLI+ADD).
+        // Marking them not_allocatable prevents the allocator from
+        // assigning a live vreg to them, which would be clobbered by
+        // the next immediate load. (W7-fix: same pattern as x86_64 R11.)
         RegDesc::gpr("x28", 28),
         RegDesc::gpr("x29", 29),
-        RegDesc::gpr("x30", 30),
-        RegDesc::gpr("x31", 31),
+        RegDesc::gpr("x30", 30).not_allocatable(),
+        RegDesc::gpr("x31", 31).not_allocatable(),
         // f0-f7: temporaries ft0-ft7 (caller-saved)
         RegDesc::fpr("f0", 0),
         RegDesc::fpr("f1", 1),

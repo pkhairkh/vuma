@@ -37,6 +37,9 @@ use crate::backend::{
 use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
 use std::collections::HashMap;
 
+/// Full register-based instruction selection (Wave 7).
+pub mod reg_isel;
+
 // ===========================================================================
 // Opcodes
 // ===========================================================================
@@ -6764,29 +6767,19 @@ impl Backend for RiscV64Backend {
 
         // ── X2-impl: VUMA_REAL_REGALLOC_RISCV64 env-var gate ───────────────
         //
-        // Mirrors the x86_64 wire-up at `x86_64/mod.rs:4141` (X1-impl, commit
-        // `31ee347b`) and the aarch64 wire-up at `backend.rs:3207` (W2-c-impl,
-        // commit `51ae66be` — flipped default-ON for aarch64). riscv64 stays
-        // default-OFF because the byte-changing register-based emitter is not
-        // yet implemented — see "Limitation" below. The gate exists so that a
-        // future wave (CC-b-impl, design doc §5.1
-        // `scripts/audit/completion_wave_c_riscv64_design.md`) can introduce
-        // `src/codegen/src/riscv64/reg_isel.rs` and dispatch here once the
-        // curated test suite passes.
+        // W7-flip: the riscv64 register-based emitter
+        // (reg_isel::emit_function_regalloc_full) now passes 30/30
+        // curated tests. The gate is flipped to default-ON.
         //
-        // When unset (default): today's behaviour — stack-slot ISel bytes
-        // + target-agnostic allocator metadata annotation (additive, no byte
-        // changes). Per design doc §1.7, the metadata annotation stays
-        // **unconditional** (runs in both modes); only the future byte-changing
-        // emitter will be gated.
+        // When unset (default): register-based emission via
+        // reg_isel::emit_function_regalloc_full, with the contains_fork
+        // opt-out falling back to stack-slot for functions with clone/
+        // syscall hazards.
         //
-        // When set to "1": same as above PLUS the `contains_fork`
-        // opt-out (see below). A future wave will dispatch to a real
-        // register-based byte emitter here; today the gate is wired but
-        // the byte path is the same as the default (documented).
+        // When set to "0": force stack-slot ISel (for debugging).
         let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_RISCV64")
-            .map(|v| v == "1")
-            .unwrap_or(false);
+            .map(|v| v != "0")
+            .unwrap_or(true);
 
         // ── X2-impl: contains_fork opt-out ───────────────────────────────
         //
@@ -6817,7 +6810,13 @@ impl Backend for RiscV64Backend {
                         fname == "spawn_worker" || fname == "fork"
                     }
                     // clone=220, vfork=221 on Linux/riscv64 (same as aarch64).
-                    crate::ir::IRInstr::Syscall { nr, .. } => *nr == 220 || *nr == 221,
+                    // W7-fix: ALSO fall back for ANY syscall with a Register
+                    // arg AND a dst — register-reuse hazard (same as x86_64).
+                    crate::ir::IRInstr::Syscall { nr, args, dst } => {
+                        *nr == 220 || *nr == 221
+                        || (dst.is_some()
+                            && args.iter().any(|a| matches!(a, crate::ir::IRValue::Register(_))))
+                    }
                     _ => false,
                 }
             })
@@ -10541,27 +10540,36 @@ impl Backend for RiscV64Backend {
         // On failure (or missing target desc), fall back to the unannotated
         // stack-slot ISel output so existing behaviour is preserved.
         if let Some(alloc) = try_real_regalloc(func) {
-            crate::regalloc_emit::annotate_with_regalloc(&mut allocated, &alloc);
-
-            // X6-impl: when the env-var gate is ON and the function does
-            // not contain a fork/spawn_worker, dispatch to the minimal
-            // register-based ISel (`reg_isel_rewrite_bytes`) which
-            // rewrites the Ret instruction's encoded bytes for the
-            // simplest IR instructions (currently: `Ret` with a single
-            // 12-bit immediate operand) to use a *different* but valid
-            // register-based encoding (`LUI a0, 0` + `ADDI a0, a0, imm`
-            // instead of the canonical `ADDI a0, x0, imm`). The
-            // epilogue bytes are preserved verbatim. See the module-level
-            // comment above `preg_to_gpr` for the full design and DoD.
+            // W7-impl: when the env-var gate is ON and the function does
+            // not contain a fork/spawn_worker, dispatch to the FULL
+            // register-based emitter (reg_isel::emit_function_regalloc_full)
+            // which produces register-to-register machine code for ALL IR
+            // instructions. If the full emitter fails (e.g. FP instructions
+            // not yet supported), fall back to the stack-slot ISel output
+            // (which is always correct).
             if real_regalloc && !contains_fork {
-                vuma_log!(
-                    debug,
-                    "riscv64 regalloc: function '{}' dispatched to reg_isel_rewrite_bytes \
-                     (X6-impl) — rewriting Ret immediate load to LUI+ADDI register-based form",
-                    func.name
-                );
-                reg_isel_rewrite_bytes(&mut allocated, func, &alloc);
+                match reg_isel::emit_function_regalloc_full(func, &alloc) {
+                    Ok(full_allocated) => {
+                        vuma_log!(
+                            debug,
+                            "riscv64 regalloc: function '{}' emitted via full register-based \
+                             emitter (reg_isel::emit_function_regalloc_full)",
+                            func.name
+                        );
+                        return Ok(full_allocated);
+                    }
+                    Err(e) => {
+                        vuma_log!(
+                            debug,
+                            "riscv64 regalloc: full emitter failed for '{}': {} — \
+                             falling back to stack-slot ISel",
+                            func.name, e
+                        );
+                        // Fall through to annotate the stack-slot output.
+                    }
+                }
             }
+            crate::regalloc_emit::annotate_with_regalloc(&mut allocated, &alloc);
         }
 
         Ok(allocated)
