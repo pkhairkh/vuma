@@ -46,6 +46,9 @@
 //! effects. Both are future work (see `docs/architecture/caveats.md` §5 row 1
 //! and `docs/architecture/ipc-audit.md` §4).
 
+
+pub mod reg_isel;
+
 use crate::backend::{
     AllocatedBlock, AllocatedFunction, AllocatedInstruction, AllocatedProgram, Backend,
     BackendError, RelocationEntry, Wasm32TargetInfo,

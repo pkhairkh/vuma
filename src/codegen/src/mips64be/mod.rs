@@ -74,6 +74,9 @@
 
 pub use crate::mips64::{Fpr, Gpr, Instruction, Mips64Backend};
 
+
+pub mod reg_isel;
+
 use crate::backend::{AllocatedFunction, AllocatedProgram, Backend, BackendError};
 use crate::ir::IRFunction;
 

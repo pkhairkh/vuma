@@ -1437,14 +1437,21 @@ fn aarch64_target_desc() -> TargetDesc {
         RegDesc::gpr("X7", 7).arg(7),
         // X8: indirect result location register (caller-saved)
         RegDesc::gpr("X8", 8),
-        // X9-X15: caller-saved temporaries
+        // X9-X14: caller-saved temporaries
         RegDesc::gpr("X9", 9),
         RegDesc::gpr("X10", 10),
         RegDesc::gpr("X11", 11),
         RegDesc::gpr("X12", 12),
         RegDesc::gpr("X13", 13),
         RegDesc::gpr("X14", 14),
-        RegDesc::gpr("X15", 15),
+        // X15: dedicated spill-scratch register for the register-based
+        // emitter (reg_isel.rs) and for `LinearScanAllocator`'s spill/reload
+        // code. Marking it `not_allocatable` prevents the target-agnostic
+        // allocator from assigning a vreg to X15, which would collide with
+        // spill-scratch usage. X15 is caller-saved per AAPCS64, so no
+        // prologue/epilogue save is required. Mirrors the
+        // `SPILL_SCRATCH_GPR = Register::X15` constant in regalloc.rs:1267.
+        RegDesc::gpr("X15", 15).not_allocatable(),
         // X16-X17: intra-procedure call scratch (IP0/IP1), not allocatable
         RegDesc::gpr("X16", 16).not_allocatable(),
         RegDesc::gpr("X17", 17).not_allocatable(),
@@ -1461,10 +1468,18 @@ fn aarch64_target_desc() -> TargetDesc {
         RegDesc::gpr("X26", 26).callee_saved(),
         RegDesc::gpr("X27", 27).callee_saved(),
         RegDesc::gpr("X28", 28).callee_saved(),
-        // X29: frame pointer (callee-saved)
-        RegDesc::gpr("X29", 29).frame_pointer().callee_saved(),
-        // X30: link register, not allocatable
-        RegDesc::gpr("X30", 30).link_register(),
+        // X29: frame pointer (callee-saved). Marked `not_allocatable` so
+        // the target-agnostic allocator never assigns a vreg to X29 —
+        // otherwise the prologue's `STP X29, X30, ...` save would
+        // overwrite an in-use vreg. `frame_pointer()` alone does NOT
+        // clear `is_allocatable` (see `RegDesc::frame_pointer` at
+        // target_desc.rs:1140), so the explicit `.not_allocatable()` is
+        // required — same pattern as ppc64's R31 (target_desc.rs:2572)
+        // and riscv64's x8 (target_desc.rs:1595).
+        RegDesc::gpr("X29", 29).frame_pointer().callee_saved().not_allocatable(),
+        // X30: link register. Marked `not_allocatable` so the allocator
+        // does not assign a vreg to LR — `BL` clobbers it transparently.
+        RegDesc::gpr("X30", 30).link_register().not_allocatable(),
         // SP: stack pointer, not allocatable
         RegDesc::gpr("SP", 31).stack_pointer(),
         // XZR: zero register, not allocatable

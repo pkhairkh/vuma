@@ -3356,6 +3356,37 @@ impl Backend for AArch64Backend {
         // On failure (or missing target desc), fall back to the unannotated
         // stack-slot ISel output so existing behaviour is preserved.
         if let Some(alloc) = try_real_regalloc(func) {
+            // W7-impl: when the env-var gate is ON and the function does
+            // not contain a fork/spawn_worker, dispatch to the FULL
+            // register-based emitter (aarch64::reg_isel::emit_function_regalloc_full)
+            // which produces register-to-register machine code for ALL IR
+            // instructions. If the full emitter fails (e.g. FP instructions
+            // not yet supported, encoding error), fall back to the
+            // stack-slot ISel output (which is always correct). This
+            // mirrors the dispatch pattern in riscv64 (riscv64/mod.rs:10549)
+            // and brings aarch64 in line with all other VUMA backends.
+            if real_regalloc && !contains_fork {
+                match crate::aarch64::reg_isel::emit_function_regalloc_full(func, &alloc) {
+                    Ok(full_allocated) => {
+                        vuma_log!(
+                            debug,
+                            "aarch64 regalloc: function '{}' emitted via full register-based \
+                             emitter (aarch64::reg_isel::emit_function_regalloc_full)",
+                            func.name
+                        );
+                        return Ok(full_allocated);
+                    }
+                    Err(e) => {
+                        vuma_log!(
+                            debug,
+                            "aarch64 regalloc: full emitter failed for '{}': {} — \
+                             falling back to stack-slot ISel",
+                            func.name, e
+                        );
+                        // Fall through to annotate the stack-slot output.
+                    }
+                }
+            }
             crate::regalloc_emit::annotate_with_regalloc(&mut allocated, &alloc);
         }
 
