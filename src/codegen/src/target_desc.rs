@@ -2100,10 +2100,15 @@ fn arm32_target_desc() -> TargetDesc {
         RegDesc::gpr("R8", 8).callee_saved(),
         RegDesc::gpr("R9", 9).callee_saved(),
         RegDesc::gpr("R10", 10).callee_saved(),
-        // R11: frame pointer (callee-saved)
-        RegDesc::gpr("R11", 11).frame_pointer().callee_saved(),
-        // R12: intra-procedure scratch (IP, caller-saved)
-        RegDesc::gpr("R12", 12),
+        // R11: frame pointer (callee-saved). Marked not_allocatable so
+        // the regalloc never assigns vregs to the frame pointer.
+        // (W11-fix: same pattern as x86_64 RBP, riscv64 S0, ppc64 R31.)
+        RegDesc::gpr("R11", 11).frame_pointer().callee_saved().not_allocatable(),
+        // R12: intra-procedure scratch (IP, caller-saved). Reserved as
+        // the dedicated scratch register for load_to_reg's immediate
+        // materialization in reg_isel.rs. (W11-fix: same pattern as
+        // x86_64 R11, riscv64 T6.)
+        RegDesc::gpr("R12", 12).not_allocatable(),
         // R13: stack pointer
         RegDesc::gpr("R13", 13).stack_pointer(),
         // R14: link register

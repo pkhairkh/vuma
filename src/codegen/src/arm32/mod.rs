@@ -48,6 +48,27 @@ use crate::backend::{
 use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRType, UnaryOpKind};
 use std::collections::HashMap;
 
+/// Run the target-agnostic linear-scan allocator on `func` (Wave 11).
+fn try_real_regalloc(
+    func: &IRFunction,
+) -> Option<crate::regalloc::RegAllocResult> {
+    let registry = crate::target_desc::TargetDescRegistry::new();
+    let target = registry.get("arm32")?;
+    let allocator = crate::regalloc::TargetAgnosticRegAlloc::new(target);
+    match allocator.allocate_function(func) {
+        Ok(result) => Some(result),
+        Err(e) => {
+            vuma_log!(
+                debug,
+                "arm32 allocate_registers: real regalloc failed for '{}': {}, \
+                 falling back to stack-slot ISel",
+                func.name, e
+            );
+            None
+        }
+    }
+}
+
 // Global set of function names that return 64-bit values (I64/U64).
 // Populated by compile_dump/compile_to_binary_direct before allocation,
 // used by allocate_registers to determine whether to store R1 (high word)
@@ -9726,7 +9747,7 @@ impl Backend for Arm32Backend {
         let code_size: usize = instructions.iter().map(|i| i.encoded.len()).sum();
 
         // Build single block (ARM32 doesn't use block-level offsets for relocation)
-        Ok(AllocatedFunction {
+        let allocated = AllocatedFunction {
             name: func_name,
             blocks: vec![AllocatedBlock {
                 label: "entry".to_string(),
@@ -9734,20 +9755,58 @@ impl Backend for Arm32Backend {
                 code_offset: 0,
             }],
             frame_size,
-            // Callee-saved register list is empty: the stack-slot ISel keeps
-            // all virtual-register state on the stack (no callee-saved GPRs
-            // or DPRs are assigned to vregs), so there are no caller-owned
-            // registers that the function needs to report as having
-            // preserved. R11 (FP) and LR are saved/restored directly via
-            // explicit LDR/STR in the prologue/epilogue rather than through
-            // this callee_saved vector.
             callee_saved: vec![],
             spill_slots: all_vreg_ids.len(),
             code_size,
             relocations,
             wasm_func_type: None,
             wasm_locals: None,
-        })
+        };
+
+        // ── Wave 11: Full register-based emitter dispatch ──
+        let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_ARM32")
+            .map(|v| v != "0")
+            .unwrap_or(true); // default ON
+
+        let contains_fork = func.blocks.iter().any(|block| {
+            block.instructions.iter().any(|inst| {
+                match inst {
+                    crate::ir::IRInstr::Call { func: fname, .. } => {
+                        fname == "spawn_worker" || fname == "fork"
+                    }
+                    crate::ir::IRInstr::Syscall { nr, args, dst } => {
+                        *nr == 220 || *nr == 221
+                        || (dst.is_some()
+                            && args.iter().any(|a| matches!(a, crate::ir::IRValue::Register(_))))
+                    }
+                    _ => false,
+                }
+            })
+        });
+
+        if real_regalloc && !contains_fork {
+            if let Some(alloc_result) = try_real_regalloc(func) {
+                match reg_isel::emit_function_regalloc_full(func, &alloc_result) {
+                    Ok(full_allocated) => return Ok(full_allocated),
+                    Err(e) => {
+                        vuma_log!(
+                            debug,
+                            "arm32 regalloc: full emitter failed for '{}': {} — \
+                             falling back to stack-slot ISel",
+                            func.name, e
+                        );
+                    }
+                }
+            }
+        }
+
+        if let Some(alloc_result) = try_real_regalloc(func) {
+            let mut annotated = allocated;
+            crate::regalloc_emit::annotate_with_regalloc(&mut annotated, &alloc_result);
+            Ok(annotated)
+        } else {
+            Ok(allocated)
+        }
     }
 
     fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError> {
@@ -12208,3 +12267,5 @@ fn encode_vcvt_u32_f64(sd: u8, dm: u8) -> [u8; 4] {
 }
 
 pub mod disasm;
+/// Full register-based instruction selection (Wave 11).
+pub mod reg_isel;
