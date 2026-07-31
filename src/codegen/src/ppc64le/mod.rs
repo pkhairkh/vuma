@@ -117,6 +117,9 @@
 // Re-export the PPC64 ISA primitives — they are identical for ppc64le.
 pub use crate::ppc64::{CrField, Fpr, Gpr, Instruction};
 
+
+pub mod reg_isel;
+
 use crate::backend::{AllocatedFunction, AllocatedProgram, Backend, BackendError};
 use crate::ir::IRFunction;
 use crate::ppc64::PPC64Backend;

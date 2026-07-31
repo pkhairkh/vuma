@@ -55,6 +55,9 @@
 
 pub use crate::arm32::{Arm32Backend, Gpr, Instruction};
 
+
+pub mod reg_isel;
+
 use crate::backend::{AllocatedFunction, AllocatedProgram, Backend, BackendError};
 use crate::ir::IRFunction;
 
