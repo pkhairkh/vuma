@@ -1964,9 +1964,15 @@ fn x86_64_target_desc() -> TargetDesc {
         RegDesc::gpr("R8", 8).arg(4),
         // R9: arg6 (caller-saved)
         RegDesc::gpr("R9", 9).arg(5),
-        // R10-R11: caller-saved temporaries
+        // R10-R11: caller-saved temporaries.
+        // R11 is reserved as the dedicated scratch register for
+        // `load_to_reg` in reg_isel.rs (used to materialize immediates
+        // before a two-operand ALU op). Marking it `not_allocatable`
+        // prevents the allocator from assigning a live vreg to R11,
+        // which would be clobbered by the next immediate load.
+        // (Wave-1-fix: same pattern as RBP not_allocatable.)
         RegDesc::gpr("R10", 10),
-        RegDesc::gpr("R11", 11),
+        RegDesc::gpr("R11", 11).not_allocatable(),
         // R12-R15: callee-saved
         RegDesc::gpr("R12", 12).callee_saved(),
         RegDesc::gpr("R13", 13).callee_saved(),
