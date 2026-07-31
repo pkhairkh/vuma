@@ -6607,6 +6607,88 @@ impl Backend for RiscV64Backend {
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
         let func_name = func.name.clone();
 
+        // ── X2-impl: VUMA_REAL_REGALLOC_RISCV64 env-var gate ───────────────
+        //
+        // Mirrors the x86_64 wire-up at `x86_64/mod.rs:4141` (X1-impl, commit
+        // `31ee347b`) and the aarch64 wire-up at `backend.rs:3207` (W2-c-impl,
+        // commit `51ae66be` — flipped default-ON for aarch64). riscv64 stays
+        // default-OFF because the byte-changing register-based emitter is not
+        // yet implemented — see "Limitation" below. The gate exists so that a
+        // future wave (CC-b-impl, design doc §5.1
+        // `scripts/audit/completion_wave_c_riscv64_design.md`) can introduce
+        // `src/codegen/src/riscv64/reg_isel.rs` and dispatch here once the
+        // curated test suite passes.
+        //
+        // When unset (default): today's behaviour — stack-slot ISel bytes
+        // + target-agnostic allocator metadata annotation (additive, no byte
+        // changes). Per design doc §1.7, the metadata annotation stays
+        // **unconditional** (runs in both modes); only the future byte-changing
+        // emitter will be gated.
+        //
+        // When set to "1": same as above PLUS the `contains_fork`
+        // opt-out (see below). A future wave will dispatch to a real
+        // register-based byte emitter here; today the gate is wired but
+        // the byte path is the same as the default (documented).
+        let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_RISCV64")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+
+        // ── X2-impl: contains_fork opt-out ───────────────────────────────
+        //
+        // Same hazard as aarch64's R1-b2-fix (`backend.rs:3218-3242`) and
+        // x86_64's X1-impl (`x86_64/mod.rs:4165-4192`): a register-based
+        // prologue's callee-saved `sd s1, ...; sd s2, ...` / `ld ...; ld s2;
+        // ld s1` doesn't interact correctly with `clone()` because the child
+        // process runs with a different register state than the parent.
+        //
+        // riscv64 syscall numbers (Linux/riscv64) — SAME as aarch64, DIFFERENT
+        // from x86_64 (per CD-a-audit finding, design doc §1.5):
+        //   clone  = 220   (aarch64: 220, x86_64: 56)
+        //   vfork  = 221   (aarch64: 221, x86_64: 58)
+        // RISC-V uses the generic Linux unified syscall ABI (newer ports
+        // share the asm-generic table with aarch64), unlike x86_64 which
+        // retains its historical numbers. The existing inline `spawn_worker`
+        // arm at `riscv64.rs:8070-8077` emits `clone=220` via
+        // `Addi { rd: A7, rs1: Zero, imm: 220 }`, confirming the convention.
+        //
+        // spawn_worker is lowered by `expand_spawn_worker` (ipc_lowering.rs)
+        // to `Syscall{nr: 220, ...}` on riscv64. By the time
+        // `allocate_registers` runs, the `Call{func: "spawn_worker"}` has
+        // been replaced; we still detect both forms defensively.
+        let contains_fork = func.blocks.iter().any(|block| {
+            block.instructions.iter().any(|inst| {
+                match inst {
+                    crate::ir::IRInstr::Call { func: fname, .. } => {
+                        fname == "spawn_worker" || fname == "fork"
+                    }
+                    // clone=220, vfork=221 on Linux/riscv64 (same as aarch64).
+                    crate::ir::IRInstr::Syscall { nr, .. } => *nr == 220 || *nr == 221,
+                    _ => false,
+                }
+            })
+        });
+
+        if real_regalloc {
+            if contains_fork {
+                vuma_log!(
+                    debug,
+                    "riscv64 regalloc: function '{}' contains spawn_worker/fork \
+                     (clone=220/vfork=221 on Linux/riscv64); falling back to stack-slot \
+                     ISel (fork+regalloc not supported — same hazard as aarch64 R1-b2-fix)",
+                    func.name
+                );
+            } else {
+                vuma_log!(
+                    debug,
+                    "riscv64 regalloc: function '{}' eligible for register-based path \
+                     (gate=ON, no fork). NOTE: byte-changing register-based emitter is \
+                     not yet implemented (wave CC-b-impl future work, design doc §5.1); \
+                     emitting stack-slot bytes with regalloc metadata annotation only.",
+                    func.name
+                );
+            }
+        }
+
         // ── Phase 1: Collect all vreg IDs and compute stack layout ──
 
         let mut all_vreg_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
