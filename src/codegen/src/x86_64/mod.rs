@@ -4394,7 +4394,24 @@ impl Backend for X86_64Backend {
         // design and the DoD.
         if real_regalloc && !contains_fork {
             if let Some(alloc) = try_real_regalloc(func) {
-                return reg_isel_allocate(func, &alloc);
+                // X9-impl: dispatch to the FULL register-based emitter
+                // (reg_isel::emit_function_regalloc_full) which produces
+                // register-to-register machine code for ALL IR instructions.
+                // If the full emitter fails (e.g. FP instructions not yet
+                // supported), fall back to the minimal X5-impl path which
+                // starts from stack-slot bytes and rewrites the Return.
+                match reg_isel::emit_function_regalloc_full(func, &alloc) {
+                    Ok(allocated) => return Ok(allocated),
+                    Err(e) => {
+                        vuma_log!(
+                            debug,
+                            "x86_64 reg_isel_full failed for '{}': {}; \
+                             falling back to stack-slot ISel",
+                            func.name, e
+                        );
+                        // Fall through to stack-slot path.
+                    }
+                }
             }
             // If try_real_regalloc returned None (target desc missing or
             // allocator errored), fall through to the stack-slot path
@@ -5969,3 +5986,4 @@ mod tests {
 }
 pub mod disasm;
 pub mod stack_slot_isel;
+pub mod reg_isel;
