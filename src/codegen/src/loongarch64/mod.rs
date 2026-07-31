@@ -52,6 +52,14 @@ use crate::ir::IRInstr;
 use std::collections::HashMap;
 use std::fmt;
 
+/// Run the target-agnostic linear-scan allocator (Wave 13).
+fn try_real_regalloc(func: &IRFunction) -> Option<crate::regalloc::RegAllocResult> {
+    let registry = crate::target_desc::TargetDescRegistry::new();
+    let target = registry.get("loongarch64")?;
+    let allocator = crate::regalloc::TargetAgnosticRegAlloc::new(target);
+    allocator.allocate_function(func).ok()
+}
+
 // ===========================================================================
 // General-Purpose Registers
 // ===========================================================================
@@ -2619,6 +2627,37 @@ impl Backend for LoongArch64Backend {
     }
 
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
+        // ── Wave 13: Full register-based emitter dispatch ──
+        let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_LOONGARCH64")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+
+        let contains_fork = func.blocks.iter().any(|block| {
+            block.instructions.iter().any(|inst| {
+                match inst {
+                    crate::ir::IRInstr::Call { func: fname, .. } => {
+                        fname == "spawn_worker" || fname == "fork"
+                    }
+                    crate::ir::IRInstr::Syscall { nr, args, dst } => {
+                        *nr == 220 || *nr == 221
+                        || (dst.is_some()
+                            && args.iter().any(|a| matches!(a, crate::ir::IRValue::Register(_))))
+                    }
+                    _ => false,
+                }
+            })
+        });
+
+        if real_regalloc && !contains_fork {
+            if let Some(alloc_result) = try_real_regalloc(func) {
+                match reg_isel::emit_function_regalloc_full(func, &alloc_result) {
+                    Ok(full) => return Ok(full),
+                    Err(e) => {
+                        vuma_log!(debug, "loongarch64 regalloc: full emitter failed for '{}': {} — falling back to stack-slot", func.name, e);
+                    }
+                }
+            }
+        }
         stack_slot_isel::allocate_registers(func)
     }
 
@@ -6939,6 +6978,8 @@ mod tests {
     }
 }
 pub mod disasm;
+/// Full register-based instruction selection (Wave 13).
+pub mod reg_isel;
 // NOTE: `reg_alloc_isel` was an alternate register-allocator ISel that is
 // superseded by `stack_slot_isel`. The module declaration is commented out
 // because nothing in the crate references it; keeping it would just force

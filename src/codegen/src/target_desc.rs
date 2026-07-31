@@ -1838,7 +1838,9 @@ fn loongarch64_target_desc() -> TargetDesc {
         RegDesc::gpr("r9", 9).arg(5),
         RegDesc::gpr("r10", 10).arg(6),
         RegDesc::gpr("r11", 11).arg(7),
-        // r12-r20: temporaries t0-t8 (caller-saved)
+        // r12-r20: temporaries t0-t8 (caller-saved).
+        // r19 (t7) and r20 (t8) are reserved as scratch for immediate
+        // materialization in reg_isel.rs (W13-fix).
         RegDesc::gpr("r12", 12),
         RegDesc::gpr("r13", 13),
         RegDesc::gpr("r14", 14),
@@ -1846,12 +1848,12 @@ fn loongarch64_target_desc() -> TargetDesc {
         RegDesc::gpr("r16", 16),
         RegDesc::gpr("r17", 17),
         RegDesc::gpr("r18", 18),
-        RegDesc::gpr("r19", 19),
-        RegDesc::gpr("r20", 20),
+        RegDesc::gpr("r19", 19).not_allocatable(),
+        RegDesc::gpr("r20", 20).not_allocatable(),
         // r21: temp / PIC register (caller-saved)
         RegDesc::gpr("r21", 21),
-        // r22: frame pointer (callee-saved)
-        RegDesc::gpr("r22", 22).frame_pointer().callee_saved(),
+        // r22: frame pointer (callee-saved). not_allocatable (W13-fix).
+        RegDesc::gpr("r22", 22).frame_pointer().callee_saved().not_allocatable(),
         // r23-r31: saved s0-s8 (callee-saved)
         RegDesc::gpr("r23", 23).callee_saved(),
         RegDesc::gpr("r24", 24).callee_saved(),
