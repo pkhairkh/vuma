@@ -47,6 +47,9 @@
 //! verifies that a `Syscall { nr: 1, .. }` produces non-empty encoded
 //! output on this backend.
 
+
+pub mod reg_isel;
+
 use crate::backend::{AArch64Backend, AllocatedFunction, AllocatedProgram, Backend, BackendError};
 use crate::ir::IRFunction;
 

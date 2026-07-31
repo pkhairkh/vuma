@@ -43,6 +43,16 @@ use crate::ir::{BinOpKind, CastKind, IRInstr, IRTerminator, IRType, IRValue};
 use crate::CodegenError;
 use crate::Result;
 
+/// Full register-based instruction selection (Wave 7).
+///
+/// Mirrors the `reg_isel.rs` template used by every other VUMA backend
+/// (riscv64, x86_64, ppc64, s390x, loongarch64, mips64, sparc64, hppa,
+/// arm32, m68k, alpha, x86_32, riscv32). Consumes a target-agnostic
+/// `RegAllocResult` from `TargetAgnosticRegAlloc` and emits real AArch64
+/// machine code (prologue / body / epilogue) with vregs replaced by the
+/// allocator's assigned physical registers.
+pub mod reg_isel;
+
 // ---------------------------------------------------------------------------
 // Register Width
 // ---------------------------------------------------------------------------
