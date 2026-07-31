@@ -1,6 +1,6 @@
-import Pmt.ArenaInv
--- The task specification lists `import Pmt.CMRA` and `import Pmt.WP`
--- alongside `import Pmt.ArenaInv`. Those two modules transitively
+import PMT.Faithful.ArenaInv
+-- The task specification lists `import PMT.Faithful.CMRA` and `import PMT.Faithful.WP`
+-- alongside `import PMT.Faithful.ArenaInv`. Those two modules transitively
 -- import `Pmt.Sep`, which declares its own `Pmt.Ptsto` structure.
 -- `Pmt.ArenaInv` also declares `Pmt.Ptsto` (a `Prop`-valued marker
 -- used by `CapBnd`'s `auth`/`agree` ghosts). Importing both families

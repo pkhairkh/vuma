@@ -1,5 +1,5 @@
-import Pmt.WP
-import Pmt.IrSubset
+import PMT.Faithful.WP
+import PMT.Faithful.IrSubset
 -- `Pmt.ArenaInv` is *not* imported here, even though the task spec lists
 -- it: `Pmt.ArenaInv` declares `Pmt.Ptsto` as a `Prop`-valued marker, while
 -- `Pmt.WP` transitively imports `Pmt.CMRA` → `Pmt.Sep`, which declares

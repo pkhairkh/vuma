@@ -3,10 +3,11 @@
 # This file is the entry point for `lake build` from within `proof/`.
 # It declares a single Lean library `PMT` rooted at `PMT.lean`, which
 # re-exports the multi-module layout:
-#   PMT/Basic.lean     (§1-§2: Arena, Field, Layout, CapacityInvariant)
-#   PMT/Field.lean     (§3-§4: FieldBounds, Linearity, LinearResource)
-#   PMT/Liveness.lean  (§5-§6: Liveness predicate, GuardPage)
-#   PMT/Soundness.lean (§7:   Execution model, pmt_soundness theorem)
+#   PMT/Basic.lean          (§1-§2: Arena, Field, Layout, CapacityInvariant)
+#   PMT/Field.lean          (§3-§4: FieldBounds, Linearity, LinearResource)
+#   PMT/Liveness.lean       (§5-§6: Liveness predicate, GuardPage)
+#   PMT/Soundness.lean      (§7:   Execution model, pmt_soundness theorem)
+#   PMT/Faithful/*.lean     (faithful model: USize, Ptr, Arena, simulation)
 # and the test harness modules under `PMT/Test/`:
 #   PMT/Test/ValidProgram.lean      (W7-A: valid 2-step happy path)
 #   PMT/Test/UafProgram.lean        (W7-B: UAF trap detection)
@@ -14,7 +15,7 @@
 #   PMT/Test/EmptyProgram.lean      (W7-D: empty-program nil case)
 #   PMT/Test/MultiStepProgram.lean  (W7-E: multi-step capacity preservation)
 # The `test` executable (`lake exe test`) imports all test modules and
-# prints a success banner — invoked by `make proof-test` / `just proof-test`.
+# prints a success banner — invoked by `just proof-test`.
 #
 # Run: `cd proof && lake build`  (builds PMT lib + check-pmt + test exe)
 # Run: `cd proof && lake exe test`  (runs the test harness)
@@ -27,51 +28,28 @@ keywords = ["vuma", "pmt", "memory-safety", "formal-verification"]
 # when running bare `lake build` (Lake 5.x requires explicit
 # `defaultTargets` — otherwise `lake build` is a no-op).
 # The `test` exe is NOT a default target (it's invoked on-demand by
-# `make proof-test` / `lake exe test`) so `lake build` stays focused on
+# `just proof-test` / `lake exe test`) so `lake build` stays focused on
 # the proof library + check-pmt.
-defaultTargets = ["PMT", "Pmt", "check-pmt"]
+defaultTargets = ["PMT", "check-pmt"]
 
 [leanOptions]
-# Allow `sorry` in development but emit a warning (caught by check-lean.sh).
-# To enforce sorry-free builds, switch to `--allow-unsolved-tactics=false`.
-# For now we keep the default (warning only) since the proof is sorry-free
-# but the linter is informational.
 pp.unicode.fun = true
 autoImplicit = false
 relaxedAutoImplicit = false
 
 # stdlib is implicit in Lean 4 — no `[[require]]` block needed.
-# (Removing the previous `[[require]] name = "stdlib"` block which
-# caused "package not found on Reservoir" since stdlib ships with Lean.)
 
 [[lean_lib]]
 name = "PMT"
-# The root module is `PMT.lean` which imports all submodules:
+# Root module is `PMT.lean` which imports all submodules:
 #   PMT.Basic, PMT.Field, PMT.Liveness, PMT.Soundness,
-#   PMT.Test.{ValidProgram, UafProgram, OverflowProgram,
-#             EmptyProgram, MultiStepProgram}
-# Lake will discover and build all of them transitively.
-
-[[lean_lib]]
-name = "Pmt"
-# Faithful model: USize (Fin 2^64), Ptr (provenance), Arena, Layout,
-# 3-instruction simulation relation, Iris [cap_bnd] and [guard]
-# invariants, arena overflow proof with Fin arithmetic, UAF proof
-# with pointer aliasing. All sorry-free.
+#   PMT.Faithful.* (merged from the former Pmt/ directory),
+#   PMT.Test.*
 
 [[lean_exe]]
 name = "check-pmt"
-# `root` is the Lean module name (without `.lean`) that contains `main`.
-# We use `check_pmt` (underscore) because Lean module names cannot contain
-# hyphens, while the exe *name* (`check-pmt`) keeps the project's
-# conventional hyphen style for CLI invocations (`lake exe check-pmt`).
 root = "check_pmt"
 
 [[lean_exe]]
 name = "test"
-# Test harness runner. Imports all PMT.Test.* modules (which are
-# also built as part of the `PMT` library) and prints a success banner.
-# Invoked by `lake exe test` (or `make proof-test` / `just proof-test`
-# from the repo root). NOT a default target — run explicitly.
-# Module `Test.Main` lives at `Test/Main.lean` (Lake resolves the dot).
 root = "Test.Main"

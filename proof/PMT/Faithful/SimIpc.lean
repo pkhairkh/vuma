@@ -1,4 +1,4 @@
-import Pmt.IrSubset
+import PMT.Faithful.IrSubset
 
 /-!
 # `SimIpc` — simulation lemmas for the IPC channel instructions
