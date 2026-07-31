@@ -271,6 +271,9 @@ fn emit_instruction(code: &mut Vec<u8>, instr: &IRInstr, alloc: &RegAllocResult,
                 BinOpKind::Shl => code.extend_from_slice(&Instruction::SllD { rd: d, rj: l, rk: r }.encode()),
                 BinOpKind::ShrL => code.extend_from_slice(&Instruction::SrlD { rd: d, rj: l, rk: r }.encode()),
                 BinOpKind::ShrA => code.extend_from_slice(&Instruction::SraD { rd: d, rj: l, rk: r }.encode()),
+                BinOpKind::Add => code.extend_from_slice(&Instruction::AddD { rd: d, rj: l, rk: r }.encode()),
+                BinOpKind::Sub => code.extend_from_slice(&Instruction::SubD { rd: d, rj: l, rk: r }.encode()),
+                BinOpKind::Mul => code.extend_from_slice(&Instruction::MulD { rd: d, rj: l, rk: r }.encode()),
                 _ => code.extend_from_slice(&Instruction::AddD { rd: d, rj: l, rk: r }.encode()),
             }
             reads.push(phys(l)); reads.push(phys(r)); writes.push(phys(d)); "binop".to_string()

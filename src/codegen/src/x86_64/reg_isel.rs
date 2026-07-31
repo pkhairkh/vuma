@@ -703,6 +703,66 @@ fn emit_instruction(
                     writes.push(phys(dst_reg));
                     if *op == BinOpKind::ShrA { "sar" } else { "shr" }.to_string()
                 }
+                BinOpKind::Add => {
+                    let dst_reg = load_to_reg(dst, alloc, code);
+                    let lhs_reg = load_to_reg(lhs, alloc, code);
+                    if !matches!(resolve_value(lhs, alloc), ResolvedVal::Reg(r) if r == dst_reg) {
+                        code.extend(encode_mov_reg_reg(dst_reg, lhs_reg));
+                    }
+                    match resolve_value(rhs, alloc) {
+                        ResolvedVal::Reg(rhs_reg) => {
+                            code.extend(encode_add_reg_reg(dst_reg, rhs_reg));
+                            reads.push(phys(rhs_reg));
+                        }
+                        ResolvedVal::Imm(imm) => {
+                            code.extend(encode_add_reg_imm32(dst_reg, imm as i32));
+                        }
+                    }
+                    reads.push(phys(lhs_reg));
+                    writes.push(phys(dst_reg));
+                    "add".to_string()
+                }
+                BinOpKind::Sub => {
+                    let dst_reg = load_to_reg(dst, alloc, code);
+                    let lhs_reg = load_to_reg(lhs, alloc, code);
+                    if !matches!(resolve_value(lhs, alloc), ResolvedVal::Reg(r) if r == dst_reg) {
+                        code.extend(encode_mov_reg_reg(dst_reg, lhs_reg));
+                    }
+                    match resolve_value(rhs, alloc) {
+                        ResolvedVal::Reg(rhs_reg) => {
+                            code.extend(encode_sub_reg_reg(dst_reg, rhs_reg));
+                            reads.push(phys(rhs_reg));
+                        }
+                        ResolvedVal::Imm(imm) => {
+                            code.extend(encode_sub_reg_imm32(dst_reg, imm as i32));
+                        }
+                    }
+                    reads.push(phys(lhs_reg));
+                    writes.push(phys(dst_reg));
+                    "sub".to_string()
+                }
+                BinOpKind::Mul => {
+                    let dst_reg = load_to_reg(dst, alloc, code);
+                    let lhs_reg = load_to_reg(lhs, alloc, code);
+                    if !matches!(resolve_value(lhs, alloc), ResolvedVal::Reg(r) if r == dst_reg) {
+                        code.extend(encode_mov_reg_reg(dst_reg, lhs_reg));
+                    }
+                    match resolve_value(rhs, alloc) {
+                        ResolvedVal::Reg(rhs_reg) => {
+                            code.extend(encode_imul_reg_reg(dst_reg, rhs_reg));
+                            reads.push(phys(rhs_reg));
+                        }
+                        ResolvedVal::Imm(imm) => {
+                            // imul dst, imm32
+                            let scratch = Gpr::R11;
+                            code.extend(encode_mov_reg_imm32(scratch, imm as i32));
+                            code.extend(encode_imul_reg_reg(dst_reg, scratch));
+                        }
+                    }
+                    reads.push(phys(lhs_reg));
+                    writes.push(phys(dst_reg));
+                    "mul".to_string()
+                }
                 _ => {
                     // Other BinOp variants (Add, Sub, Mul) are handled by
                     // IRInstr::Add/Sub/Mul above. If we get here, it's an

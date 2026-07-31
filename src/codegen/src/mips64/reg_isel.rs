@@ -375,6 +375,9 @@ fn emit_instruction(
                 BinOpKind::Shl => code.extend_from_slice(&Instruction::Dsllv { rd: dst_reg, rt: lhs_reg, rs: rhs_reg }.encode()),
                 BinOpKind::ShrL => code.extend_from_slice(&Instruction::Dsrlv { rd: dst_reg, rt: lhs_reg, rs: rhs_reg }.encode()),
                 BinOpKind::ShrA => code.extend_from_slice(&Instruction::Dsrav { rd: dst_reg, rt: lhs_reg, rs: rhs_reg }.encode()),
+                BinOpKind::Add => code.extend_from_slice(&Instruction::Daddu { rd: dst_reg, rs: lhs_reg, rt: rhs_reg }.encode()),
+                BinOpKind::Sub => code.extend_from_slice(&Instruction::Dsubu { rd: dst_reg, rs: lhs_reg, rt: rhs_reg }.encode()),
+                BinOpKind::Mul => { code.extend_from_slice(&Instruction::Dmult { rs: lhs_reg, rt: rhs_reg }.encode()); code.extend_from_slice(&Instruction::Mflo { rd: dst_reg }.encode()); code.extend_from_slice(&Instruction::Nop.encode()); }
                 _ => code.extend_from_slice(&Instruction::Daddu { rd: dst_reg, rs: lhs_reg, rt: rhs_reg }.encode()),
             }
             reads.push(phys(lhs_reg)); reads.push(phys(rhs_reg)); writes.push(phys(dst_reg));

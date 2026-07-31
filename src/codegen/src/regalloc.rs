@@ -2742,6 +2742,160 @@ impl Default for RegAllocator {
 ///    preferentially assigned callee-saved registers.
 /// 6. **Spill with eviction**: when all registers are occupied, the
 ///    interval with the lowest spill weight per length is evicted.
+/// 7. **Post-allocation conflict resolution**: after linear-scan, a
+///    verification pass detects cases where a used vreg and a defined
+///    vreg at the same instruction share a physical register AND the
+///    used vreg is live after that instruction. The defined vreg is
+///    reassigned to a different register or spilled. This eliminates the
+///    "register-reuse hazard" that previously required a fallback to
+///    stack-slot ISel for functions with syscalls.
+///
+/// Detect and resolve register-reuse conflicts.
+///
+/// A conflict occurs when the allocator assigns the same physical register
+/// to a vreg that is **used** (as an argument) and a vreg that is
+/// **defined** (as a destination) at the same instruction position, AND
+/// the used vreg is live after that position (i.e., it is used by a
+/// subsequent instruction).
+///
+/// This typically happens with `IRInstr::Syscall` where the syscall's
+/// argument vreg and return-value vreg share a register. Without
+/// resolution, the syscall clobbers the argument value, causing
+/// incorrect behavior.
+///
+/// The fix: reassign the defined vreg to a different physical register
+/// that is free at that position. If no register is free, spill the
+/// defined vreg to a stack slot (the emitter will insert reload code).
+fn resolve_register_reuse_conflicts(
+    func: &IRFunction,
+    result: &mut RegAllocResult,
+    intervals: &[LiveInterval],
+    caller_saved: &[crate::backend::PhysicalReg],
+    callee_saved: &[crate::backend::PhysicalReg],
+) {
+    let mut pos: u32 = 0;
+    for block in &func.blocks {
+        for instr in &block.instructions {
+            let use_regs = instr.used_regs();
+            let def_regs = instr.defined_regs();
+
+            // Check each (use, def) pair for conflicts.
+            for &def_vreg in &def_regs {
+                let def_root_owned = *result.coalesced_map.get(&def_vreg).unwrap_or(&def_vreg);
+                let def_preg = match result.vreg_to_preg.get(&def_root_owned) {
+                    Some(p) => *p,
+                    None => continue, // def is spilled, no conflict
+                };
+
+                for &use_vreg in &use_regs {
+                    let use_root_owned = *result.coalesced_map.get(&use_vreg).unwrap_or(&use_vreg);
+                    if use_root_owned == def_root_owned {
+                        continue; // same vreg, not a conflict
+                    }
+                    let use_preg = match result.vreg_to_preg.get(&use_root_owned) {
+                        Some(p) => *p,
+                        None => continue, // use is spilled, no conflict
+                    };
+
+                    if use_preg != def_preg {
+                        continue; // different registers, no conflict
+                    }
+
+                    // Same register! Check if the use vreg is live after
+                    // this position (i.e., its interval extends past `pos`).
+                    let use_interval = intervals.iter().find(|i| i.vreg == use_root_owned);
+                    if let Some(ui) = use_interval {
+                        if ui.end > pos {
+                            // CONFLICT: use vreg is live after this instruction
+                            // and shares a register with def vreg.
+                            // Reassign def vreg to a different register.
+                            resolve_single_conflict(
+                                result,
+                                intervals,
+                                def_root_owned,
+                                use_root_owned,
+                                def_preg,
+                                pos,
+                                caller_saved,
+                                callee_saved,
+                            );
+                        }
+                    }
+                }
+            }
+            pos += 2;
+        }
+        pos += 2; // terminator
+    }
+}
+
+/// Resolve a single register-reuse conflict by reassigning the def vreg.
+#[allow(clippy::too_many_arguments)]
+fn resolve_single_conflict(
+    result: &mut RegAllocResult,
+    intervals: &[LiveInterval],
+    def_vreg: IRValueId,
+    _use_vreg: IRValueId,
+    conflict_preg: crate::backend::PhysicalReg,
+    _pos: u32,
+    caller_saved: &[crate::backend::PhysicalReg],
+    callee_saved: &[crate::backend::PhysicalReg],
+) {
+    // Find the def vreg's interval to know its end position.
+    let def_interval = intervals.iter().find(|i| i.vreg == def_vreg);
+    let def_end = def_interval.map(|i| i.end).unwrap_or(u32::MAX);
+
+    // Find a register that is free for the def vreg's entire live range.
+    // We need a register that is NOT assigned to any vreg whose interval
+    // overlaps [pos, def_end].
+    let mut used_pregs: std::collections::HashSet<crate::backend::PhysicalReg> =
+        std::collections::HashSet::new();
+    for (vreg, preg) in &result.vreg_to_preg {
+        if *vreg == def_vreg {
+            continue;
+        }
+        // Check if this vreg's interval overlaps the def vreg's interval.
+        if let Some(interval) = intervals.iter().find(|i| i.vreg == *vreg) {
+            // The def vreg's interval starts at `pos` (or earlier) and ends at `def_end`.
+            // An overlap occurs if the other interval contains any point in [pos, def_end].
+            // Since we don't have `pos` here (it's _pos), use the def interval's start.
+            let def_start = def_interval.map(|i| i.start).unwrap_or(0);
+            if interval.start <= def_end && interval.end >= def_start {
+                used_pregs.insert(*preg);
+            }
+        }
+    }
+
+    // Build the list of allocatable registers (only those that are
+    // actually allocatable — excludes RSP, RBP, R11, etc.)
+    let backend_class = conflict_preg.class;
+    let regalloc_class = match backend_class { crate::backend::RegClass::Gpr => RegClass::Gpr, _ => RegClass::SimdFp };
+    let allocatable: Vec<crate::backend::PhysicalReg> = if backend_class == crate::backend::RegClass::Gpr {
+        caller_saved.iter().chain(callee_saved.iter()).cloned().collect()
+    } else {
+        (0..32u32).map(|i| crate::backend::PhysicalReg::new(backend_class, i)).collect()
+    };
+    for candidate in &allocatable {
+        if *candidate != conflict_preg && !used_pregs.contains(candidate) {
+            result.vreg_to_preg.insert(def_vreg, *candidate);
+            return;
+        }
+    }
+
+    // No free register available — spill the def vreg.
+    let slot_idx = result.total_spill_slots;
+    result.total_spill_slots += 1;
+    let offset = if regalloc_class == RegClass::Gpr { -((slot_idx as i32 + 1) * 8) } else { -((slot_idx as i32 + 1) * 16) };
+    let slot = GenericSpillSlot::new(slot_idx, offset, regalloc_class);
+    result.spill_slots.insert(def_vreg, slot.clone());
+    // Remove the physical register assignment — the vreg is now spilled.
+    result.vreg_to_preg.remove(&def_vreg);
+    // The spill code will be generated by the emitter based on the
+    // spill_slots map. We need to add spill/reload entries.
+    // For the def vreg: spill AFTER the instruction (at pos+1),
+    // reload BEFORE each subsequent use.
+    // This is handled by the existing spill_code mechanism in the emitter.
+}
 pub struct TargetAgnosticRegAlloc {
     /// Name of the target ISA (for error messages).
     isa_name: &'static str,
@@ -2863,7 +3017,20 @@ impl TargetAgnosticRegAlloc {
         // Sort by start position, then by end position (longer first).
         intervals.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end)));
 
-        self.allocate_intervals(&intervals)
+        let mut result = self.allocate_intervals(&intervals)?;
+
+        // Post-allocation conflict resolution: detect cases where the
+        // allocator assigned the same physical register to a vreg that is
+        // used (arg) and a vreg that is defined (dst) at the same
+        // instruction position, AND the used vreg is live after that
+        // position. This is the "register-reuse hazard" that previously
+        // caused a fallback to stack-slot ISel.
+        //
+        // The fix: for each conflicting instruction, reassign the dst vreg
+        // to a different physical register (or spill it if none available).
+        resolve_register_reuse_conflicts(func, &mut result, &intervals, &self.caller_saved_gprs, &self.callee_saved_gprs);
+
+        Ok(result)
     }
 
     /// Run allocation with per-vreg register class overrides.
@@ -2880,7 +3047,9 @@ impl TargetAgnosticRegAlloc {
 
         intervals.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end)));
 
-        self.allocate_intervals(&intervals)
+        let mut result = self.allocate_intervals(&intervals)?;
+        resolve_register_reuse_conflicts(func, &mut result, &intervals, &self.caller_saved_gprs, &self.callee_saved_gprs);
+        Ok(result)
     }
 
     /// Core linear-scan algorithm over sorted intervals.
