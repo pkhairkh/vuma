@@ -44,7 +44,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "vuma"
-version = "0.2.0-alpha.8"
+version = "0.2.0-alpha.9"
 dependencies = [
  "bitflags",
  "cc",
@@ -59,21 +59,21 @@ dependencies = [
 
 [[package]]
 name = "vuma-bd"
-version = "0.2.0-alpha.8"
+version = "0.2.0-alpha.9"
 dependencies = [
  "vuma-scg",
 ]
 
 [[package]]
 name = "vuma-codegen"
-version = "0.2.0-alpha.8"
+version = "0.2.0-alpha.9"
 dependencies = [
  "vuma-scg",
 ]
 
 [[package]]
 name = "vuma-core"
-version = "0.2.0-alpha.8"
+version = "0.2.0-alpha.9"
 dependencies = [
  "vuma-bd",
  "vuma-codegen",
@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "vuma-ive"
-version = "0.2.0-alpha.8"
+version = "0.2.0-alpha.9"
 dependencies = [
  "vuma-bd",
  "vuma-codegen",
@@ -94,22 +94,22 @@ dependencies = [
 
 [[package]]
 name = "vuma-package"
-version = "0.2.0-alpha.8"
+version = "0.2.0-alpha.9"
 
 [[package]]
 name = "vuma-parser"
-version = "0.2.0-alpha.8"
+version = "0.2.0-alpha.9"
 dependencies = [
  "vuma-scg",
 ]
 
 [[package]]
 name = "vuma-scg"
-version = "0.2.0-alpha.8"
+version = "0.2.0-alpha.9"
 
 [[package]]
 name = "vuma-tests"
-version = "0.2.0-alpha.8"
+version = "0.2.0-alpha.9"
 dependencies = [
  "vuma",
  "vuma-bd",
