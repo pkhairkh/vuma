@@ -50,6 +50,16 @@ use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRVal
 use std::collections::HashMap;
 use std::fmt;
 
+/// Full register-based instruction selection (Wave 15).
+#[allow(clippy::all)]
+pub mod reg_isel;
+
+fn try_real_regalloc(func: &IRFunction) -> Option<crate::regalloc::RegAllocResult> {
+    let registry = crate::target_desc::TargetDescRegistry::new();
+    let target = registry.get("alpha")?;
+    crate::regalloc::TargetAgnosticRegAlloc::new(target).allocate_function(func).ok()
+}
+
 // ===========================================================================
 // General-Purpose Registers
 // ===========================================================================
@@ -1265,6 +1275,7 @@ fn alpha_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, B
 /// stack slots (for safety), but the allocation metadata records which vregs
 /// COULD be in real registers. A future revision will use this metadata to emit
 /// register-based instructions directly.
+#[allow(dead_code)]
 fn alpha_allocate_registers_real(func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
     // Run the existing stack-slot allocator to get a working AllocatedFunction.
     let mut allocated = alpha_allocate_registers_ss(func)?;
@@ -3110,11 +3121,10 @@ impl Backend for AlphaBackend {
     }
 
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
-        if self.use_real_regalloc {
-            alpha_allocate_registers_real(func)
-        } else {
-            alpha_allocate_registers_ss(func)
-        }
+        let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_ALPHA").map(|v| v != "0").unwrap_or(true);
+        let contains_fork = func.blocks.iter().any(|b| b.instructions.iter().any(|i| match i { crate::ir::IRInstr::Call { func: f, .. } => f == "spawn_worker" || f == "fork", crate::ir::IRInstr::Syscall { nr, args, dst } => *nr == 220 || *nr == 221 || (dst.is_some() && args.iter().any(|a| matches!(a, crate::ir::IRValue::Register(_)))), _ => false }));
+        if real_regalloc && !contains_fork { if let Some(ar) = try_real_regalloc(func) { if let Ok(full) = reg_isel::emit_function_regalloc_full(func, &ar) { return Ok(full); } } }
+        alpha_allocate_registers_ss(func)
     }
 
     fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError> {
