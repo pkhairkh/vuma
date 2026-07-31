@@ -2715,10 +2715,10 @@ fn alpha_target_desc() -> TargetDesc {
             9..=14 => { rd = rd.callee_saved(); }
             15 => { rd = rd.frame_pointer().callee_saved().not_allocatable(); }
             16..=21 => { rd = rd.arg((i-16) as usize); }
-            26 => { rd = rd.link_register(); }
+            26 => { rd = rd.link_register().not_allocatable(); }
             27 => { rd = rd.not_allocatable(); }
-            30 => { rd = rd.stack_pointer(); }
-            31 => { rd = rd.hardwired_zero(); }
+            30 => { rd = rd.stack_pointer().not_allocatable(); }
+            31 => { rd = rd.hardwired_zero().not_allocatable(); }
             _ => {}
         }
         rd
