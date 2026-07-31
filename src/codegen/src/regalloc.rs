@@ -77,7 +77,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::arm64::Register;
+use crate::aarch64::Register;
 use crate::ir::{IRFunction, IRInstr, IRProgram, IRTerminator, IRValue};
 use crate::CodegenError;
 use crate::Result;

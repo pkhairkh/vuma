@@ -57,7 +57,7 @@ pub mod aarch64_be;
 pub mod alias_analysis;
 pub mod alpha;
 pub mod arm32;
-pub mod arm64;
+pub mod aarch64;
 pub mod armeb;
 pub mod backend;
 /// Bitvector verification framework.

@@ -4,7 +4,7 @@
 # Usage: bash scripts/qemu_system_boot.sh
 
 set -e
-cd /home/z/vuma-review
+cd /home/z/my-project/vuma
 
 # Check if QEMU system is installed
 if ! command -v qemu-system-x86_64 &>/dev/null; then
