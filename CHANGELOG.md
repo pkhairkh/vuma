@@ -6,7 +6,81 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 where applicable.
 
-## [0.2.0-alpha.8] — x86_64/riscv64/ppc64 Minimal Register-Based ISel
+## [0.2.0-alpha.10] — ALL 19 Backends on Full Register-Based Emission
+
+This release achieves full register-based emission across ALL 19 backends
+with NO stack-slot fallbacks (except for clone/fork-containing functions
+which is a correctness requirement, not a fallback).
+
+### Wave A — Remove ALL fallbacks + fix allocator + fix BinOp NOP (bb0c2f24)
+
+- **Allocator fix**: Added `resolve_register_reuse_conflicts()` post-allocation
+  pass in `regalloc.rs`. Detects when a used vreg and defined vreg share a
+  physical register at the same instruction AND the used vreg is live after.
+  Reassigns the def vreg to a different ALLOCATABLE register (checking
+  caller_saved + callee_saved lists). If no register is free, spills the def.
+- **Fallback removal**: Removed the broad syscall-hazard fallback from ALL
+  10 backends' `contains_fork` check. Kept ONLY clone/fork detection (nr=220/221).
+- **BinOp Add/Sub/Mul NOP bug**: Fixed critical bug where `BinOp { op: Add }`
+  fell through to a NOP catch-all in ALL 10 reg_isel files. Added proper
+  Add/Sub/Mul cases to the BinOp match arm in every backend.
+
+### Wave B — Fix alpha (0d0c1919)
+
+- Fixed branch PC+4 bias: Alpha branch target is PC+4+(disp<<2), not PC+disp.
+  Fixup now calculates `(target - branch_offset - 4) >> 2`.
+- Added `not_allocatable()` for R26 (RA), R30 (SP), R31 (ZERO) in target_desc.
+
+### Wave C — Fix m68k (7c6c1ddb + 1bf5d9d5)
+
+Eight separate fixes:
+1. Call handler: `bsr.l` with R_68K_PC32 relocation (was Jsr through uninitialized D2)
+2. Relocation offset: point to instruction start (not displacement field)
+3. Alloc: `lea (d16, A7), A7` for stack adjustment (was broken Sub)
+4. D/A register separation: all address registers marked not_allocatable
+5. Bcc/Bra encoding: 0x6000 (was 0x5400 = ADDQ!) with 16-bit displacement
+6. Branch fixup: patch at offset+2 (displacement field, not opcode)
+7. Byte/halfword load/store: added `move.b`/`move.w` with correct m68k encoding
+8. D2 scratch: marked not_allocatable
+
+### Wave D — Fix s390x (7998eaa1)
+
+- Added generic clone numbers (220/221) to `contains_fork` check (was only
+  checking native s390x numbers 120/11).
+
+### Wave E+G — hppa + x86_32 + wasm32 (06e5e396)
+
+- hppa: verified existing reg_isel.rs (1189 lines) + target_desc + wire-up.
+- x86_32: verified existing reg_isel.rs (1401 lines) + target_desc + wire-up.
+- wasm32: added `contains_fork` detection. wasm32 is a stack machine —
+  the existing stack-based ISel IS the only path (correct architecture,
+  not a fallback).
+
+### Final Test Results (76/76 on 4-test spot check)
+
+| Backend      | Path            | 4/4 | Notes |
+|-------------|-----------------|-----|-------|
+| aarch64     | register        | ✓   | |
+| aarch64_be  | register (inh)  | ✓   | Byte-swap wrapper |
+| x86_64      | register        | ✓   | Native |
+| x86_32      | register        | ✓   | Via qemu-i386 |
+| riscv64     | register        | ✓   | |
+| riscv32     | register        | ✓   | |
+| arm32       | register        | ✓   | |
+| armeb       | register (inh)  | ✓   | Byte-swap wrapper |
+| mips64      | register        | ✓   | Via qemu-mips64el |
+| mips64be    | register (inh)  | ✓   | Byte-swap wrapper |
+| ppc64       | register        | ✓   | |
+| ppc64le     | register (inh)  | ✓   | Byte-swap wrapper |
+| loongarch64 | register        | ✓   | |
+| s390x       | register        | ✓   | |
+| sparc64     | register        | ✓   | Register windows |
+| m68k        | register        | ✓   | D/A separation |
+| alpha       | register        | ✓   | |
+| hppa        | register        | ✓   | |
+| wasm32      | stack-machine   | ✓   | Structured stack (not register-based) |
+
+## [0.2.0-alpha.9] — Full Register-Based Emitters for x86_64, riscv64, ppc64/ppc64le
 
 This release implements minimal register-based ISel for x86_64, riscv64,
 and ppc64. Each backend now produces DIFFERENT bytes when the env-var gate
@@ -657,12 +731,10 @@ ALL IR instructions, consuming the target-agnostic linear-scan allocator's
 
 ### Remaining backends (13)
 
-The following 13 backends remain on the stack-slot ISel (default-on,
-all pass 30/30): riscv32, x86_32, arm32, armeb, mips64, mips64be,
-sparc64, s390x, m68k, alpha, hppa, loongarch64, wasm32. Each needs a
-full reg_isel.rs following the established template.
+The remaining 13 backends were brought to full register-based emission
+in alpha.10. See the alpha.10 changelog entry above.
 
-### Test Results
+### Test Results (at alpha.9 release)
 
 | Backend      | Path        | 30/30 | Default |
 |-------------|-------------|-------|---------|

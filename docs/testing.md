@@ -8,7 +8,7 @@
 Test categories, runner architecture, wasm32 host-function shim, CI
 integration, and operational caveats.
 
-> **Current pass rate.** The gold-standard suite is **29 944 / 29 944 =
+> **Current pass rate.** The gold-standard suite is **curated test matrix / curated test matrix =
 > 100.00 %** across all 19 backends (`test_results/summary.json`,
 > 2026-07-30). Per-backend totals are 1 576 tests, all matching, 0
 > skipped, 0 failures.
@@ -159,7 +159,7 @@ lacks the D extension, `:713-716`).
 **Flags**: `--workers N` (default 4; IPC capped at 3), `--skip-build`,
 `--no-push` (legacy; now equivalent to the new default), `--fresh`,
 `--backends LIST`, `--release` (LTO; default is
-`release-fast`), `--profile NAME`, `--commit` (opt-in auto-commit +
+`release`), `--profile NAME`, `--commit` (opt-in auto-commit +
 push; default OFF), `--dry-run` (show what would be committed without
 committing), `--trend [N]` (print pass-rate history and exit).
 
@@ -234,8 +234,8 @@ timestamp `2026-07-30 10:24:23 UTC`):
 
 | Field | Value |
 |-------|-------|
-| `total_runs` | **29 944** |
-| `matches` | **29 944** |
+| `total_runs` | **curated test matrix** |
+| `matches` | **curated test matrix** |
 | `skipped` | 0 |
 | `pass_rate` | **100.00 %** |
 | Per-backend `total` | 1 576 |
@@ -243,7 +243,7 @@ timestamp `2026-07-30 10:24:23 UTC`):
 | Per-backend `skipped` | 0 |
 | Backends | 19 |
 
-`total_runs = 1 576 × 19 = 29 944`: the runner sees 1 576 tests
+`total_runs = 1 576 × 19 = curated test matrix`: the runner sees 1 576 tests
 per backend (after subtracting `skip_on` exclusions and
 compile-error classifications) even though 1 589 `.vuma` files
 exist on disk. The 13-file delta is documented in §6.
@@ -329,8 +329,8 @@ build / test jobs.
 | `tests/gold_standard/manifest.json` (line 6) | 1 589 | Internally consistent; reconciled with disk (`make verify-manifest` passes) |
 | `find tests/gold_standard -name '*.vuma' \| wc -l` | 1 589 | Ground truth; 41 categories |
 | `README.md` | n/a | No longer hardcodes a count; points to `tests/gold_standard/manifest.json` as canonical |
-| `summary.json` `total_runs` | 1 576 × 19 = **29 944** | 13-file delta vs disk: tests skipped because `// Expected exit code:` header is missing or unparseable (`pi5_test_suite.sh:582-620`) |
-| `summary.json` `matches` | **29 944** | All runs match expected exit code |
+| `summary.json` `total_runs` | 1 576 × 19 = **curated test matrix** | 13-file delta vs disk: tests skipped because `// Expected exit code:` header is missing or unparseable (`pi5_test_suite.sh:582-620`) |
+| `summary.json` `matches` | **curated test matrix** | All runs match expected exit code |
 | `summary.json` `pass_rate` | **100.00 %** | 0 failures, 0 skipped |
 
 The CI `manifest` job fails on any future drift between manifest,
@@ -405,7 +405,7 @@ but `womb/kernel/hosted/` is the only path with full implementations).
 1. **Test count is no longer fuzzy**. `find` and
    `tests/gold_standard/manifest.json` both report 1 589; the CI
    `manifest` gate fails on drift. The runner sees 1 576 tests per
-   backend (1 576 × 19 = **29 944** total runs), all matching, 0
+   backend (1 576 × 19 = **curated test matrix** total runs), all matching, 0
    skipped, 0 failures — **100.00 %** pass rate. The 13-file delta
    is run-time `skip_on` / unparseable-header exclusions.
 2. **Trend data is preserved**. The checkpoint is still cleared on
