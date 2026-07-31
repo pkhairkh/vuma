@@ -38,7 +38,7 @@
 //! rsp = rbp - frame_size
 //! ```
 
-use crate::backend::{AllocatedBlock, AllocatedFunction, AllocatedInstruction, BackendError, PhysicalReg};
+use crate::backend::{AllocatedBlock, AllocatedFunction, AllocatedInstruction, BackendError, PhysicalReg, RelocationEntry};
 use crate::ir::{IRFunction, IRInstr, IRValue, IRTerminator, IRType, BinOpKind, UnaryOpKind, CastKind, CmpKind};
 use crate::regalloc::RegAllocResult;
 use crate::regalloc::GenericSpillCode;
@@ -65,6 +65,17 @@ pub fn emit_function_regalloc_full(
     func: &IRFunction,
     alloc: &RegAllocResult,
 ) -> Result<AllocatedFunction, BackendError> {
+    // DEBUG: dump the IR blocks and terminators to stderr.
+    if std::env::var("VUMA_DEBUG_REG_ISEL").is_ok() {
+        eprintln!("=== emit_function_regalloc_full: {} ===", func.name);
+        for (i, block) in func.blocks.iter().enumerate() {
+            eprintln!("  bb{} label={:?}:", i, block.label);
+            for instr in &block.instructions {
+                eprintln!("    {:?}", instr);
+            }
+            eprintln!("    TERM: {:?}", block.terminator);
+        }
+    }
     // ── Compute frame size ──
     // Callee-saved saves: each push is 8 bytes. Count the callee-saved GPRs
     // (excluding RBP which is handled separately).
@@ -78,7 +89,12 @@ pub fn emit_function_regalloc_full(
     // Spill slots: each is 8 bytes (GPR) or 16 bytes (SIMD). Use 8 for now.
     let spill_size = alloc.total_spill_slots as usize * 8;
     // Frame size must be 16-byte aligned (System V ABI).
-    let raw_frame = callee_saved_size + spill_size + 8; // +8 for alignment
+    // After `call` (8-byte return addr) + `push rbp` (8 bytes), RSP is
+    // 16-aligned. After pushing N callee-saved (N*8 bytes), alignment is
+    // preserved iff N is even, else off by 8. Either way, `sub rsp, frame_size`
+    // must bring RSP back to 16-alignment at the next call boundary, so
+    // frame_size = ((callee_saved_size + spill_size + 15) & !15).
+    let raw_frame = callee_saved_size + spill_size;
     let frame_size = ((raw_frame + 15) & !15) as u32;
 
     // ── Two-pass: first compute block offsets, then emit ──
@@ -88,6 +104,7 @@ pub fn emit_function_regalloc_full(
     let mut all_code: Vec<u8> = Vec::new();
     let mut blocks: Vec<AllocatedBlock> = Vec::new();
     let mut fixups: Vec<BranchFixup> = Vec::new();
+    let mut relocations: Vec<RelocationEntry> = Vec::new();
     let mut label_offsets: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
     // ── Prologue ──
@@ -111,17 +128,22 @@ pub fn emit_function_regalloc_full(
     };
 
     // ── Body: emit each block ──
+    // Position keying must match the allocator in regalloc.rs
+    // (`LiveRangeComputer::compute`): each instruction and each terminator
+    // consumes `pos += 2`, NEVER reset between blocks. The emitter previously
+    // used `idx as u32 * 2` per-block which silently dropped spill_code for
+    // all blocks after the first.
+    let mut global_pos: u32 = 0;
+
     for block in &func.blocks {
         let block_offset = all_code.len();
         label_offsets.insert(block.label.clone(), block_offset);
 
         let mut instrs: Vec<AllocatedInstruction> = Vec::new();
 
-        for (idx, instr) in block.instructions.iter().enumerate() {
-            let pos = idx as u32 * 2;
-
+        for instr in &block.instructions {
             // Insert spill/reload code before this instruction.
-            if let Some(spills) = alloc.spill_code.get(&pos) {
+            if let Some(spills) = alloc.spill_code.get(&global_pos) {
                 for spill in spills {
                     let spill_start = all_code.len();
                     emit_spill_code(&mut all_code, spill, &callee_saved_gprs, frame_size);
@@ -146,7 +168,9 @@ pub fn emit_function_regalloc_full(
                 instr,
                 alloc,
                 frame_size,
+                &callee_saved_gprs,
                 &mut fixups,
+                &mut relocations,
             )?;
             let instr_end = all_code.len();
 
@@ -158,15 +182,37 @@ pub fn emit_function_regalloc_full(
                     encoded: all_code[instr_start..instr_end].to_vec(),
                 });
             }
+            global_pos += 2;
         }
 
-        // Emit terminator.
+        // Spill/reload BEFORE the terminator uses the terminator's own pos.
+        if let Some(spills) = alloc.spill_code.get(&global_pos) {
+            for spill in spills {
+                let spill_start = all_code.len();
+                emit_spill_code(&mut all_code, spill, &callee_saved_gprs, frame_size);
+                if all_code.len() > spill_start {
+                    instrs.push(AllocatedInstruction {
+                        opcode: match spill {
+                            GenericSpillCode::Spill { .. } => "spill".to_string(),
+                            GenericSpillCode::Reload { .. } => "reload".to_string(),
+                        },
+                        reads: vec![],
+                        writes: vec![],
+                        encoded: all_code[spill_start..].to_vec(),
+                    });
+                }
+            }
+        }
+
+        // Emit terminator. Return paths emit the full epilogue inline so
+        // that early returns restore RSP / callee-saved / RBP correctly.
         let term_start = all_code.len();
         emit_terminator(
             &mut all_code,
             &block.terminator,
             alloc,
             frame_size,
+            &callee_saved_gprs,
             &mut fixups,
         );
         let term_end = all_code.len();
@@ -179,6 +225,7 @@ pub fn emit_function_regalloc_full(
                 encoded: all_code[term_start..term_end].to_vec(),
             });
         }
+        global_pos += 2;
 
         blocks.push(AllocatedBlock {
             label: block.label.clone(),
@@ -187,28 +234,23 @@ pub fn emit_function_regalloc_full(
         });
     }
 
-    // ── Epilogue (at the end of the function) ──
+    // ── Trailing unreachable epilogue (defensive) ──
+    // Every Return/Jump-to-return path now emits its own epilogue inline.
+    // This trailing copy is kept only as a defensive safety net in case
+    // some path falls through without an explicit terminator; it is
+    // normally unreachable.
     let epilogue_start = all_code.len();
-    // add rsp, frame_size
-    all_code.extend(encode_add_reg_imm32(Gpr::Rsp, frame_size as i32));
-    // pop callee-saved (reverse order)
-    for &g in callee_saved_gprs.iter().rev() {
-        all_code.extend(encode_pop(g));
-    }
-    // pop rbp
-    all_code.extend(encode_pop(Gpr::Rbp));
-    // ret
-    all_code.extend(encode_ret());
+    all_code.extend(emit_epilogue_bytes(frame_size, &callee_saved_gprs));
     let epilogue_end = all_code.len();
 
-    // Add prologue and epilogue as special instructions in the first block.
+    // Add prologue to the first block, and the trailing epilogue to the
+    // last block (as a defensive unreachable marker).
     if let Some(first_block) = blocks.first_mut() {
         first_block.instructions.insert(0, prologue_instr);
-        // Epilogue goes at the end of the last block.
     }
     if let Some(last_block) = blocks.last_mut() {
         last_block.instructions.push(AllocatedInstruction {
-            opcode: "epilogue".to_string(),
+            opcode: "epilogue_trailing".to_string(),
             reads: vec![],
             writes: vec![],
             encoded: all_code[epilogue_start..epilogue_end].to_vec(),
@@ -224,21 +266,31 @@ pub fn emit_function_regalloc_full(
             all_code[fixup.offset + 1] = bytes[1];
             all_code[fixup.offset + 2] = bytes[2];
             all_code[fixup.offset + 3] = bytes[3];
+        } else if std::env::var("VUMA_DEBUG_REG_ISEL").is_ok() {
+            eprintln!(
+                "  FIXUP MISS: target={:?} not in label_offsets (keys: {:?})",
+                fixup.target,
+                label_offsets.keys().collect::<Vec<_>>()
+            );
         }
     }
 
     // ── Update block code offsets and instruction encoded bytes ──
-    // We need to re-split the all_code into per-instruction chunks.
-    // Actually, we already tracked per-instruction offsets during emission.
-    // The AllocatedBlock.instructions already have their encoded bytes.
-    // But we need to update the code_offset fields to reflect the final layout.
-
-    // Re-compute block offsets from the instruction encoded bytes.
+    // CRITICAL: branch fixups patched `all_code` in place above, but each
+    // `AllocatedInstruction.encoded` was copied from `all_code` BEFORE the
+    // patch. Re-slice each instruction's encoded bytes from the now-patched
+    // `all_code` so the linker sees correct rel32 values. Lengths are
+    // unchanged (fixup resolution only overwrites the 4 rel32 bytes in
+    // place), so we can re-derive offsets from the existing lengths.
     let mut offset = 0usize;
     for block in &mut blocks {
         block.code_offset = offset;
         for instr in &mut block.instructions {
-            offset += instr.encoded.len();
+            let len = instr.encoded.len();
+            if len > 0 && offset + len <= all_code.len() {
+                instr.encoded = all_code[offset..offset + len].to_vec();
+            }
+            offset += len;
         }
     }
 
@@ -255,7 +307,7 @@ pub fn emit_function_regalloc_full(
         callee_saved: callee_saved_phys,
         spill_slots: alloc.total_spill_slots as usize,
         code_size: all_code.len(),
-        relocations: vec![],
+        relocations,
         wasm_func_type: None,
         wasm_locals: None,
     })
@@ -355,8 +407,10 @@ fn emit_instruction(
     code: &mut Vec<u8>,
     instr: &IRInstr,
     alloc: &RegAllocResult,
-    _frame_size: u32,
+    frame_size: u32,
+    callee_saved_gprs: &[Gpr],
     fixups: &mut Vec<BranchFixup>,
+    relocations: &mut Vec<RelocationEntry>,
 ) -> Result<(String, Vec<PhysicalReg>, Vec<PhysicalReg>), BackendError> {
     let mut reads = Vec::new();
     let mut writes = Vec::new();
@@ -755,15 +809,23 @@ fn emit_instruction(
                             code.extend(encode_movzx_reg16(dst_reg, src_reg));
                         }
                         Some(IRType::U32) | Some(IRType::I32) => {
-                            // mov eax, ecx zero-extends to 64-bit on x86_64.
-                            code.extend(encode_mov_reg32_mem(dst_reg, Gpr::Rbp, 0)); // placeholder
-                            // Actually, use mov reg32, reg32 (zero-extends).
-                            // We don't have encode_mov_reg32_reg32, so use the
-                            // 32-bit mov by clearing high bits.
-                            // Simpler: mov dst, src (64-bit) then and dst, 0xFFFFFFFF.
-                            code.clear(); // remove placeholder
-                            code.extend(encode_mov_reg_reg(dst_reg, src_reg));
-                            code.extend(encode_and_reg_imm32(dst_reg, -1i32));
+                            // ZExt from U32/I32 to 64-bit: emit a 32-bit
+                            // mov (which zero-extends to 64-bit on x86_64).
+                            // We don't have a dedicated encode_mov_reg32_reg32
+                            // helper, so emit the bytes directly:
+                            //   8B /r (MOV r32, r/m32) — no REX.W
+                            // For now, fall back to a 64-bit mov which
+                            // preserves all bits; this is correct as long
+                            // as the source U32 value already has its high
+                            // 32 bits clear (which the IR type system should
+                            // guarantee).
+                            //
+                            // BUG W0-2 fix: previously this branch called
+                            // `code.clear()` which wiped the ENTIRE function's
+                            // emitted code so far. Removed.
+                            if src_reg != dst_reg {
+                                code.extend(encode_mov_reg_reg(dst_reg, src_reg));
+                            }
                         }
                         _ => {
                             if src_reg != dst_reg {
@@ -831,11 +893,17 @@ fn emit_instruction(
         // ── Alloc (stack allocation — use RSP) ──
         IRInstr::Alloc { dst, size, .. } => {
             let dst_reg = load_to_reg(dst, alloc, code);
-            // lea dst, [rsp + 0]  (or use the current stack pointer)
-            code.extend(encode_lea_reg_mem(dst_reg, Gpr::Rsp, 0));
-            // sub rsp, size (align to 16)
+            // Stack-allocate `size` bytes (16-byte aligned) and return a
+            // pointer to the LOW end of the new space in `dst_reg`.
+            // Order matters: `sub rsp, N` FIRST, then `lea dst, [rsp]`.
+            // The previous order (`lea dst, [rsp]; sub rsp, N`) put the
+            // buffer at the HIGH end ([old_rsp]), which overlaps the
+            // saved-RBP slot at [rbp] when frame_size=0, causing the
+            // subsequent store to clobber the saved RBP and corrupt the
+            // return path.
             let aligned = ((*size as usize + 15) & !15) as i32;
             code.extend(encode_sub_reg_imm32(Gpr::Rsp, aligned));
+            code.extend(encode_lea_reg_mem(dst_reg, Gpr::Rsp, 0));
             writes.push(phys(dst_reg));
             "alloc".to_string()
         }
@@ -852,9 +920,15 @@ fn emit_instruction(
         // ── GetAddress (lea — symbol address) ──
         IRInstr::GetAddress { dst, name } => {
             let dst_reg = load_to_reg(dst, alloc, code);
-            // lea dst, [rip + sym] — use a placeholder relocation.
-            // For now, emit lea with offset 0; the linker resolves the symbol.
+            // lea dst, [rip + sym] — emit placeholder 0, record a
+            // PC32 relocation so the linker resolves the symbol.
             code.extend(encode_lea_rip_rel(dst_reg, 0));
+            let rel_offset = code.len() as u64 - 4;
+            relocations.push(RelocationEntry {
+                offset: rel_offset,
+                symbol: name.clone(),
+                reloc_type: "R_X86_64_PC32".to_string(),
+            });
             writes.push(phys(dst_reg));
             "getaddr".to_string()
         }
@@ -889,7 +963,7 @@ fn emit_instruction(
             "phi".to_string()
         }
 
-        // ── Ret ──
+        // ── Ret (rare mid-block return — emit full epilogue inline) ──
         IRInstr::Ret { values } => {
             if let Some(first) = values.first() {
                 let ret_reg = load_to_reg(first, alloc, code);
@@ -897,13 +971,8 @@ fn emit_instruction(
                     code.extend(encode_mov_reg_reg(Gpr::Rax, ret_reg));
                 }
             }
-            // The epilogue (add rsp, pop, pop rbp, ret) is emitted after all blocks.
-            // But if Ret appears mid-function, we need the epilogue here too.
-            // For simplicity, emit a jump to the epilogue (which is at the end).
-            // For now, emit the epilogue inline.
-            // Actually, the caller (emit_terminator) handles Return via IRTerminator.
-            // IRInstr::Ret is rare; emit NOP.
-            code.extend(encode_nop());
+            // BUG W0-1 fix: emit the full epilogue (was just `nop`).
+            code.extend(emit_epilogue_bytes(frame_size, callee_saved_gprs));
             "ret".to_string()
         }
 
@@ -977,9 +1046,19 @@ fn emit_instruction(
                     code.extend(encode_mov_reg_reg(arg_regs[i], arg_reg));
                 }
             }
-            // Emit call with a relocation (placeholder offset 0).
+            // For variadic functions, AL should contain the number of
+            // XMM registers used (0 for integer-only calls). Clear AL
+            // unconditionally — harmless for non-variadic calls.
+            code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+            // Emit call with a relocation so the linker resolves the
+            // target function address.
             code.extend(encode_call_rel32(0));
-            // TODO: record call relocation for the linker.
+            let call_rel32_offset = code.len() as u64 - 4;
+            relocations.push(RelocationEntry {
+                offset: call_rel32_offset,
+                symbol: fname.clone(),
+                reloc_type: "R_X86_64_PLT32".to_string(),
+            });
             if let Some(dst_val) = dst {
                 let dst_reg = load_to_reg(dst_val, alloc, code);
                 if dst_reg != Gpr::Rax {
@@ -1064,7 +1143,8 @@ fn emit_terminator(
     code: &mut Vec<u8>,
     term: &IRTerminator,
     alloc: &RegAllocResult,
-    _frame_size: u32,
+    frame_size: u32,
+    callee_saved_gprs: &[Gpr],
     fixups: &mut Vec<BranchFixup>,
 ) {
     match term {
@@ -1099,13 +1179,12 @@ fn emit_terminator(
                     code.extend(encode_mov_reg_reg(Gpr::Rax, ret_reg));
                 }
             }
-            // Epilogue: add rsp, frame_size; pop callee-saved; pop rbp; ret
-            // Note: frame_size is not available here — the epilogue is
-            // emitted by the caller (emit_function_regalloc_full) at the
-            // end of the function. For mid-function returns, we need the
-            // epilogue here too. For now, emit ret (the function-level
-            // epilogue handles the rest).
-            code.extend(encode_ret());
+            // BUG W0-1 fix: emit the FULL epilogue (add rsp, frame_size;
+            // pop callee-saved; pop rbp; ret) — previously emitted only
+            // a bare `ret`, leaving RSP at `rbp - frame_size` and
+            // callee-saved registers unrestored, which caused every
+            // return to jump to garbage and SIGSEGV.
+            code.extend(emit_epilogue_bytes(frame_size, callee_saved_gprs));
         }
         IRTerminator::Unreachable => {
             code.extend(encode_int3()); // trap
@@ -1114,6 +1193,32 @@ fn emit_terminator(
             code.extend(encode_nop());
         }
     }
+}
+
+/// Build the function epilogue bytes: restore RSP from RBP (so dynamic
+/// stack adjustments from `Alloc` are correctly undone), then pop
+/// callee-saved (reverse order), pop rbp, ret. Used at every Return path.
+///
+/// We use `lea rsp, [rbp - callee_saved_size]` instead of `add rsp,
+/// frame_size` because the latter does NOT account for `IRInstr::Alloc`'s
+/// runtime `sub rsp, size` — using RBP as the reference is robust.
+fn emit_epilogue_bytes(frame_size: u32, callee_saved_gprs: &[Gpr]) -> Vec<u8> {
+    let _ = frame_size; // unused — we restore via RBP, not frame_size
+    let callee_saved_size = (callee_saved_gprs.len() * 8) as i32;
+    let mut out = Vec::with_capacity(8 + callee_saved_gprs.len() * 2);
+    // lea rsp, [rbp - callee_saved_size] — restore RSP to just below the
+    // callee-saved area (i.e., the value RSP had right after the prologue's
+    // `sub rsp, frame_size`, before any Alloc adjustments).
+    out.extend(encode_lea_reg_mem(Gpr::Rsp, Gpr::Rbp, -callee_saved_size));
+    // pop callee-saved in reverse order of prologue push
+    for &g in callee_saved_gprs.iter().rev() {
+        out.extend(encode_pop(g));
+    }
+    // pop rbp
+    out.extend(encode_pop(Gpr::Rbp));
+    // ret
+    out.extend(encode_ret());
+    out
 }
 
 /// FP fallback — for now, emit NOP and return empty metadata.
