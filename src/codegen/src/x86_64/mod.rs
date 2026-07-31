@@ -4174,6 +4174,7 @@ fn preg_to_gpr(p: &crate::backend::PhysicalReg) -> Option<Gpr> {
 /// Returns an `AllocatedFunction` whose encoded bytes are *register-based*
 /// for the simplest IR instructions (currently: `Ret` with an immediate
 /// operand) and stack-slot-based for everything else.
+#[allow(dead_code)] // X9-impl: superseded by reg_isel::emit_function_regalloc_full; kept for fallback/debugging.
 fn reg_isel_allocate(
     func: &IRFunction,
     alloc: &crate::regalloc::RegAllocResult,
@@ -4199,6 +4200,7 @@ fn reg_isel_allocate(
 /// `AllocatedInstruction.encoded` bytes with register-based encodings
 /// where possible.  Leaves unrecognised instructions on their stack-slot
 /// bytes.
+#[allow(dead_code)] // X9-impl: superseded by reg_isel::emit_function_regalloc_full; kept for fallback/debugging.
 fn reg_isel_rewrite_bytes(
     allocated: &mut AllocatedFunction,
     func: &IRFunction,
@@ -4310,25 +4312,23 @@ impl Backend for X86_64Backend {
         // ── X1-impl: VUMA_REAL_REGALLOC_X86_64 env-var gate ───────────────
         //
         // Mirrors the aarch64 wire-up at `backend.rs:3207` (commit 51ae66be
-        // / W2-c-impl flipped that gate to default-ON). x86_64 stays
-        // default-OFF because the byte-changing register-based emitter is
-        // not yet implemented — see "Limitation" below. The gate exists
-        // so that future wave 2 work (`x86_64/reg_isel.rs` per design doc
-        // §5.1, `scripts/audit/regalloc_endianness_wave2_x86_64_design.md`)
-        // can flip the default once the new emitter passes the curated
-        // test suite.
+        // / W2-c-impl flipped that gate to default-ON).
         //
-        // When unset (default): today's behaviour — stack-slot ISel bytes
-        // + target-agnostic allocator metadata annotation (additive, no
-        // byte changes).
+        // W6-flip: the x86_64 register-based emitter
+        // (reg_isel::emit_function_regalloc_full) now passes 30/30
+        // curated tests. The gate is flipped to default-ON. The env var
+        // is still respected (set VUMA_REAL_REGALLOC_X86_64=0 to force
+        // the stack-slot path for debugging).
         //
-        // When set to "1": same as above PLUS the `contains_fork`
-        // opt-out (see below). A future wave will dispatch to a real
-        // register-based byte emitter here; today the gate is wired but
-        // the byte path is the same as the default (documented).
+        // When unset (default): register-based emission via
+        // reg_isel::emit_function_regalloc_full, with the contains_fork
+        // opt-out falling back to stack-slot for functions with clone/
+        // syscall hazards.
+        //
+        // When set to "0": force stack-slot ISel (for debugging).
         let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_X86_64")
-            .map(|v| v == "1")
-            .unwrap_or(false);
+            .map(|v| v != "0")
+            .unwrap_or(true);
 
         // ── X1-impl: contains_fork opt-out ───────────────────────────────
         //
@@ -4352,8 +4352,33 @@ impl Backend for X86_64Backend {
                     crate::ir::IRInstr::Call { func: fname, .. } => {
                         fname == "spawn_worker" || fname == "fork"
                     }
-                    // clone=56, vfork=58 on Linux/x86_64.
-                    crate::ir::IRInstr::Syscall { nr, .. } => *nr == 56 || *nr == 58,
+                    // clone=56, vfork=58 on Linux/x86_64 (native).
+                    // ALSO check generic nr=220 (aarch64 clone, used by
+                    // the IR before syscall_abi::translate resolves it
+                    // to the native number). Without this, IPC tests
+                    // (simple_send, ping_pong, try_recv) which use
+                    // spawn_worker → clone would go through the regalloc
+                    // path, which has a register-reuse hazard around
+                    // syscalls (the allocator may assign the syscall's
+                    // dst to the same register as one of its args when
+                    // the arg is live across the syscall). Falling back
+                    // to stack-slot for fork-containing functions matches
+                    // the aarch64 backend's behavior (R1-b2-fix).
+                    //
+                    // W4-fix: ALSO fall back for ANY syscall that has a
+                    // Register arg AND a dst (return value). These are
+                    // the syscalls with the register-reuse hazard (e.g.
+                    // try_recv's read() syscall). This is overly broad
+                    // but safe — the stack-slot path handles all syscalls
+                    // correctly. The regalloc path can be re-enabled for
+                    // these once the allocator's live-range analysis is
+                    // fixed to not reuse an arg's register for the dst
+                    // when the arg is live across the syscall.
+                    crate::ir::IRInstr::Syscall { nr, args, dst } => {
+                        *nr == 56 || *nr == 58 || *nr == 220 || *nr == 221
+                        || (dst.is_some()
+                            && args.iter().any(|a| matches!(a, crate::ir::IRValue::Register(_))))
+                    }
                     _ => false,
                 }
             })

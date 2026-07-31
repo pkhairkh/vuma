@@ -1087,7 +1087,16 @@ fn emit_instruction(
             // x86_64 Linux syscall ABI:
             //   nr in RAX, args in RDI, RSI, RDX, R10, R8, R9
             //   return in RAX
-            code.extend(encode_mov_reg_imm32(Gpr::Rax, *nr as i32));
+            //
+            // Translate the VUMA-generic syscall number (e.g. 220 for
+            // clone, which is the aarch64 number) to the x86_64 native
+            // number (e.g. 56 for clone). Without this translation, the
+            // IPC tests call non-existent syscalls and SIGSEGV.
+            let native_nr = crate::syscall_abi::translate_or_warn(
+                crate::backend::BackendKind::X86_64,
+                *nr,
+            );
+            code.extend(encode_mov_reg_imm32(Gpr::Rax, native_nr as i32));
             let arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::R10, Gpr::R8, Gpr::R9];
             for (i, arg) in args.iter().enumerate().take(6) {
                 let arg_reg = load_to_reg(arg, alloc, code);
