@@ -1,5 +1,5 @@
-import Pmt.IrSubset
-import Pmt.CMRA
+import PMT.Faithful.IrSubset
+import PMT.Faithful.CMRA
 
 /-!
 # `WP` — Inductive Weakest Precondition

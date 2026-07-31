@@ -1,4 +1,4 @@
-import Pmt.Model
+import PMT.Faithful.Model
 
 /-!
 # Agreement theorem — `Arena.alloc` agrees with the Rust mirror decision

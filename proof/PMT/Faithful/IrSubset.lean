@@ -1,4 +1,4 @@
-import Pmt.Model
+import PMT.Faithful.Model
 
 /-!
 # `IrSubset` — IR instructions and their small-step semantics over the Arena

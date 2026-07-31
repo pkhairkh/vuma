@@ -1,4 +1,4 @@
-import Pmt.Model
+import PMT.Faithful.Model
 
 /-!
 ## Rust Conformance — Lean `Arena.alloc` matches the Rust `Arena::alloc` spec

@@ -1,4 +1,4 @@
-import Pmt.Model
+import PMT.Faithful.Model
 
 /-!
 # Lean extraction of `Arena.alloc` to a verified Rust `arena_alloc_verified`
