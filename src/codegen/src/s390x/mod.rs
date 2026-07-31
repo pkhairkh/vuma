@@ -3114,7 +3114,7 @@ impl Backend for S390XBackend {
                     IRInstr::Call { func: fname, .. } => {
                         fname == "spawn_worker" || fname == "fork"
                     }
-                    IRInstr::Syscall { nr, .. } => *nr == 120 || *nr == 11,
+                    IRInstr::Syscall { nr, .. } => *nr == 120 || *nr == 11 || *nr == 220 || *nr == 221,
                     _ => false,
                 }
             })
