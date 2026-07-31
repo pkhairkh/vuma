@@ -4629,6 +4629,52 @@ impl Backend for Wasm32Backend {
     }
 
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
+        // ── contains_fork detection ────────────────────────────────────
+        //
+        // wasm32 is a stack machine — there are no physical registers and
+        // therefore no register-based emitter to "fall back" from.  The
+        // existing `lower_function` IS the only ISel path; we never branch
+        // to an alternative emitter.
+        //
+        // We still compute `contains_fork` for parity with the other
+        // backends (x86_64, x86_32, arm32, riscv*, mips*, ppc*, s390x,
+        // sparc64, alpha, m68k, hppa, loongarch64) so downstream tooling
+        // (debug logs, future fork-emulation hooks, audit reports) can
+        // observe that this function contains a clone/spawn_worker.  The
+        // generic syscall numbers 220/221 are the aarch64 clone/vfork
+        // numbers used by the IR before `syscall_abi::translate` resolves
+        // them; spawn_worker is the IPC-level name lowered by
+        // `expand_spawn_worker` (ipc_lowering.rs) to `Syscall{nr: 220}`.
+        //
+        // Note: the existing `lower_instruction`'s `IRInstr::Syscall` arm
+        // already special-cases `nr == 220` (clone) by emitting the
+        // in-process fork-emulation pattern (CFG-rewrite + child-exit
+        // marker) and a one-shot `vuma_log!(warn, ...)`.  Computing
+        // `contains_fork` here does NOT change that behavior — it is
+        // purely observational.
+        let contains_fork = func.blocks.iter().any(|block| {
+            block.instructions.iter().any(|inst| {
+                match inst {
+                    crate::ir::IRInstr::Call { func: fname, .. } => {
+                        fname == "spawn_worker" || fname == "fork"
+                    }
+                    // Generic clone/vfork numbers (aarch64) used by the IR
+                    // before syscall_abi::translate resolves them.
+                    crate::ir::IRInstr::Syscall { nr, .. } => *nr == 220 || *nr == 221,
+                    _ => false,
+                }
+            })
+        });
+        if contains_fork {
+            vuma_log!(
+                debug,
+                "wasm32 allocate_registers: function '{}' contains spawn_worker/\
+                 fork (clone nr=220/221); existing stack-machine ISel remains \
+                 the only path (no register-based emitter to fall back from)",
+                func.name
+            );
+        }
+
         // Wasm has no registers — map virtual regs to locals.
         // We lower the IR function to Wasm bytecode here.
         let (func_body, func_type, call_relocs, table_relocs, type_relocs, per_instr) =
