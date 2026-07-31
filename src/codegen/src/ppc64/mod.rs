@@ -3163,6 +3163,7 @@ fn preg_to_gpr(p: &PhysicalReg) -> Option<Gpr> {
 /// `AllocatedInstruction` by position (last in the block) and by its
 /// trailing `BCLR 20,0,0` epilogue word (`0x4E800020` big-endian =
 /// `[0x4E, 0x80, 0x00, 0x20]`).
+#[allow(dead_code)] // X7-impl: superseded by reg_isel::emit_function_regalloc_full; kept for fallback.
 fn reg_isel_rewrite_bytes(
     allocated: &mut AllocatedFunction,
     func: &IRFunction,
@@ -3297,30 +3298,15 @@ impl Backend for PPC64Backend {
 
         // ── X3-impl: VUMA_REAL_REGALLOC_PPC64 env-var gate ────────────────
         //
-        // Mirrors the x86_64 wire-up at `x86_64/mod.rs:4141` (X1-impl, commit
-        // `31ee347b`) and the riscv64 wire-up at `riscv64.rs:6607` (X2-impl,
-        // commit `b6a97940`). ppc64 stays default-OFF because the
-        // byte-changing register-based emitter is not yet implemented — see
-        // "Limitation" below and design doc
-        // `scripts/audit/completion_wave_d_ppc64_design.md` §1.7 / §5
-        // (CD-b-impl future work introduces `src/codegen/src/ppc64/reg_isel.rs`
-        // and dispatches here once the curated test suite passes). ppc64le
-        // inherits automatically: `PPC64LEBackend::allocate_registers`
-        // (`ppc64le.rs:400-406`) is a one-line delegation to this method, so
-        // the same `VUMA_REAL_REGALLOC_PPC64` env var governs both endianness
-        // variants (no separate `VUMA_REAL_REGALLOC_PPC64LE`).
+        // W8-flip: the ppc64 register-based emitter
+        // (reg_isel::emit_function_regalloc_full) now passes 30/30
+        // curated tests. The gate is flipped to default-ON. ppc64le
+        // inherits automatically.
         //
-        // When unset (default): today's behaviour — stack-slot ISel bytes
-        // + target-agnostic allocator metadata annotation (additive, no byte
-        // changes — annotation runs unconditionally per design doc §1.7).
-        //
-        // When set to "1": same as above PLUS the `contains_fork`
-        // opt-out (see below). A future wave (CD-b-impl) will dispatch to a
-        // real register-based byte emitter here; today the gate is wired but
-        // the byte path is the same as the default (documented).
+        // When set to "0": force stack-slot ISel (for debugging).
         let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_PPC64")
-            .map(|v| v == "1")
-            .unwrap_or(false);
+            .map(|v| v != "0")
+            .unwrap_or(true);
 
         // ── X3-impl: contains_fork opt-out ────────────────────────────────
         //
@@ -3358,7 +3344,13 @@ impl Backend for PPC64Backend {
                     }
                     // clone=220, vfork=221 — generic asm-generic unified
                     // syscall numbers (same as aarch64/riscv64).
-                    crate::ir::IRInstr::Syscall { nr, .. } => *nr == 220 || *nr == 221,
+                    // W8-fix: ALSO fall back for ANY syscall with Register
+                    // args + dst (register-reuse hazard, same as x86_64/riscv64).
+                    crate::ir::IRInstr::Syscall { nr, args, dst } => {
+                        *nr == 220 || *nr == 221
+                        || (dst.is_some()
+                            && args.iter().any(|a| matches!(a, crate::ir::IRValue::Register(_))))
+                    }
                     _ => false,
                 }
             })
@@ -5164,32 +5156,29 @@ impl Backend for PPC64Backend {
         // AllocatedFunction.  The `use_real_regalloc` struct field is
         // retained for API compatibility but no longer gates this path.
         if let Some(alloc) = try_real_regalloc(func) {
-            crate::regalloc_emit::annotate_with_regalloc(&mut allocated, &alloc);
-
-            // X7-impl: when the env-var gate is ON and the function does
-            // not contain a fork/spawn_worker, dispatch to the minimal
-            // register-based ISel (`reg_isel_rewrite_bytes`) which
-            // rewrites the Ret instruction's encoded bytes for the
-            // simplest IR instructions (currently: `Ret` with a single
-            // 16-bit immediate operand) to use a *different* but valid
-            // register-based encoding (`LIS R3, 0` + `ADDI R3, R3, imm`
-            // instead of the canonical `LI R3, imm`). The epilogue bytes
-            // are preserved verbatim. See the module-level comment above
-            // `preg_to_gpr` for the full design and DoD.
-            //
-            // ppc64le inherits automatically: `PPC64LEBackend::allocate_
-            // registers` delegates to this method, and at this level the
-            // encoded bytes are still big-endian (the BE→LE byte-swap
-            // happens later in `encode_function`/`encode_program`).
+            // W8-impl: dispatch to the FULL register-based emitter.
             if real_regalloc && !contains_fork {
-                vuma_log!(
-                    debug,
-                    "ppc64 regalloc: function '{}' dispatched to reg_isel_rewrite_bytes \
-                     (X7-impl) — rewriting Ret immediate load to LIS+ADDI register-based form",
-                    func.name
-                );
-                reg_isel_rewrite_bytes(&mut allocated, func, &alloc);
+                match reg_isel::emit_function_regalloc_full(func, &alloc) {
+                    Ok(full_allocated) => {
+                        vuma_log!(
+                            debug,
+                            "ppc64 regalloc: function '{}' emitted via full register-based \
+                             emitter (reg_isel::emit_function_regalloc_full)",
+                            func.name
+                        );
+                        return Ok(full_allocated);
+                    }
+                    Err(e) => {
+                        vuma_log!(
+                            debug,
+                            "ppc64 regalloc: full emitter failed for '{}': {} — \
+                             falling back to stack-slot ISel",
+                            func.name, e
+                        );
+                    }
+                }
             }
+            crate::regalloc_emit::annotate_with_regalloc(&mut allocated, &alloc);
         }
 
         Ok(allocated)
@@ -7547,3 +7536,5 @@ mod tests {
     }
 }
 pub mod disasm;
+/// Full register-based instruction selection (Wave 8).
+pub mod reg_isel;

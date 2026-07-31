@@ -2360,8 +2360,14 @@ fn ppc64_target_desc() -> TargetDesc {
         RegDesc::gpr("R8", 8).arg(5),
         RegDesc::gpr("R9", 9).arg(6),
         RegDesc::gpr("R10", 10).arg(7),
-        // R11-R12: volatile (caller-saved)
-        RegDesc::gpr("R11", 11),
+        // R11-R12: volatile (caller-saved).
+        // R11 is reserved as the dedicated scratch register for
+        // load_to_reg's immediate materialization in reg_isel.rs.
+        // Marking it not_allocatable prevents the allocator from
+        // assigning a live vreg to R11, which would be clobbered by the
+        // next immediate load. (W8-fix: same pattern as x86_64 R11 and
+        // riscv64 T6.)
+        RegDesc::gpr("R11", 11).not_allocatable(),
         RegDesc::gpr("R12", 12),
         // R13: thread pointer (not allocatable)
         RegDesc::gpr("R13", 13).not_allocatable(),
