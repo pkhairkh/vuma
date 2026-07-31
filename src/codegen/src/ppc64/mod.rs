@@ -3084,6 +3084,97 @@ impl Backend for PPC64Backend {
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
         let func_name = func.name.clone();
 
+        // ── X3-impl: VUMA_REAL_REGALLOC_PPC64 env-var gate ────────────────
+        //
+        // Mirrors the x86_64 wire-up at `x86_64/mod.rs:4141` (X1-impl, commit
+        // `31ee347b`) and the riscv64 wire-up at `riscv64.rs:6607` (X2-impl,
+        // commit `b6a97940`). ppc64 stays default-OFF because the
+        // byte-changing register-based emitter is not yet implemented — see
+        // "Limitation" below and design doc
+        // `scripts/audit/completion_wave_d_ppc64_design.md` §1.7 / §5
+        // (CD-b-impl future work introduces `src/codegen/src/ppc64/reg_isel.rs`
+        // and dispatches here once the curated test suite passes). ppc64le
+        // inherits automatically: `PPC64LEBackend::allocate_registers`
+        // (`ppc64le.rs:400-406`) is a one-line delegation to this method, so
+        // the same `VUMA_REAL_REGALLOC_PPC64` env var governs both endianness
+        // variants (no separate `VUMA_REAL_REGALLOC_PPC64LE`).
+        //
+        // When unset (default): today's behaviour — stack-slot ISel bytes
+        // + target-agnostic allocator metadata annotation (additive, no byte
+        // changes — annotation runs unconditionally per design doc §1.7).
+        //
+        // When set to "1": same as above PLUS the `contains_fork`
+        // opt-out (see below). A future wave (CD-b-impl) will dispatch to a
+        // real register-based byte emitter here; today the gate is wired but
+        // the byte path is the same as the default (documented).
+        let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_PPC64")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+
+        // ── X3-impl: contains_fork opt-out ────────────────────────────────
+        //
+        // Same hazard as aarch64's R1-b2-fix (`backend.rs:3218-3242`),
+        // x86_64's X1-impl (`x86_64/mod.rs:4165-4192`), and riscv64's
+        // X2-impl (`riscv64.rs:6636-6669`): a register-based prologue's
+        // callee-saved `STD R14, slot(R1); STD R15, ...; LD ...; LD R14`
+        // doesn't interact correctly with `clone()` because the child
+        // process runs with a different register state than the parent.
+        //
+        // ppc64 syscall numbers — the IR uses the **generic** asm-generic
+        // unified syscall numbers (same as aarch64 and riscv64, DIFFERENT
+        // from x86_64's historical 56/58):
+        //   clone  = 220   (generic; ppc64-native 120 via
+        //                  `syscall_abi::translate_or_warn(PowerPC64, 220)`
+        //                  at `syscall_abi.rs:553` — translation happens at
+        //                  emit time, NOT in the IR)
+        //   vfork  = 221   (generic; defensive — ppc64 has no separate
+        //                  vfork syscall, execve-family)
+        // Per design doc §1.5 / §7.4 and CD-a-audit finding: the predicate
+        // checks the GENERIC IR-level `nr` (220/221), matching aarch64 and
+        // riscv64 verbatim. The ppc64-native 120 translation is irrelevant
+        // here because by the time `allocate_registers` runs, the IR still
+        // carries the generic number.
+        //
+        // spawn_worker is lowered by `expand_spawn_worker` (ipc_lowering.rs)
+        // to `Syscall{nr: 220, ...}`. By the time `allocate_registers` runs,
+        // the `Call{func: "spawn_worker"}` has been replaced; we still
+        // detect both forms defensively.
+        let contains_fork = func.blocks.iter().any(|block| {
+            block.instructions.iter().any(|inst| {
+                match inst {
+                    crate::ir::IRInstr::Call { func: fname, .. } => {
+                        fname == "spawn_worker" || fname == "fork"
+                    }
+                    // clone=220, vfork=221 — generic asm-generic unified
+                    // syscall numbers (same as aarch64/riscv64).
+                    crate::ir::IRInstr::Syscall { nr, .. } => *nr == 220 || *nr == 221,
+                    _ => false,
+                }
+            })
+        });
+
+        if real_regalloc {
+            if contains_fork {
+                vuma_log!(
+                    debug,
+                    "ppc64 regalloc: function '{}' contains spawn_worker/fork \
+                     (clone=220/vfork=221 generic IR-level; ppc64-native 120 at emit \
+                     time); falling back to stack-slot ISel (fork+regalloc not supported \
+                     — same hazard as aarch64 R1-b2-fix)",
+                    func.name
+                );
+            } else {
+                vuma_log!(
+                    debug,
+                    "ppc64 regalloc: function '{}' eligible for register-based path \
+                     (gate=ON, no fork). NOTE: byte-changing register-based emitter is \
+                     not yet implemented (wave CD-b-impl future work, design doc §5); \
+                     emitting stack-slot bytes with regalloc metadata annotation only.",
+                    func.name
+                );
+            }
+        }
+
         // ── Phase 1: Collect all vreg IDs and compute stack layout ──
         let mut all_vreg_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for &id in func.vregs.keys() {
