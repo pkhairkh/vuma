@@ -35,7 +35,43 @@ use crate::backend::{
     BackendError, PhysicalReg, RegClass, RelocationEntry, RiscV32TargetInfo,
 };
 use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
+
+/// Full register-based instruction selection (Wave 10).
+pub mod reg_isel;
 use std::collections::HashMap;
+
+/// Run the target-agnostic linear-scan allocator on `func` and return
+/// the result. Returns `None` if the target desc is missing or alloc fails.
+fn try_real_regalloc(
+    func: &IRFunction,
+) -> Option<crate::regalloc::RegAllocResult> {
+    let registry = crate::target_desc::TargetDescRegistry::new();
+    let target = match registry.get("riscv32") {
+        Some(t) => t,
+        None => {
+            vuma_log!(
+                debug,
+                "riscv32 allocate_registers: target 'riscv32' not in TargetDescRegistry, \
+                 falling back to stack-slot ISel"
+            );
+            return None;
+        }
+    };
+    let allocator = crate::regalloc::TargetAgnosticRegAlloc::new(target);
+    match allocator.allocate_function(func) {
+        Ok(result) => Some(result),
+        Err(e) => {
+            vuma_log!(
+                debug,
+                "riscv32 allocate_registers: real regalloc failed for '{}': {}, \
+                 falling back to stack-slot ISel",
+                func.name,
+                e
+            );
+            None
+        }
+    }
+}
 
 // ===========================================================================
 // Opcodes
@@ -8639,7 +8675,7 @@ impl Backend for RiscV32Backend {
 
         let code_size: usize = instructions.iter().map(|i| i.encoded.len()).sum();
 
-        Ok(AllocatedFunction {
+        let allocated = AllocatedFunction {
             name: func_name,
             blocks: vec![AllocatedBlock {
                 label: "entry".to_string(),
@@ -8653,7 +8689,57 @@ impl Backend for RiscV32Backend {
             relocations,
             wasm_func_type: None,
             wasm_locals: None,
-        })
+        };
+
+        // ── Wave 10: Full register-based emitter dispatch ──
+        // Mirrors the riscv64/x86_64/ppc64 wire-up. Runs the target-agnostic
+        // linear-scan allocator, then dispatches to reg_isel::emit_function_
+        // regalloc_full for functions without fork/syscall hazards.
+        let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_RISCV32")
+            .map(|v| v != "0")
+            .unwrap_or(true); // default ON
+
+        let contains_fork = func.blocks.iter().any(|block| {
+            block.instructions.iter().any(|inst| {
+                match inst {
+                    crate::ir::IRInstr::Call { func: fname, .. } => {
+                        fname == "spawn_worker" || fname == "fork"
+                    }
+                    crate::ir::IRInstr::Syscall { nr, args, dst } => {
+                        *nr == 220 || *nr == 221
+                        || (dst.is_some()
+                            && args.iter().any(|a| matches!(a, crate::ir::IRValue::Register(_))))
+                    }
+                    _ => false,
+                }
+            })
+        });
+
+        if real_regalloc && !contains_fork {
+            if let Some(alloc_result) = try_real_regalloc(func) {
+                match reg_isel::emit_function_regalloc_full(func, &alloc_result) {
+                    Ok(full_allocated) => return Ok(full_allocated),
+                    Err(e) => {
+                        vuma_log!(
+                            debug,
+                            "riscv32 regalloc: full emitter failed for '{}': {} — \
+                             falling back to stack-slot ISel",
+                            func.name, e
+                        );
+                    }
+                }
+            }
+        }
+
+        // If regalloc ran (even if we didn't use the full emitter), annotate
+        // the stack-slot output with the allocator's decisions.
+        if let Some(alloc_result) = try_real_regalloc(func) {
+            let mut annotated = allocated;
+            crate::regalloc_emit::annotate_with_regalloc(&mut annotated, &alloc_result);
+            Ok(annotated)
+        } else {
+            Ok(allocated)
+        }
     }
 
     fn encode_function(&self, func: &AllocatedFunction) -> Result<Vec<u8>, BackendError> {
