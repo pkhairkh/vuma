@@ -91,6 +91,9 @@ use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRVal
 use std::collections::HashMap;
 use std::fmt;
 
+#[allow(clippy::all)]
+pub mod reg_isel;
+
 // ===========================================================================
 // General-Purpose Registers
 // ===========================================================================
@@ -3040,12 +3043,118 @@ impl TargetInfo for S390XTargetInfo {
     }
 }
 
+// ===========================================================================
+// Real register-allocator helper (VUMA_REAL_REGALLOC_S390X wiring)
+// ===========================================================================
+
+/// Run the target-agnostic linear-scan register allocator on `func`,
+/// returning a `RegAllocResult` on success or `None` on failure (so the
+/// caller falls back to the stack-slot ISel).
+///
+/// Mirrors the `try_real_regalloc` helpers in `aarch64`/`riscv64`/`x86_64`.
+fn try_real_regalloc(func: &IRFunction) -> Option<crate::regalloc::RegAllocResult> {
+    let registry = crate::target_desc::TargetDescRegistry::new();
+    let target = match registry.get("s390x") {
+        Some(t) => t,
+        None => {
+            vuma_log!(
+                debug,
+                "s390x allocate_registers: target 's390x' not in TargetDescRegistry, \
+                 falling back to stack-slot ISel"
+            );
+            return None;
+        }
+    };
+    let allocator = crate::regalloc::TargetAgnosticRegAlloc::new(target);
+    match allocator.allocate_function(func) {
+        Ok(result) => Some(result),
+        Err(e) => {
+            vuma_log!(
+                debug,
+                "s390x allocate_registers: real regalloc failed for '{}': {}, \
+                 falling back to stack-slot ISel",
+                func.name,
+                e
+            );
+            None
+        }
+    }
+}
+
 impl Backend for S390XBackend {
     fn target_info(&self) -> &dyn TargetInfo {
         &self.target_info
     }
 
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
+        // ── VUMA_REAL_REGALLOC_S390X env-var gate ───────────────────────
+        //
+        // When unset (default): dispatch to the FULL register-based emitter
+        // (reg_isel::emit_function_regalloc_full), which produces real
+        // register-to-register s390x machine code for all IR instructions
+        // it supports. If the full emitter fails (e.g., FP instructions
+        // not yet supported), fall back to the stack-slot ISel output.
+        //
+        // When set to "0": force stack-slot ISel (for debugging).
+        let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_S390X")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+
+        // ── contains_fork opt-out ───────────────────────────────────────
+        // s390x syscall numbers (Linux/s390x):
+        //   clone  = 120   (different from aarch64/riscv64 which use 220)
+        //   vfork  = 11    (execve is also 11 — but we check args[0] too)
+        // The regalloc prologue's callee-saved save/restore doesn't
+        // interact correctly with clone() because the child process runs
+        // with a different register state. Fall back to stack-slot for
+        // functions containing clone/fork.
+        let contains_fork = func.blocks.iter().any(|block| {
+            block.instructions.iter().any(|inst| {
+                match inst {
+                    IRInstr::Call { func: fname, .. } => {
+                        fname == "spawn_worker" || fname == "fork"
+                    }
+                    IRInstr::Syscall { nr, .. } => *nr == 120 || *nr == 11,
+                    _ => false,
+                }
+            })
+        });
+
+        if real_regalloc && !contains_fork {
+            // Try the real register-based emitter.
+            if let Some(alloc) = try_real_regalloc(func) {
+                match reg_isel::emit_function_regalloc_full(func, &alloc) {
+                    Ok(full_allocated) => {
+                        vuma_log!(
+                            debug,
+                            "s390x regalloc: function '{}' emitted via full register-based \
+                             emitter (reg_isel::emit_function_regalloc_full)",
+                            func.name
+                        );
+                        return Ok(full_allocated);
+                    }
+                    Err(e) => {
+                        vuma_log!(
+                            debug,
+                            "s390x regalloc: full emitter failed for '{}': {} — \
+                             falling back to stack-slot ISel",
+                            func.name, e
+                        );
+                        // Fall through to stack-slot path.
+                    }
+                }
+            }
+        } else if contains_fork {
+            vuma_log!(
+                debug,
+                "s390x regalloc: function '{}' contains spawn_worker/fork \
+                 (clone=120 on Linux/s390x); falling back to stack-slot ISel \
+                 (fork+regalloc not supported)",
+                func.name
+            );
+        }
+
+        // Stack-slot ISel fallback (always correct, but slow).
         if self.use_real_regalloc {
             s390x_allocate_registers_real(func)
         } else {

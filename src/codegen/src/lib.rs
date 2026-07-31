@@ -3,6 +3,7 @@
     clippy::map_unwrap_or,
     clippy::unnecessary_cast,
     clippy::redundant_closure,
+    clippy::doc_overindented_list_items,
     clippy::if_same_then_else,
     clippy::collapsible_if,
     clippy::useless_format

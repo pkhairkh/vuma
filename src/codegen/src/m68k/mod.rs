@@ -65,6 +65,7 @@ use std::fmt;
 
 /// Full register-based instruction selection (Wave 16).
 #[allow(clippy::all)]
+#[allow(clippy::all)]
 pub mod reg_isel;
 
 fn try_real_regalloc(func: &IRFunction) -> Option<crate::regalloc::RegAllocResult> {
