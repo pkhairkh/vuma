@@ -2763,14 +2763,16 @@ fn m68k_target_desc() -> TargetDesc {
         RegDesc::gpr("D5", 5).callee_saved(),
         RegDesc::gpr("D6", 6).callee_saved(),
         RegDesc::gpr("D7", 7).callee_saved(),
-        // A0-A1: scratch (caller-saved)
-        RegDesc::gpr("A0", 8),
-        RegDesc::gpr("A1", 9),
-        // A2-A6: callee-saved (A6 = frame pointer)
-        RegDesc::gpr("A2", 10).callee_saved(),
-        RegDesc::gpr("A3", 11).callee_saved(),
-        RegDesc::gpr("A4", 12).callee_saved(),
-        RegDesc::gpr("A5", 13).callee_saved(),
+        // A0-A1: scratch (caller-saved). Marked not_allocatable because
+        // m68k instruction encodings don't distinguish D/A registers —
+        // the Move instruction can't write to address registers.
+        RegDesc::gpr("A0", 8).not_allocatable(),
+        RegDesc::gpr("A1", 9).not_allocatable(),
+        // A2-A6: callee-saved (A6 = frame pointer). Also not_allocatable.
+        RegDesc::gpr("A2", 10).not_allocatable(),
+        RegDesc::gpr("A3", 11).not_allocatable(),
+        RegDesc::gpr("A4", 12).not_allocatable(),
+        RegDesc::gpr("A5", 13).not_allocatable(),
         RegDesc::gpr("A6", 14).frame_pointer().callee_saved().not_allocatable(),
         // A7: stack pointer
         RegDesc::gpr("A7", 15).stack_pointer(),

@@ -463,12 +463,18 @@ impl Instruction {
             }
             Instruction::Rts => vec![0x4E, 0x75],
             Instruction::Bra { offset } => {
-                let w = 0x6000u16 | (*offset as u16 & 0xff);
-                w.to_be_bytes().to_vec()
+                let w1 = 0x6000u16;
+                let w2 = *offset as u16;
+                let mut v = w1.to_be_bytes().to_vec();
+                v.extend_from_slice(&w2.to_be_bytes());
+                v
             }
             Instruction::Bcc { cond, offset } => {
-                let w = 0x5400u16 | ((*cond as u16 & 0xf) << 8) | (*offset as u16 & 0xff);
-                w.to_be_bytes().to_vec()
+                let w1 = 0x6000u16 | ((*cond as u16 & 0xf) << 8);
+                let w2 = *offset as u16;
+                let mut v = w1.to_be_bytes().to_vec();
+                v.extend_from_slice(&w2.to_be_bytes());
+                v
             }
             Instruction::Trap0 => vec![0x4E, 0x40],
             Instruction::Link { reg, disp } => {
