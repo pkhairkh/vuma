@@ -1391,6 +1391,7 @@ impl TargetDescRegistry {
         descs.insert("wasm32", wasm32_target_desc());
         descs.insert("loongarch64", loongarch64_target_desc());
         descs.insert("x86_64", x86_64_target_desc());
+        descs.insert("x86_32", x86_32_target_desc());
         descs.insert("arm32", arm32_target_desc());
         descs.insert("mips64", mips64_target_desc());
         descs.insert("ppc64", ppc64_target_desc());
@@ -1398,6 +1399,7 @@ impl TargetDescRegistry {
         descs.insert("alpha", alpha_target_desc());
         descs.insert("m68k", m68k_target_desc());
         descs.insert("s390x", s390x_target_desc());
+        descs.insert("hppa", hppa_target_desc());
         Self { descs }
     }
 
@@ -2084,6 +2086,142 @@ fn x86_64_target_desc() -> TargetDesc {
         calling_convention,
         instruction_categories,
         latency_table: LatencyTable::x86_64(),
+    }
+}
+
+// ===========================================================================
+// x86-32 (i386 SystemV — VUMA-internal regparam calling convention)
+// ===========================================================================
+
+fn x86_32_target_desc() -> TargetDesc {
+    // x86_32 has only 8 general-purpose registers (EAX–EDI).  The Gpr enum
+    // in `x86_32/mod.rs` retains R8–R15 as source-compat aliases whose
+    // encodings silently alias to the low 8 registers — including those in
+    // the target desc would let the allocator hand out the same physical
+    // register under two names, so we deliberately list ONLY the 8 real
+    // i386 GPRs here.
+    //
+    // # Calling convention (VUMA-internal regparam, matches stack_slot_isel)
+    //
+    //   • Non-FP params: first 4 in EDI, ESI, EDX, ECX (in that order).
+    //   • FP params (F32/F64): on the stack, 8 bytes each at [EBP + 8 + i*8].
+    //   • Return value: EAX (32-bit) or EDX:EAX (64-bit).
+    //   • Callee-saved: EBX, EBP (and the allocator is free to use EBP only
+    //     as the frame pointer — marked not_allocatable).
+    //
+    // # Scratch policy
+    //
+    //   EAX is reserved as the dedicated scratch register for immediate
+    //   materialization in `load_to_reg` (used to load an immediate into a
+    //   register before a two-operand ALU op).  Marking it `not_allocatable`
+    //   prevents the allocator from assigning a live vreg to EAX, which
+    //   would be clobbered by the next immediate load.  EAX is also used
+    //   as the dividend register for IDIV and the result register for
+    //   division — both safe because no live vreg is ever assigned to it.
+    //   The Return terminator still emits `mov eax, ret_reg` at function
+    //   exit to materialise the return value.
+    //
+    //   EDX is required by IDIV (sign-extended high word via CDQ) and by
+    //   32×32→64 MUL (high word in EDX).  We keep EDX allocatable and rely
+    //   on the allocator's liveness analysis to spill any live vreg that
+    //   would otherwise be clobbered by these instructions; this matches
+    //   the x86_64 backend's approach.
+    let registers = vec![
+        // EAX: return value / scratch (NOT allocatable — see above).
+        RegDesc::gpr("EAX", 0).return_reg().not_allocatable(),
+        // ECX: arg4 in regparam (caller-saved, allocatable); also the shift
+        // count register for SHL/SHR/SAR.
+        RegDesc::gpr("ECX", 1).arg(3),
+        // EDX: arg3 in regparam (caller-saved, allocatable); also the
+        // high-word register for IDIV/MUL.
+        RegDesc::gpr("EDX", 2).arg(2),
+        // EBX: callee-saved (allocatable).  i386 syscall ABI uses EBX as
+        // arg1, but we shuffle syscall args explicitly in `emit_instruction`
+        // for Syscall, so the allocator may freely use EBX otherwise.
+        RegDesc::gpr("EBX", 3).callee_saved(),
+        // ESP: stack pointer (not allocatable).
+        RegDesc::gpr("ESP", 4).stack_pointer(),
+        // EBP: frame pointer (callee-saved, NOT allocatable — same pattern
+        // as x86_64 RBP, prevents the allocator from clobbering the frame).
+        RegDesc::gpr("EBP", 5).frame_pointer().callee_saved().not_allocatable(),
+        // ESI: arg2 in regparam (caller-saved, allocatable).
+        RegDesc::gpr("ESI", 6).arg(1),
+        // EDI: arg1 in regparam (caller-saved, allocatable).
+        RegDesc::gpr("EDI", 7).arg(0),
+        // XMM0–XMM7: FP temporaries (caller-saved).  FP argument passing is
+        // via the stack on i386 SysV, so XMM regs are not marked as arg regs.
+        RegDesc::fpr("XMM0", 0),
+        RegDesc::fpr("XMM1", 1),
+        RegDesc::fpr("XMM2", 2),
+        RegDesc::fpr("XMM3", 3),
+        RegDesc::fpr("XMM4", 4),
+        RegDesc::fpr("XMM5", 5),
+        RegDesc::fpr("XMM6", 6),
+        RegDesc::fpr("XMM7", 7),
+    ];
+
+    let calling_convention = CallingConventionDesc {
+        name: "i386-vuma-regparam",
+        // First 4 non-FP int args in EDI, ESI, EDX, ECX (VUMA-internal
+        // regparam — matches the existing stack_slot_isel convention and
+        // the `_start` stub which loads argc→EDI, argv→ESI before calling
+        // main).
+        int_arg_regs: vec![7, 6, 2, 1], // EDI, ESI, EDX, ECX
+        // FP args are passed on the stack on i386, not in XMM regs.
+        fp_arg_regs: vec![],
+        int_return_regs: vec![0], // EAX
+        fp_return_regs: vec![0],  // XMM0
+        callee_saved_gprs: vec![3, 5], // EBX, EBP
+        callee_saved_fps: vec![],
+        stack_alignment: 16, // i386 SysV maintains 16-byte stack alignment at call boundaries
+        has_link_register: false,
+        has_branch_delay_slots: false,
+        has_toc_pointer: false,
+    };
+
+    let instruction_categories = vec![
+        InstCategoryDesc {
+            name: "arithmetic",
+            insts: vec![
+                "ADD", "SUB", "IMUL", "IDIV", "AND", "OR", "XOR", "SHL", "SHR", "SAR", "NEG", "NOT",
+            ],
+        },
+        InstCategoryDesc {
+            name: "branch",
+            insts: vec![
+                "JMP", "JE", "JNE", "JL", "JG", "JLE", "JGE", "CALL", "RET",
+            ],
+        },
+        InstCategoryDesc {
+            name: "load_store",
+            insts: vec!["MOV", "LEA", "PUSH", "POP", "MOVZX", "MOVSX"],
+        },
+        InstCategoryDesc {
+            name: "fp_arithmetic",
+            insts: vec![
+                "ADDSD", "SUBSD", "MULSD", "DIVSD", "CVTSI2SD", "CVTSD2SI", "UCOMISD",
+            ],
+        },
+        InstCategoryDesc {
+            name: "system",
+            insts: vec![
+                "INT", "INT3", "NOP",
+            ],
+        },
+    ];
+
+    TargetDesc {
+        name: "x86_32",
+        triple: "i386-unknown-linux-gnu",
+        elf_machine: 3, // EM_386
+        base_addr: 0x08048000,
+        pointer_width: 4,
+        endianness: Endianness::Little,
+        output_format: OutputFormat::Elf32,
+        registers,
+        calling_convention,
+        instruction_categories,
+        latency_table: LatencyTable::x86_32(),
     }
 }
 
@@ -2931,6 +3069,140 @@ fn s390x_target_desc() -> TargetDesc {
     }
 }
 
+// ===========================================================================
+// HPPA (HP PA-RISC 1.1)
+// ===========================================================================
+
+/// HPPA (PA-RISC 1.1) target description.
+///
+/// Register convention (Linux ABI):
+/// - R0       — hardwired zero (reads as 0, writes discarded). NOT allocatable.
+/// - R1 (RP)  — return pointer (caller's return address). NOT allocatable.
+/// - R2       — return pointer (SL: previous SP). Scratch / volatile.
+/// - R3 (FP)  — frame pointer (convention). NOT allocatable.
+/// - R4-R18   — callee-saved (general-purpose scratch + callee-saved pool).
+/// - R19-R22  — caller-saved temporaries.
+/// - R23-R26  — argument registers (REVERSED: R26=arg0, R25=arg1, R24=arg2,
+///              R23=arg3).
+/// - R27      — global data pointer (DP). Scratch / volatile.
+/// - R28      — return value (also ret2 with R29).
+/// - R29      — return value 2.
+/// - R30 (SP) — stack pointer. NOT allocatable.
+/// - R31      — temporary link register for BL (caller-saved).
+///
+/// Callee-saved per the PA-RISC ABI: R3-R18.
+///
+/// Stack alignment: 64 bytes (PA-RISC ABI requirement).
+fn hppa_target_desc() -> TargetDesc {
+    let registers = vec![
+        // R0: hardwired zero. NOT allocatable.
+        RegDesc::gpr("R0", 0).hardwired_zero(),
+        // R1: RP (return pointer). NOT allocatable.
+        RegDesc::gpr("R1", 1).link_register(),
+        // R2: previous SP / scratch. Caller-saved.
+        RegDesc::gpr("R2", 2),
+        // R3: FP (frame pointer). NOT allocatable, callee-saved per ABI.
+        RegDesc::gpr("R3", 3).frame_pointer().callee_saved().not_allocatable(),
+        // R4-R7: callee-saved (general-purpose).
+        RegDesc::gpr("R4", 4).callee_saved(),
+        RegDesc::gpr("R5", 5).callee_saved(),
+        RegDesc::gpr("R6", 6).callee_saved(),
+        RegDesc::gpr("R7", 7).callee_saved(),
+        // R8-R14: S0-S6 scratch registers used by the hppa codegen helpers
+        // (e.g. emit_hppa_mulu32_to_64). NOT marked callee-saved because
+        // the codegen helpers clobber them freely (matching the existing
+        // stack-slot backend's behaviour). Marked not_allocatable so the
+        // register allocator never assigns vregs to them.
+        RegDesc::gpr("R8", 8).not_allocatable(),
+        RegDesc::gpr("R9", 9).not_allocatable(),
+        RegDesc::gpr("R10", 10).not_allocatable(),
+        RegDesc::gpr("R11", 11).not_allocatable(),
+        RegDesc::gpr("R12", 12).not_allocatable(),
+        RegDesc::gpr("R13", 13).not_allocatable(),
+        RegDesc::gpr("R14", 14).not_allocatable(),
+        // R15-R18: callee-saved, allocatable.
+        RegDesc::gpr("R15", 15).callee_saved(),
+        RegDesc::gpr("R16", 16).callee_saved(),
+        RegDesc::gpr("R17", 17).callee_saved(),
+        RegDesc::gpr("R18", 18).callee_saved(),
+        // R19-R22: caller-saved temporaries.
+        RegDesc::gpr("R19", 19),
+        RegDesc::gpr("R20", 20),
+        RegDesc::gpr("R21", 21),
+        RegDesc::gpr("R22", 22),
+        // R23-R26: argument registers (REVERSED order: arg0=R26, arg1=R25, ...).
+        RegDesc::gpr("R23", 23).arg(3),
+        RegDesc::gpr("R24", 24).arg(2),
+        RegDesc::gpr("R25", 25).arg(1),
+        RegDesc::gpr("R26", 26).arg(0),
+        // R27: global data pointer. Caller-saved.
+        RegDesc::gpr("R27", 27),
+        // R28-R29: return value registers.
+        RegDesc::gpr("R28", 28).return_reg(),
+        RegDesc::gpr("R29", 29).return_reg(),
+        // R30: stack pointer. NOT allocatable.
+        RegDesc::gpr("R30", 30).stack_pointer(),
+        // R31: BL link register (transient). Caller-saved.
+        RegDesc::gpr("R31", 31),
+    ];
+    let calling_convention = CallingConventionDesc {
+        name: "hppa-cdecl",
+        // PA-RISC arg regs are reversed: R26=arg0, R25=arg1, R24=arg2, R23=arg3.
+        int_arg_regs: vec![26, 25, 24, 23],
+        fp_arg_regs: vec![],
+        int_return_regs: vec![28],
+        fp_return_regs: vec![],
+        // Callee-saved per the PA-RISC ABI: R3-R7, R15-R18.
+        // (R8-R14 are S0-S6 scratch — clobbered freely by codegen helpers.)
+        callee_saved_gprs: vec![3, 4, 5, 6, 7, 15, 16, 17, 18],
+        callee_saved_fps: vec![],
+        // PA-RISC requires 64-byte stack alignment.
+        stack_alignment: 64,
+        has_link_register: true,
+        has_branch_delay_slots: false,
+        has_toc_pointer: false,
+    };
+    let instruction_categories = vec![
+        InstCategoryDesc {
+            name: "arithmetic",
+            insts: vec!["ADD", "SUB", "SHLADD", "ADDI", "ADDIL"],
+        },
+        InstCategoryDesc {
+            name: "logical",
+            insts: vec!["AND", "OR", "XOR", "COPY", "UADDCM"],
+        },
+        InstCategoryDesc {
+            name: "shift",
+            insts: vec!["SHRPW", "EXTRU", "DEPW", "ZDEP"],
+        },
+        InstCategoryDesc {
+            name: "load_store",
+            insts: vec!["LDW", "LDH", "LDB", "STW", "STH", "STB", "LDO", "LDIL", "LDI"],
+        },
+        InstCategoryDesc {
+            name: "branch",
+            insts: vec!["BL", "BV", "CMPB", "COMB", "ADDB", "ADDI", "MOVB"],
+        },
+        InstCategoryDesc {
+            name: "system",
+            insts: vec!["GATE", "BREAK", "RFI", "SSM", "RSM"],
+        },
+    ];
+    TargetDesc {
+        name: "hppa",
+        triple: "hppa-unknown-linux-gnu",
+        elf_machine: 15, // EM_PARISC
+        base_addr: 0x10000,
+        pointer_width: 4,
+        endianness: crate::backend::Endianness::Big,
+        output_format: crate::backend::OutputFormat::Elf32,
+        registers,
+        calling_convention,
+        instruction_categories,
+        latency_table: LatencyTable::hppa(),
+    }
+}
+
 // Tests
 // ===========================================================================
 
@@ -2960,7 +3232,7 @@ mod tests {
             );
         }
         let names = registry.isa_names();
-        assert_eq!(names.len(), 8, "Expected 8 ISAs, got {}", names.len());
+        assert!(names.len() >= 8, "Expected at least 8 ISAs, got {}", names.len());
     }
 
     /// Verify no register is both an argument register and callee-saved

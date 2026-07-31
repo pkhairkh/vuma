@@ -32,6 +32,24 @@ use crate::ir::{
 };
 
 // ===========================================================================
+// Register-based instruction selection (full regalloc path).
+// ===========================================================================
+
+/// Full register-based instruction selection for hppa (PA-RISC 1.1).
+/// Falls back to the stack-slot allocator when real regalloc is disabled
+/// or unavailable.
+#[allow(clippy::all)]
+pub mod reg_isel;
+
+/// Try to run the target-agnostic register allocator on `func` and return
+/// its `RegAllocResult` (returns `None` on failure).
+fn try_real_regalloc(func: &IRFunction) -> Option<crate::regalloc::RegAllocResult> {
+    let registry = crate::target_desc::TargetDescRegistry::new();
+    let target = registry.get("hppa")?;
+    crate::regalloc::TargetAgnosticRegAlloc::new(target).allocate_function(func).ok()
+}
+
+// ===========================================================================
 // Register definitions
 // ===========================================================================
 
@@ -5606,6 +5624,26 @@ impl Backend for HppaBackend {
     }
 
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
+        // Real-register path: try the target-agnostic allocator and the
+        // register-based emitter first; fall back to the legacy stack-slot
+        // path if regalloc fails or is disabled via VUMA_REAL_REGALLOC_HPPA=0.
+        let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_HPPA")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+        let contains_fork = func.blocks.iter().any(|b| {
+            b.instructions.iter().any(|i| match i {
+                crate::ir::IRInstr::Call { func: f, .. } => f == "spawn_worker" || f == "fork",
+                crate::ir::IRInstr::Syscall { nr, .. } => *nr == 220 || *nr == 221,
+                _ => false,
+            })
+        });
+        if real_regalloc && !contains_fork {
+            if let Some(ar) = try_real_regalloc(func) {
+                if let Ok(full) = reg_isel::emit_function_regalloc_full(func, &ar) {
+                    return Ok(full);
+                }
+            }
+        }
         if self.use_real_regalloc {
             hppa_allocate_registers_real(func)
         } else {
