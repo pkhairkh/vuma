@@ -3334,6 +3334,44 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
 }
 
 // ===========================================================================
+// Real register allocator bridge (Wave F)
+// ===========================================================================
+
+/// Run the target-agnostic linear-scan register allocator on `func` and
+/// return its `RegAllocResult`, or `None` if the target desc is missing or
+/// the allocator errored.  Mirrors `x86_64::try_real_regalloc`.
+fn try_real_regalloc(
+    func: &IRFunction,
+) -> Option<crate::regalloc::RegAllocResult> {
+    let registry = crate::target_desc::TargetDescRegistry::new();
+    let target = match registry.get("x86_32") {
+        Some(t) => t,
+        None => {
+            vuma_log!(
+                debug,
+                "x86_32 allocate_registers: target 'x86_32' not in TargetDescRegistry, \
+                 falling back to stack-slot ISel"
+            );
+            return None;
+        }
+    };
+    let allocator = crate::regalloc::TargetAgnosticRegAlloc::new(target);
+    match allocator.allocate_function(func) {
+        Ok(result) => Some(result),
+        Err(e) => {
+            vuma_log!(
+                debug,
+                "x86_32 allocate_registers: real regalloc failed for '{}': {}, \
+                 falling back to stack-slot ISel",
+                func.name,
+                e
+            );
+            None
+        }
+    }
+}
+
+// ===========================================================================
 // X86_32Backend
 // ===========================================================================
 
@@ -3408,10 +3446,113 @@ impl Backend for X86_32Backend {
     }
 
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
+        // ── Wave F: VUMA_REAL_REGALLOC_X86_32 env-var gate ──────────────
+        //
+        // Mirrors the x86_64 wire-up at `x86_64/mod.rs:4311` (commit
+        // W6-flip).  The register-based emitter (reg_isel::
+        // emit_function_regalloc_full) consumes a `RegAllocResult` from
+        // `TargetAgnosticRegAlloc` (driven by `x86_32_target_desc` in
+        // `target_desc.rs`) and produces register-to-register machine code
+        // for ALL non-FP IR instructions.  FP instructions fall back to
+        // the stack-slot ISel.
+        //
+        // When unset (default): register-based emission via
+        // reg_isel::emit_function_regalloc_full, with the contains_fork
+        // opt-out falling back to stack-slot for functions with clone/
+        // syscall hazards.
+        //
+        // When set to "0": force stack-slot ISel (for debugging).
+        let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_X86_32")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+
+        // ── contains_fork opt-out ──────────────────────────────────────
+        //
+        // Same hazard as x86_64's contains_fork check: a register-based
+        // prologue's callee-saved `push ebx` / `pop ebx` doesn't interact
+        // correctly with `clone()` because the child process runs with a
+        // different register state than the parent.
+        //
+        // x86_32 syscall numbers (Linux/i386) — DIFFERENT from x86_64:
+        //   clone  = 120  (x86_64: 56)
+        //   vfork  = 190  (x86_64: 58)
+        //   (generic 220/221 are the aarch64 numbers used by the IR before
+        //    syscall_abi::translate resolves them to the native number.)
+        //
+        // spawn_worker is lowered by `expand_spawn_worker` (ipc_lowering.rs)
+        // to `Syscall{nr: 220, ...}` on all backends.  By the time
+        // `allocate_registers` runs, the `Call{func: "spawn_worker"}` has
+        // been replaced; we still detect both forms defensively.
+        let contains_fork = func.blocks.iter().any(|block| {
+            block.instructions.iter().any(|inst| {
+                match inst {
+                    crate::ir::IRInstr::Call { func: fname, .. } => {
+                        fname == "spawn_worker" || fname == "fork"
+                    }
+                    // clone=120, vfork=190 on Linux/i386 (native).
+                    // ALSO check generic nr=220 (aarch64 clone, used by
+                    // the IR before syscall_abi::translate resolves it
+                    // to the native number).
+                    crate::ir::IRInstr::Syscall { nr, .. } => {
+                        *nr == 120 || *nr == 190 || *nr == 220 || *nr == 221
+                    }
+                    _ => false,
+                }
+            })
+        });
+
+        if real_regalloc {
+            if contains_fork {
+                vuma_log!(
+                    debug,
+                    "x86_32 regalloc: function '{}' contains spawn_worker/fork \
+                     (clone=120/vfork=190 on Linux/i386); falling back to stack-slot \
+                     ISel (fork+regalloc not supported — same hazard as x86_64 R1-b2-fix)",
+                    func.name
+                );
+            } else {
+                vuma_log!(
+                    debug,
+                    "x86_32 regalloc: function '{}' eligible for register-based path \
+                     (gate=ON, no fork). Dispatching to reg_isel::emit_function_regalloc_full.",
+                    func.name
+                );
+            }
+        }
+
+        // Wave F: when the env-var gate is ON and the function does not
+        // contain a fork/spawn_worker, dispatch to the FULL register-based
+        // emitter (reg_isel::emit_function_regalloc_full).  If the full
+        // emitter fails (e.g. FP instructions not yet supported), fall
+        // back to the stack-slot ISel.
+        if real_regalloc && !contains_fork {
+            if let Some(alloc) = try_real_regalloc(func) {
+                match reg_isel::emit_function_regalloc_full(func, &alloc) {
+                    Ok(allocated) => return Ok(allocated),
+                    Err(e) => {
+                        vuma_log!(
+                            debug,
+                            "x86_32 reg_isel_full failed for '{}': {}; \
+                             falling back to stack-slot ISel",
+                            func.name, e
+                        );
+                        // Fall through to stack-slot path.
+                    }
+                }
+            }
+            // If try_real_regalloc returned None (target desc missing or
+            // allocator errored), fall through to the stack-slot path
+            // below so existing behaviour is preserved.
+        }
+
+        // ── Stack-slot ISel (fallback / forced via VUMA_REAL_REGALLOC_X86_32=0) ──
         let mut allocated = stack_slot_isel::allocate_registers(func)?;
 
-        // If real register allocation is enabled, post-process the
-        // AllocatedFunction to record physical register assignments.
+        // If real register allocation is enabled (and we didn't take the
+        // reg_isel path above), post-process the AllocatedFunction to
+        // record physical register assignments.  The encoded bytes remain
+        // stack-slot-based; only the reads/writes/spill_slots metadata is
+        // updated for downstream consumers (disassemblers, debuggers).
         if self.use_real_regalloc {
             let max_real_regs = 6u32; // EAX, ECX, EDX, EBX, ESI, EDI
             let mut all_vreg_ids: Vec<u32> = Vec::new();
@@ -4808,4 +4949,5 @@ mod tests {
     }
 }
 pub mod disasm;
+pub mod reg_isel;
 pub mod stack_slot_isel;
