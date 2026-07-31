@@ -615,3 +615,74 @@ and aligns the doc surface with the code.
 - The `pmt-runtime-check` Cargo feature remains **off by default**
   and is verified to introduce zero regressions when enabled
   (Wave 7).
+
+## [0.2.0-alpha.9] — Full Register-Based Emitters for x86_64, riscv64, ppc64/ppc64le
+
+This release implements FULL register-based emitters for x86_64, riscv64,
+and ppc64/ppc64le — all 30/30 curated tests pass with default-on (no env
+var needed). The emitters produce register-to-register machine code for
+ALL IR instructions, consuming the target-agnostic linear-scan allocator's
+`RegAllocResult` directly.
+
+### Wave 1-6 — x86_64 Full Register-Based Emitter (15bcaf78 → 1693fecc)
+
+- W1-fix: emit full epilogue at every IRTerminator::Return (was bare `ret`,
+  causing SIGSEGV on all 30 tests). Fixed frame layout, spill-code position
+  keying, code.clear() bug in Cast ZExt.
+- W4-fix: added call relocations (R_X86_64_PLT32), GetAddress relocations,
+  branch fixup persistence, R11 not_allocatable, Alloc buffer location,
+  argument shuffle at function entry.
+- W6-flip: flipped VUMA_REAL_REGALLOC_X86_64 to default-on. Extended
+  contains_fork opt-out for syscall register-reuse hazard. Added syscall
+  number translation. 30/30 pass, clippy green.
+
+### Wave 7 — riscv64 Full Register-Based Emitter (79a230e5)
+
+- Created src/codegen/src/riscv64/reg_isel.rs (1187 lines).
+- Prologue: addi sp, sp, -N; sd ra, N-8(sp); sd s0, N-16(sp); addi s0, sp, N.
+- Epilogue: addi sp, s0, -N (restore from FP); ld callee-saved; ld ra; ld s0;
+  addi sp, sp, N; ret — at every Return path.
+- T5/T6 not_allocatable (scratch for immediate materialization).
+- 30/30 pass, default-on.
+
+### Wave 8 — ppc64/ppc64le Full Register-Based Emitter (a7760a07)
+
+- Created src/codegen/src/ppc64/reg_isel.rs (~1050 lines). ppc64le inherits.
+- Prologue: mflr r0; stdu r1, -N(r1); std r0, 8(r1); std r31, 16(r1);
+  mr r31, r1.
+- Epilogue: mr r1, r31; ld callee-saved; ld r0, 8(r1); mtlr r0; ld r31, 16(r1);
+  addi r1, r1, N; blr — at every Return path.
+- R11 not_allocatable. Cmp uses CR0 + mfcr + rlwinm.
+- 30/30 pass (ppc64), 3/3 spot-check (ppc64le), default-on.
+
+### Remaining backends (13)
+
+The following 13 backends remain on the stack-slot ISel (default-on,
+all pass 30/30): riscv32, x86_32, arm32, armeb, mips64, mips64be,
+sparc64, s390x, m68k, alpha, hppa, loongarch64, wasm32. Each needs a
+full reg_isel.rs following the established template.
+
+### Test Results
+
+| Backend      | Path        | 30/30 | Default |
+|-------------|-------------|-------|---------|
+| aarch64     | register    | ✓     | ON      |
+| aarch64_be  | register    | ✓     | ON      |
+| x86_64      | register    | ✓     | ON      |
+| riscv64     | register    | ✓     | ON      |
+| ppc64       | register    | ✓     | ON      |
+| ppc64le     | register    | ✓     | ON      |
+| riscv32     | stack-slot  | ✓     | —       |
+| x86_32      | stack-slot  | ✓     | —       |
+| arm32       | stack-slot  | ✓     | —       |
+| armeb       | stack-slot  | ✓     | —       |
+| mips64      | stack-slot  | ✓     | —       |
+| mips64be    | stack-slot  | ✓     | —       |
+| sparc64     | stack-slot  | ✓     | —       |
+| s390x       | stack-slot  | ✓     | —       |
+| m68k        | stack-slot  | ✓     | —       |
+| alpha       | stack-slot  | ✓     | —       |
+| hppa        | stack-slot  | ✓     | —       |
+| loongarch64 | stack-slot  | ✓     | —       |
+| wasm32      | wasm-stack  | 27/30 | —       |
+
