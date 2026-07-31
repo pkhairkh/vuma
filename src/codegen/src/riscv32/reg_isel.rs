@@ -581,6 +581,9 @@ fn emit_instruction(
                 BinOpKind::Shl => code.extend_from_slice(&Instruction::Sll { rd: dst_reg, rs1: lhs_reg, rs2: rhs_reg }.encode()),
                 BinOpKind::ShrL => code.extend_from_slice(&Instruction::Srl { rd: dst_reg, rs1: lhs_reg, rs2: rhs_reg }.encode()),
                 BinOpKind::ShrA => code.extend_from_slice(&Instruction::Sra { rd: dst_reg, rs1: lhs_reg, rs2: rhs_reg }.encode()),
+                BinOpKind::Add => code.extend_from_slice(&Instruction::Add { rd: dst_reg, rs1: lhs_reg, rs2: rhs_reg }.encode()),
+                BinOpKind::Sub => code.extend_from_slice(&Instruction::Sub { rd: dst_reg, rs1: lhs_reg, rs2: rhs_reg }.encode()),
+                BinOpKind::Mul => code.extend_from_slice(&Instruction::Mul { rd: dst_reg, rs1: lhs_reg, rs2: rhs_reg }.encode()),
                 _ => {
                     // Add/Sub/Mul handled above
                     code.extend_from_slice(&Instruction::Add { rd: dst_reg, rs1: lhs_reg, rs2: rhs_reg }.encode());

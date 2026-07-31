@@ -520,6 +520,9 @@ fn emit_instruction(
                 BinOpKind::Shl => code.extend_from_slice(&Instruction::Sld { ra: dst_reg, rs: lhs_reg, rb: rhs_reg }.encode()),
                 BinOpKind::ShrL => code.extend_from_slice(&Instruction::Srd { ra: dst_reg, rs: lhs_reg, rb: rhs_reg }.encode()),
                 BinOpKind::ShrA => code.extend_from_slice(&Instruction::Srad { ra: dst_reg, rs: lhs_reg, rb: rhs_reg }.encode()),
+                BinOpKind::Add => code.extend_from_slice(&Instruction::Add { rt: dst_reg, ra: lhs_reg, rb: rhs_reg }.encode()),
+                BinOpKind::Sub => code.extend_from_slice(&Instruction::Subf { rt: dst_reg, ra: rhs_reg, rb: lhs_reg }.encode()),
+                BinOpKind::Mul => code.extend_from_slice(&Instruction::Mulld { rt: dst_reg, ra: lhs_reg, rb: rhs_reg }.encode()),
                 _ => code.extend_from_slice(&Instruction::Add { rt: dst_reg, ra: lhs_reg, rb: rhs_reg }.encode()),
             }
             reads.push(phys(lhs_reg));

@@ -4374,10 +4374,9 @@ impl Backend for X86_64Backend {
                     // these once the allocator's live-range analysis is
                     // fixed to not reuse an arg's register for the dst
                     // when the arg is live across the syscall.
-                    crate::ir::IRInstr::Syscall { nr, args, dst } => {
+                    crate::ir::IRInstr::Syscall { nr, .. } => {
                         *nr == 56 || *nr == 58 || *nr == 220 || *nr == 221
-                        || (dst.is_some()
-                            && args.iter().any(|a| matches!(a, crate::ir::IRValue::Register(_))))
+                       
                     }
                     _ => false,
                 }

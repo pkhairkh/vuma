@@ -573,6 +573,21 @@ fn emit_instruction(
                     code.extend_from_slice(&Instruction::AsrReg { rd: dst_reg, rn: lhs_reg, rs: rhs_reg, cond: Condition::Al }.encode());
                     reads.push(phys(rhs_reg));
                 }
+                BinOpKind::Add => {
+                    let rhs_reg = load_to_reg(rhs, alloc, code);
+                    code.extend_from_slice(&Instruction::Add { rd: dst_reg, rn: lhs_reg, rm: rhs_reg, cond: Condition::Al }.encode());
+                    reads.push(phys(rhs_reg));
+                }
+                BinOpKind::Sub => {
+                    let rhs_reg = load_to_reg(rhs, alloc, code);
+                    code.extend_from_slice(&Instruction::Sub { rd: dst_reg, rn: lhs_reg, rm: rhs_reg, cond: Condition::Al }.encode());
+                    reads.push(phys(rhs_reg));
+                }
+                BinOpKind::Mul => {
+                    let rhs_reg = load_to_reg(rhs, alloc, code);
+                    code.extend_from_slice(&Instruction::Mul { rd: dst_reg, rn: Gpr::R0, rs: rhs_reg, rm: lhs_reg, cond: Condition::Al }.encode());
+                    reads.push(phys(rhs_reg));
+                }
                 BinOpKind::SDiv | BinOpKind::UDiv | BinOpKind::SRem | BinOpKind::URem => {
                     // ARMv7-A has no hardware divide. Emit a call to __aeabi_idiv
                     // (or __aeabi_uidiv) — for now, fall back to stack-slot by
