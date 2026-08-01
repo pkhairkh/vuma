@@ -562,16 +562,66 @@ fn emit_instr(
             }
             let d = load_to_reg(dst, a, c);
             let l = load_to_reg(lhs, a, c);
+            // Check if rhs is a small immediate we can fold into Add/Sub via
+            // LDO. PA-RISC LDO encodes a 14-bit signed displacement
+            // (-8192..=8191) added to a base register. Using LDO directly
+            // avoids loading rhs into the S4 scratch register, which would
+            // clobber lhs when lhs is also an immediate loaded into S4.
+            // And/Or/Xor have no clean immediate form on PA-RISC, so they
+            // still use load_to_reg (the both-Imm clobber is rare for them).
+            let rhs_val = resolve(rhs, a);
+            let use_imm = match &rhs_val {
+                ResolvedVal::Imm(i) => match op {
+                    BinOpKind::Add => (-8192..=8191).contains(i),
+                    // Sub: d = l - i = l + (-i); need -i to fit in LDO range.
+                    BinOpKind::Sub => (-8191..=8192).contains(i),
+                    _ => false,
+                },
+                _ => false,
+            };
+            let r = if use_imm {
+                R0 // placeholder, not used by the immediate-form path
+            } else {
+                load_to_reg(rhs, a, c)
+            };
             match op {
                 BinOpKind::And | BinOpKind::Or | BinOpKind::Xor | BinOpKind::Add
                 | BinOpKind::Sub | BinOpKind::Mul => {
-                    let r = load_to_reg(rhs, a, c);
                     match op {
                         BinOpKind::And => c.extend_from_slice(&encode_and(l, r, d)),
                         BinOpKind::Or => c.extend_from_slice(&encode_or(l, r, d)),
                         BinOpKind::Xor => c.extend_from_slice(&encode_xor(l, r, d)),
-                        BinOpKind::Add => c.extend_from_slice(&encode_add(l, r, d)),
-                        BinOpKind::Sub => c.extend_from_slice(&encode_sub(l, r, d)),
+                        BinOpKind::Add => {
+                            if use_imm {
+                                if let ResolvedVal::Imm(i) = rhs_val {
+                                    if i == 0 {
+                                        if l != d {
+                                            c.extend_from_slice(&encode_copy(l, d));
+                                        }
+                                    } else {
+                                        c.extend_from_slice(&encode_ldo(l, i as i16, d));
+                                    }
+                                }
+                            } else {
+                                c.extend_from_slice(&encode_add(l, r, d));
+                            }
+                        }
+                        BinOpKind::Sub => {
+                            if use_imm {
+                                if let ResolvedVal::Imm(i) = rhs_val {
+                                    if i == 0 {
+                                        if l != d {
+                                            c.extend_from_slice(&encode_copy(l, d));
+                                        }
+                                    } else {
+                                        // d = l - i = l + (-i)
+                                        c.extend_from_slice(&encode_ldo(l, (-i) as i16, d));
+                                    }
+                                }
+                            } else {
+                                c.extend_from_slice(&encode_sub(l, r, d));
+                            }
+                        }
                         BinOpKind::Mul => {
                             // Use the shift-and-add helper.
                             c.extend_from_slice(&encode_copy(l, S0));
@@ -581,7 +631,9 @@ fn emit_instr(
                         }
                         _ => unreachable!(),
                     }
-                    reads.push(ph(r));
+                    if !use_imm {
+                        reads.push(ph(r));
+                    }
                 }
                 BinOpKind::Shl => {
                     // PA-RISC SHRPW is right-shift only. For left shift by
