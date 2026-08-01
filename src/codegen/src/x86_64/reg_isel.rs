@@ -1093,11 +1093,12 @@ fn emit_instruction(
                     }
                 }
                 _ => {
-                    // IntToFloat, FloatToInt, etc. — FP casts need SSE.
-                    // For now, emit a mov as placeholder.
-                    if src_reg != dst_reg {
-                        code.extend(encode_mov_reg_reg(dst_reg, src_reg));
-                    }
+                    // IntToFloat, FloatToInt, FloatToUInt, UIntToFloat,
+                    // FloatToFloat — FP casts need SSE instructions which
+                    // the register-based emitter doesn't support yet.
+                    // Return an error so the caller falls back to the
+                    // stack-slot ISel which has proper FP conversion code.
+                    return emit_fp_fallback(instr, alloc);
                 }
             }
             reads.push(phys(src_reg));

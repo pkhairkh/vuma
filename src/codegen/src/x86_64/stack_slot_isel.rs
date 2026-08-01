@@ -3031,9 +3031,8 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                     ));
                                     code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::R11)); // add 2^63 back
                                                                                          // Now RAX = corrected, R10 = direct. Pick based on value.
-                                                                                         // Compare 2^63 (in XMM1, still holds 2^63) with original value.
-                                                                                         // We need the original value back in XMM0 for the comparison.
-                                    code.extend(encode_movq_gpr_xmm(Gpr::Rax, Xmm::Xmm0)); // recover (value - 2^63)
+                                                                                         // XMM0 still holds (value - 2^63). Add 2^63 back to recover
+                                                                                         // the original value for the comparison.
                                     code.extend(encode_addsd_xmm_xmm(Xmm::Xmm0, Xmm::Xmm1)); // restore original value
                                     code.extend(encode_ucomisd_xmm_xmm(Xmm::Xmm1, Xmm::Xmm0)); // compare 2^63 vs value
                                                                                                // If 2^63 <= value (value >= 2^63, i.e. above-or-equal), use corrected (RAX)
