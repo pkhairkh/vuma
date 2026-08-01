@@ -13,16 +13,22 @@ field.
 
 | Number | Title | Status | Date | Closes |
 |--------|-------|--------|------|--------|
-| [ADR-0001](ADR-0001.md) | Fix `bridge_type_to_ir_type` to map f32/f64 | Accepted | 2026-08-01 | V-34 |
-| [ADR-0002](ADR-0002.md) | Fix `type_size_from_name` + `type_alignment` for layout names | Accepted | 2026-08-01 | V-35, V-42, V-44 |
-| [ADR-0003](ADR-0003.md) | Thread IRType through StateRead/StateWrite + fix `Alloc { size: 0 }` | Accepted | 2026-08-01 | V-36, V-A2-1 |
-| [ADR-0004](ADR-0004.md) | Migrate `build_pmt_layout_specs` + IVE `rederive_layout` to `_with_layouts` | Accepted | 2026-08-01 | V-03, V-NEW-2 |
+| [ADR-0001](ADR-0001.md) | Fix `bridge_type_to_ir_type` to map f32/f64 | Accepted (severity revised by ADR-0011: P0→P1) | 2026-08-01 | V-34 |
+| [ADR-0002](ADR-0002.md) | Fix `type_size_from_name` + `type_alignment` for layout names | Accepted (severity revised by ADR-0011: P0→P2) | 2026-08-01 | V-35, V-42, V-44 |
+| [ADR-0003](ADR-0003.md) | Thread IRType through StateRead/StateWrite + fix `Alloc { size: 0 }` | Accepted (severity revised by ADR-0011: P0→P2) | 2026-08-01 | V-36, V-A2-1 |
+| [ADR-0004](ADR-0004.md) | Migrate `build_pmt_layout_specs` + IVE `rederive_layout` to `_with_layouts` | Accepted (framing revised by ADR-0011: P0→P1, IVE-soundness not codegen-correctness) | 2026-08-01 | V-03, V-NEW-2 |
 | [ADR-0005](ADR-0005.md) | Delete unused build-deps + legacy `bridge_type_size` | Accepted | 2026-08-01 | V-40, deps cleanup |
-| [ADR-0006](ADR-0006.md) | Defer f32 PMT Lean proof to v2; use runtime `__float_overflow_trap` only | Accepted | 2026-08-01 | V-14 |
-| [ADR-0007](ADR-0007.md) | Wire `verify_capability` + migrate to HMAC-SHA256 | Proposed | 2026-08-01 | V-16, V-A3-2 |
-| [ADR-0008](ADR-0008.md) | Fix `discharge_rate` denominator to include `failed` | Accepted | 2026-08-01 | V-A3-3 |
-| [ADR-0009](ADR-0009.md) | Re-run full test suite on `main` HEAD before treating V-39 as ground truth | Accepted | 2026-08-01 | V-39 (stale baseline) |
-| [ADR-0010](ADR-0010.md) | Adopt "5 external crates maximum" dependency policy | Accepted | 2026-08-01 | deps policy |
+| [ADR-0006](ADR-0006.md) | Defer f32 PMT Lean proof to v2; use runtime `__float_overflow_trap` only | Accepted (effort revised by ADR-0011: 3-6mo → 2-4wk bit-pattern / 2-3mo IEEE-754) | 2026-08-01 | V-14 |
+| [ADR-0007](ADR-0007.md) | Wire `verify_capability` + migrate to HMAC-SHA256 | Proposed (framing revised by ADR-0011: wire IVE verifier not emitted binaries; severity P1→P0) | 2026-08-01 | V-16, V-A3-2 |
+| [ADR-0008](ADR-0008.md) | Fix `discharge_rate` denominator to include `failed` | Accepted (confirmed by ADR-0011) | 2026-08-01 | V-A3-3 |
+| [ADR-0009](ADR-0009.md) | Re-run full test suite on `main` HEAD before treating V-39 as ground truth | Accepted (confirmed by ADR-0011; QEMU 10.0+ mandated) | 2026-08-01 | V-39 (stale baseline) |
+| [ADR-0010](ADR-0010.md) | Adopt "5 external crates maximum" dependency policy | Accepted (confirmed by ADR-0011) | 2026-08-01 | deps policy |
+| [ADR-0011](ADR-0011.md) | Re-audit corrections to ADR-0001 through ADR-0010 | Accepted | 2026-08-01 | (meta-ADR; corrects severities and framing) |
+
+**Note**: ADR-0011 is a meta-ADR that documents the Wave F re-audit
+corrections. The technical fixes in ADR-0001 through ADR-0010 remain
+valid; what changes is severity, framing, and urgency. Read ADR-0011
+alongside the original ADRs to get the current state.
 
 ## Dependency edges
 

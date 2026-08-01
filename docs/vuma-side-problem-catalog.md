@@ -28,6 +28,41 @@ reports live in `docs/research/`; the 10 confident decisions are
 captured as ADRs in `docs/adr/`. The dependency manifest is documented
 in `docs/dependency-manifest.md`.
 
+**Wave F re-audit update (2026-08-01).** Three follow-up subagents
+re-verified every high-stakes claim against VUMA's own source AND
+documentation. The v1 draft was hand-wavy: it pattern-matched on
+`_ => <default>` arms without understanding VUMA's two-SCG
+architecture, the `__oob_trap` runtime bounds check, the Iris
+separation-logic proof layer, or the QEMU-workaround status of
+backend "stubs." The corrected consolidated draft is
+`docs/vuma-side-research-draft-v2.md`; the three re-audit reports are
+`docs/research/F-{1,2,3}-*.md`; the corrections to ADR-0001 through
+ADR-0010 are documented in `docs/adr/ADR-0011.md`.
+
+**Severity revisions from Wave F**:
+- V-34: P0 → P1 (arrays unaffected via `resolve_state_array_access`;
+  only scalar f32; wrong IRType = wrong arithmetic, not wrong memory)
+- V-35: P0 → P2 (IVE has zero references to `StructDefNode`; sole
+  consumer is dormant stub `state_merge_compatible_layouts`)
+- V-36: P0 → P2 (`PmtOpStmt` path fires only for test/deserialized
+  SCGs; production uses `AccessNode::Load`)
+- V-03: P0 → P1 (affects IVE-soundness not codegen-correctness;
+  `build_layout_registry` is a separate correct algorithm; parity
+  with IVE `rederive_layout` is intentional)
+- V-14: effort 3-6mo → 2-4wk bit-pattern / 2-3mo IEEE-754 (builds on
+  `BitVecArena`, not greenfield)
+- V-16: P1 → P0 (IVE capability verifier is a stub `let known = true`;
+  compile-time-only design is correct, implementation is broken)
+- V-A2-7: P1 → P2 (HPPA F64 sub/mul/div are REAL IEEE 754; A-2
+  trusted a stale doc comment)
+- V-A2-8: P1 → P2 (m68k has full F64 via 68881; only F32 missing)
+- V-A2-4: P1 → P3 (the `=> {}` arms are dead code; `ipc_lowering.rs`
+  lowers Call-form builtins before backend sees them)
+- **V-A2-9: DROPPED** (REFUTED — `resolve_register_reuse_conflicts`
+  at `regalloc.rs:2836` explicitly models syscall interference;
+  `contains_fork` is a documented correctness requirement for
+  `clone(2)`, not a workaround)
+
 ---
 
 ## Summary table
