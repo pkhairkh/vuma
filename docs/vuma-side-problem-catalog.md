@@ -39,6 +39,21 @@ backend "stubs." The corrected consolidated draft is
 `docs/research/F-{1,2,3}-*.md`; the corrections to ADR-0001 through
 ADR-0010 are documented in `docs/adr/ADR-0011.md`.
 
+**Wave L three-layer architecture update (2026-08-01).** The SWE
+package's three-layer plan (VUMA / WOMB / VELL) is formalized in
+ADR-0013. VELL is renamed to VEEE (VE^3 = Verified Expression
+Evaluation Engine) per ADR-0012. VEEE compiles to VUMA AST (ADR-0014),
+inherits PMT verification, and its incremental-computation engine
+(ADR-0016) and monotonicity types (ADR-0017) live in VEEE, not VUMA.
+The GPU path goes through MLIR→SPIR-V (ADR-0018, Proposed), not
+through VUMA's CPU-only codegen. WOMB UI modules live in `womb/ui/`
+(ADR-0019) and the existing `womb/kernel/trap/irq_ring.vuma` SPSC
+ring is generalized to `womb/sync/spsc.vuma`. The dead `Effect` enum
+is deleted (ADR-0021, resolving V-A3-7). A new WOMB-layer bug
+V-WOMB-1 (broken `womb/net/*.vuma` imports) is filed and resolved by
+ADR-0020. See `docs/research/J-1-womb-layer.md` and
+`docs/research/K-1-veee-rename-design.md` for the full design reports.
+
 **Severity revisions from Wave F**:
 - V-34: P0 → P1 (arrays unaffected via `resolve_state_array_access`;
   only scalar f32; wrong IRType = wrong arithmetic, not wrong memory)
@@ -62,6 +77,12 @@ ADR-0010 are documented in `docs/adr/ADR-0011.md`.
   at `regalloc.rs:2836` explicitly models syscall interference;
   `contains_fork` is a documented correctness requirement for
   `clone(2)`, not a workaround)
+- **V-A3-7: RESOLVED by ADR-0021** (delete the dead `Effect` enum)
+
+**New entries from Wave L**:
+- **V-WOMB-1** (new, P1): 8 `womb/net/*.vuma` files have broken imports
+  pointing to pre-reorganization `crypto/` paths. Effectively dead code.
+  Resolved by ADR-0020. 1-day fix.
 
 ---
 
@@ -119,7 +140,8 @@ based on verified source evidence.
 | V-48 **(new)** | `ConstantFolding` folds 3 ops, parses as f64, effectively dead | Open (verified) | 1 week | (deferred) |
 | V-49 **(new)** | `NodeVisitor::dispatch` handles 10/28 `NodePayload` variants | Open (verified) | 1 week | (deferred) |
 | V-A3-5 **(new)** | Lean `SessionType` model behind Rust IVE by 4 variants | Open (verified) | 2 weeks | (deferred) |
-| V-A3-7 **(new)** | `Effect::ExternCall` is dead code (IVE has zero refs) | Open (verified) | 1 day | (deferred) |
+| V-A3-7 **(new)** | `Effect::ExternCall` is dead code (IVE has zero refs) | **RESOLVED by ADR-0021** (delete the `Effect` enum) | 1 day | ADR-0021 |
+| V-WOMB-1 **(new)** | 8 `womb/net/*.vuma` files have broken imports to pre-reorg `crypto/` paths | Open (verified by Wave J) | 1 day | ADR-0020 |
 | V-NEW-7 **(new)** | Duplicate `lean-proofs` job in `ci.yml` + `proof-verify.yml` | Open (verified) | 1 day | (deferred) |
 
 ### P3 — Documentation and minor cleanup
