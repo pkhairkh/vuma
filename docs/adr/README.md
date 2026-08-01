@@ -24,11 +24,31 @@ field.
 | [ADR-0009](ADR-0009.md) | Re-run full test suite on `main` HEAD before treating V-39 as ground truth | Accepted (confirmed by ADR-0011; QEMU 10.0+ mandated) | 2026-08-01 | V-39 (stale baseline) |
 | [ADR-0010](ADR-0010.md) | Adopt "5 external crates maximum" dependency policy | Accepted (confirmed by ADR-0011) | 2026-08-01 | deps policy |
 | [ADR-0011](ADR-0011.md) | Re-audit corrections to ADR-0001 through ADR-0010 | Accepted | 2026-08-01 | (meta-ADR; corrects severities and framing) |
+| [ADR-0012](ADR-0012.md) | Adopt "VEEE" as the name for the UX language layer | Accepted | 2026-08-01 | (renames VELL → VEEE) |
+| [ADR-0013](ADR-0013.md) | Adopt the three-layer architecture (VUMA / WOMB / VEEE) | Accepted | 2026-08-01 | (formalizes layer boundaries) |
+| [ADR-0014](ADR-0014.md) | VEEE compiles to VUMA AST, not to VUMA IR | Accepted | 2026-08-01 | (VEEE inherits PMT verification) |
+| [ADR-0015](ADR-0015.md) | VEEE backend strategy — Cranelift (dev) + VUMA codegen (prod) + MLIR→SPIR-V (GPU) | Proposed | 2026-08-01 | (needs prototype validation) |
+| [ADR-0016](ADR-0016.md) | VEEE's incremental computation engine lives in VEEE, not VUMA | Accepted | 2026-08-01 | (VUMA stays minimal) |
+| [ADR-0017](ADR-0017.md) | VEEE's monotonicity types are a VEEE-layer type-system feature | Accepted | 2026-08-01 | (not a VUMA IR feature) |
+| [ADR-0018](ADR-0018.md) | GPU path for VEEE goes through MLIR→SPIR-V, not through VUMA's codegen | Proposed | 2026-08-01 | (needs MLIR prototype) |
+| [ADR-0019](ADR-0019.md) | WOMB UI modules live in `womb/ui/`; IrqRing generalizes to `womb/sync/` | Accepted | 2026-08-01 | (WOMB layer structure) |
+| [ADR-0020](ADR-0020.md) | Fix broken `womb/net/*.vuma` imports (V-WOMB-1) | Accepted | 2026-08-01 | V-WOMB-1 |
+| [ADR-0021](ADR-0021.md) | Delete the `Effect` enum (it is dead code) | Accepted | 2026-08-01 | V-A3-7 |
 
 **Note**: ADR-0011 is a meta-ADR that documents the Wave F re-audit
 corrections. The technical fixes in ADR-0001 through ADR-0010 remain
 valid; what changes is severity, framing, and urgency. Read ADR-0011
 alongside the original ADRs to get the current state.
+
+**Note**: ADR-0012 through ADR-0018 are Wave L decisions covering the
+VEEE rename (ADR-0012), the three-layer architecture (ADR-0013), and
+VEEE's compilation strategy (ADR-0014 through ADR-0018). ADR-0015 and
+ADR-0018 are Proposed pending prototype validation of the Cranelift
+and MLIR integrations.
+
+**Note**: ADR-0019 through ADR-0021 are Wave L decisions covering the
+WOMB layer (ADR-0019, ADR-0020) and the cleanup of the previously-
+undecided `Effect` enum (ADR-0021, resolving V-A3-7).
 
 ## Dependency edges
 
