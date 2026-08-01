@@ -2765,12 +2765,16 @@ fn build_runtime_syscall_stubs() -> Vec<(String, Vec<u8>)> {
     }
 
     // mprotect(addr, len, prot) → int  [i386 syscall 125]
+    // VUMA args: EDI=addr, ESI=len, EDX=prot → syscall: EBX=addr, ECX=len, EDX=prot
     {
         let mut code = Vec::new();
-        code.extend(encode_push(Gpr::Rbx));
-        code.extend(encode_mov_reg_imm32(Gpr::Rax, 125));
+        code.extend(encode_push(Gpr::Rbx)); // save EBX
+        code.extend(encode_push(Gpr::Rsi)); // push len
+        code.extend(encode_mov_reg_reg(Gpr::Rbx, Gpr::Rdi)); // EBX = addr
+        code.extend(encode_pop(Gpr::Rcx)); // ECX = len
+        code.extend(encode_mov_reg_imm32(Gpr::Rax, 125)); // EAX = sys_mprotect
         code.extend(encode_syscall());
-        code.extend(encode_pop(Gpr::Rbx));
+        code.extend(encode_pop(Gpr::Rbx)); // restore EBX
         code.extend(encode_ret());
         stubs.push(("mprotect".to_string(), code));
     }

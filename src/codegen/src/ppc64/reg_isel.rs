@@ -641,17 +641,22 @@ fn emit_instruction(
             // For Eq: CR0 bit 2 (EQ) → bit 29 in dst.
             // For Lt: CR0 bit 0 (LT) → bit 27 in dst.
             // Use rlwinm to extract and shift to bit 0.
+            // CR0 field bits (MSB=0 numbering): LT=0, GT=1, EQ=2, SO=3
+            // After mfcr, these are in the GPR at the MSB side.
+            // rlwinm rotates LEFT (toward MSB). To move CR0 bit N (MSB=0) to
+            // the LSB (MSB=0 bit 31), we need SH = 1 + N.
+            //   LT (bit 0) → SH=1, GT (bit 1) → SH=2, EQ (bit 2) → SH=3
             let (sh, mb, me) = match kind {
-                CmpKind::Eq => (32 - 2, 31, 31), // EQ bit → position 31
-                CmpKind::Ne => (32 - 2, 31, 31), // EQ bit → invert below
-                CmpKind::SLt => (32, 31, 31),
-                CmpKind::SLe => (32 - 1, 31, 31), // GT bit inverted
-                CmpKind::SGt => (32 - 1, 31, 31),
-                CmpKind::SGe => (32, 31, 31), // LT bit inverted
-                CmpKind::ULt => (32, 31, 31),
-                CmpKind::ULe => (32 - 1, 31, 31),
-                CmpKind::UGt => (32 - 1, 31, 31),
-                CmpKind::UGe => (32, 31, 31),
+                CmpKind::Eq => (3, 31, 31), // EQ bit (bit 2) → LSB
+                CmpKind::Ne => (3, 31, 31), // EQ bit → invert below
+                CmpKind::SLt => (1, 31, 31), // LT bit (bit 0) → LSB
+                CmpKind::SLe => (2, 31, 31), // GT bit inverted (bit 1)
+                CmpKind::SGt => (2, 31, 31), // GT bit (bit 1)
+                CmpKind::SGe => (1, 31, 31), // LT bit inverted (bit 0)
+                CmpKind::ULt => (1, 31, 31),
+                CmpKind::ULe => (2, 31, 31),
+                CmpKind::UGt => (2, 31, 31),
+                CmpKind::UGe => (1, 31, 31),
             };
             code.extend_from_slice(&Instruction::Rlwinm { ra: dst_reg, rs: dst_reg, sh, mb, me }.encode());
             // For Ne/Le/Ge (inverted conditions), XOR with 1.
