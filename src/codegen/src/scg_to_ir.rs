@@ -2126,6 +2126,17 @@ impl IRBuilder {
             self.resolve_phis(&mut ir_func)?;
         }
 
+        if std::env::var("VUMA_DUMP_POST_RESOLVE").is_ok() {
+            eprintln!("=== POST-RESOLVE IR for function {} ===", ir_func.name);
+            for (i, bb) in ir_func.blocks.iter().enumerate() {
+                eprintln!("  bb{}: label={:?}", i, bb.label);
+                for instr in &bb.instructions {
+                    eprintln!("    {:?}", instr);
+                }
+                eprintln!("    TERM: {:?}", bb.terminator);
+            }
+        }
+
         // Rebuild the CFG (predecessor/successor sets).
         ir_func.rebuild_cfg();
 
@@ -2804,8 +2815,19 @@ impl IRBuilder {
                 .cloned()
                 .collect();
 
+            // Sort names deterministically (alphabetically) so that phi
+            // vreg IDs are assigned in a stable order across runs.  Without
+            // this, HashSet iteration order (which is random per-process
+            // due to a randomised hash seed) causes the merge-phi dst vreg
+            // IDs to vary, which — combined with downstream copy-emission
+            // that is sensitive to vreg-ID ordering — produces
+            // non-deterministic, sometimes-swapped phi copies and
+            // miscompilation.  See VUMA_DEBUG_PHIS for the diagnostic trace.
+            let mut all_modified_sorted: Vec<String> = all_modified.iter().cloned().collect();
+            all_modified_sorted.sort();
+
             // Build the phi list: (name, then_incoming_vreg, else_incoming_vreg).
-            let phis_to_insert: Vec<(String, u32, u32)> = all_modified
+            let phis_to_insert: Vec<(String, u32, u32)> = all_modified_sorted
                 .iter()
                 .filter_map(|name| {
                     let in_then = then_defs.is_defined(name);
@@ -2861,7 +2883,7 @@ impl IRBuilder {
             // For single-branch modifications WITHOUT a pre-if definition
             // (e.g. a new variable declared inside one branch), keep the
             // branch's vreg without a phi.
-            for name in &all_modified {
+            for name in &all_modified_sorted {
                 let in_then = then_defs.is_defined(name);
                 let in_else = else_defs.is_defined(name);
                 if (in_then ^ in_else) && !names_before.contains_key(name) {
@@ -3644,6 +3666,16 @@ impl IRBuilder {
         for (block_idx, block) in ir_func.blocks.iter().enumerate() {
             for instr in &block.instructions {
                 if let IRInstruction::Phi { dst, incoming } = instr {
+                    if std::env::var("VUMA_DEBUG_PHIS").is_ok() {
+                        let dst_name = dst.as_register()
+                            .and_then(|id| ir_func.vregs.get(&id))
+                            .and_then(|v| v.name.as_deref())
+                            .unwrap_or("?");
+                        eprintln!(
+                            "PHI block={:?} label={:?} dst={:?}({}) incoming={:?}",
+                            block_idx, block.label, dst, dst_name, incoming
+                        );
+                    }
                     all_phis.push((block_idx, dst.clone(), incoming.clone()));
                 }
             }
@@ -3679,6 +3711,9 @@ impl IRBuilder {
         // Map: pred_label → Vec<(dst, src)>
         let mut copies_by_pred: HashMap<String, Vec<(IRValue, IRValue)>> = HashMap::new();
         for (_phi_block_idx, dst, incoming) in &all_phis {
+            if std::env::var("VUMA_DEBUG_PHIS").is_ok() {
+                eprintln!("  BUILD_COPIES phi dst={:?} incoming={:?}", dst, incoming);
+            }
             for (value, pred_label) in incoming {
                 // Skip self-referencing entries (where the value == dst)
                 if value == dst {
@@ -3689,6 +3724,9 @@ impl IRBuilder {
                     // Immediate sources have no slot to clobber, so they're always safe.
                     // We still emit them (the dst gets the immediate value).
                 }
+                if std::env::var("VUMA_DEBUG_PHIS").is_ok() {
+                    eprintln!("    push ({:?}, {:?}) -> pred={:?}", dst, value, pred_label);
+                }
                 copies_by_pred
                     .entry(pred_label.clone())
                     .or_default()
@@ -3697,13 +3735,24 @@ impl IRBuilder {
         }
 
         // For each predecessor block, emit the parallel copies.
-        for (pred_label, copies) in &copies_by_pred {
-            let Some(&pred_idx) = label_to_idx.get(pred_label) else {
+        // Sort predecessors by label for deterministic processing order.
+        let mut sorted_preds: Vec<(&String, &Vec<(IRValue, IRValue)>)> = copies_by_pred.iter().collect();
+        sorted_preds.sort_by(|a, b| a.0.cmp(b.0));
+        for (pred_label, copies) in &sorted_preds {
+            let Some(&pred_idx) = label_to_idx.get(*pred_label) else {
                 continue;
             };
 
+            if std::env::var("VUMA_DEBUG_PHIS").is_ok() {
+                eprintln!("COPIES pred={:?} inputs={:?}", pred_label, copies);
+            }
+
             // Run the parallel-copy algorithm.
-            let emitted = self.emit_parallel_copies(copies.clone(), ir_func)?;
+            let emitted = self.emit_parallel_copies(copies.to_vec(), ir_func)?;
+
+            if std::env::var("VUMA_DEBUG_PHIS").is_ok() {
+                eprintln!("COPIES pred={:?} emitted={:?}", pred_label, emitted);
+            }
 
             // Insert all emitted instructions BEFORE the block's terminating
             // control-flow instruction.
@@ -4126,10 +4175,14 @@ impl IRBuilder {
             .filter(|name| names_before.contains_key(name))
             .collect();
 
+        // Sort for deterministic phi vreg ID assignment (see lower_if comment).
+        let mut all_modified_sorted: Vec<String> = all_modified.iter().cloned().collect();
+        all_modified_sorted.sort();
+
         // Merge block with phi nodes for variables modified in multiple arms.
         ir_func.append_block(&merge_label);
 
-        for name in &all_modified {
+        for name in &all_modified_sorted {
             let mut incoming: Vec<(IRValue, String)> = Vec::new();
 
             for (i, arm_defs) in all_arm_defs.iter().enumerate() {

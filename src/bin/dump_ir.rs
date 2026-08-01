@@ -73,6 +73,20 @@ fn main() {
     // verifier can label `#[secret]`-annotated vregs `Secret` and flag
     // real `Secret → Public` flows.
     let secret_vars = collect_secret_vars(&ast);
+    if std::env::var("VUMA_DUMP_PRE_OPT").is_ok() {
+        println!("=== IR (PRE-OPT) for {} (backend={}) ===", path, backend_name);
+        for func in &ir_program.functions {
+            println!("\n--- Function: {} ---", func.name);
+            for (i, bb) in func.blocks.iter().enumerate() {
+                println!("  bb{}: label={:?}", i, bb.label);
+                for instr in &bb.instructions {
+                    println!("    {:?}", instr);
+                }
+                println!("    TERM: {:?}", bb.terminator);
+            }
+        }
+        return;
+    }
     let ir_program = run_ir_pipeline(ir_program, &cfg, kind, &secret_vars, &mut timings).unwrap();
 
     println!("=== IR for {} (backend={}) ===", path, backend_name);
@@ -81,6 +95,14 @@ fn main() {
             "\n--- Function: {} (params={:?} returns={:?}) ---",
             func.name, func.param_types, func.result_types
         );
+        // Print vreg table first so Register(N) can be cross-referenced.
+        let mut vreg_ids: Vec<u32> = func.vregs.keys().copied().collect();
+        vreg_ids.sort();
+        println!("  vregs:");
+        for id in &vreg_ids {
+            let name = func.vregs.get(id).and_then(|v| v.name.as_deref()).unwrap_or("?");
+            println!("    %v{} = {}", id, name);
+        }
         for (i, bb) in func.blocks.iter().enumerate() {
             println!(
                 "  bb{}: label={:?} preds={:?}",
