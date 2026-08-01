@@ -845,9 +845,7 @@ fn emit_instruction(
                             code.extend_from_slice(&Instruction::Rldicr { ra: dst_reg, rs: src_reg, sh: 0, me: 31 }.encode());
                         }
                         _ => {
-                            if src_reg != dst_reg {
-                                code.extend_from_slice(&Instruction::Mr { ra: dst_reg, rs: src_reg }.encode());
-                            }
+                            return emit_fp_fallback(instr);
                         }
                     }
                 }

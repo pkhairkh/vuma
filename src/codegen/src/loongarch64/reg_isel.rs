@@ -385,7 +385,9 @@ fn emit_instruction(code: &mut Vec<u8>, instr: &IRInstr, alloc: &RegAllocResult,
                 CastKind::ZExt => { match from_ty { Some(IRType::U8)|Some(IRType::I8) => code.extend_from_slice(&Instruction::Andi { rd: d, rj: s, imm12: 0xFF }.encode()), Some(IRType::U16)|Some(IRType::I16) => code.extend_from_slice(&Instruction::Andi { rd: d, rj: s, imm12: 0xFFFF }.encode()), _ => { if s != d { code.extend_from_slice(&Instruction::Or { rd: d, rj: s, rk: Gpr::R0 }.encode()); } } } }
                 CastKind::SExt => { match from_ty { Some(IRType::I8)|Some(IRType::U8) => { code.extend_from_slice(&Instruction::SlliD { rd: d, rj: s, imm8: 56 }.encode()); code.extend_from_slice(&Instruction::SraiD { rd: d, rj: d, imm8: 56 }.encode()); } Some(IRType::I16)|Some(IRType::U16) => { code.extend_from_slice(&Instruction::SlliD { rd: d, rj: s, imm8: 48 }.encode()); code.extend_from_slice(&Instruction::SraiD { rd: d, rj: d, imm8: 48 }.encode()); } Some(IRType::I32)|Some(IRType::U32) => { code.extend_from_slice(&Instruction::SlliW { rd: d, rj: s, imm8: 0 }.encode()); code.extend_from_slice(&Instruction::SraiW { rd: d, rj: d, imm8: 0 }.encode()); } _ => { if s != d { code.extend_from_slice(&Instruction::Or { rd: d, rj: s, rk: Gpr::R0 }.encode()); } } } }
                 CastKind::Trunc => { if s != d { code.extend_from_slice(&Instruction::Or { rd: d, rj: s, rk: Gpr::R0 }.encode()); } else if let Some(tt) = to_ty { match tt { IRType::U8|IRType::I8 => code.extend_from_slice(&Instruction::Andi { rd: d, rj: d, imm12: 0xFF }.encode()), IRType::U16|IRType::I16 => code.extend_from_slice(&Instruction::Andi { rd: d, rj: d, imm12: 0xFFFF }.encode()), _ => {} } } }
-                _ => { if s != d { code.extend_from_slice(&Instruction::Or { rd: d, rj: s, rk: Gpr::R0 }.encode()); } }
+                _ => {
+                    return emit_fp_fallback(instr);
+                }
             }
             reads.push(phys(s)); writes.push(phys(d)); "cast".to_string()
         }
