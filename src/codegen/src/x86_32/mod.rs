@@ -3468,7 +3468,7 @@ impl Backend for X86_32Backend {
         // When set to "0": force stack-slot ISel (for debugging).
         let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_X86_32")
             .map(|v| v != "0")
-            .unwrap_or(true);
+            .unwrap_or(false);
 
         // ── contains_fork opt-out ──────────────────────────────────────
         //
