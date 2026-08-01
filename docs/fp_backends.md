@@ -16,8 +16,8 @@ fidelity only*, not overall test pass rate.
 |---|---------|------|:---:|:---:|:---:|:---:|:---:|
 | 1 | x86_64 | `x86_64/stack_slot_isel.rs` | Y | Y | Y | 16 (XMM) | Native — fully operational |
 | 2 | x86_32 | `x86_32/stack_slot_isel.rs` | Y | Y | Y | 8 (XMM) | Native — fully operational |
-| 3 | aarch64 | `arm64.rs` / `emit.rs` | Y | Y | Y | 32 | Native — fully operational |
-| 4 | aarch64_be | `aarch64_be.rs` | Y | Y | Y | 32 | Native (wraps arm64) |
+| 3 | aarch64 | `aarch64/mod.rs` / `reg_isel.rs` | Y | Y | Y | 32 | Native — fully operational |
+| 4 | aarch64_be | `aarch64_be/mod.rs` | Y | Y | Y | 32 | Native (wraps arm64) |
 | 5 | arm32 | `arm32/mod.rs` | Y | Y | Y | 32 (VFP) | Native — fully operational |
 | 6 | armeb | `armeb.rs` | Y | Y | Y | 32 (VFP) | Native (wraps arm32) |
 | 7 | riscv64 | `riscv64.rs` | Y | Y | Y | 32 (F/D) | Native — fully operational |

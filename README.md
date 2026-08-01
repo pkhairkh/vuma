@@ -15,11 +15,12 @@ WebAssembly.
 
 The compiler targets **19 production backends**. All 19 pass the curated
 30-test matrix (76/76 on the 4-test spot check, 30/30 on the full matrix for
-the primary backends). **15 of 19 backends use full register-based emission**
+the primary backends). **18 of 19 backends use full register-based emission**
 (`reg_isel.rs`) with a target-agnostic linear-scan register allocator — no
-stack-slot fallbacks. The remaining 4 backends (aarch64_be, armeb, mips64be,
-ppc64le) inherit their parent's register-based emitter via byte-swap wrappers.
-wasm32 uses structured stack-machine emission (the correct architecture for a
+stack-slot fallbacks. Of these, 14 are native backends with their own
+`reg_isel.rs`; 4 byte-swap wrappers (aarch64_be, armeb, mips64be, ppc64le)
+inherit their parent's register-based emitter. The 19th backend, wasm32,
+uses structured stack-machine emission (the correct architecture for a
 stack machine, not a fallback).
 
 ---
@@ -29,7 +30,7 @@ stack machine, not a fallback).
 | Metric | Value |
 |--------------------------------|------------------------------------|
 | Backends | 19 (all pass curated test matrix) |
-| Register-based emission | 15 backends with full `reg_isel.rs` |
+| Register-based emission | 18 backends (14 native + 4 wrappers) |
 | Register allocator | Target-agnostic linear-scan with post-allocation conflict resolution |
 | Contract / invariant discharge | Z3 SMT solver (hard dependency) |
 | Implementation language | Rust (nightly-2026-03-01) |
@@ -78,12 +79,13 @@ stack machine, not a fallback).
   rejected before register allocation.
 
 ### Codegen
-- **Full register-based emission** on 15 backends: aarch64, x86_64, x86_32,
-  riscv64, riscv32, arm32, mips64, ppc64, loongarch64, sparc64, s390x,
-  m68k, alpha, hppa, and wasm32 (stack machine). Each backend has a
-  `reg_isel.rs` module that consumes the `RegAllocResult` from the
-  target-agnostic linear-scan allocator and produces register-to-register
-  machine code for ALL IR instructions.
+- **Full register-based emission** on 18 backends (14 native backends with
+  their own `reg_isel.rs` — aarch64, x86_64, x86_32, riscv64, riscv32,
+  arm32, mips64, ppc64, loongarch64, sparc64, s390x, m68k, alpha, hppa —
+  plus 4 byte-swap wrappers aarch64_be, armeb, mips64be, ppc64le that
+  delegate to a parent's `reg_isel.rs`). Each `reg_isel.rs` consumes the
+  `RegAllocResult` from the target-agnostic linear-scan allocator and
+  produces register-to-register machine code for ALL IR instructions.
 - **Target-agnostic linear-scan register allocator** (`regalloc.rs`) with:
   - Live-range computation across all blocks (global position numbering)
   - Caller-saved / callee-saved register pools
