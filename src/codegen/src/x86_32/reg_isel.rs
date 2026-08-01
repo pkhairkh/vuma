@@ -65,7 +65,8 @@
 
 use crate::backend::{AllocatedBlock, AllocatedFunction, AllocatedInstruction, BackendError, PhysicalReg, RelocationEntry};
 use crate::ir::{IRFunction, IRInstr, IRValue, IRTerminator, IRType, BinOpKind, UnaryOpKind, CastKind, CmpKind};
-use crate::regalloc::{RegAllocResult, GenericSpillCode, IRValueId};
+use crate::regalloc::RegAllocResult;
+use crate::regalloc::GenericSpillCode;
 use crate::x86_32::*;
 
 /// Resolved value: either a physical register or an immediate.
@@ -236,34 +237,6 @@ pub fn emit_function_regalloc_full(
     // Position keying must match the allocator in regalloc.rs
     // (`LiveRangeComputer::compute`): each instruction and each terminator
     // consumes `pos += 2`, NEVER reset between blocks.
-    //
-    // The allocator inserts two kinds of spill_code entries:
-    //   • Reloads at `use_pos` (EVEN position = the instruction's own pos):
-    //     emitted BEFORE the instruction so the value is in a register when
-    //     the instruction reads it.
-    //   • Spills at `def_pos + 1` (ODD position = the gap right AFTER the
-    //     defining instruction): emitted AFTER the instruction so the
-    //     freshly-written value is stored to memory before any subsequent
-    //     reload can clobber the scratch register.
-    //
-    // Historically this emitter only checked `spill_code` at EVEN positions
-    // (before each instruction/terminator). That correctly emitted reloads
-    // but SILENTLY DROPPED all post-def spills at odd positions. As a
-    // result, when a spilled vreg was the destination of an instruction
-    // (e.g. `Cmp { dst: v12, ... }`), the instruction wrote the result to
-    // the EAX scratch fallback (because `load_to_reg` returns EAX for
-    // spilled vregs) but the value was never stored to the spill slot.
-    // The subsequent reload then read stale memory, corrupting the
-    // condition used by `CondBranch`. This was the root cause of the
-    // nested_loops failures on x86_32 (e.g. 2x37_count returned 127
-    // instead of 74).
-    //
-    // Fix: after emitting each instruction (and each terminator), also
-    // check `spill_code` at `global_pos + 1` and emit any post-def spills
-    // found there. This mirrors what the x86_64 backend would do if it
-    // ever routed through the same `gen_spill_reload` metadata path (it
-    // currently does not, because x86_64 has enough registers to avoid
-    // spilling these short-lived cmp results).
     let mut global_pos: u32 = 0;
 
     for block in &func.blocks {
@@ -273,9 +246,24 @@ pub fn emit_function_regalloc_full(
         let mut instrs: Vec<AllocatedInstruction> = Vec::new();
 
         for instr in &block.instructions {
-            // Insert spill/reload code BEFORE this instruction (reloads at
-            // use_pos, which is the instruction's own even pos).
-            emit_spill_code_at(&mut all_code, &mut instrs, alloc, global_pos);
+            // Insert spill/reload code before this instruction.
+            if let Some(spills) = alloc.spill_code.get(&global_pos) {
+                for spill in spills {
+                    let spill_start = all_code.len();
+                    emit_spill_code(&mut all_code, spill);
+                    if all_code.len() > spill_start {
+                        instrs.push(AllocatedInstruction {
+                            opcode: match spill {
+                                GenericSpillCode::Spill { .. } => "spill".to_string(),
+                                GenericSpillCode::Reload { .. } => "reload".to_string(),
+                            },
+                            reads: vec![],
+                            writes: vec![],
+                            encoded: all_code[spill_start..].to_vec(),
+                        });
+                    }
+                }
+            }
 
             // Emit the instruction itself.
             let instr_start = all_code.len();
@@ -298,37 +286,27 @@ pub fn emit_function_regalloc_full(
                     encoded: all_code[instr_start..instr_end].to_vec(),
                 });
             }
-
-            // Insert spill code AFTER this instruction (spills at
-            // def_pos + 1, which is the odd position immediately following
-            // the instruction's own even pos). Without this, post-def
-            // spills are silently dropped and spilled destinations lose
-            // their values (see the block comment above).
-            emit_spill_code_at(&mut all_code, &mut instrs, alloc, global_pos + 1);
-
-            // Fallback def-side spill for EVICTED vregs.
-            //
-            // The allocator's `gen_eviction_spill_reload` (regalloc.rs)
-            // only inserts a single Spill at position 0 for an evicted
-            // interval — it does NOT insert Spills at the evicted vreg's
-            // subsequent def_positions. So when an instruction writes to
-            // an evicted vreg (whose `load_to_reg` returns EAX as the
-            // scratch fallback), the freshly-written value never reaches
-            // the spill slot. The next use (which `load_to_reg` reloads
-            // from the slot) then reads the stale pre-eviction value.
-            //
-            // Entirely-spilled vregs are NOT affected: their post-def
-            // spills ARE in `spill_code` at `def_pos+1` and were just
-            // emitted by `emit_spill_code_at` above. To avoid double-
-            // spilling, we skip any vreg that already has a Spill entry
-            // in `spill_code` at `global_pos + 1`.
-            emit_evicted_def_spills(&mut all_code, &mut instrs, alloc, instr, global_pos);
-
             global_pos += 2;
         }
 
         // Spill/reload BEFORE the terminator uses the terminator's own pos.
-        emit_spill_code_at(&mut all_code, &mut instrs, alloc, global_pos);
+        if let Some(spills) = alloc.spill_code.get(&global_pos) {
+            for spill in spills {
+                let spill_start = all_code.len();
+                emit_spill_code(&mut all_code, spill);
+                if all_code.len() > spill_start {
+                    instrs.push(AllocatedInstruction {
+                        opcode: match spill {
+                            GenericSpillCode::Spill { .. } => "spill".to_string(),
+                            GenericSpillCode::Reload { .. } => "reload".to_string(),
+                        },
+                        reads: vec![],
+                        writes: vec![],
+                        encoded: all_code[spill_start..].to_vec(),
+                    });
+                }
+            }
+        }
 
         // Emit terminator.  Return paths emit the full epilogue inline so
         // that early returns restore ESP / callee-saved / EBP correctly.
@@ -351,12 +329,6 @@ pub fn emit_function_regalloc_full(
                 encoded: all_code[term_start..term_end].to_vec(),
             });
         }
-
-        // Insert spill code AFTER the terminator (spills at def_pos + 1
-        // for any vreg defined by the terminator — rare, but supported
-        // for correctness parity with the instruction path).
-        emit_spill_code_at(&mut all_code, &mut instrs, alloc, global_pos + 1);
-
         global_pos += 2;
 
         blocks.push(AllocatedBlock {
@@ -496,77 +468,21 @@ fn resolve_value(val: &IRValue, alloc: &RegAllocResult) -> ResolvedVal {
 ///
 /// EAX is `not_allocatable` in the target desc, so the allocator never
 /// assigns a live vreg to it — clobbering EAX here is safe.
-///
-/// # Spilled vregs
-///
-/// When the allocator spills a vreg (it lives in a stack slot, not a
-/// physical register), there are two cases:
-///
-///   1. **Entirely-spilled interval** — the allocator inserts Reload
-///      entries in `alloc.spill_code` at every `use_pos`. The main emit
-///      loop emits those reloads BEFORE the instruction, loading the
-///      value into EAX (after the index-5→EAX remap in `emit_spill_code`).
-///      By the time `load_to_reg` runs, EAX already holds the value, so
-///      the fallback `return EAX` below is correct.
-///
-///   2. **Evicted interval** — the allocator's `gen_eviction_spill_reload`
-///      inserts only a single Spill at position 0 (the eviction point).
-///      It does NOT insert Reload entries at the evicted vreg's subsequent
-///      use positions. So when `load_to_reg` is called for an evicted
-///      vreg, EAX does NOT hold the value. The fallback `return EAX`
-///      would silently read stale data — this was the second root cause
-///      of the x86_32 nested_loops failures (the outer-loop counter `i`
-///      and the outer count were evicted, so their uses read garbage).
-///
-/// Fix: when the vreg is spilled (present in `alloc.spill_slots` but not
-/// in `alloc.vreg_to_preg`), explicitly emit a `mov eax, [ebp+offset]`
-/// reload from the vreg's spill slot. For entirely-spilled vregs this is
-/// a redundant second reload (the first was emitted by `emit_spill_code`
-/// from `spill_code`); the redundancy is harmless (same value, same
-/// register). For evicted vregs this is the ONLY reload — without it the
-/// use reads stale data.
 fn load_to_reg(val: &IRValue, alloc: &RegAllocResult, code: &mut Vec<u8>) -> Gpr {
-    match val {
-        IRValue::Register(vreg_id) => {
-            let root = alloc.coalesced_map.get(vreg_id).unwrap_or(vreg_id);
-            // If the vreg is in a physical register, return it directly.
-            if let Some(preg) = alloc.vreg_to_preg.get(root) {
-                if let Some(gpr) = preg_to_gpr(preg) {
-                    return gpr;
-                }
-            }
-            // The vreg is spilled. Emit a reload from its spill slot into
-            // EAX (the dedicated scratch). This handles BOTH entirely-
-            // spilled intervals (redundant with the spill_code reload but
-            // harmless) and evicted intervals (the only reload — the
-            // allocator omits use-position reloads for evicted vregs).
-            if let Some(slot) = alloc.spill_slot(*vreg_id) {
-                code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rbp, slot.offset));
-                return Gpr::Rax;
-            }
-            // Not in a register and not in a spill slot — shouldn't happen
-            // for well-formed IR. Fall back to EAX (the historical
-            // behavior) to avoid crashing.
-            Gpr::Rax
-        }
-        IRValue::Immediate(imm) => {
+    match resolve_value(val, alloc) {
+        ResolvedVal::Reg(g) => g,
+        ResolvedVal::Imm(imm) => {
             let scratch = Gpr::Rax;
             // x86_32 cannot hold a 64-bit immediate in a single register;
             // encode_mov_reg_imm64 truncates to the low 32 bits (with a
             // warning).  This is the same limitation as the stack-slot ISel.
-            if *imm >= i32::MIN as i64 && *imm <= i32::MAX as i64 {
-                code.extend(encode_mov_reg_imm32(scratch, *imm as i32));
+            if imm >= i32::MIN as i64 && imm <= i32::MAX as i64 {
+                code.extend(encode_mov_reg_imm32(scratch, imm as i32));
             } else {
-                code.extend(encode_mov_reg_imm64(scratch, *imm as u64));
+                code.extend(encode_mov_reg_imm64(scratch, imm as u64));
             }
             scratch
         }
-        IRValue::Address(addr) => {
-            let scratch = Gpr::Rax;
-            code.extend(encode_mov_reg_imm32(scratch, *addr as i32));
-            scratch
-        }
-        IRValue::Label(_) => Gpr::Rax,
     }
 }
 
@@ -613,219 +529,6 @@ fn emit_spill_code(code: &mut Vec<u8>, spill: &GenericSpillCode) {
     }
 }
 
-/// Look up `alloc.spill_code` at `pos` and emit any spill/reload entries
-/// found there, appending each emitted entry to `instrs` as a labeled
-/// `AllocatedInstruction` (opcode `"spill"` or `"reload"`).
-///
-/// This is a thin wrapper around `emit_spill_code` that handles the
-/// bookkeeping of recording each emitted byte range as a discrete
-/// `AllocatedInstruction`. It is called at two points in the main emit
-/// loop:
-///
-///   1. BEFORE each instruction/terminator (at the instruction's own even
-///      `pos`) — picks up Reloads inserted at `use_pos`.
-///   2. AFTER each instruction/terminator (at `pos + 1`) — picks up
-///      Spills inserted at `def_pos + 1`. Without this second call,
-///      post-def spills are silently dropped and spilled destinations
-///      lose their values (root cause of the x86_32 nested_loops bug).
-fn emit_spill_code_at(
-    code: &mut Vec<u8>,
-    instrs: &mut Vec<AllocatedInstruction>,
-    alloc: &RegAllocResult,
-    pos: u32,
-) {
-    if let Some(spills) = alloc.spill_code.get(&pos) {
-        for spill in spills {
-            let spill_start = code.len();
-            emit_spill_code(code, spill);
-            if code.len() > spill_start {
-                instrs.push(AllocatedInstruction {
-                    opcode: match spill {
-                        GenericSpillCode::Spill { .. } => "spill".to_string(),
-                        GenericSpillCode::Reload { .. } => "reload".to_string(),
-                    },
-                    reads: vec![],
-                    writes: vec![],
-                    encoded: code[spill_start..].to_vec(),
-                });
-            }
-        }
-    }
-}
-
-/// Emit a fallback `mov [ebp+offset], eax` for every vreg DEFINED by
-/// `instr` that is spilled (present in `alloc.spill_slots`) but whose
-/// post-def spill was NOT already inserted by the allocator in
-/// `spill_code[global_pos + 1]`.
-///
-/// This closes the gap left by the allocator's
-/// `gen_eviction_spill_reload`, which only inserts a single Spill at
-/// position 0 for evicted intervals and omits Spills at subsequent
-/// def_positions. Without this fallback, an instruction that writes to
-/// an evicted vreg leaves the new value in the EAX scratch register
-/// only — the spill slot retains the pre-eviction value, and the next
-/// reload (emitted by `load_to_reg`) reads stale data.
-///
-/// For entirely-spilled vregs (whose post-def spills ARE in
-/// `spill_code`), this function is a no-op — the `already_spilled`
-/// check skips them to avoid a redundant double-store.
-fn emit_evicted_def_spills(
-    code: &mut Vec<u8>,
-    instrs: &mut Vec<AllocatedInstruction>,
-    alloc: &RegAllocResult,
-    instr: &IRInstr,
-    global_pos: u32,
-) {
-    let def_regs = instr.defined_regs();
-    if def_regs.is_empty() {
-        return;
-    }
-    // Snapshot the set of vregs already spilled by spill_code at
-    // global_pos + 1 (the post-def position). These are the
-    // entirely-spilled vregs whose spills were just emitted by
-    // `emit_spill_code_at` — we skip them to avoid double-spilling.
-    let already_spilled: std::collections::HashSet<IRValueId> = alloc
-        .spill_code
-        .get(&(global_pos + 1))
-        .map(|spills| {
-            spills
-                .iter()
-                .filter_map(|s| match s {
-                    GenericSpillCode::Spill { vreg, .. } => Some(*vreg),
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    for def_vreg in def_regs {
-        if already_spilled.contains(&def_vreg) {
-            continue;
-        }
-        // Only emit a fallback spill if the vreg is spilled (in
-        // spill_slots) AND not in a physical register (evicted or
-        // entirely-spilled-but-not-in-spill_code — the latter shouldn't
-        // happen, but the check is defensive).
-        let root = alloc.coalesced_map.get(&def_vreg).copied().unwrap_or(def_vreg);
-        if alloc.vreg_to_preg.contains_key(&root) {
-            continue; // in a physical register — no spill needed
-        }
-        let slot = match alloc.spill_slot(def_vreg) {
-            Some(s) => s,
-            None => continue,
-        };
-        // Emit: mov [ebp + slot.offset], eax
-        // EAX is the scratch register that `load_to_reg` returns for
-        // spilled dst vregs, so the instruction's result is in EAX.
-        let spill_start = code.len();
-        code.extend(encode_mov_mem_reg(Gpr::Rbp, slot.offset, Gpr::Rax));
-        if code.len() > spill_start {
-            instrs.push(AllocatedInstruction {
-                opcode: "spill".to_string(),
-                reads: vec![],
-                writes: vec![],
-                encoded: code[spill_start..].to_vec(),
-            });
-        }
-    }
-}
-
-/// Emit a single IR instruction as register-based machine code.
-/// Emit a `SETcc` + `MOVZX` pair that writes the boolean condition
-/// result into `dst_reg` (zero-extended to 32 bits).
-///
-/// # The 8-bit register encoding hazard
-///
-/// In 32-bit x86, `SETcc` writes to an 8-bit register. Without a REX
-/// prefix (which is a 64-bit-only feature), the available 8-bit
-/// destinations are AL, CL, DL, BL, AH, CH, DH, BH — i.e., only the
-/// low/high bytes of EAX, ECX, EDX, EBX. The low bytes of ESP, EBP,
-/// ESI, EDI (SPL, BPL, SIL, DIL) are NOT accessible in 32-bit mode.
-///
-/// `encode_setcc` uses `dst.encoding() & 7` as the r/m field. For
-/// dst_reg in {ESP, EBP, ESI, EDI} (encodings 4-7), this silently
-/// remaps to AH, CH, DH, BH — clobbering the high byte of EAX, ECX,
-/// EDX, or EBX. This was the root cause of the nl_triangle /
-/// nl_countdown failures: the cmp's dst was in EDI, so `setl` wrote
-/// to BH (clobbering EBX which held the inner loop counter `j`).
-///
-/// Fix: when dst_reg is one of {ESP, EBP, ESI, EDI}, use EAX (AL) as
-/// the SETcc destination and then `movzx dst_reg, al`. EAX is the
-/// dedicated scratch register (`not_allocatable`), so clobbering AL
-/// here is safe.
-fn emit_setcc_zero_extend(code: &mut Vec<u8>, cc: Cc, dst_reg: Gpr) {
-    match dst_reg {
-        Gpr::Rsp | Gpr::Rbp | Gpr::Rsi | Gpr::Rdi => {
-            // These registers' low bytes are not accessible in 32-bit
-            // mode. Use EAX (AL) as scratch, then movzx dst, al.
-            code.extend(encode_setcc(cc, Gpr::Rax));
-            code.extend(encode_movzx_reg8(dst_reg, Gpr::Rax));
-        }
-        _ => {
-            code.extend(encode_setcc(cc, dst_reg));
-            code.extend(encode_movzx_reg8(dst_reg, dst_reg));
-        }
-    }
-}
-
-/// Tail of the Add instruction emission (the non-commutative-swap path).
-/// Emits `mov dst, lhs` (if lhs is not already in dst) followed by
-/// `add dst, rhs` (or `add dst, imm`). Pushes the appropriate reads/writes.
-fn emit_add_tail(
-    code: &mut Vec<u8>,
-    reads: &mut Vec<PhysicalReg>,
-    writes: &mut Vec<PhysicalReg>,
-    dst_reg: Gpr,
-    lhs_reg: Gpr,
-    rhs_resolved: ResolvedVal,
-) {
-    if lhs_reg != dst_reg {
-        code.extend(encode_mov_reg_reg(dst_reg, lhs_reg));
-    }
-    match rhs_resolved {
-        ResolvedVal::Reg(rhs_reg) => {
-            code.extend(encode_add_reg_reg(dst_reg, rhs_reg));
-            reads.push(phys(rhs_reg));
-        }
-        ResolvedVal::Imm(imm) => {
-            code.extend(encode_add_reg_imm32(dst_reg, imm as i32));
-        }
-    }
-    reads.push(phys(lhs_reg));
-    writes.push(phys(dst_reg));
-}
-
-/// Tail of the Mul instruction emission (the non-commutative-swap path).
-/// Emits `mov dst, lhs` (if lhs is not already in dst) followed by
-/// `imul dst, rhs` (or `imul dst, scratch` for immediates, where scratch
-/// is EAX). Pushes the appropriate reads/writes.
-fn emit_mul_tail(
-    code: &mut Vec<u8>,
-    reads: &mut Vec<PhysicalReg>,
-    writes: &mut Vec<PhysicalReg>,
-    dst_reg: Gpr,
-    lhs_reg: Gpr,
-    rhs_resolved: ResolvedVal,
-) {
-    if lhs_reg != dst_reg {
-        code.extend(encode_mov_reg_reg(dst_reg, lhs_reg));
-    }
-    match rhs_resolved {
-        ResolvedVal::Reg(rhs_reg) => {
-            code.extend(encode_imul_reg_reg(dst_reg, rhs_reg));
-            reads.push(phys(rhs_reg));
-        }
-        ResolvedVal::Imm(imm) => {
-            // imul dst, imm32 — materialize imm in EAX scratch.
-            let scratch = Gpr::Rax;
-            code.extend(encode_mov_reg_imm32(scratch, imm as i32));
-            code.extend(encode_imul_reg_reg(dst_reg, scratch));
-        }
-    }
-    reads.push(phys(lhs_reg));
-    writes.push(phys(dst_reg));
-}
-
 /// Emit a single IR instruction as register-based machine code.
 /// Returns (opcode_name, reads, writes).
 #[allow(clippy::too_many_arguments)]
@@ -843,22 +546,6 @@ fn emit_instruction(
 
     let opcode = match instr {
         // ── Add ──
-        //
-        // # The dst==rhs register-reuse hazard
-        //
-        // When the allocator coalesces the dst vreg with the rhs vreg
-        // (valid because rhs dies at this instruction), dst_reg and
-        // rhs_reg are the same physical register. The naive sequence
-        //   `mov dst, lhs; add dst, rhs`
-        // clobbers rhs via the `mov dst, lhs` before the `add` reads it,
-        // producing `dst = lhs + lhs` instead of `dst = lhs + rhs`.
-        //
-        // Fix: Add is commutative, so when dst_reg == rhs_reg and
-        // lhs_reg != dst_reg, emit `add dst, lhs` which computes
-        // `dst = dst + lhs = rhs + lhs = lhs + rhs` without clobbering
-        // rhs. (When lhs_reg == dst_reg too, the mov is skipped and
-        // `add dst, rhs` = `add dst, dst` = `2*dst` is correct since
-        // lhs == rhs == dst.)
         IRInstr::Add { dst, lhs, rhs, ty } => {
             let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64));
             if is_fp {
@@ -866,23 +553,21 @@ fn emit_instruction(
             }
             let dst_reg = load_to_reg(dst, alloc, code);
             let lhs_reg = load_to_reg(lhs, alloc, code);
-            let rhs_resolved = resolve_value(rhs, alloc);
-            // Commutative-swap fast path: dst == rhs, lhs != dst.
-            if let ResolvedVal::Reg(rhs_reg) = rhs_resolved {
-                if rhs_reg == dst_reg && lhs_reg != dst_reg {
-                    code.extend(encode_add_reg_reg(dst_reg, lhs_reg));
-                    reads.push(phys(lhs_reg));
-                    reads.push(phys(rhs_reg));
-                    writes.push(phys(dst_reg));
-                    "add".to_string()
-                } else {
-                    emit_add_tail(code, &mut reads, &mut writes, dst_reg, lhs_reg, rhs_resolved);
-                    "add".to_string()
-                }
-            } else {
-                emit_add_tail(code, &mut reads, &mut writes, dst_reg, lhs_reg, rhs_resolved);
-                "add".to_string()
+            if !matches!(resolve_value(lhs, alloc), ResolvedVal::Reg(r) if r == dst_reg) {
+                code.extend(encode_mov_reg_reg(dst_reg, lhs_reg));
             }
+            match resolve_value(rhs, alloc) {
+                ResolvedVal::Reg(rhs_reg) => {
+                    code.extend(encode_add_reg_reg(dst_reg, rhs_reg));
+                    reads.push(phys(rhs_reg));
+                }
+                ResolvedVal::Imm(imm) => {
+                    code.extend(encode_add_reg_imm32(dst_reg, imm as i32));
+                }
+            }
+            reads.push(phys(lhs_reg));
+            writes.push(phys(dst_reg));
+            "add".to_string()
         }
 
         // ── Sub ──
@@ -911,7 +596,6 @@ fn emit_instruction(
         }
 
         // ── Mul ──
-        // Mul is commutative — same dst==rhs swap as Add applies.
         IRInstr::Mul { dst, lhs, rhs, ty } => {
             let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64));
             if is_fp {
@@ -919,23 +603,24 @@ fn emit_instruction(
             }
             let dst_reg = load_to_reg(dst, alloc, code);
             let lhs_reg = load_to_reg(lhs, alloc, code);
-            let rhs_resolved = resolve_value(rhs, alloc);
-            if let ResolvedVal::Reg(rhs_reg) = rhs_resolved {
-                if rhs_reg == dst_reg && lhs_reg != dst_reg {
-                    // imul dst, lhs (computes dst = dst * lhs = rhs * lhs)
-                    code.extend(encode_imul_reg_reg(dst_reg, lhs_reg));
-                    reads.push(phys(lhs_reg));
-                    reads.push(phys(rhs_reg));
-                    writes.push(phys(dst_reg));
-                    "mul".to_string()
-                } else {
-                    emit_mul_tail(code, &mut reads, &mut writes, dst_reg, lhs_reg, rhs_resolved);
-                    "mul".to_string()
-                }
-            } else {
-                emit_mul_tail(code, &mut reads, &mut writes, dst_reg, lhs_reg, rhs_resolved);
-                "mul".to_string()
+            if !matches!(resolve_value(lhs, alloc), ResolvedVal::Reg(r) if r == dst_reg) {
+                code.extend(encode_mov_reg_reg(dst_reg, lhs_reg));
             }
+            match resolve_value(rhs, alloc) {
+                ResolvedVal::Reg(rhs_reg) => {
+                    code.extend(encode_imul_reg_reg(dst_reg, rhs_reg));
+                    reads.push(phys(rhs_reg));
+                }
+                ResolvedVal::Imm(imm) => {
+                    // imul dst, imm32 — materialize imm in EAX scratch.
+                    let scratch = Gpr::Rax;
+                    code.extend(encode_mov_reg_imm32(scratch, imm as i32));
+                    code.extend(encode_imul_reg_reg(dst_reg, scratch));
+                }
+            }
+            reads.push(phys(lhs_reg));
+            writes.push(phys(dst_reg));
+            "mul".to_string()
         }
 
         // ── BinOp (Div/Rem/And/Or/Xor/Shl/Shr/Add/Sub/Mul) ──
@@ -1236,10 +921,9 @@ fn emit_instruction(
             }
             let dst_reg = load_to_reg(dst, alloc, code);
             let cc = cmp_kind_to_cc(kind);
-            // Use emit_setcc_zero_extend to handle the 8-bit register
-            // encoding hazard (SETcc can't write to ESP/EBP/ESI/EDI low
-            // bytes in 32-bit mode).
-            emit_setcc_zero_extend(code, cc, dst_reg);
+            code.extend(encode_setcc(cc, dst_reg));
+            // Zero-extend the 8-bit result to 32-bit.
+            code.extend(encode_movzx_reg8(dst_reg, dst_reg));
             reads.push(phys(lhs_reg));
             writes.push(phys(dst_reg));
             "cmp".to_string()
@@ -1283,7 +967,8 @@ fn emit_instruction(
             let rhs_reg = load_to_reg(rhs, alloc, code);
             code.extend(encode_cmp_reg_reg(lhs_reg, rhs_reg));
             let dst_reg = load_to_reg(dst, alloc, code);
-            emit_setcc_zero_extend(code, Cc::Equal, dst_reg);
+            code.extend(encode_setcc(Cc::Equal, dst_reg));
+            code.extend(encode_movzx_reg8(dst_reg, dst_reg));
             reads.push(phys(lhs_reg));
             reads.push(phys(rhs_reg));
             writes.push(phys(dst_reg));
@@ -1513,25 +1198,8 @@ fn emit_instruction(
         // ── Call ──
         IRInstr::Call { dst, func: fname, args, is_extern, .. } => {
             // VUMA-internal regparam: first 4 non-FP int args in EDI, ESI,
-            // EDX, ECX.  Args 5+ are pushed on the stack (right-to-left,
-            // cdecl-style). Return value in EAX.
+            // EDX, ECX.  Return value in EAX.
             let arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx];
-            // Push stack args (args 5+) in reverse order (right-to-left).
-            // This MUST happen BEFORE setting up register args, because
-            // load_to_reg might clobber the arg regs.
-            let stack_args: Vec<_> = args.iter().enumerate()
-                .skip(arg_regs.len())
-                .collect();
-            for (_, arg) in stack_args.iter().rev() {
-                let arg_reg = load_to_reg(arg, alloc, code);
-                // Push the value via EAX (EAX is scratch/not_allocatable)
-                if arg_reg != Gpr::Rax {
-                    code.extend(encode_mov_reg_reg(Gpr::Rax, arg_reg));
-                }
-                code.extend(encode_push(Gpr::Rax));
-            }
-            let stack_arg_count = stack_args.len();
-            // Set up register args (args 0-3)
             for (i, arg) in args.iter().enumerate().take(arg_regs.len()) {
                 let arg_reg = load_to_reg(arg, alloc, code);
                 if arg_reg != arg_regs[i] {
@@ -1549,10 +1217,6 @@ fn emit_instruction(
                 symbol: fname.clone(),
                 reloc_type: "R_386_PC32".to_string(),
             });
-            // Clean up stack args (cdecl caller-cleanup)
-            if stack_arg_count > 0 {
-                code.extend_from_slice(&[0x83, 0xC4, (stack_arg_count * 4) as u8]); // add esp, N*4
-            }
             if let Some(dst_val) = dst {
                 let dst_reg = load_to_reg(dst_val, alloc, code);
                 if dst_reg != Gpr::Rax {
