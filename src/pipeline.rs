@@ -6512,6 +6512,8 @@ fn bridge_type_to_ir_type(ty: &vuma_parser::ast::Type) -> vuma_codegen::ir::IRTy
             "u16" => vuma_codegen::ir::IRType::U16,
             "u32" => vuma_codegen::ir::IRType::U32,
             "u64" => vuma_codegen::ir::IRType::U64,
+            "f32" => vuma_codegen::ir::IRType::F32,
+            "f64" => vuma_codegen::ir::IRType::F64,
             _ => vuma_codegen::ir::IRType::U64,
         },
         Type::Ptr(_) | Type::RegionPtr { .. } => vuma_codegen::ir::IRType::U64,
