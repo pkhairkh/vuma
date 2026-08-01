@@ -172,7 +172,7 @@ caveat.
 
 | Aspect | Detail |
 |--------|--------|
-| Files | `src/ive/Cargo.toml` (`pmt-runtime-check = []`); `build.rs` (file-level doc, "Lean FFI bridge removed") |
+| Files | `src/ive/Cargo.toml` (`pmt-runtime-check = []`); `build.rs` (repo-root, file-level doc "Lean FFI bridge removed" — note: there is no `src/ive/build.rs`, only the repo-root `build.rs`) |
 | History | The feature used to wire Lean-verified PMT checkers into the runtime via a C-archive FFI bridge. That FFI bridge has been **deleted** — Z3-based contract discharge and hand-written Rust verifiers now do the work. |
 | Current state | The feature is **retained as a no-op for `vuma-ive`** so existing CI commands (`cargo build --features pmt-runtime-check`) continue to work without changes. In `vuma-codegen` the feature still has a real effect: it activates the independent pure-Rust `pmt_check` module (a parity-tested hand-translation of the Lean definitions in `proof/PMT/Extraction.lean`) — but that module does **not** depend on any Lean linkage. |
 | Caveat | If you enable `pmt-runtime-check` expecting Lean-verified runtime checkers, you will instead get the Rust hand-translations. They are parity-tested against the Lean definitions (see `tests/pmt_parity_test.rs`) but are not themselves formally verified. |
@@ -290,11 +290,15 @@ appear in docs, scripts, or examples:
 - `--safe` / `--no-memory-safety` — runtime bounds-check injection is
   always on; there is no flag to disable it.
 - `--repl` — the interactive REPL has been removed.
-- Any "Wave"-named task references — these were internal milestone
-  labels and have no meaning in the current codebase.
 
-If you find a script or doc still using one of these, delete the
-reference rather than re-adding the flag.
+**Note on "Wave-N" labels.** The `[Wave-N]` commit-message prefixes and
+`### Wave N` CHANGELOG section headers are retained as the historical
+organization scheme for v0.2.0-alpha.10 development. They appear
+throughout `git log`, `CHANGELOG.md`, source comments, and this caveats
+file (e.g., §2.1 references "Wave A", the intro references "Wave-0").
+They are meaningful as version-history references but should not be used
+as references in NEW user-facing docs — prefer commit SHAs or section
+numbers.
 
 ### 5.2 Register-allocation env vars (default ON)
 
