@@ -317,7 +317,7 @@ the most impactful items:
 7. **HPPA backend** — Scaffolded tier; `Mul`/`Div`/`Cmp`/cond-branches emit
  stub code; requires QEMU LDIL workaround.
 8. **`state_merge_compatible_layouts`** — stub returning `None`
- (`src/ive/src/bv_verify.rs:69`); deferred pending lifetime analysis.
+ (`src/codegen/src/bv_verify.rs:421`); deferred pending lifetime analysis.
 
 ---
 
@@ -335,7 +335,7 @@ is invoked by CI on every push.
 
 > **The Lean proofs are the formal specification, not the executable
 > verifier.** They are machine-checked by `lake build` (CI:
-> `proof-verify.yml`) and audited by `scripts/check_lean.sh`, but they
+> `proof-verify.yml`) and audited by `scripts/check-lean.sh`, but they
 > are **not linked into the compiler binary**. The previous Lean↔Rust
 > FFI bridge (with `lean_stub.c`, `lean_ffi_linked`, and the
 > `lean_verify_*` externs) has been **deleted**. Build-time and runtime
@@ -384,7 +384,7 @@ is invoked by CI on every push.
 ```bash
 make proof # top-level: invokes lake build under proof/
 cd proof && lake build # direct: builds all PMT/ and IVE/ theories
-make proof-check # sorry-free audit via scripts/check_lean.sh (2 sorries remain)
+make proof-check # sorry-free audit via scripts/check-lean.sh (2 sorries remain)
 make proof-test # run the Lean test harness (proof/PMT/Test/*.lean)
 make verify-all # Lean + CI + docs in one shot
 ```
@@ -398,10 +398,13 @@ and proof strategy) is in [`./pmt-formal-spec.md`](./pmt-formal-spec.md).
 
 **In-tree verified checkers (`pmt-runtime-check` feature).** The Lean-
 verified PMT checkers from `proof/PMT/Extraction.lean` are hand-translated
-into Rust at `src/codegen/src/runtime/pmt_check.rs` (no longer living only
-under `proof/extracted/`). The translation is *verified by parity test*
+into Rust at `src/codegen/src/runtime/pmt_check.rs`. The `proof/extracted/`
+directory was **deleted in v0.2.0-alpha.10**: the Lean→Rust FFI extraction
+pipeline was removed in favour of **Z3-based contract discharge** at
+compile time (see [`../caveats.md` §3.2](../caveats.md)). The
+hand-translation is *verified by parity test*
 (`tests/pmt_parity_test.rs`, see testing overview) rather than by FFI
-extraction (the FFI bridge has been deleted). Enable the `pmt-runtime-check`
+extraction (the FFI bridge has also been deleted). Enable the `pmt-runtime-check`
 Cargo feature on `vuma-codegen` to swap the hand-written checkers in
 `arena.rs` for the verified set: `cargo build -p vuma-codegen --features
 pmt-runtime-check`. When the feature is off (default), the unverified

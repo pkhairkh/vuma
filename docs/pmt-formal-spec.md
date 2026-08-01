@@ -14,7 +14,7 @@ and proof sketches for the runtime side of each theorem.
 > **Role of the Lean proofs.** The Lean development under `proof/` is the
 > *formal specification* of the PMT memory model. The Lean theorems are
 > machine-checked (`lake build` passes, sorry-audit by
-> `scripts/check_lean.sh`), but they are **not linked into the compiler
+> `scripts/check-lean.sh`), but they are **not linked into the compiler
 > binary**. Build-time and runtime verification go through **Z3** (the
 > SMT solver, hard dependency in `src/ive/Cargo.toml`) and the
 > hand-written Rust verifiers under `src/ive/`. The Lean proofs exist to
