@@ -591,8 +591,14 @@ fn emit_instruction(
             match resolve_value(rhs, alloc) {
                 ResolvedVal::Reg(rhs_reg) => {
                     if is_32bit {
-                        // 32-bit div: F7 /6 (no REX.W)
-                        code.extend_from_slice(&[0xF7, 0xF0 | (rhs_reg as u8 & 7)]);
+                        // 32-bit div: F7 /6 (no REX.W, but need REX.B for regs >= R8)
+                        let rm = (rhs_reg as u8) & 7;
+                        if (rhs_reg as u8) >= 8 {
+                            // REX.B prefix for registers R8-R15
+                            code.extend_from_slice(&[0x41, 0xF7, 0xF0 | rm]);
+                        } else {
+                            code.extend_from_slice(&[0xF7, 0xF0 | rm]);
+                        }
                     } else {
                         code.extend(encode_div_reg(rhs_reg));
                     }
