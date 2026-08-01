@@ -5346,14 +5346,14 @@ impl Backend for Sparc64Backend {
                     }
                     .encode(),
                 ); // O0 = 0
+                // O1 = 4096: OrImm simm13 max is 4095, so use SETHI
                 code.extend_from_slice(
-                    &Instruction::OrImm {
+                    &Instruction::Sethi {
                         rd: Gpr::O1,
-                        rs1: Gpr::G0,
-                        imm: 4096,
+                        imm22: 4096 >> 10, // = 4, sets O1 = 4 << 10 = 4096
                     }
                     .encode(),
-                ); // O1 = 4096
+                );
                 code.extend_from_slice(
                     &Instruction::OrImm {
                         rd: Gpr::O2,
@@ -5370,22 +5370,15 @@ impl Backend for Sparc64Backend {
                     }
                     .encode(),
                 ); // O3 = MAP
-                   // O4 = -1: use SETHI + OR for -1 (0xFFFFFFFF)
+                   // O4 = -1 (fd): use sub G0, 1, O4 (= 0 - 1 = -1, sign-extended to 64 bits)
                 code.extend_from_slice(
-                    &Instruction::Sethi {
+                    &Instruction::SubImm {
                         rd: Gpr::O4,
-                        imm22: 0x3FF,
+                        rs1: Gpr::G0,
+                        imm: 1,
                     }
                     .encode(),
-                ); // sethi %hi(0xFFFFFC00), %o4
-                code.extend_from_slice(
-                    &Instruction::OrImm {
-                        rd: Gpr::O4,
-                        rs1: Gpr::O4,
-                        imm: 0x3FF,
-                    }
-                    .encode(),
-                ); // or %o4, 0x3FF, %o4 → -1
+                ); // O4 = -1
                 code.extend_from_slice(
                     &Instruction::OrImm {
                         rd: Gpr::O5,
