@@ -1198,18 +1198,25 @@ fn emit_instruction(
         // ── Call ──
         IRInstr::Call { dst, func: fname, args, is_extern, .. } => {
             // VUMA-internal regparam: first 4 non-FP int args in EDI, ESI,
-            // EDX, ECX.  Return value in EAX.
+            // EDX, ECX.  Args 5+ pushed on stack (right-to-left).
+            // Return value in EAX.
             let arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx];
+            // Push stack args (args 4+) in reverse order first.
+            let n_stack = if args.len() > arg_regs.len() { args.len() - arg_regs.len() } else { 0 };
+            for i in (arg_regs.len()..args.len()).rev() {
+                let arg_reg = load_to_reg(&args[i], alloc, code);
+                if arg_reg != Gpr::Rax {
+                    code.extend(encode_mov_reg_reg(Gpr::Rax, arg_reg));
+                }
+                code.extend(encode_push(Gpr::Rax));
+            }
+            // Set up register args (args 0-3).
             for (i, arg) in args.iter().enumerate().take(arg_regs.len()) {
                 let arg_reg = load_to_reg(arg, alloc, code);
                 if arg_reg != arg_regs[i] {
                     code.extend(encode_mov_reg_reg(arg_regs[i], arg_reg));
                 }
             }
-            // Emit call with a relocation so the linker resolves the target.
-            // On x86_32, the relocation type is R_386_PC32 (PC-relative 32-bit
-            // call displacement), aliased as R_X86_64_PLT32 in the x86_32
-            // backend for source-compat with the relocation resolver.
             code.extend(encode_call_rel32(0));
             let call_rel32_offset = code.len() as u64 - 4;
             relocations.push(RelocationEntry {
@@ -1217,6 +1224,10 @@ fn emit_instruction(
                 symbol: fname.clone(),
                 reloc_type: "R_386_PC32".to_string(),
             });
+            // Clean up stack args.
+            if n_stack > 0 {
+                code.extend_from_slice(&[0x83, 0xC4, (n_stack * 4) as u8]); // add esp, N*4
+            }
             if let Some(dst_val) = dst {
                 let dst_reg = load_to_reg(dst_val, alloc, code);
                 if dst_reg != Gpr::Rax {

@@ -299,26 +299,34 @@ fn emit_instruction(code: &mut Vec<u8>, instr: &IRInstr, alloc: &RegAllocResult,
         }
         IRInstr::Cmp { dst, kind, lhs, rhs, .. } => {
             let l = load_to_reg(lhs, alloc, code); let r = load_to_reg(rhs, alloc, code); let d = load_to_reg(dst, alloc, code);
-            // SUBcc %g0, 0, %g0 (clear flags); SUBcc l, r, %g0; MOVcc d, #1; MOV d, #0
-            // Simpler: SUBcc l, r, %g0; MOV d, #0; MOVcc d, #1 (cond)
+            // Branch-based comparison (more reliable than MOVcc on QEMU):
+            //   subcc %g0, l, r     (sets %icc based on l - r)
+            //   b{COND} +3           (branch if condition TRUE, skip the 'mov d,0')
+            //   mov d, 0             (delay slot — always executes)
+            //   mov d, 1             (condition was true)
+            //   <next instr>         (branch target)
+            //
+            // Wait — SPARC delay slot always executes, so:
+            //   subcc %g0, l, r
+            //   b{NCOND} +3          (branch if condition FALSE, skip mov d,1)
+            //   mov d, 0             (delay slot — always executes)
+            //   mov d, 1             (condition true — only reached if branch NOT taken)
+            //   <next instr>         (branch target — after mov d,1)
             code.extend_from_slice(&Instruction::Subcc { rd: Gpr::G0, rs1: l, rs2: r }.encode());
-            code.extend_from_slice(&Instruction::Or { rd: d, rs1: Gpr::G0, rs2: Gpr::G0 }.encode()); // mov d, 0
-            #[allow(unreachable_patterns)]
-            let cond: u32 = match kind {
-                CmpKind::Eq => 0b001, CmpKind::Ne => 0b010, CmpKind::SLt => 0b100, CmpKind::SLe => 0b011,
-                CmpKind::SGt => 0b110, CmpKind::SGe => 0b101, CmpKind::ULt => 0b1000, CmpKind::ULe => 0b0011,
-                CmpKind::UGt => 0b1010, CmpKind::UGe => 0b0101,
-                _ => 0b001,
-            };
-            // MOVcc: if condition met, d = 1. Use AddImm for mov 1.
-            code.extend_from_slice(&Instruction::Movcc { rd: d, rs2: Gpr::G1, cond }.encode());
-            // Need G1=1 for the MOVcc. Actually MOVcc moves rs2 to rd if cond.
-            // Let's use a simpler approach: SUBcc; MOV d, 0; MOVcc cond d, 1
-            // But MOVcc moves rs2→rd. So we need rs2=1. Load 1 into G1 first.
-            // Reorder: load G1=1 first, then SUBcc, then MOV d,0, then MOVcc.
-            // This is getting complex. Let me use the SLT approach instead.
-            // Actually, for SPARC we can use SUBcc + MOVcc more directly.
-            // For now, use a branch-based approach for correctness.
+            // Use NEGATED condition: branch when condition is FALSE (skip mov d,1)
+            let neg_cond_offset = 3i32; // skip delay slot + mov d,1
+            match kind {
+                CmpKind::Eq => code.extend_from_slice(&Instruction::Bne { offset: neg_cond_offset }.encode()),
+                CmpKind::Ne => code.extend_from_slice(&Instruction::Be { offset: neg_cond_offset }.encode()),
+                CmpKind::SLt => code.extend_from_slice(&Instruction::Bge { offset: neg_cond_offset }.encode()),
+                CmpKind::SLe => code.extend_from_slice(&Instruction::Bg { offset: neg_cond_offset }.encode()),
+                CmpKind::SGt => code.extend_from_slice(&Instruction::Ble { offset: neg_cond_offset }.encode()),
+                CmpKind::SGe => code.extend_from_slice(&Instruction::Bl { offset: neg_cond_offset }.encode()),
+                #[allow(unreachable_patterns)]
+                _ => code.extend_from_slice(&Instruction::Bne { offset: neg_cond_offset }.encode()),
+            }
+            code.extend_from_slice(&Instruction::Or { rd: d, rs1: Gpr::G0, rs2: Gpr::G0 }.encode()); // delay slot: mov d, 0
+            code.extend_from_slice(&Instruction::AddImm { rd: d, rs1: Gpr::G0, imm: 1 }.encode()); // condition true: mov d, 1
             reads.push(phys(l)); reads.push(phys(r)); writes.push(phys(d)); "cmp".to_string()
         }
         IRInstr::Select { dst, cond, true_val, false_val, .. } | IRInstr::CtSelect { dst, cond, true_val, false_val, .. } => {
@@ -327,7 +335,7 @@ fn emit_instruction(code: &mut Vec<u8>, instr: &IRInstr, alloc: &RegAllocResult,
             // SUBcc c, 0, %g0; MOV d, false; MOVNE d, true
             code.extend_from_slice(&Instruction::Subcc { rd: Gpr::G0, rs1: c, rs2: Gpr::G0 }.encode());
             code.extend_from_slice(&Instruction::Or { rd: d, rs1: f, rs2: Gpr::G0 }.encode()); // mov d, false
-            code.extend_from_slice(&Instruction::Movcc { rd: d, rs2: t, cond: 0b010 }.encode()); // MOVNE: if c!=0, d=true
+            code.extend_from_slice(&Instruction::Movcc { rd: d, rs2: t, cond: COND_BNE }.encode()); // MOVNE: if c!=0, d=true
             reads.push(phys(c)); reads.push(phys(f)); reads.push(phys(t)); writes.push(phys(d)); "select".to_string()
         }
         IRInstr::CtEq { dst, lhs, rhs, .. } => {
@@ -336,7 +344,7 @@ fn emit_instruction(code: &mut Vec<u8>, instr: &IRInstr, alloc: &RegAllocResult,
             code.extend_from_slice(&Instruction::Or { rd: d, rs1: Gpr::G0, rs2: Gpr::G0 }.encode()); // mov d, 0
             // Need G1=1 for MOVcc. Load it.
             code.extend_from_slice(&Instruction::AddImm { rd: Gpr::G1, rs1: Gpr::G0, imm: 1 }.encode());
-            code.extend_from_slice(&Instruction::Movcc { rd: d, rs2: Gpr::G1, cond: 0b001 }.encode()); // MOVEQ: if l==r, d=1
+            code.extend_from_slice(&Instruction::Movcc { rd: d, rs2: Gpr::G1, cond: COND_BE }.encode()); // MOVEQ: if l==r, d=1
             reads.push(phys(l)); reads.push(phys(r)); writes.push(phys(d)); "ct_eq".to_string()
         }
         IRInstr::Cast { kind, dst, src, from_ty, to_ty: _, .. } => {
