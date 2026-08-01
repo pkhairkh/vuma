@@ -1,17 +1,16 @@
-// v34_test.vuma — tests whether f32 state fields get correct IRType
+// v34_test.vuma — V-34 regression test (cast-based, avoids literal-immediate bug)
 //
-// V-34 claims: bridge_type_to_ir_type at pipeline.rs:6503 doesn't map
-// "f32"/"f64" → IRType::F32/F64. They fall into _ => IRType::U64.
+// V-34: bridge_type_to_ir_type at pipeline.rs:6515 didn't map "f32"/"f64"
+// to IRType::F32/F64. They fell into _ => IRType::U64, causing:
+//   - f32 state fields loaded as U64 (wrong arithmetic: integer ADD not ADDSD)
+//   - f32 state fields stored as U64 (memory corruption: 8-byte store to 4-byte field)
+//   - IVE unsoundness (discharge_rate=100% on a wrong program)
 //
-// If V-34 is real, reading an f32 state field and doing float arithmetic
-// on it would emit integer ADD instead of float ADDSD.
+// This test uses integer-to-float casts (not literal f32 immediates) to
+// isolate the V-34 bridge fix from the separate f32-literal-immediate
+// materialization bug (tracked separately).
 //
-// This program: creates a Point layout with f32 fields, writes 1.5
-// and 2.5, reads them back via a State<Point>-typed parameter, adds
-// them, returns the sum as i32.
-//
-// Expected (correct): 1.5 + 2.5 = 4.0 → return 4
-// Expected (V-34 buggy): wrong arithmetic → return something else
+// Expected exit code: 7  (3 + 4 = 7)
 
 layout Point = { x: f32, y: f32 }
 
@@ -21,8 +20,8 @@ transform get_sum(p: State<Point>) -> f32 {
 
 transform main() -> i32 {
     let p = state_new(Point);
-    p.x = 1.5;
-    p.y = 2.5;
+    p.x = 3 as f32;
+    p.y = 4 as f32;
     sum: f32 = get_sum(p);
     return sum as i32;
 }
