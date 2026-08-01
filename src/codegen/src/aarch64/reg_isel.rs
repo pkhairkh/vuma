@@ -928,27 +928,55 @@ fn emit_instruction(
             }
             let dst_reg = load_to_reg(dst, alloc, code);
             let lhs_reg = load_to_reg(lhs, alloc, code);
-            let rhs_reg = load_to_reg(rhs, alloc, code);
+            // For ops that support immediate operands (Add, Sub, Shl, ShrL,
+            // ShrA), use Imm12 when rhs is a small immediate. This avoids
+            // loading the immediate into a scratch register (which would
+            // clobber X9 if lhs was also an immediate loaded into X9).
+            let supports_imm = matches!(
+                op,
+                BinOpKind::Add | BinOpKind::Sub | BinOpKind::Shl | BinOpKind::ShrL | BinOpKind::ShrA
+            );
+            let (rhs_reg, rhs_operand): (Register, Operand) = if supports_imm {
+                match resolve_value(rhs, alloc) {
+                    ResolvedVal::Imm(imm) if (0..=4095).contains(&imm) => {
+                        (Register::XZR, Operand::Imm12(imm as u16))
+                    }
+                    _ => {
+                        let r = load_to_reg(rhs, alloc, code);
+                        (r, Operand::Reg { reg: r, shift: None })
+                    }
+                }
+            } else {
+                let r = load_to_reg(rhs, alloc, code);
+                (r, Operand::Reg { reg: r, shift: None })
+            };
             match op {
-                BinOpKind::SDiv => emit_instr(code, Instruction::SDIV { rd: dst_reg, rn: lhs_reg, rm: rhs_reg }),
-                BinOpKind::UDiv => emit_instr(code, Instruction::UDIV { rd: dst_reg, rn: lhs_reg, rm: rhs_reg }),
+                BinOpKind::SDiv => {
+                    let rm_reg = match rhs_operand { Operand::Reg { reg, .. } => reg, _ => rhs_reg };
+                    emit_instr(code, Instruction::SDIV { rd: dst_reg, rn: lhs_reg, rm: rm_reg });
+                }
+                BinOpKind::UDiv => {
+                    let rm_reg = match rhs_operand { Operand::Reg { reg, .. } => reg, _ => rhs_reg };
+                    emit_instr(code, Instruction::UDIV { rd: dst_reg, rn: lhs_reg, rm: rm_reg });
+                }
                 BinOpKind::SRem => {
-                    // SDIV dst, lhs, rhs; MSUB dst, rhs, dst, lhs  (dst = lhs - rhs*dst = lhs % rhs)
-                    emit_instr(code, Instruction::SDIV { rd: dst_reg, rn: lhs_reg, rm: rhs_reg });
-                    emit_instr(code, Instruction::MSUB { rd: dst_reg, rn: rhs_reg, rm: dst_reg, ra: lhs_reg });
+                    let rm_reg = match rhs_operand { Operand::Reg { reg, .. } => reg, _ => rhs_reg };
+                    emit_instr(code, Instruction::SDIV { rd: dst_reg, rn: lhs_reg, rm: rm_reg });
+                    emit_instr(code, Instruction::MSUB { rd: dst_reg, rn: rm_reg, rm: dst_reg, ra: lhs_reg });
                 }
                 BinOpKind::URem => {
-                    emit_instr(code, Instruction::UDIV { rd: dst_reg, rn: lhs_reg, rm: rhs_reg });
-                    emit_instr(code, Instruction::MSUB { rd: dst_reg, rn: rhs_reg, rm: dst_reg, ra: lhs_reg });
+                    let rm_reg = match rhs_operand { Operand::Reg { reg, .. } => reg, _ => rhs_reg };
+                    emit_instr(code, Instruction::UDIV { rd: dst_reg, rn: lhs_reg, rm: rm_reg });
+                    emit_instr(code, Instruction::MSUB { rd: dst_reg, rn: rm_reg, rm: dst_reg, ra: lhs_reg });
                 }
                 BinOpKind::And => emit_instr(code, Instruction::AND { rd: dst_reg, rn: lhs_reg, rm: rhs_reg }),
                 BinOpKind::Or  => emit_instr(code, Instruction::ORR { rd: dst_reg, rn: lhs_reg, rm: rhs_reg }),
                 BinOpKind::Xor => emit_instr(code, Instruction::EOR { rd: dst_reg, rn: lhs_reg, rm: rhs_reg }),
-                BinOpKind::Shl => emit_instr(code, Instruction::LSL { rd: dst_reg, rn: lhs_reg, rm: Operand::Reg { reg: rhs_reg, shift: None } }),
-                BinOpKind::ShrL => emit_instr(code, Instruction::LSR { rd: dst_reg, rn: lhs_reg, rm: Operand::Reg { reg: rhs_reg, shift: None } }),
-                BinOpKind::ShrA => emit_instr(code, Instruction::ASR { rd: dst_reg, rn: lhs_reg, rm: Operand::Reg { reg: rhs_reg, shift: None } }),
-                BinOpKind::Add => emit_instr(code, Instruction::ADD { rd: dst_reg, rn: lhs_reg, rm: Operand::Reg { reg: rhs_reg, shift: None } }),
-                BinOpKind::Sub => emit_instr(code, Instruction::SUB { rd: dst_reg, rn: lhs_reg, rm: Operand::Reg { reg: rhs_reg, shift: None } }),
+                BinOpKind::Shl => emit_instr(code, Instruction::LSL { rd: dst_reg, rn: lhs_reg, rm: rhs_operand }),
+                BinOpKind::ShrL => emit_instr(code, Instruction::LSR { rd: dst_reg, rn: lhs_reg, rm: rhs_operand }),
+                BinOpKind::ShrA => emit_instr(code, Instruction::ASR { rd: dst_reg, rn: lhs_reg, rm: rhs_operand }),
+                BinOpKind::Add => emit_instr(code, Instruction::ADD { rd: dst_reg, rn: lhs_reg, rm: rhs_operand }),
+                BinOpKind::Sub => emit_instr(code, Instruction::SUB { rd: dst_reg, rn: lhs_reg, rm: rhs_operand }),
                 BinOpKind::Mul => emit_instr(code, Instruction::MUL { rd: dst_reg, rn: lhs_reg, rm: rhs_reg }),
                 _ => {
                     emit_instr(code, Instruction::ADD { rd: dst_reg, rn: lhs_reg, rm: Operand::Reg { reg: rhs_reg, shift: None } });
@@ -1391,16 +1419,70 @@ fn emit_instruction(
 
         // ── Call (BL with R_AARCH64_CALL26 relocation) ──
         IRInstr::Call { dst, func: fname, args, is_extern, .. } => {
+            // AAPCS64: calls clobber X0-X18 (caller-saved). The register
+            // allocator may have assigned live values to X0-X14 (the
+            // allocatable caller-saved range; X15 is the spill-scratch and
+            // X16-X18 are not allocatable). Save all allocatable
+            // caller-saved registers before the call and restore after,
+            // preserving the return value (in X0) if the call has one.
             let arg_regs = [
                 Register::X0, Register::X1, Register::X2, Register::X3,
                 Register::X4, Register::X5, Register::X6, Register::X7,
             ];
+            let has_return = dst.is_some();
+
+            // Caller-saved allocatable registers: X0-X14 (X15 is
+            // spill-scratch, not allocatable). Exclude X0 when the call
+            // returns a value (X0 holds the return value after BL).
+            let saved_regs: Vec<Register> = if has_return {
+                vec![Register::X1, Register::X2, Register::X3, Register::X4,
+                     Register::X5, Register::X6, Register::X7, Register::X8,
+                     Register::X9, Register::X10, Register::X11, Register::X12,
+                     Register::X13, Register::X14]
+            } else {
+                vec![Register::X0, Register::X1, Register::X2, Register::X3,
+                     Register::X4, Register::X5, Register::X6, Register::X7,
+                     Register::X8, Register::X9, Register::X10, Register::X11,
+                     Register::X12, Register::X13, Register::X14]
+            };
+
+            // Allocate stack space for saved registers (16-byte aligned).
+            // saved_regs.len() is 14 (has_return) or 15 (no return).
+            // 14*8 = 112 (already 16-aligned); 15*8 = 120 → round to 128.
+            let save_bytes = ((saved_regs.len() * 8 + 15) & !15) as u16;
+            emit_instr(code, Instruction::SUB {
+                rd: Register::SP,
+                rn: Register::SP,
+                rm: Operand::Imm12(save_bytes),
+            });
+
+            // Store saved_regs in pairs via STP. Pairing: (r0, r1), (r2, r3),
+            // ... The last pair of an odd count uses XZR as the second reg.
+            let n_pairs = (saved_regs.len() + 1) / 2;
+            for pair in 0..n_pairs {
+                let i = pair * 2;
+                let r1 = saved_regs[i];
+                let r2 = if i + 1 < saved_regs.len() {
+                    saved_regs[i + 1]
+                } else {
+                    Register::XZR
+                };
+                emit_instr(code, Instruction::STP {
+                    rt1: r1,
+                    rt2: r2,
+                    rn: Register::SP,
+                    offset: (pair * 16) as i32,
+                });
+            }
+
+            // Set up arguments.
             for (i, arg) in args.iter().enumerate().take(8) {
                 let arg_reg = load_to_reg(arg, alloc, code);
                 if arg_reg != arg_regs[i] {
                     emit_instr(code, Instruction::MOV { rd: arg_regs[i], rm: arg_reg });
                 }
             }
+
             // BL 0  — placeholder, patched by encode_program via
             // R_AARCH64_CALL26 relocation.
             let offset_pos = all_code_offset(code);
@@ -1412,6 +1494,35 @@ fn emit_instruction(
                 symbol: fname.clone(),
                 reloc_type: "R_AARCH64_CALL26".to_string(),
             });
+
+            // Restore caller-saved registers (in reverse pair order, using
+            // the same pairing as the store loop).
+            for pair in (0..n_pairs).rev() {
+                let i = pair * 2;
+                let r1 = saved_regs[i];
+                let r2 = if i + 1 < saved_regs.len() {
+                    saved_regs[i + 1]
+                } else {
+                    Register::XZR
+                };
+                emit_instr(code, Instruction::LDP {
+                    rt1: r1,
+                    rt2: r2,
+                    rn: Register::SP,
+                    offset: (pair * 16) as i32,
+                });
+            }
+
+            // Deallocate stack space.
+            emit_instr(code, Instruction::ADD {
+                rd: Register::SP,
+                rn: Register::SP,
+                rm: Operand::Imm12(save_bytes),
+            });
+
+            // Move return value from X0 to dst_reg AFTER restoring (dst_reg
+            // may be one of the restored caller-saved registers; X0 was not
+            // restored when has_return=true, so it still holds the return).
             if let Some(dst_val) = dst {
                 let dst_reg = load_to_reg(dst_val, alloc, code);
                 if dst_reg != Register::X0 {
