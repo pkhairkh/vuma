@@ -812,9 +812,7 @@ fn emit_instruction(
                             }
                         }
                         _ => {
-                            if src_reg != dst_reg {
-                                code.extend_from_slice(&Instruction::Addi { rd: dst_reg, rs1: src_reg, imm: 0 }.encode());
-                            }
+                            return emit_fp_fallback(instr);
                         }
                     }
                 }
