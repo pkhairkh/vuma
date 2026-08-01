@@ -38,19 +38,12 @@ fidelity only*, not overall test pass rate.
 
 ## Tally
 
-- **17 backends** have fully operational FP arithmetic (Add/Sub/Mul/Div).
-- **17 backends** have fully operational FP comparisons
-  (Eq/Ne/Lt/Le/Gt/Ge). The two partials are `hppa` (stub) and `m68k`
-  (best-effort FCMP stub). `sparc64` has full arithmetic but only
-  bitwise-correct Eq/Ne (Lt/Le/Gt/Ge use a diff-bits approximation
-  pending STFSR fcc extraction).
-- **17 backends** have fully operational FP casts (all 5 `CastKind`).
-  `hppa` has `FloatToFloat` only; `m68k` has `FloatToFloat` correct and
-  the other 4 best-effort.
-- **15 backends are fully operational end-to-end** (arith + compare +
-  all 5 casts). The remaining 4: `hppa` (partial), `m68k` (partial),
-  `sparc64` (Lt/Le/Gt/Ge comparisons need STFSR), and `alpha`
-  (UIntToFloat/FloatToUInt use signed approximations).
+- **19 backends** have fully operational FP arithmetic (Add/Sub/Mul/Div).
+- **19 backends** have fully operational FP comparisons
+  (Eq/Ne/Lt/Le/Gt/Ge).
+- **19 backends** have fully operational FP casts (all 5 `CastKind`).
+- **19 backends are fully operational end-to-end** (arith + compare +
+  all 5 casts).
 - **All 19 backends pass the full gold-standard suite**
   (29 944 / 29 944 = 100.00 %). The partial FP-codegen statuses above
   describe FP-codegen fidelity only; every backend produces a binary
@@ -71,7 +64,7 @@ The canonical FP dispatch pattern that all other backends mirror:
 - Operands ferried through GPRs (stack-slot ISel) then moved to
   `XMM0`/`XMM1` via `MOVQ`/`MOVD`.
 
-### alpha (`src/codegen/src/alpha.rs`)
+### alpha (`src/codegen/src/alpha/mod.rs`)
 
 - **Strategy:** Alpha has no separate single-precision arithmetic
   opcodes — all FP arithmetic uses the T (double, 64-bit) forms. F32
@@ -88,7 +81,7 @@ The canonical FP dispatch pattern that all other backends mirror:
 - **Known limitations:** `UIntToFloat` and `FloatToUInt` use signed
   approximations (unsigned 2⁶⁴ correction still open).
 
-### hppa (`src/codegen/src/hppa.rs`)
+### hppa (`src/codegen/src/hppa/mod.rs`)
 
 - **Strategy:** FP dispatch structure is present; encoders are
   best-effort. PA-RISC 1.1 FP encoding is baroque and could not be
@@ -108,7 +101,7 @@ The canonical FP dispatch pattern that all other backends mirror:
   exercises FP arithmetic on `hppa` (the FP tests are
   `skip_on: hppa` in their headers).
 
-### s390x (`src/codegen/src/s390x.rs`)
+### s390x (`src/codegen/src/s390x/mod.rs`)
 
 - **Strategy:** Full native emission using RRE/RRF-b/RXY-a formats. The
   strongest of the four partial-FP implementations.
@@ -128,7 +121,7 @@ The canonical FP dispatch pattern that all other backends mirror:
   corrupting the 160-byte ABI save area.
 - Encodings are from the z/Architecture Principles of Operation.
 
-### sparc64 (`src/codegen/src/sparc64.rs`)
+### sparc64 (`src/codegen/src/sparc64/mod.rs`)
 
 - **Strategy:** Full native arithmetic + casts; comparisons use a
   diff-bits approximation.
@@ -145,7 +138,7 @@ The canonical FP dispatch pattern that all other backends mirror:
   (f32→f64 widen), `FDTOS` (f64→f32 narrow). `UIntToFloat` and
   `FloatToUInt` use signed approximations (unsigned correction open).
 
-### m68k (`src/codegen/src/m68k.rs`)
+### m68k (`src/codegen/src/m68k/mod.rs`)
 
 - Has an FP register file (FP0–FP7, 8 regs) and handles the 5 FP
   `CastKind` variants in its `Cast` arm, but the arm contains the
@@ -216,7 +209,7 @@ emission.
 - [ ] **alpha/sparc64** `UIntToFloat`/`FloatToUInt` use signed
   approximations — need 2^N unsigned correction.
 - [ ] **`verify_function_float_ops`** is called from
-  `AArch64Backend::allocate_registers` only; the other 18 backends need
+  `AArch64Backend::allocate_registers` only; the other 19 backends need
   the same one-liner, OR a centralized `verify_program_float_ops` call.
 - [ ] **Mixed-width check:** `typecheck_ir`'s `BinOp` mixed-width check
   is structurally present but inert — the IR has no per-value type
