@@ -180,7 +180,7 @@ instruction. The pass runs after `allocate_intervals` and patches the
 `RegAllocResult` in place before it is handed to the per-backend
 emitter.
 
-The older AArch64-specific `LinearScanAllocator` (`regalloc.rs:2307`,
+The older AArch64-specific `LinearScanAllocator` (`regalloc.rs:1284`,
 `new` at `:2307`, `allocate_intervals` at `:1426`) is still on the
 aarch64 path — see [§6](#6-per-backend-file-locations) for why aarch64
 is the one backend that does not use `TargetAgnosticRegAlloc`.
@@ -464,17 +464,18 @@ the parent's env-var governs both endianness variants.
 
 ## 6. Per-Backend File Locations
 
-All register-based backends except `aarch64` live in a per-backend
+All 14 native register-based backends live in a per-backend
 **directory** under `src/codegen/src/<isa>/` containing at minimum
 `mod.rs` (the `Backend` impl, `TargetInfo`, `allocate_registers`
 driver) and `reg_isel.rs` (the `emit_function_regalloc_full`
 emitter). Most also have `disasm.rs` (disassembler) and some retain
 `stack_slot_isel.rs` for the `contains_fork` opt-out path.
 
-### 6.1 Directory-style backends (14 of 15 register-based emitters)
+### 6.1 Directory-style backends (all 14 native register-based emitters)
 
 | Backend       | Directory                          | Files in directory                                |
 |---------------|------------------------------------|---------------------------------------------------|
+| `aarch64`     | `src/codegen/src/aarch64/`         | `mod.rs`, `reg_isel.rs`                           |
 | `x86_64`      | `src/codegen/src/x86_64/`          | `mod.rs`, `reg_isel.rs`, `disasm.rs`, `stack_slot_isel.rs` |
 | `x86_32`      | `src/codegen/src/x86_32/`          | `mod.rs`, `reg_isel.rs`, `disasm.rs`, `stack_slot_isel.rs` |
 | `arm32`       | `src/codegen/src/arm32/`           | `mod.rs`, `reg_isel.rs`, `disasm.rs`              |
@@ -495,30 +496,27 @@ declaration is commented out at `loongarch64/mod.rs` and the production
 through `try_real_regalloc`. The file is retained for historical
 reference; it is not compiled.
 
-### 6.2 `aarch64` — special-case layout (single file + shared emitter)
+### 6.2 `aarch64` — directory-style since W7-impl
 
-`aarch64` predates the directory pattern and is split across three
-files:
+Since the W7-impl wave, `aarch64` follows the same directory-style
+pattern as the other 13 native backends, with its own
+`aarch64/reg_isel.rs` exposing `emit_function_regalloc_full`. The
+`AArch64Backend` struct, `TargetInfo` impl, and `allocate_registers`
+driver live in `src/codegen/src/backend.rs` (the `allocate_registers`
+driver is at `:3162`; the `contains_fork` check at `:3230`; the
+`try_real_regalloc` + `reg_isel` dispatch at `:3358`).
 
-| File                          | Role                                                                                    |
-|-------------------------------|-----------------------------------------------------------------------------------------|
-| `src/codegen/src/aarch64/mod.rs` | ISA encoder/decoder: `Instruction`, `Register`, `Condition`, `Operand` enums + `encode()`/`decode()`. |
-| `src/codegen/src/backend.rs`  | `AArch64Backend` struct, `TargetInfo` impl, `allocate_registers` driver (at `:3162`). The `contains_fork` check is at `:3230`; the dispatch is at `:3244`/`:3274`. |
-| `src/codegen/src/emit.rs`     | `Emitter::emit_function_regalloc` — the register-based emitter. aarch64 calls `emitter.emit_function(func, Some(&alloc))` (`backend.rs:3261`). |
+The older `LinearScanAllocator` (`regalloc.rs:1284`) +
+`Emitter::emit_function_regalloc` (`emit.rs:1056`) path survives as a
+**fallback only** — invoked when `aarch64::reg_isel::emit_function_regalloc_full`
+returns an error (e.g. for an unimplemented IR instruction). This mirrors
+the fallback pattern in every other native backend's `allocate_registers`
+driver.
 
-aarch64 uses the older AArch64-specific `LinearScanAllocator`
-(`regalloc.rs:2307`, `allocate_intervals` at `:1426`) rather than
-`TargetAgnosticRegAlloc`, and the `Emitter::emit_function_regalloc`
-plumbing in `emit.rs` rather than a per-backend `reg_isel.rs`. The
-functionality is equivalent to the directory-style backends — the
-difference is historical: aarch64 was the first register-based
-backend, the `TargetAgnosticRegAlloc` + `reg_isel.rs` pattern was
-extracted from it later, and aarch64 has not yet been ported to the
-new pattern.
+### 6.3 The 4 byte-swap wrappers (directory-style)
 
-### 6.3 The 4 byte-swap wrappers (single files)
-
-Each wrapper is a single `.rs` file under `src/codegen/src/`:
+Each wrapper is a directory under `src/codegen/src/` with a `mod.rs`
+and a `reg_isel.rs` that re-exports the parent's emitter:
 
 | Backend       | File                                  | Wraps            | `allocate_registers` delegation line |
 |---------------|---------------------------------------|------------------|--------------------------------------|
