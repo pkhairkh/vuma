@@ -133,7 +133,7 @@ based on verified source evidence.
 
 | ID  | Title                                                  | Status              | Effort      | ADR         |
 |-----|--------------------------------------------------------|---------------------|-------------|-------------|
-| V-13 | SIMD coverage narrow (no AVX2/AVX-512, no pmaxsd/pminsd) | **(corrected)** AArch64 lacks `2D`/i64 form (catalog over-stated) | 6 weeks | (deferred) |
+| V-13 | SIMD coverage narrow (no AVX2/AVX-512, no pmaxsd/pminsd) | **(corrected)** AArch64 lacks `2D`/i64 form (catalog over-stated). **RESOLVED by ADR-0025** (incremental extension driven by text-shaper benchmarks; existing fp_simd latency tables are the benchmark data) | Phase 1: 2wk (fix V-A2-3); Phase 2: incremental | ADR-0025 |
 | V-40 | Legacy `bridge_type_size` coexists with `_with_layouts` | Open                | 1 day       | ADR-0005    |
 | V-43 **(new)** | `infer_expr_type` returns variable NAMES not types | Open (verified) | 1 week | (deferred) |
 | V-47 **(new)** | `extract_state_write_target` only handles `DerefField` | Open (verified) | 1 week | (deferred) |
