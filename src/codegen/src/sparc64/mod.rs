@@ -111,7 +111,7 @@ const OP3_SUBC: u32 = 0x0C;
 const OP3_UDIVX: u32 = 0x0D; // V9 64-bit unsigned divide
 
 const OP3_ADDCC: u32 = 0x10;
-const OP3_SUBCC: u32 = 0x14;
+const OP3_SUBCC: u32 = 0x06; // V9 64-bit SUBcc (sets %ccr = %icc + %xcc)
 const OP3_SDIVX: u32 = 0x2D; // V9 64-bit signed divide
 
 /// Shift op3 values.
@@ -141,19 +141,30 @@ const OP3_RESTORE: u32 = 0x3D;
 const OP3_MEMBAR: u32 = 0x28;
 const OP3_MOVCC: u32 = 0x2C;
 
-/// Bicc condition codes (5-bit, used in cond[29:25] for Format 2 branches).
+/// Bicc condition codes (4-bit, used in cond[28:25] for Format 2 branches).
+/// Bit 29 is the 'a' (annul) bit — the encode_bicc function masks with 0x1F
+/// to preserve the 'a' bit (always 0 here), so these 4-bit values are shifted
+/// into [28:25]. The V8/V9 Bicc cond encoding:
+///   0000 BN    1000 BA
+///   0001 BNE   1001 BE
+///   0010 BG    1010 BLE
+///   0011 BGE   1011 BL
+///   0100 BLU   1100 BLEU
+///   0101 BCS   1101 BCC
+///   0110 BNEG  1110 BPOS
+///   0111 BVS   1111 BVC
 const COND_BA: u32 = 0x08; // always
 const COND_BN: u32 = 0x00; // never
-const COND_BNE: u32 = 0x09;
-const COND_BE: u32 = 0x01;
-const COND_BG: u32 = 0x0A;
-const COND_BLE: u32 = 0x02;
-const COND_BGE: u32 = 0x0B;
-const COND_BL: u32 = 0x03;
-const COND_BGU: u32 = 0x0C;
-const COND_BLEU: u32 = 0x04;
-const COND_BCC: u32 = 0x0D;
-const COND_BCS: u32 = 0x05;
+const COND_BNE: u32 = 0x01;
+const COND_BE: u32 = 0x09;
+const COND_BG: u32 = 0x02;
+const COND_BLE: u32 = 0x0A;
+const COND_BGE: u32 = 0x03;
+const COND_BL: u32 = 0x0B;
+const COND_BGU: u32 = 0x0C;  // 1100 = BGU (unsigned greater: C=0 and Z=0)
+const COND_BLEU: u32 = 0x04; // 0100 = BLEU (unsigned less or equal: C=1 or Z=1)
+const COND_BCC: u32 = 0x0D;  // 1101 = BCC (carry clear: C=0, unsigned >=)
+const COND_BCS: u32 = 0x05;  // 0101 = BCS (carry set: C=1, unsigned <)
 
 // ===========================================================================
 // General-Purpose Registers
