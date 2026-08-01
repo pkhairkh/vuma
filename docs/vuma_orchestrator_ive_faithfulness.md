@@ -1,7 +1,7 @@
 # VUMA IVE Orchestrator — Faithfulness Gap Closure
 
 **Pillar**: IVE (Invariant Verification Engine)
-**Scope**: Close all faithfulness gaps identified in `proof/FAITHFULNESS_AUDIT.md`. The current Lean theorems prove soundness of **Lean abstractions**, not of the production **Rust IVE**. This orchestrator rewrites the Lean models to faithfully mirror the Rust implementations, so `ive_pillar_sound` proves soundness of the actual Rust IVE.
+**Scope**: Close all faithfulness gaps previously identified in the IVE faithfulness audit (the audit file `proof/FAITHFULNESS_AUDIT.md` was deleted in v0.2.0-alpha.10 along with the Lean↔Rust FFI bridge — see `docs/caveats.md` §3.2 for context). The current Lean theorems prove soundness of **Lean abstractions**, not of the production **Rust IVE**. This orchestrator rewrites the Lean models to faithfully mirror the Rust implementations, so `ive_pillar_sound` proves soundness of the actual Rust IVE.
 **Repository**: `https://github.com/pkhairkh/vuma.git` — clone to `/home/z/my-project/vuma`.
 **Total tasks**: 11 (4 critical-gap closures + 5 major-gap closures + 1 pillar re-proof + 1 final audit)
 **Estimated effort**: ~28 person-weeks (~7 months for one Lean+Rust expert)
@@ -53,8 +53,8 @@ Same as the original IVE orchestrator spec — PMT and FFI orchestrators work on
 | Orchestrator | Pillar | Codedomain |
 |--------------|--------|------------|
 | **PMT** | PMT model | `proof/PMT/*.lean` (except `IVE/`), `proof/PMT/Iris/`, `src/codegen/src/runtime/arena.rs` |
-| **IVE** (this doc) | IVE engine + faithful Lean models | `src/ive/**/*.rs`, `proof/PMT/IVE/`, `proof/extracted/`, `tests/pmt_parity_test*.rs` |
-| **FFI** | FFI removal (No-FFI path) | `src/ffi.rs`, `src/codegen/src/runtime/{marshal,vuma_context,callback,ffi_scratch,pmt_ops}.rs`, `proof/PMT/NoFFI.lean`, `proof/PMT/FFI/` |
+| **IVE** (this doc) | IVE engine + faithful Lean models | `src/ive/**/*.rs`, `proof/PMT/IVE/`, `tests/pmt_parity_test*.rs` |
+| **FFI** | FFI removal (No-FFI path) | `src/ffi.rs`, `src/codegen/src/marshal.rs`, `src/codegen/src/runtime/{vuma_context,callback,ffi_scratch}.rs`, `proof/PMT/NoFFI.lean`, `proof/PMT/FFI/` |
 
 ---
 
@@ -89,15 +89,23 @@ Same as the original IVE orchestrator spec — PMT and FFI orchestrators work on
 > They are machine-checked by `lake build` but are **not linked into
 > the compiler binary**. The executable verifier is Z3-based
 > (`src/ive/`, hard `libz3` dependency). The previous Lean↔Rust FFI
-> bridge — including `proof/extracted/lean_stub.c`, the `lean_ffi_linked`
-> cfg, and the `lean_verify_*` / `lean_verified_*` extern surface —
-> has been **deleted**. `lean_stub.c` is no longer compiled.
+> bridge — including the entire `proof/extracted/` directory (which
+> held `lean_stub.c`), the `lean_ffi_linked` cfg, and the
+> `lean_verify_*` / `lean_verified_*` extern surface — has been
+> **deleted**. `lean_stub.c` is no longer compiled, and the
+> `proof/extracted/` directory no longer exists on disk. See
+> `docs/caveats.md` §3.2 for the full context of the
+> Lean-proofs-as-standalone-artifact change.
 
 **Tests & audit**:
 - `tests/pmt_parity_test.rs` — extended with faithful-model parity tests.
 - `tests/pmt_parity_test_full.rs` — updated for new models.
-- `proof/FAITHFULNESS_AUDIT.md` — updated to reflect gap closures.
-- `proof/AUDIT_IVE.md` — updated for re-audit.
+- (Historical: `proof/FAITHFULNESS_AUDIT.md` and `proof/AUDIT_IVE.md`
+  were deleted in v0.2.0-alpha.10 along with the Lean↔Rust FFI bridge
+  and the `proof/extracted/` directory — see `docs/caveats.md` §3.2.
+  The gap closures previously tracked in those audit files are now
+  recorded in the per-wave worklog entries under "Faithfulness gaps
+  closed".)
 
 ### Shared files (multiple orchestrators touch — see conflict rules below)
 - `proof/PMT/Extraction.lean` — IVE owns the `@[export]` annotations (append-only).
@@ -868,17 +876,15 @@ Branch: task/ive-faith-8-a
 Background: All gap closures are merged. Need a final audit confirming faithfulness.
 
 Task: For each of the 11 soundness modules, produce a line-by-line faithfulness
-checklist comparing Lean vs Rust. Update FAITHFULNESS_AUDIT.md to mark each gap
-as CLOSED or STILL-OPEN. Run clean build + sorry audit.
+checklist comparing Lean vs Rust. Record gap status (CLOSED or STILL-OPEN) in
+the worklog entry for this task (the historical `proof/FAITHFULNESS_AUDIT.md`
+and `proof/AUDIT_IVE.md` files were deleted in v0.2.0-alpha.10 — see
+`docs/caveats.md` §3.2). Run clean build + sorry audit.
 
 Read (≤3 files per module, but read all 11 modules + their Rust counterparts).
 
-Modify (≤2 files): proof/FAITHFULNESS_AUDIT.md (update gap statuses),
-proof/AUDIT_IVE.md (update for re-audit).
-
-Deliverable: Updated FAITHFULNESS_AUDIT.md with all gaps marked CLOSED (or
-documented why still open). Clean lake build PASS. Sorry audit 0.
-Worklog entry.
+Deliverable: Worklog entry with all gaps marked CLOSED (or documented why
+still open). Clean lake build PASS. Sorry audit 0.
 
 Do NOT: Skip any module. Mark a gap closed without line-by-line verification.
 ```
@@ -913,7 +919,7 @@ Stage Summary:
 - Theorems stated: <count>
 - Theorems proven (sorry-free): <count>
 - Axioms used: <list, must be empty unless explicitly justified>
-- Faithfulness gaps closed: <list of gap IDs from FAITHFULNESS_AUDIT.md>
+- Faithfulness gaps closed: <list of gap IDs (recorded in this worklog entry)>
 - Faithfulness gaps still open: <list, must be empty for this task to be considered complete>
 - Outstanding questions / blockers: <list>
 - Next-wave dependencies unblocked: <list of Task IDs>
@@ -930,7 +936,7 @@ Run this checklist before declaring faithful verification complete:
 - [ ] Wave 6 complete; 5 major gaps closed (InformationFlow, BorrowRegion, SessionType, ArenaBounds, StateReads/Writes).
 - [ ] Wave 6.5 gate passed.
 - [ ] Wave 7 complete; LayoutConsistency gap closed, Composition updated, ive_pillar_sound re-proven.
-- [ ] Wave 8 complete; all gaps in FAITHFULNESS_AUDIT.md marked CLOSED.
+- [ ] Wave 8 complete; all faithfulness gaps marked CLOSED in the worklog entry.
 - [ ] Final `lake build` from clean passes with zero warnings.
 - [ ] Final `grep -rn "sorry\|admit" proof/PMT/IVE/ | wc -l` = 0.
 - [ ] Every module's faithfulness checklist verified by the audit.
