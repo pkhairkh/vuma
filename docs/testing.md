@@ -59,19 +59,19 @@ plus standalone suites like `cross_backend.rs`,
 `is_err`-style negative-path unit tests across 5 source files in 3
 library crates (`vuma-parser`, `vuma-ive`, `vuma-codegen`):
 
-- **1 real `#[should_panic]`** — `src/codegen/src/ir.rs:3621`
+- **1 real `#[should_panic]`** — `src/codegen/src/ir.rs:3825`
   `test_negative_current_block_panics_on_empty_blocks` (clears the
   `pub blocks` Vec and asserts the
   `expect("IRFunction must have at least one block")` panic fires).
 - **8 `Result`/`Verification`-style** with error-message substring
   checks:
-  - `src/parser/src/parser.rs:7743` `test_negative_parse_pointer_syntax_is_fatal_error`
-  - `src/parser/src/parser.rs:7769` `test_negative_parse_unterminated_function_body_has_errors`
+  - `src/parser/src/parser.rs:7478` `test_negative_parse_pointer_syntax_is_fatal_error`
+  - `src/parser/src/parser.rs:7504` `test_negative_parse_unterminated_function_body_has_errors`
   - `src/ive/src/state_read.rs:232` `test_negative_unknown_field_error_message_is_specific`
   - `src/ive/src/state_read.rs:263` `test_negative_type_mismatch_error_message_is_specific`
   - `src/ive/src/state_write.rs` linearity-violation test
-  - `src/codegen/src/scg_to_ir.rs:8503` `test_negative_ct_select_wrong_operand_count_returns_err`
-  - `src/codegen/src/memory_safety.rs:2957` `test_negative_oob_store_triggers_oob_trap_injection`
+  - `src/codegen/src/scg_to_ir.rs:9786` `test_negative_ct_select_wrong_operand_count_returns_err`
+  - `src/codegen/src/memory_safety.rs:2955` `test_negative_oob_store_triggers_oob_trap_injection`
   - `src/codegen/src/runtime/arena.rs` arena-overflow precondition test
     (verifies `Layout::from_size_align(usize::MAX, 8)` is `Err`; the
     trap itself fires `std::process::exit(1)` and is asserted by the
@@ -97,7 +97,7 @@ linkage.
 
 > The Lean proofs are the **formal specification** of the PMT memory
 > model. They are machine-checked (`lake build` passes;
-> `scripts/check_lean.sh` greps for `sorry`), but they are **not linked
+> `scripts/check-lean.sh` greps for `sorry`), but they are **not linked
 > into the compiler binary**. Build-time and runtime verification go
 > through **Z3** (the SMT solver, hard dependency in
 > `src/ive/Cargo.toml`) and the hand-written Rust verifiers in
@@ -165,7 +165,7 @@ committing), `--trend [N]` (print pass-rate history and exit).
 
 > **Verification is always on.** The `--verify` flag is no longer
 > listed because IVE verification is unconditional in VUMA 2.0
-> (`src/bin/compile_dump.rs:606` always runs the IVE state verifiers
+> (`src/bin/compile_dump.rs:84` always runs the IVE state verifiers
 > + Z3 contract discharge). There is no `--no-verify` opt-out in
 > production builds; the pipeline hard-fails on any contract that Z3
 > cannot discharge. See [`./caveats.md` §5.1](./caveats.md) for the
@@ -315,7 +315,7 @@ runs the broader `--all-targets` clippy pass with warnings tolerated.
 
 **Lean proof-verify CI** (`proof-verify.yml`). Runs `lake build` on
 every push to confirm the formal Lean specification still builds and
-is sorry-free (`scripts/check_lean.sh`). This CI job does **not**
+is sorry-free (`scripts/check-lean.sh`). This CI job does **not**
 gate the compiler build — it gates the *formal spec* only. The
 executable verifier is Z3-based and runs in the regular `ci.yml`
 build / test jobs.
@@ -350,7 +350,7 @@ They are a Lean-side test surface that complements the QEMU-driven
 ## 7. Known Flaky Tests
 
 **7.1 `self_exec.vuma` — SIGPIPE race**.
-`tests/gold_standard/ipc/self_exec.vuma` exercises fork+exec+pipe.
+`examples/self_exec.vuma` exercises fork+exec+pipe.
 Under QEMU user-mode emulation, pipe-close timing is racy: the child
 may write to a pipe whose read end has already been closed in the
 parent, raising `SIGPIPE` (signal 13, exit code -13). The runner
@@ -431,7 +431,7 @@ but `womb/kernel/hosted/` is the only path with full implementations).
    claims at `--workers 8` are misleading for the IPC subset.
 7. **Verification is always on** — IVE state verifiers + Z3 contract
    discharge are unconditional in VUMA 2.0
-   (`src/bin/compile_dump.rs:606`); the `--verify` / `--no-verify`
+   (`src/bin/compile_dump.rs:84`); the `--verify` / `--no-verify`
    flags are no longer in the CLI surface. `--safe`,
    `--no-memory-safety`, and `--repl` have also been removed (see
    [`./caveats.md` §5.1](./caveats.md)).
@@ -485,7 +485,7 @@ cd proof && lake exe test
 The Makefile target delegates to `lake exe test` (Lean's built-in test
 runner). Related targets: `make proof` (= `cd proof && lake build`,
 builds the proof library), `make proof-check` (verifies the proof is
-`sorry`-free via `scripts/check_lean.sh`).
+`sorry`-free via `scripts/check-lean.sh`).
 
 **Test modules** (`proof/PMT/Test/`, 808 LOC total):
 
@@ -521,7 +521,7 @@ The three trap exit codes asserted by `UafProgram` and
 `OverflowProgram` (`1`, `134`, `135`) match the runtime stubs every
 backend emits (`__arena_overflow` → exit 1, `__oob_trap` → exit 134,
 `__uaf_trap` → exit 135) and the Lean `TrapCode.to_exit` evaluator
-(`proof/PMT/Soundness.lean:96-99`).
+(`proof/PMT/Soundness.lean:162-171`).
 
 **Rust parity test (`tests/pmt_parity_test.rs`, 5 tests).** A separate
 Rust integration test under `tests/` guards the *hand-translation* of
@@ -551,7 +551,7 @@ pmt-runtime-check` to also exercise the in-tree checkers at
 
 **Feature-flag test (`tests/pmt_feature_flag_test.rs`, 3 tests).**
 Exercises the `pmt-runtime-check` cargo feature wired into
-`src/wrappers/arena.rs::alloc_raw`. Each case constructs an arena
+`src/codegen/src/runtime/arena.rs::alloc_raw`. Each case constructs an arena
 allocation request, asserts that the request is routed through
 `verified_capacity_check` (the Lean-verified hand-translation at
 `src/codegen/src/runtime/pmt_check.rs`) when the feature is on,
