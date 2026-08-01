@@ -569,6 +569,55 @@ fn emit_instruction(
             "mul".to_string()
         }
 
+        // ── Div (standalone, from scg_to_ir) ──
+        IRInstr::Div { dst, lhs, rhs, ty } => {
+            let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64));
+            if is_fp {
+                return emit_fp_fallback(instr, alloc);
+            }
+            // Check if this is a 32-bit operation
+            let is_32bit = matches!(ty, Some(IRType::U32) | Some(IRType::I32));
+            let lhs_reg = load_to_reg(lhs, alloc, code);
+            if is_32bit {
+                // 32-bit unsigned division: zero-extend EAX, zero EDX
+                code.extend(encode_mov_reg_reg(Gpr::Rax, lhs_reg));
+                // Use 32-bit mov to zero upper bits: mov eax, eax
+                code.extend_from_slice(&[0x89, 0xC0]); // mov eax, eax (zero-extends)
+                code.extend_from_slice(&[0x31, 0xD2]); // xor edx, edx
+            } else {
+                code.extend(encode_mov_reg_reg(Gpr::Rax, lhs_reg));
+                code.extend(encode_xor_reg_reg(Gpr::Rdx, Gpr::Rdx));
+            }
+            match resolve_value(rhs, alloc) {
+                ResolvedVal::Reg(rhs_reg) => {
+                    if is_32bit {
+                        // 32-bit div: F7 /6 (no REX.W)
+                        code.extend_from_slice(&[0xF7, 0xF0 | (rhs_reg as u8 & 7)]);
+                    } else {
+                        code.extend(encode_div_reg(rhs_reg));
+                    }
+                    reads.push(phys(rhs_reg));
+                }
+                ResolvedVal::Imm(imm) => {
+                    if imm == 0 {
+                        code.extend(encode_nop());
+                    } else {
+                        code.extend(encode_mov_reg_imm32(Gpr::Rcx, imm as i32));
+                        if is_32bit {
+                            code.extend_from_slice(&[0xF7, 0xF1]); // div ecx
+                        } else {
+                            code.extend(encode_div_reg(Gpr::Rcx));
+                        }
+                    }
+                }
+            }
+            let dst_reg = load_to_reg(dst, alloc, code);
+            code.extend(encode_mov_reg_reg(dst_reg, Gpr::Rax));
+            reads.push(phys(lhs_reg));
+            writes.push(phys(dst_reg));
+            "div".to_string()
+        }
+
         // ── Div (BinOp with SDiv/UDiv/SRem/URem) ──
         IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
             let is_fp = matches!(ty, Some(IRType::F32) | Some(IRType::F64));
