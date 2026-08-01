@@ -3242,6 +3242,37 @@ impl Backend for AArch64Backend {
         });
 
         let code = if real_regalloc && !contains_fork {
+            // Check if the function uses floating-point operations. The
+            // regalloc path's emit_binop does not handle FP arithmetic
+            // (FADD/FSUB/FMUL/FDIV), so FP functions must use the
+            // stack-slot path which has proper FP support.
+            let uses_fp = func.blocks.iter().any(|block| {
+                block.instructions.iter().any(|inst| {
+                    match inst {
+                        crate::ir::IRInstr::BinOp { ty, .. } |
+                        crate::ir::IRInstr::Add { ty, .. } |
+                        crate::ir::IRInstr::Sub { ty, .. } |
+                        crate::ir::IRInstr::Mul { ty, .. } |
+                        crate::ir::IRInstr::Div { ty, .. } => {
+                            matches!(ty, Some(crate::ir::IRType::F32) | Some(crate::ir::IRType::F64))
+                        }
+                        crate::ir::IRInstr::Cast { kind, .. } => {
+                            matches!(
+                                kind,
+                                crate::ir::CastKind::IntToFloat
+                                    | crate::ir::CastKind::UIntToFloat
+                                    | crate::ir::CastKind::FloatToInt
+                                    | crate::ir::CastKind::FloatToUInt
+                                    | crate::ir::CastKind::FloatToFloat
+                            )
+                        }
+                        _ => false,
+                    }
+                })
+            });
+            if uses_fp {
+                emitter.emit_function(func, None)
+            } else {
             let allocator = crate::regalloc::LinearScanAllocator::new();
             match allocator.allocate_function(func) {
                 Ok(alloc) => {
@@ -3270,6 +3301,7 @@ impl Backend for AArch64Backend {
                     );
                     emitter.emit_function(func, None)
                 }
+            }
             }
         } else if real_regalloc && contains_fork {
             // R1-b2-fix: function contains spawn_worker/fork — fall back to
