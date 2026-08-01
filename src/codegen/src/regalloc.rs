@@ -1178,6 +1178,16 @@ impl LiveRangeComputer {
             let combined_start = src_interval.start.min(dst_interval.start);
             let combined_end = src_interval.end.max(dst_interval.end);
 
+            // FIRST: check if src and dst intervals themselves overlap.
+            // If they do, they are simultaneously live and CANNOT be coalesced
+            // (coalescing would assign both to the same register, clobbering one).
+            if src_interval.start <= dst_interval.end
+                && dst_interval.start <= src_interval.end
+            {
+                // src and dst overlap — skip coalescing
+                continue;
+            }
+
             let mut can_coalesce = true;
             for other in intervals.iter() {
                 if other.class != src_interval.class {
