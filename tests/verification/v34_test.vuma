@@ -1,0 +1,28 @@
+// v34_test.vuma — tests whether f32 state fields get correct IRType
+//
+// V-34 claims: bridge_type_to_ir_type at pipeline.rs:6503 doesn't map
+// "f32"/"f64" → IRType::F32/F64. They fall into _ => IRType::U64.
+//
+// If V-34 is real, reading an f32 state field and doing float arithmetic
+// on it would emit integer ADD instead of float ADDSD.
+//
+// This program: creates a Point layout with f32 fields, writes 1.5
+// and 2.5, reads them back via a State<Point>-typed parameter, adds
+// them, returns the sum as i32.
+//
+// Expected (correct): 1.5 + 2.5 = 4.0 → return 4
+// Expected (V-34 buggy): wrong arithmetic → return something else
+
+layout Point = { x: f32, y: f32 }
+
+transform get_sum(p: State<Point>) -> f32 {
+    return p.x + p.y;
+}
+
+transform main() -> i32 {
+    let p = state_new(Point);
+    p.x = 1.5;
+    p.y = 2.5;
+    sum: f32 = get_sum(p);
+    return sum as i32;
+}

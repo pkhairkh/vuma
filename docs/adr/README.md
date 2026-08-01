@@ -13,7 +13,7 @@ field.
 
 | Number | Title | Status | Date | Closes |
 |--------|-------|--------|------|--------|
-| [ADR-0001](ADR-0001.md) | Fix `bridge_type_to_ir_type` to map f32/f64 | Accepted (severity revised by ADR-0011: P0→P1) | 2026-08-01 | V-34 |
+| [ADR-0001](ADR-0001.md) | Fix `bridge_type_to_ir_type` to map f32/f64 | Accepted (severity: P0→P1 by ADR-0011, then **REVERTED to P0** by Wave S-Z empirical test — causes memory corruption + IVE unsoundness) | 2026-08-01 | V-34 |
 | [ADR-0002](ADR-0002.md) | Fix `type_size_from_name` + `type_alignment` for layout names | Accepted (severity revised by ADR-0011: P0→P2) | 2026-08-01 | V-35, V-42, V-44 |
 | [ADR-0003](ADR-0003.md) | Thread IRType through StateRead/StateWrite + fix `Alloc { size: 0 }` | Accepted (severity revised by ADR-0011: P0→P2) | 2026-08-01 | V-36, V-A2-1 |
 | [ADR-0004](ADR-0004.md) | Migrate `build_pmt_layout_specs` + IVE `rederive_layout` to `_with_layouts` | Accepted (framing revised by ADR-0011: P0→P1, IVE-soundness not codegen-correctness) | 2026-08-01 | V-03, V-NEW-2 |
