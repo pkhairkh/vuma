@@ -176,7 +176,7 @@ pipeline diagram](../README.md#register-allocation-pipeline) in
   live-interval computation (`LiveRangeComputer`), boundary-safe overlap
   detection, spill-weighted eviction, copy coalescing, and — critically —
   the post-allocation conflict-resolution pass
-  `resolve_register_reuse_conflicts` (`regalloc.rs:2769`, see §7.3) that
+  `resolve_register_reuse_conflicts` (`regalloc.rs:2836`, see §7.3) that
   eliminates the register-reuse hazard that previously forced
   stack-slot fallbacks on syscall-heavy functions.
 - **`LinearScanAllocator`** (`regalloc.rs:2307`, `new` at `:1318`) — the
@@ -673,7 +673,7 @@ stack_slot_isel::allocate_registers(func)
 
 ### 7.3 `resolve_register_reuse_conflicts` (post-allocation conflict resolution)
 
-`resolve_register_reuse_conflicts` (`regalloc.rs:2769`) is a
+`resolve_register_reuse_conflicts` (`regalloc.rs:2836`) is a
 **post-allocation verification pass** that runs after
 `TargetAgnosticRegAlloc::allocate_intervals` and patches the
 `RegAllocResult` in place before it is handed to the per-backend
@@ -901,6 +901,6 @@ throughout this document.
 | **`transform`** | The sole function-declaration keyword. The legacy `fn` keyword was removed from the keyword table and now lexes as a plain `Ident`. |
 | **`TargetAgnosticRegAlloc`** | The production register allocator on 14 of 15 register-based backends (`regalloc.rs:2899`). `TargetDesc`-driven linear-scan: the per-ISA register file is supplied at construction time by `TargetDescRegistry::get(<isa>)`. Used by every register-based backend except `aarch64`, which uses the older `LinearScanAllocator`. |
 | **`LinearScanAllocator`** | The older AArch64-specific linear-scan allocator (`regalloc.rs:2307`). Used only by `aarch64` (and inherited by `aarch64_be`). Predates the directory-style `reg_isel.rs` pattern; functionally equivalent to `TargetAgnosticRegAlloc` but with hardcoded caller/callee-saved GPR+SIMD lists. |
-| **`resolve_register_reuse_conflicts`** | Post-allocation verification pass (`regalloc.rs:2769`) that detects and fixes cases where a single instruction's `use_vreg` and `def_vreg` would land in the same physical register while the `use_vreg` is still live afterwards. Reassigns the `def_vreg` to a different allocatable register, or spills it if every register is taken. Eliminated the broad "syscall-hazard fallback" that previously forced stack-slot emission on syscall-heavy functions. See §7.3. |
+| **`resolve_register_reuse_conflicts`** | Post-allocation verification pass (`regalloc.rs:2836`) that detects and fixes cases where a single instruction's `use_vreg` and `def_vreg` would land in the same physical register while the `use_vreg` is still live afterwards. Reassigns the `def_vreg` to a different allocatable register, or spills it if every register is taken. Eliminated the broad "syscall-hazard fallback" that previously forced stack-slot emission on syscall-heavy functions. See §7.3. |
 | **`contains_fork` opt-out** | The *one and only* situation in which the register-based emission path is bypassed: a function whose IR contains a `clone`/`fork` syscall (Linux generic nrs 220/221) takes the stack-slot path because the child process's divergent register state is incompatible with the register-based prologue/epilogue. This is a **correctness requirement**, not a fallback for register pressure or unimplemented IR ops. See §7.4. |
 | **`reg_isel.rs`** | Per-backend module exposing `emit_function_regalloc_full(func, &alloc)` — the register-to-register machine-code emitter that consumes a `RegAllocResult` and produces an `AllocatedFunction`. Present in 14 of 15 register-based backends (the exception is `aarch64`, which uses the shared `Emitter::emit_function_regalloc` in `emit.rs`). |

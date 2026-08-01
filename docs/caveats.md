@@ -15,11 +15,14 @@ code is edited above.
 **Notable change in v0.2.0-alpha.10.** The previous version of this
 document carried a long §2.1 titled "Stack-slot ISel is the only
 production code-emission path". That caveat is **no longer true**:
-15 of 19 backends now use full register-based emission as their
-default code path, with no stack-slot fallbacks. The legacy
-stack-slot emitters survive only as the `contains_fork` opt-out
-(see §2.1 below), which is a correctness requirement rather than a
-production fallback.
+18 of 19 backends now use full register-based emission as their
+default code path (14 native ISAs with their own `reg_isel.rs` plus
+4 byte-swap wrappers that delegate to a parent's `reg_isel.rs`),
+with no stack-slot fallbacks. The legacy stack-slot emitters survive
+only as the `contains_fork` opt-out (see §2.1 below), which is a
+correctness requirement rather than a production fallback. The
+remaining backend, `wasm32`, uses structured stack-machine emission
+— the correct architecture for a stack machine, not a fallback.
 
 ---
 
@@ -81,7 +84,7 @@ let contains_fork = func.blocks.iter().any(|block| {
 **Historical note.** Prior to v0.2.0-alpha.10 the `contains_fork` check
 was a broad "syscall-hazard fallback" that pushed many more functions
 onto the stack-slot path. The post-allocation conflict-resolution pass
-`resolve_register_reuse_conflicts` (`regalloc.rs:2769`,
+`resolve_register_reuse_conflicts` (`regalloc.rs:2836`,
 [architecture.md §7.3](./architecture.md#73-resolve_register_reuse_conflicts-post-allocation-conflict-resolution))
 eliminated the underlying register-reuse hazard, and the fallback was
 narrowed to *only* `clone`/`fork` detection. The change is documented
@@ -135,7 +138,7 @@ caveat.
 
 | Aspect | Detail |
 |--------|--------|
-| Files | `src/codegen/src/aarch64_be.rs`, `armeb.rs`, `mips64be.rs`, `ppc64le.rs` (each 200–530 LOC) |
+| Files | `src/codegen/src/aarch64_be/mod.rs`, `armeb/mod.rs`, `mips64be/mod.rs`, `ppc64le/mod.rs` (each 235–596 LOC; the four byte-swap wrapper backends now live as directories with a `mod.rs` + `reg_isel.rs` pair, having been promoted from single-file `.rs` modules in v0.2.0-alpha.10) |
 | Behaviour | The 4 byte-swap wrappers delegate `allocate_registers` to their parent backend via one-line `self.inner.allocate_registers(func)` calls, then byte-swap the parent's emitted bytes and ELF header at the encoding boundary. They contribute no allocation or emission logic of their own. |
 | Caveat | A bug in the parent's emission automatically affects both endianness variants — there is no LE-only or BE-only path to bisect against. When debugging an `aarch64_be` / `armeb` / `mips64be` / `ppc64le`-specific failure, reproduce on the parent first (LE `aarch64` / `arm32` / `mips64` / BE `ppc64`) and confirm the wrapper is byte-swapping correctly. |
 | Cross-ref | [backends.md §7](./backends.md#7-big-endian-backends) for the per-wrapper byte-swap policy matrix. |
@@ -236,7 +239,9 @@ decision chain at `scripts/pi5_test_suite.sh:1084–1186`):
 > Operators who want "commit locally, don't push" have no single-flag
 > way to express it with this script — they must either commit
 > manually outside the script, or apply the restructure sketched in
-> `scripts/audit/wave5_flag_precedence.md` §6.
+> `scripts/archive/audit/wave5_flag_precedence.md` §6 (the audit
+> directory was archived in v0.2.0-alpha.10 when the wave-based
+> milestone tracking was retired).
 
 ---
 
