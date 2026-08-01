@@ -2061,35 +2061,35 @@ impl Emitter {
             } => {
                 let width = RegWidth::from_ir_type(ty.as_ref());
                 let rd = self.resolve_reg(dst)?;
-                // IMPORTANT: resolve_reg uses X9 for immediates, so if both lhs and rhs
-                // are immediates, the second load would overwrite the first. Use X10 for
-                // the RHS when both are immediates.
                 let rn = self.resolve_reg(lhs)?;
+                // Use CMP with immediate (SUBS XZR, Xn, #imm12) when the
+                // RHS is a small immediate. This avoids loading the
+                // immediate into a scratch register (X9) which could
+                // overwrite a live value assigned to X9 by the regalloc.
                 let rm = match rhs {
-                    IRValue::Immediate(_) | IRValue::Address(_) => {
-                        // If lhs was also an immediate, it's in X9; use X10 for rhs
-                        let temp = if matches!(lhs, IRValue::Immediate(_) | IRValue::Address(_)) {
-                            Register::X10
+                    IRValue::Immediate(v) => {
+                        if *v >= 0 && *v <= 4095 {
+                            Operand::Imm12(*v as u16)
                         } else {
-                            Register::X9
-                        };
-                        match rhs {
-                            IRValue::Immediate(v) => self.emit_load_immediate(temp, *v)?,
-                            IRValue::Address(a) => self.emit_load_immediate(temp, *a as i64)?,
-                            _ => unreachable!(),
+                            // Large immediate: use X10 (not X9, which may
+                            // hold a live vreg assigned by the regalloc).
+                            let temp = Register::X10;
+                            self.emit_load_immediate(temp, *v)?;
+                            Operand::Reg { reg: temp, shift: None }
                         }
-                        temp
                     }
-                    _ => self.resolve_reg(rhs)?,
+                    IRValue::Address(a) => {
+                        let temp = Register::X10;
+                        self.emit_load_immediate(temp, *a as i64)?;
+                        Operand::Reg { reg: temp, shift: None }
+                    }
+                    _ => {
+                        let r = self.resolve_reg(rhs)?;
+                        Operand::Reg { reg: r, shift: None }
+                    }
                 };
                 self.emit_instruction_with_width(
-                    Instruction::CMP {
-                        rn,
-                        rm: Operand::Reg {
-                            reg: rm,
-                            shift: None,
-                        },
-                    },
+                    Instruction::CMP { rn, rm },
                     width,
                 )?;
                 let cond = cmp_kind_to_condition(kind);
