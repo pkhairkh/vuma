@@ -555,51 +555,117 @@ fn emit_instruction(
             if matches!(ty, Some(IRType::F32) | Some(IRType::F64)) { return emit_fp_fallback(instr); }
             let dst_reg = load_to_reg(dst, alloc, code);
             let lhs_reg = load_to_reg(lhs, alloc, code);
+            // Use immediate-form instructions for ops that support them
+            // (Add/Sub/And/Or/Xor with a rotated 8-bit immediate;
+            // Shl/ShrL/ShrA with a 5-bit shift immediate) when rhs is an
+            // encodable immediate. This avoids loading rhs into the R12
+            // scratch register, which would clobber lhs if lhs was also an
+            // immediate loaded into R12.
+            let rhs_val = resolve_value(rhs, alloc);
+            let use_imm = match &rhs_val {
+                ResolvedVal::Imm(imm) => match op {
+                    BinOpKind::Add | BinOpKind::Sub
+                    | BinOpKind::And | BinOpKind::Or | BinOpKind::Xor => {
+                        encode_arm_imm(*imm as u32).is_some()
+                    }
+                    BinOpKind::Shl | BinOpKind::ShrL | BinOpKind::ShrA => {
+                        (*imm as u32) <= 31
+                    }
+                    _ => false,
+                },
+                _ => false,
+            };
+            let rhs_reg = if use_imm {
+                Gpr::R0 // placeholder; not referenced by immediate-form encodings
+            } else {
+                load_to_reg(rhs, alloc, code)
+            };
             match op {
                 BinOpKind::And => {
-                    let rhs_reg = load_to_reg(rhs, alloc, code);
-                    code.extend_from_slice(&Instruction::And { rd: dst_reg, rn: lhs_reg, rm: rhs_reg, cond: Condition::Al }.encode());
-                    reads.push(phys(rhs_reg));
+                    if use_imm {
+                        if let ResolvedVal::Imm(imm) = rhs_val {
+                            let (rotate, imm8) = encode_arm_imm(imm as u32).unwrap();
+                            let instr = encode_dp_imm(Condition::Al, 0b0000, false, lhs_reg, dst_reg, rotate, imm8);
+                            code.extend_from_slice(&instr.to_le_bytes());
+                        }
+                    } else {
+                        code.extend_from_slice(&Instruction::And { rd: dst_reg, rn: lhs_reg, rm: rhs_reg, cond: Condition::Al }.encode());
+                    }
                 }
                 BinOpKind::Or => {
-                    let rhs_reg = load_to_reg(rhs, alloc, code);
-                    code.extend_from_slice(&Instruction::Orr { rd: dst_reg, rn: lhs_reg, rm: rhs_reg, cond: Condition::Al }.encode());
-                    reads.push(phys(rhs_reg));
+                    if use_imm {
+                        if let ResolvedVal::Imm(imm) = rhs_val {
+                            let (rotate, imm8) = encode_arm_imm(imm as u32).unwrap();
+                            let instr = encode_dp_imm(Condition::Al, 0b1100, false, lhs_reg, dst_reg, rotate, imm8);
+                            code.extend_from_slice(&instr.to_le_bytes());
+                        }
+                    } else {
+                        code.extend_from_slice(&Instruction::Orr { rd: dst_reg, rn: lhs_reg, rm: rhs_reg, cond: Condition::Al }.encode());
+                    }
                 }
                 BinOpKind::Xor => {
-                    let rhs_reg = load_to_reg(rhs, alloc, code);
-                    code.extend_from_slice(&Instruction::Eor { rd: dst_reg, rn: lhs_reg, rm: rhs_reg, cond: Condition::Al }.encode());
-                    reads.push(phys(rhs_reg));
+                    if use_imm {
+                        if let ResolvedVal::Imm(imm) = rhs_val {
+                            let (rotate, imm8) = encode_arm_imm(imm as u32).unwrap();
+                            let instr = encode_dp_imm(Condition::Al, 0b0001, false, lhs_reg, dst_reg, rotate, imm8);
+                            code.extend_from_slice(&instr.to_le_bytes());
+                        }
+                    } else {
+                        code.extend_from_slice(&Instruction::Eor { rd: dst_reg, rn: lhs_reg, rm: rhs_reg, cond: Condition::Al }.encode());
+                    }
                 }
                 BinOpKind::Shl => {
-                    let rhs_reg = load_to_reg(rhs, alloc, code);
-                    code.extend_from_slice(&Instruction::LslReg { rd: dst_reg, rn: lhs_reg, rs: rhs_reg, cond: Condition::Al }.encode());
-                    reads.push(phys(rhs_reg));
+                    if use_imm {
+                        if let ResolvedVal::Imm(imm) = rhs_val {
+                            code.extend_from_slice(&Instruction::LslImm { rd: dst_reg, rm: lhs_reg, shift_imm: (imm as u32) & 0x1F, cond: Condition::Al }.encode());
+                        }
+                    } else {
+                        code.extend_from_slice(&Instruction::LslReg { rd: dst_reg, rn: lhs_reg, rs: rhs_reg, cond: Condition::Al }.encode());
+                    }
                 }
                 BinOpKind::ShrL => {
-                    let rhs_reg = load_to_reg(rhs, alloc, code);
-                    code.extend_from_slice(&Instruction::LsrReg { rd: dst_reg, rn: lhs_reg, rs: rhs_reg, cond: Condition::Al }.encode());
-                    reads.push(phys(rhs_reg));
+                    if use_imm {
+                        if let ResolvedVal::Imm(imm) = rhs_val {
+                            code.extend_from_slice(&Instruction::LsrImm { rd: dst_reg, rm: lhs_reg, shift_imm: (imm as u32) & 0x1F, cond: Condition::Al }.encode());
+                        }
+                    } else {
+                        code.extend_from_slice(&Instruction::LsrReg { rd: dst_reg, rn: lhs_reg, rs: rhs_reg, cond: Condition::Al }.encode());
+                    }
                 }
                 BinOpKind::ShrA => {
-                    let rhs_reg = load_to_reg(rhs, alloc, code);
-                    code.extend_from_slice(&Instruction::AsrReg { rd: dst_reg, rn: lhs_reg, rs: rhs_reg, cond: Condition::Al }.encode());
-                    reads.push(phys(rhs_reg));
+                    if use_imm {
+                        if let ResolvedVal::Imm(imm) = rhs_val {
+                            code.extend_from_slice(&Instruction::AsrImm { rd: dst_reg, rm: lhs_reg, shift_imm: (imm as u32) & 0x1F, cond: Condition::Al }.encode());
+                        }
+                    } else {
+                        code.extend_from_slice(&Instruction::AsrReg { rd: dst_reg, rn: lhs_reg, rs: rhs_reg, cond: Condition::Al }.encode());
+                    }
                 }
                 BinOpKind::Add => {
-                    let rhs_reg = load_to_reg(rhs, alloc, code);
-                    code.extend_from_slice(&Instruction::Add { rd: dst_reg, rn: lhs_reg, rm: rhs_reg, cond: Condition::Al }.encode());
-                    reads.push(phys(rhs_reg));
+                    if use_imm {
+                        if let ResolvedVal::Imm(imm) = rhs_val {
+                            let (rotate, imm8) = encode_arm_imm(imm as u32).unwrap();
+                            let instr = encode_dp_imm(Condition::Al, 0b0100, false, lhs_reg, dst_reg, rotate, imm8);
+                            code.extend_from_slice(&instr.to_le_bytes());
+                        }
+                    } else {
+                        code.extend_from_slice(&Instruction::Add { rd: dst_reg, rn: lhs_reg, rm: rhs_reg, cond: Condition::Al }.encode());
+                    }
                 }
                 BinOpKind::Sub => {
-                    let rhs_reg = load_to_reg(rhs, alloc, code);
-                    code.extend_from_slice(&Instruction::Sub { rd: dst_reg, rn: lhs_reg, rm: rhs_reg, cond: Condition::Al }.encode());
-                    reads.push(phys(rhs_reg));
+                    if use_imm {
+                        if let ResolvedVal::Imm(imm) = rhs_val {
+                            let (rotate, imm8) = encode_arm_imm(imm as u32).unwrap();
+                            let instr = encode_dp_imm(Condition::Al, 0b0010, false, lhs_reg, dst_reg, rotate, imm8);
+                            code.extend_from_slice(&instr.to_le_bytes());
+                        }
+                    } else {
+                        code.extend_from_slice(&Instruction::Sub { rd: dst_reg, rn: lhs_reg, rm: rhs_reg, cond: Condition::Al }.encode());
+                    }
                 }
                 BinOpKind::Mul => {
-                    let rhs_reg = load_to_reg(rhs, alloc, code);
+                    // MUL has no immediate form; rhs_reg was loaded above.
                     code.extend_from_slice(&Instruction::Mul { rd: dst_reg, rn: Gpr::R0, rs: rhs_reg, rm: lhs_reg, cond: Condition::Al }.encode());
-                    reads.push(phys(rhs_reg));
                 }
                 BinOpKind::SDiv | BinOpKind::UDiv | BinOpKind::SRem | BinOpKind::URem => {
                     // ARMv7-A has no hardware divide. Emit a call to __aeabi_idiv
@@ -611,12 +677,11 @@ fn emit_instruction(
                     });
                 }
                 _ => {
-                    let rhs_reg = load_to_reg(rhs, alloc, code);
                     code.extend_from_slice(&Instruction::Add { rd: dst_reg, rn: lhs_reg, rm: rhs_reg, cond: Condition::Al }.encode());
-                    reads.push(phys(rhs_reg));
                 }
             }
             reads.push(phys(lhs_reg));
+            if !use_imm { reads.push(phys(rhs_reg)); }
             writes.push(phys(dst_reg));
             "binop".to_string()
         }

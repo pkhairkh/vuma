@@ -260,22 +260,73 @@ fn emit_instruction(code: &mut Vec<u8>, instr: &IRInstr, alloc: &RegAllocResult,
         }
         IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
             if matches!(ty, Some(IRType::F32) | Some(IRType::F64)) { return emit_fp_fallback(instr); }
-            let d = load_to_reg(dst, alloc, code); let l = load_to_reg(lhs, alloc, code); let r = load_to_reg(rhs, alloc, code);
+            let d = load_to_reg(dst, alloc, code);
+            let l = load_to_reg(lhs, alloc, code);
+            // Use immediate form for ops that support it (Add, Sub, And, Or,
+            // Xor, Shl, ShrL, ShrA) when rhs is a small immediate. This
+            // avoids loading the immediate into the G1 scratch register which
+            // would clobber lhs if lhs was also an immediate loaded into G1.
+            let rhs_val = resolve_value(rhs, alloc);
+            // For shifts on SPARC64 we use the 64-bit variants (Sllx/Srlx/Srax),
+            // whose immediate form takes a 6-bit shift amount (0..=63). The
+            // 13-bit signed immediate range applies to Add/Sub/And/Or/Xor.
+            let use_imm = match (&op, &rhs_val) {
+                (BinOpKind::Shl, ResolvedVal::Imm(i)) => *i >= 0 && *i <= 63,
+                (BinOpKind::ShrL, ResolvedVal::Imm(i)) => *i >= 0 && *i <= 63,
+                (BinOpKind::ShrA, ResolvedVal::Imm(i)) => *i >= 0 && *i <= 63,
+                (_, ResolvedVal::Imm(i)) => *i >= -4096 && *i <= 4095,
+                _ => false,
+            };
+            // Ops that have NO immediate form on SPARC64 (Mul, SDiv, UDiv,
+            // SRem, URem) must always load rhs into a register.
+            let op_supports_imm = !matches!(op, BinOpKind::Mul | BinOpKind::SDiv | BinOpKind::UDiv | BinOpKind::SRem | BinOpKind::URem);
+            let use_imm = use_imm && op_supports_imm;
+            let r = if use_imm {
+                Gpr::G0 // placeholder, not used
+            } else {
+                load_to_reg(rhs, alloc, code)
+            };
             match op {
                 BinOpKind::SDiv => code.extend_from_slice(&Instruction::SDivX { rd: d, rs1: l, rs2: r }.encode()),
                 BinOpKind::UDiv => code.extend_from_slice(&Instruction::UDivX { rd: d, rs1: l, rs2: r }.encode()),
-                BinOpKind::And => code.extend_from_slice(&Instruction::And { rd: d, rs1: l, rs2: r }.encode()),
-                BinOpKind::Or => code.extend_from_slice(&Instruction::Or { rd: d, rs1: l, rs2: r }.encode()),
-                BinOpKind::Xor => code.extend_from_slice(&Instruction::Xor { rd: d, rs1: l, rs2: r }.encode()),
-                BinOpKind::Shl => code.extend_from_slice(&Instruction::Sllx { rd: d, rs1: l, rs2: r }.encode()),
-                BinOpKind::ShrL => code.extend_from_slice(&Instruction::Srlx { rd: d, rs1: l, rs2: r }.encode()),
-                BinOpKind::ShrA => code.extend_from_slice(&Instruction::Srax { rd: d, rs1: l, rs2: r }.encode()),
-                BinOpKind::Add => code.extend_from_slice(&Instruction::Add { rd: d, rs1: l, rs2: r }.encode()),
-                BinOpKind::Sub => code.extend_from_slice(&Instruction::Sub { rd: d, rs1: l, rs2: r }.encode()),
+                BinOpKind::And => {
+                    if use_imm { let imm = if let ResolvedVal::Imm(i) = rhs_val { i } else { 0 }; code.extend_from_slice(&Instruction::AndImm { rd: d, rs1: l, imm: imm as i32 }.encode()) }
+                    else { code.extend_from_slice(&Instruction::And { rd: d, rs1: l, rs2: r }.encode()) }
+                }
+                BinOpKind::Or => {
+                    if use_imm { let imm = if let ResolvedVal::Imm(i) = rhs_val { i } else { 0 }; code.extend_from_slice(&Instruction::OrImm { rd: d, rs1: l, imm: imm as i32 }.encode()) }
+                    else { code.extend_from_slice(&Instruction::Or { rd: d, rs1: l, rs2: r }.encode()) }
+                }
+                BinOpKind::Xor => {
+                    if use_imm { let imm = if let ResolvedVal::Imm(i) = rhs_val { i } else { 0 }; code.extend_from_slice(&Instruction::XorImm { rd: d, rs1: l, imm: imm as i32 }.encode()) }
+                    else { code.extend_from_slice(&Instruction::Xor { rd: d, rs1: l, rs2: r }.encode()) }
+                }
+                BinOpKind::Shl => {
+                    if use_imm { let imm = if let ResolvedVal::Imm(i) = rhs_val { i } else { 0 }; code.extend_from_slice(&Instruction::SllxImm { rd: d, rs1: l, imm: (imm & 63) as u32 }.encode()) }
+                    else { code.extend_from_slice(&Instruction::Sllx { rd: d, rs1: l, rs2: r }.encode()) }
+                }
+                BinOpKind::ShrL => {
+                    if use_imm { let imm = if let ResolvedVal::Imm(i) = rhs_val { i } else { 0 }; code.extend_from_slice(&Instruction::SrlxImm { rd: d, rs1: l, imm: (imm & 63) as u32 }.encode()) }
+                    else { code.extend_from_slice(&Instruction::Srlx { rd: d, rs1: l, rs2: r }.encode()) }
+                }
+                BinOpKind::ShrA => {
+                    if use_imm { let imm = if let ResolvedVal::Imm(i) = rhs_val { i } else { 0 }; code.extend_from_slice(&Instruction::SraxImm { rd: d, rs1: l, imm: (imm & 63) as u32 }.encode()) }
+                    else { code.extend_from_slice(&Instruction::Srax { rd: d, rs1: l, rs2: r }.encode()) }
+                }
+                BinOpKind::Add => {
+                    if use_imm { let imm = if let ResolvedVal::Imm(i) = rhs_val { i } else { 0 }; code.extend_from_slice(&Instruction::AddImm { rd: d, rs1: l, imm: imm as i32 }.encode()) }
+                    else { code.extend_from_slice(&Instruction::Add { rd: d, rs1: l, rs2: r }.encode()) }
+                }
+                BinOpKind::Sub => {
+                    if use_imm { let imm = if let ResolvedVal::Imm(i) = rhs_val { i } else { 0 }; code.extend_from_slice(&Instruction::SubImm { rd: d, rs1: l, imm: imm as i32 }.encode()) }
+                    else { code.extend_from_slice(&Instruction::Sub { rd: d, rs1: l, rs2: r }.encode()) }
+                }
                 BinOpKind::Mul => code.extend_from_slice(&Instruction::MulX { rd: d, rs1: l, rs2: r }.encode()),
                 _ => code.extend_from_slice(&Instruction::Add { rd: d, rs1: l, rs2: r }.encode()),
             }
-            reads.push(phys(l)); reads.push(phys(r)); writes.push(phys(d)); "binop".to_string()
+            reads.push(phys(l));
+            if !use_imm { reads.push(phys(r)); }
+            writes.push(phys(d)); "binop".to_string()
         }
         IRInstr::UnaryOp { op, dst, operand, .. } => {
             let d = load_to_reg(dst, alloc, code); let s = load_to_reg(operand, alloc, code);
