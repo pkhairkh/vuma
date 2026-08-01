@@ -1330,9 +1330,15 @@ Integration tests run as part of the regular test harnesses:
   `kmain` + future subsystems). The smoke test greps stdout for
   "vuma kernel: hello" itself; the old `tests/gold_standard/kernel_boot/`
   expected-output fixture was removed during the 2026-07 cleanup.
-- **`scripts/kernel_parity.sh`** — runs the kernel + a subset of
-  gold-standard tests across all 19 codegen backends (7 executable via
-  QEMU + wasmtime, 12 compile-only).
+- **`scripts/kernel_parity.sh`** *(deleted in v0.2.0-alpha.10)* —
+  historically ran the kernel + a subset of gold-standard tests across
+  all 19 codegen backends (7 executable via QEMU + wasmtime, 12
+  compile-only). Removed in commit `d98b58e9` ("VUMA Single-Way
+  Adoption" Phase-A "dead code + doc cleanup"). No like-for-like
+  replacement exists; the closest surviving equivalents are
+  `scripts/kernel_smoke.sh` (single-arch `x86_64` boot test, §10.3) and
+  `scripts/vuma_test_matrix_19backends.sh` (multi-backend sweep of the
+  IPC gold-standard tests, not the kernel).
 - **`tests/gold_standard/kernel_crypto/`** — the SHA-256 KAT test
   (exercises `crypto/api.vuma` end-to-end).
 
@@ -1344,13 +1350,20 @@ when they compile + run that module.
 ### 10.4 Cross-arch integration testing
 
 For tests that should pass identically on all arches (the gold-standard
-suite), use `scripts/kernel_parity.sh`:
+suite), `scripts/kernel_parity.sh` was the historical entry point —
+but it was **deleted in v0.2.0-alpha.10** (commit `d98b58e9`,
+"VUMA Single-Way Adoption" Phase-A "dead code + doc cleanup"). No
+like-for-like replacement exists on disk today. The closest surviving
+multi-backend sweep is `scripts/vuma_test_matrix_19backends.sh`, which
+iterates the 19 backends over the IPC gold-standard tests (not the
+kernel itself); for a single-arch `x86_64` kernel boot test, use
+`scripts/kernel_smoke.sh` (§10.3). The historical invocation was:
 
 ```
-    ./scripts/kernel_parity.sh
-    # Compiles + runs every gold-standard test × every backend.
-    # Uses QEMU user-mode for non-x86_64 arches.
-    # Exits 0 only if every backend passes every test.
+    ./scripts/kernel_parity.sh          # deleted in v0.2.0-alpha.10
+    # Historically: compiled + ran every gold-standard test × every backend.
+    # Used QEMU user-mode for non-x86_64 arches.
+    # Exited 0 only if every backend passed every test.
 ```
 
 A differential failure (test passes on x86_64 but fails on aarch64)
@@ -1398,6 +1411,9 @@ The test file's header should document:
 - The minimal reproduction (the smallest `.vuma` program that triggers
   the bug).
 
-See `tests/gold_standard/arena_wave1/arena_overflow.vuma` for the
+See `tests/gold_standard/arena_alloc/arena_overflow.vuma` for the
 canonical regression-test format (added in K0 to catch the
-`arena_alloc` bounds-check bug).
+`arena_alloc` bounds-check bug). The directory was renamed from
+`arena_wave1/` to `arena_alloc/` in v0.2.0-alpha.10 (commit
+`1df42671`, "restructure: rename wave-named test files and
+directories").

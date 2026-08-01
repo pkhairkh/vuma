@@ -1533,19 +1533,26 @@ every commit must clear.
     # Expected: "PASS: kernel boots, prints banner, exits 0"
 ```
 
-### 16.2 `scripts/kernel_parity.sh` — multi-backend sweep
+### 16.2 `scripts/kernel_parity.sh` — multi-backend sweep (deleted in v0.2.0-alpha.10)
 
-Compiles + runs `kernel.vuma` and a subset of gold-standard tests across
-**all 19 backends** using QEMU user-mode emulators for non-x86_64 arches.
-
-```
-    ./scripts/kernel_parity.sh          # full sweep (~10 minutes)
-    ./scripts/kernel_parity.sh --quick  # arena_basic + kernel smoke only
-```
-
-The script rebuilds `compile_dump` if Cargo.toml is newer than the binary,
-then iterates the 19 backends, compiling + running each test. Exits 0 only
-if every backend passes.
+> **Note**: `scripts/kernel_parity.sh` was deleted in v0.2.0-alpha.10
+> (commit `d98b58e9`, "VUMA Single-Way Adoption" cleanup — Phase A
+> "dead code + doc cleanup"). It was never replaced by a like-for-like
+> multi-backend kernel sweep. The closest surviving equivalents are
+> `scripts/kernel_smoke.sh` (§16.1, single-arch `x86_64` boot test) and
+> `scripts/vuma_test_matrix_19backends.sh` (multi-backend sweep of the
+> IPC gold-standard tests, not the kernel). The historical description
+> below is preserved for reference; the script it describes no longer
+> exists on disk.
+>
+> Historical behaviour: compiled + ran `kernel.vuma` and a subset of
+> gold-standard tests across **all 19 backends** using QEMU user-mode
+> emulators for non-x86_64 arches. Rebuilt `compile_dump` if Cargo.toml
+> was newer than the binary, then iterated the 19 backends, compiling +
+> running each test. Exited 0 only if every backend passed. Invocations
+> were `./scripts/kernel_parity.sh` (full sweep, ~10 minutes) and
+> `./scripts/kernel_parity.sh --quick` (arena_basic + kernel smoke
+> only).
 
 ### 16.3 `tests/gold_standard/` — wave-pinned regression tests
 
