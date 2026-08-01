@@ -924,9 +924,22 @@ impl LiveRangeComputer {
         let mut call_positions: BTreeSet<u32> = BTreeSet::new();
         let mut copies: Vec<CopyInfo> = Vec::new();
 
+        // Track each block's position range [start, end] for CFG-aware
+        // interval extension (Phase 1b below).  Without this, a vreg
+        // defined before a loop and used inside it (e.g. a loop bound)
+        // gets a linear interval that ends at the use inside the loop body,
+        // missing the fact that the vreg is live across the entire loop
+        // (including the back-edge) because it's re-used on every
+        // iteration.  The linear-scan allocator then reuses the vreg's
+        // physical register for another vreg inside the loop body,
+        // clobbering the loop-invariant value.  See the fibonacci
+        // regression (loop counter `n` clobbered) for the canonical case.
+        let mut block_pos_ranges: Vec<(String, u32, u32)> = Vec::with_capacity(func.blocks.len());
+
         let mut pos: u32 = 0;
 
         for block in &func.blocks {
+            let block_start_pos = pos;
             for instr in &block.instructions {
                 let def_regs = instr.defined_regs();
                 let use_regs = instr.used_regs();
@@ -1055,6 +1068,37 @@ impl LiveRangeComputer {
                 }
             }
             pos += 2;
+            block_pos_ranges.push((block.label.clone(), block_start_pos, pos));
+        }
+
+        // Phase 1b: Extend live intervals using CFG liveness.
+        //
+        // The linear scan in Phase 1 only considers def/use positions, so a
+        // vreg that is live across a loop (defined before the loop, used
+        // inside, and re-used on every iteration via the back-edge) gets an
+        // interval that ends at the last use INSIDE the loop body — missing
+        // the blocks between that use and the back-edge.  The allocator
+        // then reuses the vreg's physical register for another vreg in
+        // those intervening blocks, clobbering the loop-invariant value.
+        //
+        // Fix: compute CFG-based liveness (live_in / live_out per block)
+        // and extend each vreg's interval to cover the position range of
+        // every block where it is live_in or live_out.  This makes the
+        // linear interval span the full set of blocks where the vreg must
+        // be preserved, including across loop back-edges.
+        {
+            let liveness = crate::regalloc::LivenessAnalysis::compute(func);
+            for interval in intervals.values_mut() {
+                let vreg = interval.vreg;
+                for (label, start, end) in &block_pos_ranges {
+                    let is_live_in = liveness.block_live_in(label).contains(&vreg);
+                    let is_live_out = liveness.block_live_out(label).contains(&vreg);
+                    if is_live_in || is_live_out {
+                        interval.extend_to(*start);
+                        interval.extend_to(*end);
+                    }
+                }
+            }
         }
 
         // Phase 2: Mark intervals that cross call sites.
