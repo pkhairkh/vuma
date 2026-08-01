@@ -249,6 +249,15 @@ fn emit_instruction(code: &mut Vec<u8>, instr: &IRInstr, alloc: &RegAllocResult,
             code.extend_from_slice(&Instruction::MulX { rd: d, rs1: l, rs2: r }.encode());
             reads.push(phys(l)); reads.push(phys(r)); writes.push(phys(d)); "mul".to_string()
         }
+        // ── Div (standalone, from scg_to_ir) ──
+        // Treated as unsigned division (UDiv). VUMA uses u32 types for most
+        // arithmetic; FP types are redirected to the BinOp FP fallback.
+        IRInstr::Div { dst, lhs, rhs, ty } => {
+            if matches!(ty, Some(IRType::F32) | Some(IRType::F64)) { return emit_fp_fallback(instr); }
+            let d = load_to_reg(dst, alloc, code); let l = load_to_reg(lhs, alloc, code); let r = load_to_reg(rhs, alloc, code);
+            code.extend_from_slice(&Instruction::UDivX { rd: d, rs1: l, rs2: r }.encode());
+            reads.push(phys(l)); reads.push(phys(r)); writes.push(phys(d)); "div".to_string()
+        }
         IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
             if matches!(ty, Some(IRType::F32) | Some(IRType::F64)) { return emit_fp_fallback(instr); }
             let d = load_to_reg(dst, alloc, code); let l = load_to_reg(lhs, alloc, code); let r = load_to_reg(rhs, alloc, code);

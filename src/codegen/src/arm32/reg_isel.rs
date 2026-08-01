@@ -538,6 +538,19 @@ fn emit_instruction(
             "mul".to_string()
         }
 
+        // ── Div (standalone, from scg_to_ir) ──
+        // Treated as unsigned division (UDiv). VUMA uses u32 types for most
+        // arithmetic; FP types are redirected to the BinOp FP fallback.
+        // ARMv7-A has no hardware divide, so this mirrors the BinOp
+        // SDiv/UDiv arm and returns an error (caller falls back to stack-slot).
+        IRInstr::Div { dst: _, lhs: _, rhs: _, ty } => {
+            if matches!(ty, Some(IRType::F32) | Some(IRType::F64)) { return emit_fp_fallback(instr); }
+            return Err(BackendError::RegisterAllocFailed {
+                isa: "arm32",
+                reason: format!("Div not yet supported in register-based emitter (no hardware divide on ARMv7-A): {:?}", instr),
+            });
+        }
+
         IRInstr::BinOp { op, dst, lhs, rhs, ty } => {
             if matches!(ty, Some(IRType::F32) | Some(IRType::F64)) { return emit_fp_fallback(instr); }
             let dst_reg = load_to_reg(dst, alloc, code);
