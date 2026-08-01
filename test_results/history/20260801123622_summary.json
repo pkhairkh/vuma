@@ -1,12 +1,17 @@
 {
-  "timestamp": "2026-08-01 14:36:54 UTC",
+  "timestamp": "2026-08-01 12:36:22 UTC",
   "host": "turbogp.benchmarks.0x01",
   "arch": "x86_64",
   "total_runs": 29963,
-  "matches": 28036,
+  "matches": 28068,
   "skipped": 0,
-  "pass_rate": "93.57%",
+  "pass_rate": "93.68%",
   "per_backend": {
+    "x86_64": {
+      "total": 1577,
+      "match": 1551,
+      "skipped": 0
+    },
     "aarch64": {
       "total": 1577,
       "match": 1549,
@@ -15,11 +20,6 @@
     "aarch64_be": {
       "total": 1577,
       "match": 1549,
-      "skipped": 0
-    },
-    "x86_64": {
-      "total": 1577,
-      "match": 1551,
       "skipped": 0
     },
     "riscv64": {
@@ -84,7 +84,7 @@
     },
     "sparc64": {
       "total": 1577,
-      "match": 1265,
+      "match": 1297,
       "skipped": 0
     },
     "hppa": {

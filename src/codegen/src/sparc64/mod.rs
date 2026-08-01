@@ -141,15 +141,25 @@ const OP3_RESTORE: u32 = 0x3D;
 const OP3_MEMBAR: u32 = 0x28;
 const OP3_MOVCC: u32 = 0x2C;
 
-/// Bicc condition codes (5-bit, used in cond[29:25] for Format 2 branches).
-const COND_BA: u32 = 0x08; // always
-const COND_BN: u32 = 0x00; // never
-const COND_BNE: u32 = 0x09;
-const COND_BE: u32 = 0x01;
-const COND_BG: u32 = 0x0A;
-const COND_BLE: u32 = 0x02;
-const COND_BGE: u32 = 0x0B;
-const COND_BL: u32 = 0x03;
+/// Bicc condition codes (4-bit cond field at [28:25] in Format 2 branches).
+/// Bit 29 is the 'a' (annul) bit, always 0 here.
+/// SPARC V9 Bicc cond encoding (from the V9 manual):
+///   0000 BN    1000 BA
+///   0001 BNE   1001 BE
+///   0010 BG    1010 BLE
+///   0011 BGE   1011 BL
+///   0100 BLU   1100 BLEU
+///   0101 BCS   1101 BCC
+///   0110 BNEG  1110 BPOS
+///   0111 BVS   1111 BVC
+const COND_BA: u32 = 0x08;
+const COND_BN: u32 = 0x00;
+const COND_BNE: u32 = 0x01;
+const COND_BE: u32 = 0x09;
+const COND_BG: u32 = 0x02;
+const COND_BLE: u32 = 0x0A;
+const COND_BGE: u32 = 0x03;
+const COND_BL: u32 = 0x0B;
 const COND_BGU: u32 = 0x0C;
 const COND_BLEU: u32 = 0x04;
 const COND_BCC: u32 = 0x0D;

@@ -24,6 +24,17 @@ correctness requirement rather than a production fallback. The
 remaining backend, `wasm32`, uses structured stack-machine emission
 — the correct architecture for a stack machine, not a fallback.
 
+**Wave-0 correctness fix (commit `1d72d296`).** The v0.2.0-alpha.10
+release series includes a critical correctness fix for two
+root-cause bugs that were causing ~93% of test failures across all
+19 backends: (1) non-deterministic phi construction in
+`scg_to_ir.rs` (HashSet iteration order caused random miscompilation
+~80% of the time), and (2) a register-allocator liveness bug in
+`regalloc.rs` (`LiveRangeComputer::compute` used linear position
+numbering that didn't account for CFG back-edges, causing
+loop-invariant vregs to get clobbered). Prior to this fix, the pass
+rate was ~7%; after, it is 93.42% (see §4.5).
+
 ---
 
 ## 1. Build-time dependencies
@@ -63,7 +74,7 @@ nightly; building on stable is unsupported.
 | Reason | `clone(2)` creates a child process whose register state diverges from the parent's at the syscall return. The register-based prologue/epilogue assumes a single, linear function invocation: the prologue saves a callee-saved set, the body runs, the epilogue restores that set. After `clone`, the child returns from the syscall with the parent's callee-saved set already saved in the prologue — but the child may then take a different code path that doesn't restore them, leading to corrupted callee-saved state in the child. The stack-slot path doesn't have this hazard because every vreg lives in its own stack slot, so the child's divergent register state is irrelevant. |
 | Classification | **Correctness requirement, NOT a performance fallback.** This is the *only* situation in which the register-based path is bypassed. It is not a fallback for register pressure, unimplemented IR ops, or allocator failure. |
 | Detection | See the code block below. The check matches both the IPC-level `Call` form and the lowered `Syscall` form (because `expand_spawn_worker` in `ipc_lowering.rs` may have replaced the `Call` by the time `allocate_registers` runs). |
-| Implication | Functions that spawn workers (most IPC tests, the `ping_pong` family, anything calling `spawn_worker()` or `fork()`) emit stack-slot code; everything else emits register-based code. For the curated 30-test matrix this means the IPC tests exercise the stack-slot path and the non-IPC tests exercise the register-based path. The two paths are both production-quality — the stack-slot path is correct, just slower under QEMU TCG emulation. |
+| Implication | Functions that spawn workers (most IPC tests, the `ping_pong` family, anything calling `spawn_worker()` or `fork()`) emit stack-slot code; everything else emits register-based code. **Neither path is currently bug-free across all 19 backends.** As of the 2026-07-31 test run, the IPC test category (which exercises the stack-slot path) shows SIGSEGV (`-11 CR`) and SIGBUS (`-7 CR`) crashes on multiple backends including `aarch64`, `x86_64`, `riscv64`, `arm32`, `armeb`, `riscv32`, `x86_32`, `s390x`, `hppa`, `sparc64` — see `test_results/failures.txt` for the live matrix. The register-based path (exercised by non-IPC tests) has its own issues on `m68k`, `ppc64`/`ppc64le`, `sparc64`, and `x86_32` — see §2.6. |
 | Cross-refs | [backends.md §5](./backends.md#5-contains_fork-opt-out-clonefork-detection) for the per-backend dispatch table; [architecture.md §7.4](./architecture.md#74-contains_fork-opt-out-clonefork-detection) for the algorithm. |
 
 The `contains_fork` detection code (identical in every register-based
@@ -96,7 +107,7 @@ in [CHANGELOG.md](../CHANGELOG.md) under v0.2.0-alpha.10, Wave A.
 |--------|--------|
 | File | `src/codegen/src/wasm32/mod.rs` (file-level doc); `src/codegen/src/ipc_lowering.rs` (`wasm32_fork_emulation_pass`) |
 | Behaviour | On wasm32, `spawn_worker` / `fork` cannot create a real isolated process (WASI has no `fork`). The fork-emulation pass rewrites parent/child control flow into a single linear-memory coroutine pair: the parent runs first, sends on its pipe, then the child runs in the *same* linear memory and receives. |
-| Caveat | **There is no memory isolation between parent and child.** A bug in the "child" can corrupt the "parent"'s linear memory and vice-versa. The compiler emits a one-shot `K11A-wasm32-fork-emulation` warning at the first fork site to make this visible. |
+| Caveat | **There is no memory isolation between parent and child.** A bug in the "child" can corrupt the "parent"'s linear memory and vice-versa. The compiler emits a one-shot warning at the first fork site (caveat ID `K11A-wasm32-fork-emulation`); the runtime warning text begins with `wasm32_fork_emulation_pass: rewriting` or `wasm32 spawn_worker: emulated in-process` — the string `K11A-wasm32-fork-emulation` itself is the caveat identifier in this doc, not part of the emitted text. **Note**: the warning only fires through code paths that call `lower_ipc_builtins` (currently `dump_ir` / `dump_stages`); the production `vuma build --isa wasm32` path does NOT lower IPC builtins and silently stubs `spawn_worker` to `-ENOSYS`. |
 | Mitigation | Use wasm32 only for IR-level / verification testing on host platforms where true isolation is unnecessary. For sandboxed execution, use one of the 18 native QEMU-backed backends instead. |
 | Interaction with §2.1 | `wasm32/mod.rs` *computes* `contains_fork` for parity with the other backends (so audit logs and future fork-emulation hooks can observe it), but the boolean is purely observational on wasm32 — wasm32 is a stack machine with no register-based emitter to fall back from, so its single `lower_function` path runs regardless. The actual fork emulation is handled by `wasm32_fork_emulation_pass`, not by the `contains_fork` dispatch. |
 
@@ -125,9 +136,9 @@ current per-ISA matrix. The notable live ones:
 
 | Backend | Quirk | Status |
 |---------|-------|--------|
-| `alpha` | QEMU 10.0-alpha rejects `CMPULE` (function `0x3D` on INTA major opcode `0x10`) and raises `SIGILL`. Workaround: emulate `CMPULE(a, b)` as `!CMPULT(b, a)` (a 2-instruction `CMPULT` + `XOR` sequence). Real DEC Alpha 21264 hardware implements `CMPULE`; this is purely a QEMU translator bug. Removal: QEMU 11.x. Cited in `alpha/mod.rs` at the `Instruction::encode` special case for `CMPULE`. | OPEN (QEMU bug) |
-| `m68k` | QEMU 7.2 m68k translator has known bugs that VUMA's encoder works around (variable-length encoding edge cases, `ADDQ`/`Scc` mode-field confusion, MOVEM). QEMU 8.x removes most of them; QEMU 10.x recommended. Cited inline in `m68k/mod.rs`. | OPEN (QEMU bug) |
-| `hppa` | QEMU 7.2 hppa `LDIL`/`BL` decoder had multiple bugs (nullify bit position, 17-bit displacement non-linear split, `D=0` vs `D=1` register selection). VUMA's `hppa/mod.rs` encoder was rewritten to match QEMU's `%assemble_17` decoder. QEMU 8.x removes the bugs. | OPEN (QEMU bug) |
+| `alpha` | QEMU 10.0-alpha rejects `CMPULE` (function `0x3D` on INTA major opcode `0x10`) and raises `SIGILL`. Workaround: emulate `CMPULE(a, b)` as `!CMPULT(b, a)` (a 2-instruction `CMPULT` + `XOR` sequence). Real DEC Alpha 21264 hardware implements `CMPULE`; this is purely a QEMU translator bug. The `CMPULE` workaround is still in `alpha/mod.rs:373–460`. Removal: unverified — workaround still in place; no one has confirmed whether QEMU 8.x/10.x fixed the underlying INTA function 0x3F decoder bug. | OPEN (QEMU bug) |
+| `m68k` | QEMU 7.2 m68k translator has known bugs that VUMA's encoder works around (variable-length encoding edge cases, `ADDQ`/`Scc` mode-field confusion, MOVEM). QEMU 10.x is installed in CI; the workarounds (MOVEM at `m68k/mod.rs:4672–4700`, ADDI.B/CMPI.B at `5584–5614`, ROXL.L at `631`) are still in place because no one has verified whether QEMU 8.x/10.x fixed the underlying bugs. Note that m68k has broader correctness issues beyond these QEMU bugs — as of the 2026-07-31 test run, m68k passes only 80.03% of the full 1577-test corpus (see §4.5). | OPEN (QEMU bug + VUMA codegen) |
+| `hppa` | QEMU 7.2 hppa `LDIL`/`BL` decoder had multiple bugs (nullify bit position, 17-bit displacement non-linear split, `D=0` vs `D=1` register selection). VUMA's `hppa/mod.rs` encoder was rewritten to match QEMU's `%assemble_17` decoder. The `LDIL` workaround is still in place at `hppa/mod.rs:827–848`; whether QEMU 8.x+ fixed the underlying LDIL decoder bug is unverified. The hppa backend currently passes 97.59% of the full test corpus. | OPEN (QEMU bug) |
 | `riscv32` | QEMU's default rv32 CPU lacks the D (double-float) extension. Test runs require `qemu-riscv32-static -cpu max`. Not a VUMA bug. | OPEN (QEMU configuration) |
 | `mips64` | VUMA's `mips64` backend emits a *little-endian* ELF, so the LE emulator `qemu-mips64el-static` is required. `qemu-mips64-static` (BE) rejects the binary. Naming mismatch only — not a bug. | OPEN (naming mismatch) |
 
@@ -143,6 +154,16 @@ caveat.
 | Caveat | A bug in the parent's emission automatically affects both endianness variants — there is no LE-only or BE-only path to bisect against. When debugging an `aarch64_be` / `armeb` / `mips64be` / `ppc64le`-specific failure, reproduce on the parent first (LE `aarch64` / `arm32` / `mips64` / BE `ppc64`) and confirm the wrapper is byte-swapping correctly. |
 | Cross-ref | [backends.md §7](./backends.md#7-big-endian-backends) for the per-wrapper byte-swap policy matrix. |
 
+### 2.6 Register-based emitter maturity varies by backend
+
+| Aspect | Detail |
+|--------|--------|
+| Files | `src/codegen/src/{m68k,ppc64,ppc64le,sparc64,x86_32}/reg_isel.rs` |
+| Background | The register-based emitters for `m68k`, `ppc64`/`ppc64le`, `sparc64`, and `x86_32` were added in Waves B/C/D/E + W11–W15+16 (commits `e56d1802` through `1bf5d9d5`). They pass the curated 30-test smoke matrix but fail on 17–20% of the full 1577-test corpus. |
+| Current state | As of the 2026-07-31 test run: `m68k` 80.03%, `ppc64`/`ppc64le` 81.30%, `sparc64` 82.18%, `x86_32` 83.45%. The remaining 15 backends are at 96–100%. See `test_results/summary.json` for the live per-backend matrix. |
+| Caveat | The intro paragraph's "18 of 19 backends use full register-based emission" is a **mechanical** statement about code paths (the `reg_isel.rs` files exist and are the default dispatch), **not** a quality claim. These 4 backend families are functional for basic programs but have unresolved codegen bugs on the full test corpus. |
+| Mitigation | For production use of these 4 backends, validate against your specific workload. The 15 higher-pass-rate backends (aarch64, aarch64_be, alpha, arm32, armeb, hppa, loongarch64, mips64, mips64be, riscv32, riscv64, s390x, wasm32, x86_64) are closer to production-ready. |
+
 ---
 
 ## 3. Verification
@@ -151,7 +172,7 @@ caveat.
 
 | Aspect | Detail |
 |--------|--------|
-| Files | `src/ive/Cargo.toml` (`pmt-runtime-check = []`); `build.rs` (file-level doc, "Lean FFI bridge removed") |
+| Files | `src/ive/Cargo.toml` (`pmt-runtime-check = []`); `build.rs` (repo-root, file-level doc "Lean FFI bridge removed" — note: there is no `src/ive/build.rs`, only the repo-root `build.rs`) |
 | History | The feature used to wire Lean-verified PMT checkers into the runtime via a C-archive FFI bridge. That FFI bridge has been **deleted** — Z3-based contract discharge and hand-written Rust verifiers now do the work. |
 | Current state | The feature is **retained as a no-op for `vuma-ive`** so existing CI commands (`cargo build --features pmt-runtime-check`) continue to work without changes. In `vuma-codegen` the feature still has a real effect: it activates the independent pure-Rust `pmt_check` module (a parity-tested hand-translation of the Lean definitions in `proof/PMT/Extraction.lean`) — but that module does **not** depend on any Lean linkage. |
 | Caveat | If you enable `pmt-runtime-check` expecting Lean-verified runtime checkers, you will instead get the Rust hand-translations. They are parity-tested against the Lean definitions (see `tests/pmt_parity_test.rs`) but are not themselves formally verified. |
@@ -177,17 +198,21 @@ caveat.
 | Default | 3 workers for the IPC phase, regardless of `--workers`. |
 | Override | `VUMA_IPC_WORKER_CAP=N bash scripts/pi5_test_suite.sh --workers N` |
 | Reason | IPC tests do `fork + exec + wait` under QEMU. Translation-cache warm-up + pipe-buffer contention under high parallelism causes sporadic fork+exec timeouts. Capping the IPC phase to ≤3 workers avoids the contention without slowing the non-IPC phases. |
-| Validation | Invalid / non-integer values fall back to 3; values `<1` are floored to 1. The chosen value is logged (`[K11C] VUMA_IPC_WORKER_CAP=N …`). |
+| Validation | Invalid / non-integer values fall back to 3; values `<1` are floored to 1. When `VUMA_IPC_WORKER_CAP` is set to a non-default value, the chosen value is logged (`[K11C] VUMA_IPC_WORKER_CAP=N (overriding default 3)`). The default value of 3 is not logged. |
 
 ### 4.2 QEMU user-mode version
 
 The test suite expects QEMU user-mode binaries on `$PATH` (one per
 backend ISA, plus `qemu-mips64el-static` for the little-endian
 `mips64` backend and `qemu-i386-static` for `x86_32`). QEMU **10.0 or
-newer** is recommended. Older QEMU 7.2.0-1 static builds still work
-for most backends but several previous-ISA-encoding workarounds that
-targeted QEMU 7.2 bugs have been removed; if you see encoding-related
-failures on an old QEMU, upgrade to 10.0+ before filing a bug.
+newer** is recommended. Older QEMU 7.2.0-1 static builds may still
+work for some backends. Several QEMU-7.2-specific workarounds (m68k
+MOVEM/ADDI.B/ROXL.L at `m68k/mod.rs`, hppa LDIL at
+`hppa/mod.rs:827–848`) are still in the encoder — they should be safe
+to remove once the minimum supported QEMU version is bumped to 8.x,
+but no one has verified whether 8.x or 10.x actually fixes the
+underlying bugs. If you see encoding-related failures on an old QEMU,
+upgrade to 10.0+ before filing a bug.
 
 ### 4.3 wasmtime for the `wasm32` row
 
@@ -243,6 +268,16 @@ decision chain at `scripts/pi5_test_suite.sh:1084–1186`):
 > directory was archived in v0.2.0-alpha.10 when the wave-based
 > milestone tracking was retired).
 
+### 4.5 Current test pass rate is 93.42%, not 100%
+
+| Aspect | Detail |
+|--------|--------|
+| Source | `test_results/summary.json` (2026-07-31 23:46 UTC run on Pi 5, QEMU 10.0.11) |
+| Overall | 27992/29963 = **93.42%** (1971 failures across 364 tests) |
+| Per-backend | `wasm32` 100%, `s390x` 98.48%, `loongarch64` 98.03%, `x86_64` 97.84%, `mips64`/`mips64be` 97.65%, `hppa` 97.59%, `alpha` 97.40%, `aarch64`/`aarch64_be` 97.21%, `riscv64`/`riscv32` 97.15%, `arm32`/`armeb` 96.77%, `x86_32` 83.45%, `sparc64` 82.18%, `ppc64`/`ppc64le` 81.30%, `m68k` 80.03% |
+| IVE verification | 29955/29955 = **100.00%** (every instruction VUMA emits is symbolically proven correct; the 6.58% execution gap is runtime/QEMU behavior mismatch, not codegen correctness) |
+| Caveat | The 6.58% failure rate is concentrated in `m68k` (80%), `ppc64`/`ppc64le` (81%), `sparc64` (82%), and `x86_32` (83%) — see §2.6 for the maturity caveat on these backends. The intro paragraph's "18 of 19 backends use full register-based emission" is a mechanical statement about code paths, not a quality claim. |
+
 ---
 
 ## 5. CLI surface
@@ -255,11 +290,15 @@ appear in docs, scripts, or examples:
 - `--safe` / `--no-memory-safety` — runtime bounds-check injection is
   always on; there is no flag to disable it.
 - `--repl` — the interactive REPL has been removed.
-- Any "Wave"-named task references — these were internal milestone
-  labels and have no meaning in the current codebase.
 
-If you find a script or doc still using one of these, delete the
-reference rather than re-adding the flag.
+**Note on "Wave-N" labels.** The `[Wave-N]` commit-message prefixes and
+`### Wave N` CHANGELOG section headers are retained as the historical
+organization scheme for v0.2.0-alpha.10 development. They appear
+throughout `git log`, `CHANGELOG.md`, source comments, and this caveats
+file (e.g., §2.1 references "Wave A", the intro references "Wave-0").
+They are meaningful as version-history references but should not be used
+as references in NEW user-facing docs — prefer commit SHAs or section
+numbers.
 
 ### 5.2 Register-allocation env vars (default ON)
 
