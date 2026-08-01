@@ -18,31 +18,93 @@ real VUMA work; the rest are either redundant (VUMA already has the
 feature), belong to WOMB/VELL, or are GPU-stack work whose scope is much
 larger than a "patch."
 
+**Wave A update (2026-08-01).** Four parallel deep-audit subagents
+extended this catalog with 33 newly-surfaced bugs (V-42 through V-74).
+Five original claims were corrected (V-37 refuted, V-13 partially
+refuted, V-39 weakest-backend list corrected, V-39 baseline marked
+stale, "18 of 19 backends" updated to "all 19"). The full consolidated
+findings live in `docs/vuma-side-research-draft.md`; the four subagent
+reports live in `docs/research/`; the 10 confident decisions are
+captured as ADRs in `docs/adr/`. The dependency manifest is documented
+in `docs/dependency-manifest.md`.
+
 ---
 
 ## Summary table
 
-| ID  | Title                                                  | Severity | Status              | Effort      |
-|-----|--------------------------------------------------------|----------|---------------------|-------------|
-| V-34 | `bridge_type_to_ir_type` misses f32/f64               | P0       | Open (verified)     | 3 days      |
-| V-35 | `type_size_from_name` returns 8 for layout names      | P0       | Open (verified)     | 1 week      |
-| V-36 | `StateRead`/`StateWrite` hardcoded to `IRType::I64`   | P0       | Open (verified)     | 1 week      |
-| V-03 | Legacy `bridge_type_size` still used by `build_pmt_layout_specs` | P0 | Open (verified) | 1 week |
-| V-37 | `build_pmt_layout_specs` should use `_with_layouts` variant | P0 | Open (depends on V-03) | 2 days |
-| V-26 | Parser lacks const byte arrays / `Expr::ArrayLit`     | P1       | Open (verified)     | 2 weeks     |
-| V-11 | Session types lack `Choice`/`Offer`                   | P1       | Open (verified)     | 2–4 weeks   |
-| V-16 | Capability signatures use FNV-1a × 4 (not HMAC-SHA256) | P1       | Open                | 5 weeks     |
-| V-13 | SIMD coverage narrow (no AVX2/AVX-512, no pmaxsd/pminsd) | P2    | Open (partial)      | 6 weeks     |
-| V-14 | f32 PMT Lean proof is greenfield (no arithmetic model to extend) | P1 | Open | 3–6 months (defer to v2) |
-| V-39 | Test suite at 93.42% — 1971 failures across 364 tests | P1       | Open (per `test_results/failures.txt`) | ongoing |
-| V-40 | `bridge_type_size` and `bridge_type_size_with_layouts` coexist (dead-code risk) | P2 | Open | 1 day |
-| V-41 | Doc references to `arm64.rs` and stale `regalloc.rs` line numbers persist in non-README files | P3 | Mostly fixed by Wave-1..6 | verify |
-| V-04 | (was) Parser rejects `[T; N]` for struct T            | —        | REDUNDANT (parser accepts; bug is V-03/V-35) | — |
-| V-05 | (was) `Expr::Index` always loads 1 byte               | —        | REDUNDANT (already implemented at `pipeline.rs:8075`) | — |
-| V-07 | (was) `extern "C"` lacks Borrow/Marshal distinction   | —        | REDUNDANT (`ArgMode` exists; only `effects.rs` integration is a 3-day fix) | 3 days |
-| V-01 | (was) Add `native` backend variant                    | —        | Out of scope (WOMB/native-host concern, not VUMA core) | — |
-| V-02 | (was) Add rendering IR instructions                   | —        | Out of scope (depends on GPU stack — see V-GPU) | — |
-| V-GPU | GPU backend infrastructure (Vulkan/Metal/SPIR-V/WebGPU) | P1 (downstream) | Greenfield — 3–6 months | tracked separately |
+Entries marked **(new)** were surfaced by the Wave A deep audit.
+Entries marked **(corrected)** had their status/severity/scope revised
+based on verified source evidence.
+
+### P0 — Foundation bridge bugs (the "bridge-fix epic")
+
+| ID  | Title                                                  | Status              | Effort      | ADR         |
+|-----|--------------------------------------------------------|---------------------|-------------|-------------|
+| V-34 | `bridge_type_to_ir_type` misses f32/f64               | Open (verified)     | 3 days      | ADR-0001    |
+| V-35 | `type_size_from_name` returns 8 for layout names      | Open (verified)     | 1 week      | ADR-0002    |
+| V-42 **(new)** | V-35 propagates to `register_layout` field offsets | Subsumed by V-35 | —       | ADR-0002    |
+| V-44 **(new)** | `type_alignment` has `_ => 8` catch-all (twin of V-35) | Open (verified) | 2 days | ADR-0002    |
+| V-36 | `StateRead`/`StateWrite` hardcoded to `IRType::I64`   | Open (verified)     | 1 week      | ADR-0003    |
+| V-A2-1 **(new)** | `StateInit`/`ArenaNew`/`ArenaAlloc` emit `Alloc { size: 0 }` | Open (verified) | 1 week | ADR-0003 |
+| V-03 | Legacy `bridge_type_size` still used by `build_pmt_layout_specs` | Open (verified) | 1 week | ADR-0004 |
+| V-NEW-2 **(new)** | IVE `rederive_layout` reproduces V-03 bug for parity | Open (verified) | 3 days | ADR-0004 |
+| V-46 **(new)** | `resolve_state_array_access` `_ => (1, None)` for unknown element types | Open (verified) | 1 week | (deferred) |
+| V-NEW-1 **(new)** | `allocate(<non-literal>)` silently truncates to 8 bytes | Open (verified) | 1 week | (deferred) |
+| V-A3-2 **(new)** | `delegate_capability` hardcodes signing key + PIDs | Open (verified) | 1 week | ADR-0007 |
+| V-37 | ~~`build_pmt_layout_specs` alignment padding missing~~ | **REFUTED** — padding IS at `pipeline.rs:6741-6744`; subsumed by V-03 | — | — |
+
+### P1 — Real gaps (VUMA genuinely lacks these)
+
+| ID  | Title                                                  | Status              | Effort      | ADR         |
+|-----|--------------------------------------------------------|---------------------|-------------|-------------|
+| V-26 | Parser lacks const byte arrays / `Expr::ArrayLit`     | Open (verified)     | 2 weeks     | (deferred)  |
+| V-11 | Session types lack `Choice`/`Offer` (AST/IR)          | **(corrected)** IVE-side `session_type.rs:38-56` already has them as dead code; only AST/IR + parser + Lean proof remain | 2 weeks (down from 2-4) | (deferred) |
+| V-16 | Capability signatures use FNV-1a × 4 + `verify_capability` never called | **(corrected)** Open, expanded scope | 7 weeks (up from 5) | ADR-0007    |
+| V-A2-2 **(new)** | `inttofloat`/`floattoint` hardcoded to `I64↔F64` | Open (verified) | 1 week | (deferred) |
+| V-A2-3 **(new)** | SIMD lowering hardcodes `Xmm0/1/2`, `V0/1/2`; vectorizer non-functional | Open (verified) | 2 weeks | (deferred) |
+| V-A2-4 **(new)** | `Transform`/`BulkCopy`/`BulkFill`/`StarkProof`/`Channel*` silent no-ops on 14+ backends | Open (verified) | 3 weeks | (deferred) |
+| V-A2-7 **(new)** | HPPA F64 softfloat sub/mul/div return 0; F32 stubbed | Open (verified) | 2 weeks | (deferred) |
+| V-A2-8 **(new)** | m68k F32 softfloat stubs return 0.0 for Register operands | Open (verified) | 1 week | (deferred) |
+| V-A2-9 **(new)** | regalloc doesn't model syscall arg/dst interference (root cause of `contains_fork` opt-out) | Open (verified) | 2 weeks | (deferred) |
+| V-A3-4 **(new)** | `lean-rust-parity.yml` CI tests non-existent FFI bridge | Open (verified) | 1 day | (deferred) |
+| V-A3-8 **(new)** | `verify_information_flow_from_ir` misses indirect flows | Open (verified) | 2 weeks | (deferred) |
+| V-NEW-6 **(new)** | `ci_run_tests.sh:61` pass criterion is "didn't crash", not "got the right answer" | Open (verified) | 3 days | (deferred) |
+| V-NEW-8 **(new)** | Full 19-backend × 1577-test matrix NOT in CI (only 7 backends × 47 examples gated) | Open (verified) | 1 week | (deferred) |
+| V-14 | f32 PMT Lean proof is greenfield                       | Open (defer to v2)  | 3–6 months  | ADR-0006    |
+| V-39 | Test suite at 93.42% — 1971 failures across 364 tests | **(corrected)** baseline STALE (pre-`1d72d296`); re-run needed | ongoing | ADR-0009    |
+
+### P2 — Cleanup and coverage
+
+| ID  | Title                                                  | Status              | Effort      | ADR         |
+|-----|--------------------------------------------------------|---------------------|-------------|-------------|
+| V-13 | SIMD coverage narrow (no AVX2/AVX-512, no pmaxsd/pminsd) | **(corrected)** AArch64 lacks `2D`/i64 form (catalog over-stated) | 6 weeks | (deferred) |
+| V-40 | Legacy `bridge_type_size` coexists with `_with_layouts` | Open                | 1 day       | ADR-0005    |
+| V-43 **(new)** | `infer_expr_type` returns variable NAMES not types | Open (verified) | 1 week | (deferred) |
+| V-47 **(new)** | `extract_state_write_target` only handles `DerefField` | Open (verified) | 1 week | (deferred) |
+| V-48 **(new)** | `ConstantFolding` folds 3 ops, parses as f64, effectively dead | Open (verified) | 1 week | (deferred) |
+| V-49 **(new)** | `NodeVisitor::dispatch` handles 10/28 `NodePayload` variants | Open (verified) | 1 week | (deferred) |
+| V-A3-5 **(new)** | Lean `SessionType` model behind Rust IVE by 4 variants | Open (verified) | 2 weeks | (deferred) |
+| V-A3-7 **(new)** | `Effect::ExternCall` is dead code (IVE has zero refs) | Open (verified) | 1 day | (deferred) |
+| V-NEW-7 **(new)** | Duplicate `lean-proofs` job in `ci.yml` + `proof-verify.yml` | Open (verified) | 1 day | (deferred) |
+
+### P3 — Documentation and minor cleanup
+
+| ID  | Title                                                  | Status              | Effort      | ADR         |
+|-----|--------------------------------------------------------|---------------------|-------------|-------------|
+| V-41 | Stale doc refs (`arm64.rs`, `regalloc.rs:NNNN`) persist | **(corrected)** 25+ refs remain (not "mostly fixed") | 2 days | (deferred) |
+| V-45 **(new)** | `Lit::Float` doc comment claims lexer doesn't produce floats (it does) | Open (verified) | 1 day | (deferred) |
+| V-A3-6 **(new)** | `l1l3_collapse` has dead `let known = true` branch | Open (verified) | 1 day | (deferred) |
+
+### Redundant or out-of-scope (verified)
+
+| ID  | Title                                                  | Status              | Effort      |
+|-----|--------------------------------------------------------|---------------------|-------------|
+| V-04 | (was) Parser rejects `[T; N]` for struct T            | REDUNDANT (parser accepts; bug is V-03/V-35) | — |
+| V-05 | (was) `Expr::Index` always loads 1 byte               | REDUNDANT (already implemented at `pipeline.rs:8075`) | — |
+| V-07 | (was) `extern "C"` lacks Borrow/Marshal distinction   | REDUNDANT (`ArgMode` exists; 3-day `effects.rs` fix) | 3 days |
+| V-01 | (was) Add `native` backend variant                    | Out of scope (WOMB/native-host) | — |
+| V-02 | (was) Add rendering IR instructions                   | Out of scope (depends on GPU stack) | — |
+| V-GPU | GPU backend infrastructure (Vulkan/Metal/SPIR-V/WebGPU) | Greenfield — 3–6 months | tracked separately |
 
 ---
 
@@ -175,20 +237,27 @@ first compute sizes for all layouts bottom-up, then call
 **Effort**: 1 week.
 **Unblocks**: sound IVE discharge on programs with nested layouts.
 
-### V-37 — `build_pmt_layout_specs` alignment handling
+### V-37 — ~~`build_pmt_layout_specs` alignment handling~~ — REFUTED
 
-**Severity**: P0 (depends on V-03 fix being done correctly).
-**File**: `src/pipeline.rs:6715–6735`.
+**Status**: REFUTED by Wave A subagent A-4.
+**File**: `src/pipeline.rs:6741–6744`.
 
-The current `build_pmt_layout_specs` uses `bridge_type_align` (which
-correctly handles user types via `_ => 8`) but does not propagate
-alignment back into the size table. After V-03 is fixed, the size table
-must also include trailing padding to `max_align`, otherwise the last
-field of a layout can be followed by unaccounted bytes that the next
-layout's first field would land inside.
+The original catalog claimed that `build_pmt_layout_specs` does not
+compute trailing padding to `max_align`. This is **false**. Trailing
+padding IS computed:
 
-**Effort**: 2 days (once V-03 lands).
-**Unblocks**: correct `sizeof(Layout)` for any layout whose `max_align` > last field's alignment.
+```rust
+// src/pipeline.rs:6741-6744 (verified)
+if max_align > 1 && !offset.is_multiple_of(max_align) {
+    offset = (offset + max_align - 1) & !(max_align - 1);
+}
+```
+
+The real gap is that `build_pmt_layout_specs` calls the legacy
+`bridge_type_size` (which returns 8 for nested layout names), so it
+can't compute correct sizes for nested layouts even though the padding
+logic is correct. This is exactly V-03. V-37 adds nothing and is
+deleted from the execution plan.
 
 ---
 
@@ -353,43 +422,76 @@ migration note) to prevent future regressions.
 **Source**: `test_results/failures.txt` and `test_results/summary.json`
 (commit `78e71a6b`, run on `pi-pkhairkh-dev`, 2026-07-31 23:46:38 UTC).
 
-**Headline numbers**:
+**⚠ STALE BASELINE (corrected by Wave A)**: This snapshot is from commit
+`78e71a6b`, which is **pre-`1d72d296`** — the phi+regalloc liveness fix
+landed ~51 minutes later. The 93.42% / 1971-failures figure is stale.
+[ADR-0009](adr/ADR-0009.md) mandates a re-run on `main` HEAD before
+treating these numbers as ground truth. The per-backend ranking and
+failure-mode breakdown below reflect the stale data and may not match
+current `main`.
+
+**Headline numbers (stale)**:
 - Total runs: 29963
 - Matches: 27992
 - Skipped: 0
 - Pass rate: 93.42%
 - Failures: 1971 across 364 tests
 
-**Per-backend pass rate** (from `summary.json`):
-- Strongest: `x86_64` (1543/1577 = 97.8%), `aarch64` (1533/1577 = 97.2%)
-- Middle: `riscv64` (1532/1577 = 97.1%), `mips64` (1532/1577 = 97.1%)
-- Weakest: `m68k`, `sparc64`, `hppa`, `alpha`, `x86_32` (these account
-  for the bulk of the failures)
+**Per-backend pass rate (corrected ranking, from `summary.json`)**:
+
+| Rank | Backend | Pass/Total | Pass% | Notes |
+|------|---------|------------|-------|-------|
+| 1 | wasm32 | 1577/1577 | 100.00% | stack-machine, no regalloc |
+| 2 | s390x | 1576/1577 | 99.94% | 1 MM |
+| 3 | x86_64 | 1543/1577 | 97.78% | mixed MM/TO |
+| 4 | aarch64 | 1533/1577 | 97.21% | mixed MM/TO |
+| 5 | aarch64_be | 1533/1577 | 97.21% | wrapper, inherits aarch64 |
+| 6 | riscv64 | 1532/1577 | 97.27% | mixed MM/TO |
+| 7 | hppa | 1539/1577 | 97.59% | F64 softfloat (V-A2-7) |
+| 8 | alpha | 1534/1577 | 97.27% | MM in arithmetic |
+| ... | ... | ... | ... | ... |
+| 15 | sparc64 | 1357/1577 | 86.05% | CR + MM in arithmetic |
+| 16 | x86_32 | 1316/1577 | 83.45% | CR + MM |
+| 17 | ppc64le | 1282/1577 | 81.29% | MM (loop lowering cluster) |
+| 18 | ppc64 | 1282/1577 | 81.29% | MM (loop lowering cluster) |
+| 19 | m68k | 1268/1577 | 80.47% | TO (80% of all TOs) + F32 softfloat (V-A2-8) |
+
+**Correction**: The original catalog listed `hppa` and `alpha` among
+the weakest backends. They are actually mid-pack (rank 7 and 8). The
+catalog missed `ppc64` and `ppc64le` (rank 18 and 17, both at 81.29%),
+which are the 2nd and 3rd weakest after `m68k`.
 
 **Failure mode breakdown** (sampled from `failures.txt`):
 - **CR** (crash, exit code -11 / SIGSEGV or -8 / SIGFPE) — concentrated
-  in `m68k`, `arm32`, `armeb`, `riscv32`, `x86_32`. Indicates backend
-  codegen bugs that produce invalid instruction encodings or trap.
+  in `arm32`, `armeb`, `riscv32`, `x86_32`, `m68k`, `hppa`. Indicates
+  backend codegen bugs that produce invalid instruction encodings or
+  trap. Highest-signal category — each CR is likely a real bug.
 - **MM** (mismatch — wrong numeric result) — spread across all backends.
-  Indicates codegen correctness bugs (wrong constant folding, wrong
-  shift amount, wrong branch direction).
-- **TO** (timeout, exit 124) — concentrated in `aarch64`, `x86_64`,
+  The `ppc64`/`ppc64le` cluster (295 failures each, almost all MM)
+  suggests a shared loop-lowering bug (see A-4's hypothesis in
+  `docs/research/A-4-pipeline-runtime-tests-deps.md`).
+- **TO** (timeout, exit 124) — 80% concentrated in `m68k` (243 of 302
+  TOs). Indicates either infinite loops in compiled programs or extreme
+  perf regressions. `m68k` TOs likely correlate with V-A2-8 (F32
+  softfloat returning 0.0 → infinite loop in float-based loop bounds).
+  The remaining 20% of TOs are concentrated in `aarch64`, `x86_64`,
   `mips64` on long-running tests (`arith_collatz`, `arith_palindrome`,
-  `arith_tribonacci`). Indicates either an infinite loop in the
-  compiled program or a perf regression.
+  `arith_tribonacci`) — likely perf regressions or genuine infinite loops.
 
 **Recommendation**:
-1. Triage the CR failures first — they are the most likely to indicate
+1. **Re-run the full suite on `main` HEAD first** (per
+   [ADR-0009](adr/ADR-0009.md)) — the `1d72d296` phi+regalloc fix may
+   have moved the needle.
+2. Triage the CR failures first — they are the most likely to indicate
    real codegen bugs (vs. perf issues for TO and edge-case arithmetic
    for MM).
-2. Group failures by backend and by test family (e.g. all `m68k` CR
-   failures are likely one or two instruction-encoder bugs).
-3. Add the missing backends to a "second-tier" CI tier — they don't
-   need to block every PR, but they should not be silently broken.
-4. The `1d72d296` commit (Wave-0, just before the doc-cleanup waves)
-   fixed a non-deterministic phi construction + regalloc liveness bug —
-   re-run the full suite on `main` HEAD to see if that fix moved the
-   needle.
+3. Group failures by backend and by test family. The
+   `ppc64`/`ppc64le`/`x86_32`/`sparc64`/`m68k` loop-lowering cluster
+   (235 failures, ~12% of all failures) is the highest-ROI single fix
+   per A-4's hypothesis.
+4. Add the missing backends to a "second-tier" CI tier — they don't
+   need to block every PR, but they should not be silently broken (per
+   V-NEW-8 / [ADR deferred]).
 
 **Effort**: ongoing — 1–2 weeks of focused triage should get the pass
 rate above 97%, after which per-PR gating on the strongest backends
@@ -432,21 +534,41 @@ a greenfield multi-month effort, not a patch).
 
 ## Recommended execution order
 
-1. **V-34** (3 days) — unblocks f32 state fields at the bridge layer.
-2. **V-35** (1 week) — unblocks nested-struct layouts at the parser layer.
-3. **V-36** (1 week) — unblocks f32 state fields at the IR builder layer.
-4. **V-03** (1 week) — unblocks nested-struct layouts at the codegen/IVE layer.
-5. **V-37** (2 days) — closes the alignment gap opened by V-03.
-6. **V-40** (1 day) — delete the legacy `bridge_type_size`.
-7. **V-39** triage (ongoing) — get the test suite above 97%.
-8. **V-26** (2 weeks) — unblocks SPIR-V embedding and font subsetting.
-9. **V-11** (2–4 weeks) — unblocks IME channels.
-10. **V-16** (5 weeks) — close the capability-model security gap.
-11. **V-13** (6 weeks) — SIMD coverage for text-shaper acceleration.
-12. **V-14** (defer to v2) — f32 PMT Lean proof.
-13. **V-41** (1 day) — verify stale doc refs are gone.
+**Bridge-fix epic** (~10 weeks, expanded from original 3.5 weeks after
+Wave A surfaced V-44, V-46, V-NEW-2, V-A2-1, V-NEW-1 in the same bug
+family). Sequenced per ADR dependency edges:
 
-Steps 1–6 form a single coherent "bridge fix" epic — total ~3.5 weeks
-of focused work, after which f32-coordinate nested-struct state fields
-work end-to-end. This is the prerequisite for every WOMB layout and
-renderer module.
+1. **ADR-0001 / V-34** (3 days) — add f32/f64 arms to `bridge_type_to_ir_type`. No deps.
+2. **ADR-0002 / V-35 + V-44** (1 week + 2 days) — fix `type_size_from_name` + `type_alignment` to consult layouts table. No deps.
+3. **ADR-0004 / V-03 + V-NEW-2** (1 week + 3 days) — migrate `build_pmt_layout_specs` + IVE `rederive_layout` to `bridge_type_size_with_layouts`. Deps: ADR-0001, ADR-0002.
+4. **ADR-0003 / V-36 + V-A2-1** (1 week + 1 week) — thread IRType through StateRead/StateWrite + fix `Alloc { size: 0 }`. Deps: ADR-0001, ADR-0004.
+5. **V-46** (1 week) — fix `resolve_state_array_access` `_ => (1, None)`. Deps: ADR-0002.
+6. **V-NEW-1** (1 week) — fix `allocate(<non-literal>)` truncation. Deps: ADR-0002.
+7. **ADR-0005 / V-40** (1 day) — delete legacy `bridge_type_size` + delete `cc`/`find-msvc-tools`/`shlex` build-deps. Deps: ADR-0004 landed.
+8. **ADR-0009** — re-run full test suite on `main` HEAD. No deps; can run in parallel with steps 1–7.
+
+**After the epic lands**:
+
+9. **ADR-0008** (3 days) — fix `discharge_rate` denominator. No deps.
+10. **ADR-0006** — defer f32 PMT Lean proof to v2; add `__float_overflow_trap` stub on all 19 backends. No deps (documentation + stub).
+11. **ADR-0007** (7 weeks) — HMAC-SHA256 capability signatures + wire `verify_capability`. No deps on the bridge-fix epic but should land after ADR-0005 (deps cleanup) to avoid merge conflicts in `Cargo.toml`.
+12. **ADR-0010** (1 day) — adopt "5 external crates max" policy + document in `contributing.md`. Deps: ADR-0005 landed.
+
+**Test-suite triage** (after ADR-0009 produces fresh numbers):
+
+13. Triage the ppc64/ppc64le loop-lowering cluster (235 failures, ~12% of all failures, likely single PR fix per A-4's hypothesis).
+14. Triage m68k TO failures (80% of all TOs; likely V-A2-8 F32 softfloat returning 0.0 → infinite loops).
+15. Triage HPPA F64 softfloat failures (V-A2-7).
+
+**Deferred ADRs** (need more design work, tracked but not yet
+actionable):
+
+- V-13 (SIMD coverage) — needs benchmarking data first
+- V-11 (session types AST/IR plumbing) — IVE-side work is done, design needs more thought
+- V-26 (const byte arrays) — syntax design needs more thought
+- Unified `VumaType` refactor — too large for an ADR, needs separate RFC
+- Effect enum wire-vs-delete decision (V-A3-7) — needs usage analysis
+
+The bridge-fix epic (steps 1–7, ~10 weeks) is the prerequisite for
+every WOMB layout and renderer module that uses f32 coordinates or
+nested-struct state fields.
