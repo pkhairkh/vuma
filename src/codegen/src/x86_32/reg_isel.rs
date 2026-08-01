@@ -919,31 +919,13 @@ fn emit_instruction(
                     code.extend(encode_cmp_reg_imm32(lhs_reg, imm as i32));
                 }
             }
+            let dst_reg = load_to_reg(dst, alloc, code);
             let cc = cmp_kind_to_cc(kind);
-            // Always setcc into EAX first, then move to dst or spill.
-            // This prevents reload-clobbers-Cmp-result hazard.
-            code.extend(encode_setcc(cc, Gpr::Rax));
-            code.extend(encode_movzx_reg8(Gpr::Rax, Gpr::Rax));
-            if let IRValue::Register(vreg_id) = dst {
-                let root = alloc.coalesced_map.get(vreg_id).unwrap_or(vreg_id);
-                if let Some(slot) = alloc.spill_slot(*root) {
-                    code.extend(encode_mov_mem_reg(Gpr::Rbp, slot.offset, Gpr::Rax));
-                    reads.push(phys(lhs_reg));
-                    return Ok(("cmp".to_string(), reads, writes));
-                }
-                if let Some(preg) = alloc.vreg_to_preg.get(root) {
-                    if let Some(dst_gpr) = preg_to_gpr(preg) {
-                        if dst_gpr != Gpr::Rax {
-                            code.extend(encode_mov_reg_reg(dst_gpr, Gpr::Rax));
-                        }
-                        reads.push(phys(lhs_reg));
-                        writes.push(phys(dst_gpr));
-                        return Ok(("cmp".to_string(), reads, writes));
-                    }
-                }
-            }
+            code.extend(encode_setcc(cc, dst_reg));
+            // Zero-extend the 8-bit result to 32-bit.
+            code.extend(encode_movzx_reg8(dst_reg, dst_reg));
             reads.push(phys(lhs_reg));
-            writes.push(phys(Gpr::Rax));
+            writes.push(phys(dst_reg));
             "cmp".to_string()
         }
 
@@ -1161,19 +1143,7 @@ fn emit_instruction(
 
         // ── CondBranch ──
         IRInstr::CondBranch { cond, true_target, false_target, .. } => {
-            // Check if cond is spilled — reload from spill slot into EAX
-            // to avoid reading a clobbered EAX.
-            let cond_reg = if let IRValue::Register(vreg_id) = cond {
-                let root = alloc.coalesced_map.get(vreg_id).unwrap_or(vreg_id);
-                if let Some(slot) = alloc.spill_slot(*root) {
-                    code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rbp, slot.offset));
-                    Gpr::Rax
-                } else {
-                    load_to_reg(cond, alloc, code)
-                }
-            } else {
-                load_to_reg(cond, alloc, code)
-            };
+            let cond_reg = load_to_reg(cond, alloc, code);
             code.extend(encode_test_reg_reg(cond_reg, cond_reg));
             // jne true_block (rel32)
             let offset_pos = code.len() + 2; // after 0x0F 0x85
