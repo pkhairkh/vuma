@@ -379,24 +379,70 @@ fn emit_instruction(
             if matches!(ty, Some(IRType::F32) | Some(IRType::F64)) { return emit_fp_fallback(instr); }
             let dst_reg = load_to_reg(dst, alloc, code);
             let lhs_reg = load_to_reg(lhs, alloc, code);
-            let rhs_reg = load_to_reg(rhs, alloc, code);
+            // Use immediate form for ops that support it (Add, Sub, And, Or,
+            // Xor, Shl, ShrL, ShrA) when rhs is a small immediate. This
+            // avoids loading the immediate into At ($1) scratch which would
+            // clobber lhs if lhs was also an immediate loaded into At.
+            let rhs_val = resolve_value(rhs, alloc);
+            let use_imm = match (&op, &rhs_val) {
+                // Daddiu imm is 16-bit signed: -32768..=32767
+                (BinOpKind::Add, ResolvedVal::Imm(imm)) => *imm >= -32768 && *imm <= 32767,
+                // Sub uses Daddiu with negated imm: need -imm in [-32768, 32767]
+                (BinOpKind::Sub, ResolvedVal::Imm(imm)) => *imm >= -32767 && *imm <= 32768,
+                // Andi/Ori/Xori imm is 16-bit unsigned: 0..=65535
+                (BinOpKind::And, ResolvedVal::Imm(imm)) => *imm >= 0 && *imm <= 0xFFFF,
+                (BinOpKind::Or,  ResolvedVal::Imm(imm)) => *imm >= 0 && *imm <= 0xFFFF,
+                (BinOpKind::Xor, ResolvedVal::Imm(imm)) => *imm >= 0 && *imm <= 0xFFFF,
+                // Dsll/Dsrl/Dsra sa is 6-bit: 0..=63
+                (BinOpKind::Shl,  ResolvedVal::Imm(imm)) => *imm >= 0 && *imm <= 63,
+                (BinOpKind::ShrL, ResolvedVal::Imm(imm)) => *imm >= 0 && *imm <= 63,
+                (BinOpKind::ShrA, ResolvedVal::Imm(imm)) => *imm >= 0 && *imm <= 63,
+                _ => false,
+            };
+            let rhs_reg = if use_imm { Gpr::Zero } else { load_to_reg(rhs, alloc, code) };
             match op {
                 BinOpKind::SDiv => { code.extend_from_slice(&Instruction::Ddiv { rs: lhs_reg, rt: rhs_reg }.encode()); code.extend_from_slice(&Instruction::Mflo { rd: dst_reg }.encode()); code.extend_from_slice(&Instruction::Nop.encode()); }
                 BinOpKind::UDiv => { code.extend_from_slice(&Instruction::Ddivu { rs: lhs_reg, rt: rhs_reg }.encode()); code.extend_from_slice(&Instruction::Mflo { rd: dst_reg }.encode()); code.extend_from_slice(&Instruction::Nop.encode()); }
                 BinOpKind::SRem => { code.extend_from_slice(&Instruction::Ddiv { rs: lhs_reg, rt: rhs_reg }.encode()); code.extend_from_slice(&Instruction::Mfhi { rd: dst_reg }.encode()); code.extend_from_slice(&Instruction::Nop.encode()); }
                 BinOpKind::URem => { code.extend_from_slice(&Instruction::Ddivu { rs: lhs_reg, rt: rhs_reg }.encode()); code.extend_from_slice(&Instruction::Mfhi { rd: dst_reg }.encode()); code.extend_from_slice(&Instruction::Nop.encode()); }
-                BinOpKind::And => code.extend_from_slice(&Instruction::And { rd: dst_reg, rs: lhs_reg, rt: rhs_reg }.encode()),
-                BinOpKind::Or => code.extend_from_slice(&Instruction::Or { rd: dst_reg, rs: lhs_reg, rt: rhs_reg }.encode()),
-                BinOpKind::Xor => code.extend_from_slice(&Instruction::Xor { rd: dst_reg, rs: lhs_reg, rt: rhs_reg }.encode()),
-                BinOpKind::Shl => code.extend_from_slice(&Instruction::Dsllv { rd: dst_reg, rt: lhs_reg, rs: rhs_reg }.encode()),
-                BinOpKind::ShrL => code.extend_from_slice(&Instruction::Dsrlv { rd: dst_reg, rt: lhs_reg, rs: rhs_reg }.encode()),
-                BinOpKind::ShrA => code.extend_from_slice(&Instruction::Dsrav { rd: dst_reg, rt: lhs_reg, rs: rhs_reg }.encode()),
-                BinOpKind::Add => code.extend_from_slice(&Instruction::Daddu { rd: dst_reg, rs: lhs_reg, rt: rhs_reg }.encode()),
-                BinOpKind::Sub => code.extend_from_slice(&Instruction::Dsubu { rd: dst_reg, rs: lhs_reg, rt: rhs_reg }.encode()),
+                BinOpKind::And => {
+                    if use_imm { if let ResolvedVal::Imm(imm) = rhs_val { code.extend_from_slice(&Instruction::Andi { rt: dst_reg, rs: lhs_reg, imm: imm as u32 }.encode()); } }
+                    else { code.extend_from_slice(&Instruction::And { rd: dst_reg, rs: lhs_reg, rt: rhs_reg }.encode()); }
+                }
+                BinOpKind::Or => {
+                    if use_imm { if let ResolvedVal::Imm(imm) = rhs_val { code.extend_from_slice(&Instruction::Ori { rt: dst_reg, rs: lhs_reg, imm: imm as u32 }.encode()); } }
+                    else { code.extend_from_slice(&Instruction::Or { rd: dst_reg, rs: lhs_reg, rt: rhs_reg }.encode()); }
+                }
+                BinOpKind::Xor => {
+                    if use_imm { if let ResolvedVal::Imm(imm) = rhs_val { code.extend_from_slice(&Instruction::Xori { rt: dst_reg, rs: lhs_reg, imm: imm as u32 }.encode()); } }
+                    else { code.extend_from_slice(&Instruction::Xor { rd: dst_reg, rs: lhs_reg, rt: rhs_reg }.encode()); }
+                }
+                BinOpKind::Shl => {
+                    if use_imm { if let ResolvedVal::Imm(imm) = rhs_val { code.extend_from_slice(&Instruction::Dsll { rd: dst_reg, rt: lhs_reg, sa: imm as u32 }.encode()); } }
+                    else { code.extend_from_slice(&Instruction::Dsllv { rd: dst_reg, rt: lhs_reg, rs: rhs_reg }.encode()); }
+                }
+                BinOpKind::ShrL => {
+                    if use_imm { if let ResolvedVal::Imm(imm) = rhs_val { code.extend_from_slice(&Instruction::Dsrl { rd: dst_reg, rt: lhs_reg, sa: imm as u32 }.encode()); } }
+                    else { code.extend_from_slice(&Instruction::Dsrlv { rd: dst_reg, rt: lhs_reg, rs: rhs_reg }.encode()); }
+                }
+                BinOpKind::ShrA => {
+                    if use_imm { if let ResolvedVal::Imm(imm) = rhs_val { code.extend_from_slice(&Instruction::Dsra { rd: dst_reg, rt: lhs_reg, sa: imm as u32 }.encode()); } }
+                    else { code.extend_from_slice(&Instruction::Dsrav { rd: dst_reg, rt: lhs_reg, rs: rhs_reg }.encode()); }
+                }
+                BinOpKind::Add => {
+                    if use_imm { if let ResolvedVal::Imm(imm) = rhs_val { code.extend_from_slice(&Instruction::Daddiu { rt: dst_reg, rs: lhs_reg, imm: imm as i32 }.encode()); } }
+                    else { code.extend_from_slice(&Instruction::Daddu { rd: dst_reg, rs: lhs_reg, rt: rhs_reg }.encode()); }
+                }
+                BinOpKind::Sub => {
+                    if use_imm { if let ResolvedVal::Imm(imm) = rhs_val { code.extend_from_slice(&Instruction::Daddiu { rt: dst_reg, rs: lhs_reg, imm: (-imm) as i32 }.encode()); } }
+                    else { code.extend_from_slice(&Instruction::Dsubu { rd: dst_reg, rs: lhs_reg, rt: rhs_reg }.encode()); }
+                }
                 BinOpKind::Mul => { code.extend_from_slice(&Instruction::Dmult { rs: lhs_reg, rt: rhs_reg }.encode()); code.extend_from_slice(&Instruction::Mflo { rd: dst_reg }.encode()); code.extend_from_slice(&Instruction::Nop.encode()); }
                 _ => code.extend_from_slice(&Instruction::Daddu { rd: dst_reg, rs: lhs_reg, rt: rhs_reg }.encode()),
             }
-            reads.push(phys(lhs_reg)); reads.push(phys(rhs_reg)); writes.push(phys(dst_reg));
+            reads.push(phys(lhs_reg));
+            if !use_imm { reads.push(phys(rhs_reg)); }
+            writes.push(phys(dst_reg));
             "binop".to_string()
         }
 
