@@ -578,6 +578,15 @@ fn emit_instruction(
             // Check if this is a 32-bit operation
             let is_32bit = matches!(ty, Some(IRType::U32) | Some(IRType::I32));
             let lhs_reg = load_to_reg(lhs, alloc, code);
+
+            // The x86_64 div/idiv instructions clobber RAX (quotient) and
+            // RDX (remainder).  If the register allocator has assigned live
+            // values to RAX or RDX that span this Div, those values would
+            // be corrupted.  Save RAX/RDX before the Div, save the quotient
+            // to R11 (scratch), restore RAX/RDX, then move R11 to dst.
+            code.extend(encode_push(Gpr::Rax));
+            code.extend(encode_push(Gpr::Rdx));
+
             if is_32bit {
                 // 32-bit unsigned division: zero-extend EAX, zero EDX
                 code.extend(encode_mov_reg_reg(Gpr::Rax, lhs_reg));
@@ -617,8 +626,14 @@ fn emit_instruction(
                     }
                 }
             }
+            // Save quotient (in RAX) to R11 scratch BEFORE restoring RAX/RDX.
+            code.extend(encode_mov_reg_reg(Gpr::R11, Gpr::Rax));
+            // Restore old RDX and RAX.
+            code.extend(encode_pop(Gpr::Rdx));
+            code.extend(encode_pop(Gpr::Rax));
+            // Move quotient from R11 to dst_reg.
             let dst_reg = load_to_reg(dst, alloc, code);
-            code.extend(encode_mov_reg_reg(dst_reg, Gpr::Rax));
+            code.extend(encode_mov_reg_reg(dst_reg, Gpr::R11));
             reads.push(phys(lhs_reg));
             writes.push(phys(dst_reg));
             "div".to_string()
@@ -633,17 +648,25 @@ fn emit_instruction(
             match op {
                 BinOpKind::SDiv | BinOpKind::SRem => {
                     // x86_64 idiv: rax = lhs, divide by rhs. Result in RAX, remainder in RDX.
+                    // Save RAX/RDX (may hold live values) before idiv clobbers them.
+                    // Use R11 as scratch to save the result before restoring.
                     let lhs_reg = load_to_reg(lhs, alloc, code);
+                    code.extend(encode_push(Gpr::Rax));
+                    code.extend(encode_push(Gpr::Rdx));
                     code.extend(encode_mov_reg_reg(Gpr::Rax, lhs_reg));
                     code.extend(encode_cqo()); // sign-extend RAX into RDX:RAX
                     let rhs_reg = load_to_reg(rhs, alloc, code);
                     code.extend(encode_idiv_reg(rhs_reg));
-                    let dst_reg = load_to_reg(dst, alloc, code);
+                    // Save result to R11 BEFORE restoring RAX/RDX.
                     if *op == BinOpKind::SRem {
-                        code.extend(encode_mov_reg_reg(dst_reg, Gpr::Rdx));
+                        code.extend(encode_mov_reg_reg(Gpr::R11, Gpr::Rdx)); // remainder
                     } else {
-                        code.extend(encode_mov_reg_reg(dst_reg, Gpr::Rax));
+                        code.extend(encode_mov_reg_reg(Gpr::R11, Gpr::Rax)); // quotient
                     }
+                    code.extend(encode_pop(Gpr::Rdx));
+                    code.extend(encode_pop(Gpr::Rax));
+                    let dst_reg = load_to_reg(dst, alloc, code);
+                    code.extend(encode_mov_reg_reg(dst_reg, Gpr::R11));
                     reads.push(phys(lhs_reg));
                     reads.push(phys(rhs_reg));
                     writes.push(phys(dst_reg));
@@ -651,16 +674,21 @@ fn emit_instruction(
                 }
                 BinOpKind::UDiv | BinOpKind::URem => {
                     let lhs_reg = load_to_reg(lhs, alloc, code);
+                    code.extend(encode_push(Gpr::Rax));
+                    code.extend(encode_push(Gpr::Rdx));
                     code.extend(encode_mov_reg_reg(Gpr::Rax, lhs_reg));
                     code.extend(encode_xor_reg_reg(Gpr::Rdx, Gpr::Rdx)); // zero RDX
                     let rhs_reg = load_to_reg(rhs, alloc, code);
                     code.extend(encode_div_reg(rhs_reg));
-                    let dst_reg = load_to_reg(dst, alloc, code);
                     if *op == BinOpKind::URem {
-                        code.extend(encode_mov_reg_reg(dst_reg, Gpr::Rdx));
+                        code.extend(encode_mov_reg_reg(Gpr::R11, Gpr::Rdx)); // remainder
                     } else {
-                        code.extend(encode_mov_reg_reg(dst_reg, Gpr::Rax));
+                        code.extend(encode_mov_reg_reg(Gpr::R11, Gpr::Rax)); // quotient
                     }
+                    code.extend(encode_pop(Gpr::Rdx));
+                    code.extend(encode_pop(Gpr::Rax));
+                    let dst_reg = load_to_reg(dst, alloc, code);
+                    code.extend(encode_mov_reg_reg(dst_reg, Gpr::R11));
                     reads.push(phys(lhs_reg));
                     reads.push(phys(rhs_reg));
                     writes.push(phys(dst_reg));
@@ -1235,7 +1263,43 @@ fn emit_instruction(
             // x86_64 System V calling convention:
             //   args in RDI, RSI, RDX, RCX, R8, R9 (first 6 integer args)
             //   return in RAX
+            //
+            // Caller-saved registers (RAX, RCX, RDX, RSI, RDI, R8, R9, R10,
+            // R11) are clobbered by the call.  The register allocator may
+            // have assigned live values to these registers (it "prefers"
+            // callee-saved for call-crossing intervals but will use
+            // caller-saved when callee-saved are exhausted).  To preserve
+            // those values across the call, save all caller-saved registers
+            // (except RAX when the call has a return value) before setting
+            // up arguments, and restore them after the call.
             let arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx, Gpr::R8, Gpr::R9];
+            let has_return = dst.is_some();
+
+            // Caller-saved registers to preserve.  RAX is excluded when the
+            // call returns a value (it holds the return value after the call).
+            // RSP and RBP are never caller-saved-allocatable so are not listed.
+            let saved_regs: Vec<Gpr> = if has_return {
+                vec![Gpr::Rcx, Gpr::Rdx, Gpr::Rsi, Gpr::Rdi,
+                     Gpr::R8, Gpr::R9, Gpr::R10, Gpr::R11]
+            } else {
+                vec![Gpr::Rax, Gpr::Rcx, Gpr::Rdx, Gpr::Rsi, Gpr::Rdi,
+                     Gpr::R8, Gpr::R9, Gpr::R10, Gpr::R11]
+            };
+
+            // Maintain 16-byte stack alignment: the System V ABI requires
+            // RSP to be 16-aligned at the `call` instruction.  Each `push`
+            // subtracts 8, so an even number of pushes keeps alignment.
+            // If saved_regs has odd length, insert an 8-byte sub for padding.
+            let need_align_pad = saved_regs.len() % 2 == 1;
+            if need_align_pad {
+                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
+            }
+            for &g in &saved_regs {
+                code.extend(encode_push(g));
+            }
+
+            // Set up arguments (may use R11 as scratch for immediates —
+            // that's fine, R11 was just saved).
             for (i, arg) in args.iter().enumerate().take(6) {
                 let arg_reg = load_to_reg(arg, alloc, code);
                 if arg_reg != arg_regs[i] {
@@ -1255,13 +1319,35 @@ fn emit_instruction(
                 symbol: fname.clone(),
                 reloc_type: "R_X86_64_PLT32".to_string(),
             });
-            if let Some(dst_val) = dst {
+
+            // If the call has a return value, it's in RAX.  RAX is NOT in
+            // saved_regs (excluded when has_return=true), so the pops below
+            // won't clobber it.  Move RAX to dst_reg AFTER restoring all
+            // saved registers (dst_reg may itself be a saved register).
+            let dst_reg_opt = if let Some(dst_val) = dst {
                 let dst_reg = load_to_reg(dst_val, alloc, code);
+                writes.push(phys(dst_reg));
+                Some(dst_reg)
+            } else {
+                None
+            };
+
+            // Restore caller-saved registers (reverse order).
+            for &g in saved_regs.iter().rev() {
+                code.extend(encode_pop(g));
+            }
+            if need_align_pad {
+                code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
+            }
+
+            // Now move the return value from RAX to dst_reg (after all
+            // pops, so dst_reg is no longer at risk of being overwritten).
+            if let Some(dst_reg) = dst_reg_opt {
                 if dst_reg != Gpr::Rax {
                     code.extend(encode_mov_reg_reg(dst_reg, Gpr::Rax));
                 }
-                writes.push(phys(dst_reg));
             }
+
             if *is_extern {
                 "call_extern".to_string()
             } else {
