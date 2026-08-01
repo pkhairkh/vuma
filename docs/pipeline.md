@@ -213,7 +213,7 @@ The Lean development is the **formal specification** of the PMT model:
 it defines the arena, layout, linear-token, and information-flow
 predicates and proves the corresponding soundness theorems. The Lean
 proofs are machine-checked (`lake build` passes; sorry-audit by
-`scripts/check_lean.sh`) but they are **not linked into the compiler
+`scripts/check-lean.sh`) but they are **not linked into the compiler
 binary**. Build-time verification goes through Z3 and the hand-written
 Rust verifiers in `src/ive/`; the Lean proofs document *what* is being
 checked, not *how the binary checks it*.

@@ -76,13 +76,14 @@ passed=<N> failed=<N> unverified=<N> total=<N> discharge_rate=<M>%
 The `discharge_rate` is the fraction of proof obligations that the IVE
 discharged (via Z3 or trivial-true elision) over the total obligations
 collected from the program. The exact wire format is in
-`src/bin/compile_dump.rs:226` and `src/ive/src/result.rs`.
+`src/bin/compile_dump.rs:228` and `src/ive/src/result.rs`.
 
 The IVE has three subsystems, all hand-written in Rust (no Lean FFI — see
 §6.1):
 
 - **PMT state verifiers** — `state_read`, `state_write`, `state_transform`
-  (`src/ive/src/state_{read,write,transform}.rs`). These check that every
+  (`src/ive/src/state_read.rs`, `src/ive/src/state_write.rs`,
+  `src/ive/src/state_transform.rs`). These check that every
   `state.field` read/write is type-correct against the registered
   `PmtLayoutSpec` and that `State<T>`-parameterized transforms preserve the
   layout's invariants.
@@ -482,7 +483,7 @@ analysis. Each is now a hard error with a migration message:
 - **`--repl`** — use the `vuma repl` subcommand instead. See
   `src/main.rs:731-737`.
 - **`--no-memory-safety`** — memory-safety analysis is mandatory. See
-  `src/main.rs:747-750`.
+  `src/main.rs:747-753`.
 
 The `--strict-ive` flag is retained but is now a no-op for the
 linear-channel discipline (which is an unconditional HARD-FAIL); it still
@@ -812,22 +813,27 @@ FFI bridge in the production compiler. The history is documented in
 state verifiers (`verify_state_reads`, `verify_state_writes`,
 `verify_all_transforms`) through Lean-extracted `lean_verify_*_prim`
 externs via a `lean_ffi_linked` build cfg. The default (stub) path linked
-`proof/extracted/lean_stub.c`, which hardcoded success (return 1) for
-every `lean_verify_*` symbol — every program's PMT state verification
-"passed" regardless of actual safety. The real (linked) path was
-effectively dead code (`build.rs` never emitted `lean_ffi_linked` in the
-default build). **The entire bridge has been deleted.**
+a now-deleted `proof/extracted/lean_stub.c`, which hardcoded success
+(return 1) for every `lean_verify_*` symbol — every program's PMT state
+verification "passed" regardless of actual safety. The real (linked)
+path was effectively dead code (`build.rs` never emitted `lean_ffi_linked`
+in the default build). **The entire bridge — including the
+`proof/extracted/` directory — was deleted in v0.2.0-alpha.10.**
 
 The production verifiers are now **hand-written Rust**
-(`src/ive/src/state_{read,write,transform}.rs`,
-`session_type.rs`, `information_flow.rs`) and contract discharge is
-handled by **Z3** (§5.2). `proof/extracted/lean_stub.c` and
-`proof/extracted/pmt_check.rs` are kept on disk for reference but are no
-longer compiled or linked. The `pmt-runtime-check` Cargo feature is
-retained as a no-op for `vuma-ive` (so existing CI commands do not break)
-but still activates the independent pure-Rust `pmt_check` module in
-`vuma-codegen` (a hand-translation of the Lean checkers, parity-tested,
-and NOT dependent on the stub).
+(`src/ive/src/state_read.rs`, `src/ive/src/state_write.rs`,
+`src/ive/src/state_transform.rs`, `session_type.rs`,
+`information_flow.rs`) and contract discharge is handled by **Z3**
+(§5.2). The former `proof/extracted/lean_stub.c` and
+`proof/extracted/pmt_check.rs` were removed with the rest of the
+`proof/extracted/` directory; the Lean proofs themselves remain in
+`proof/` as standalone specification artefacts that are no longer linked
+into the compiler binary (see [caveats.md §3.2](./caveats.md)). The
+`pmt-runtime-check` Cargo feature is retained as a no-op for `vuma-ive`
+(so existing CI commands do not break) but still activates the
+independent pure-Rust `pmt_check` module in `vuma-codegen` (a
+hand-translation of the Lean checkers, parity-tested, and NOT dependent
+on the deleted stub).
 
 **Build.** Build the proofs with `make proof` from the repo root, or
 `cd proof && lake build` for the raw Lake invocation. The build is

@@ -60,8 +60,8 @@ for why this is a correctness requirement, not a fallback.
 (`x86_64`, `x86_32`, `arm32`, `riscv64`, `riscv32`, `mips64`, `ppc64`,
 `loongarch64`, `s390x`, `sparc64`, `alpha`, `hppa`, `m68k`) **+**
 `aarch64` (register-based via `Emitter::emit_function_regalloc` in
-`emit.rs`) = **15 backends with full register-based emission**. **+** 4
-byte-swap wrappers that inherit a parent's emission = 19. (`wasm32` is
+`emit.rs`) = **14 backends with full register-based emission**. **+** 4
+byte-swap wrappers that inherit a parent's emission = 18. (`wasm32` is
 listed in row 19 because its structured stack-machine emission is its
 own emission path — not register-based, not inherited, not a fallback.)
 
@@ -502,7 +502,7 @@ files:
 
 | File                          | Role                                                                                    |
 |-------------------------------|-----------------------------------------------------------------------------------------|
-| `src/codegen/src/arm64.rs`    | ISA encoder/decoder: `Instruction`, `Register`, `Condition`, `Operand` enums + `encode()`/`decode()`. |
+| `src/codegen/src/aarch64/mod.rs` | ISA encoder/decoder: `Instruction`, `Register`, `Condition`, `Operand` enums + `encode()`/`decode()`. |
 | `src/codegen/src/backend.rs`  | `AArch64Backend` struct, `TargetInfo` impl, `allocate_registers` driver (at `:3162`). The `contains_fork` check is at `:3230`; the dispatch is at `:3244`/`:3274`. |
 | `src/codegen/src/emit.rs`     | `Emitter::emit_function_regalloc` — the register-based emitter. aarch64 calls `emitter.emit_function(func, Some(&alloc))` (`backend.rs:3261`). |
 
@@ -522,10 +522,10 @@ Each wrapper is a single `.rs` file under `src/codegen/src/`:
 
 | Backend       | File                                  | Wraps            | `allocate_registers` delegation line |
 |---------------|---------------------------------------|------------------|--------------------------------------|
-| `aarch64_be`  | `src/codegen/src/aarch64_be.rs`       | `AArch64Backend` | `:150-151` (one-line `self.inner.allocate_registers(func)`) |
-| `armeb`       | `src/codegen/src/armeb.rs`            | `Arm32Backend`   | `:185-186`                           |
-| `mips64be`    | `src/codegen/src/mips64be.rs`         | `Mips64Backend`  | `:200-201`                           |
-| `ppc64le`     | `src/codegen/src/ppc64le.rs`          | `PPC64Backend`   | `:400-406`                           |
+| `aarch64_be`  | `src/codegen/src/aarch64_be/mod.rs`   | `AArch64Backend` | `:153-155` (one-line `self.inner.allocate_registers(func)`) |
+| `armeb`       | `src/codegen/src/armeb/mod.rs`        | `Arm32Backend`   | `:188-190`                           |
+| `mips64be`    | `src/codegen/src/mips64be/mod.rs`     | `Mips64Backend`  | `:203-205`                           |
+| `ppc64le`     | `src/codegen/src/ppc64le/mod.rs`      | `PPC64Backend`   | `:403-409`                           |
 
 "One-line" delegation means the wrapper's `allocate_registers` body is
 literally `self.inner.allocate_registers(func)` — the wrapper adds no
@@ -572,22 +572,22 @@ little-endian output.
 
 | #  | Wrapper      | Wraps                   | Instruction byte-swap                                 | ELF header swap                            | `allocate_registers` delegation   |
 |---:|--------------|-------------------------|-------------------------------------------------------|--------------------------------------------|-----------------------------------|
-|  4 | `aarch64_be` | `AArch64Backend::new`   | **None** (ARM ARM D6.1.3 — instr. fetches always LE)  | `swap_le_elf_to_be` (header/PHDR/SHDR)     | one-line (`aarch64_be.rs:150-151`)  |
-|  6 | `armeb`      | `Arm32Backend::new`     | **LE→BE** (BE32 mode, every 4-byte instr. word)       | `swap_le_elf32_to_be` (header + instr.)    | one-line (`armeb.rs:185-186`)       |
-| 10 | `mips64be`   | `Mips64Backend::new_be` | **LE→BE** (instr. words only — parent already BE hdr) | None (parent already BE on header)         | one-line (`mips64be.rs:200-201`)    |
-| 12 | `ppc64le`    | `PPC64Backend::new_le`  | **BE→LE** (instr. words + `EI_DATA` `MSB→LSB` + hdr)  | `swap_be_elf_to_le` (full)                 | one-line (`ppc64le.rs:400-406`)     |
+|  4 | `aarch64_be` | `AArch64Backend::new`   | **None** (ARM ARM D6.1.3 — instr. fetches always LE)  | `swap_le_elf_to_be` (header/PHDR/SHDR)     | one-line (`aarch64_be/mod.rs:153-155`)  |
+|  6 | `armeb`      | `Arm32Backend::new`     | **LE→BE** (BE32 mode, every 4-byte instr. word)       | `swap_le_elf32_to_be` (header + instr.)    | one-line (`armeb/mod.rs:188-190`)       |
+| 10 | `mips64be`   | `Mips64Backend::new_be` | **LE→BE** (instr. words only — parent already BE hdr) | None (parent already BE on header)         | one-line (`mips64be/mod.rs:203-205`)    |
+| 12 | `ppc64le`    | `PPC64Backend::new_le`  | **BE→LE** (instr. words + `EI_DATA` `MSB→LSB` + hdr)  | `swap_be_elf_to_le` (full)                 | one-line (`ppc64le/mod.rs:403-409`)     |
 
 ### 7.2 `aarch64_be` — ELF-only swap, instructions stay LE
 
 Per ARM ARM DDI 0487 §D6.1.3, AArch64 instruction fetches are always
-little-endian regardless of `PSTATE.E`. `aarch64_be.rs` therefore
+little-endian regardless of `PSTATE.E`. `aarch64_be/mod.rs` therefore
 forwards the parent's instruction bytes unchanged and only swaps the
 ELF header/PHDR/SHDR fields via `swap_le_elf_to_be`.
 
 ### 7.3 `armeb` — BE32 word-swap wrapper
 
 ARMv7 BE32 mode requires each 4-byte instruction word stored
-big-endian. `armeb.rs` byte-swaps every 4-byte instruction word
+big-endian. `armeb/mod.rs` byte-swaps every 4-byte instruction word
 LE→BE inside `encode_function`, `return_stub`, `trampoline`, and the
 executable `PT_LOAD` segment.
 
@@ -762,7 +762,7 @@ The four wrapper backends inherit the parent's call.
 
 Every backend emits three named syscall-stub symbols that implement
 the runtime side of the PMT safety invariants. The exit codes match
-the Lean `TrapCode.to_exit` mapping (`proof/PMT/Soundness.lean:90-99`):
+the Lean `TrapCode.to_exit` mapping (`proof/PMT/Soundness.lean:162-171`):
 
 | Runtime stub (emitted by every backend)                | Exit code | Lean `TrapCode` constructor |
 |--------------------------------------------------------|----------:|-----------------------------|
