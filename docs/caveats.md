@@ -125,9 +125,9 @@ current per-ISA matrix. The notable live ones:
 
 | Backend | Quirk | Status |
 |---------|-------|--------|
-| `alpha` | QEMU 10.0-alpha rejects `CMPULE` (function `0x3D` on INTA major opcode `0x10`) and raises `SIGILL`. Workaround: emulate `CMPULE(a, b)` as `!CMPULT(b, a)` (a 2-instruction `CMPULT` + `XOR` sequence). Real DEC Alpha 21264 hardware implements `CMPULE`; this is purely a QEMU translator bug. Removal: QEMU 11.x. Cited in `alpha/mod.rs` at the `Instruction::encode` special case for `CMPULE`. | OPEN (QEMU bug) |
-| `m68k` | QEMU 7.2 m68k translator has known bugs that VUMA's encoder works around (variable-length encoding edge cases, `ADDQ`/`Scc` mode-field confusion, MOVEM). QEMU 8.x removes most of them; QEMU 10.x recommended. Cited inline in `m68k/mod.rs`. | OPEN (QEMU bug) |
-| `hppa` | QEMU 7.2 hppa `LDIL`/`BL` decoder had multiple bugs (nullify bit position, 17-bit displacement non-linear split, `D=0` vs `D=1` register selection). VUMA's `hppa/mod.rs` encoder was rewritten to match QEMU's `%assemble_17` decoder. QEMU 8.x removes the bugs. | OPEN (QEMU bug) |
+| `alpha` | QEMU 10.0-alpha rejects `CMPULE` (function `0x3D` on INTA major opcode `0x10`) and raises `SIGILL`. Workaround: emulate `CMPULE(a, b)` as `!CMPULT(b, a)` (a 2-instruction `CMPULT` + `XOR` sequence). Real DEC Alpha 21264 hardware implements `CMPULE`; this is purely a QEMU translator bug. The `CMPULE` workaround is still in `alpha/mod.rs:373–460`. Removal: unverified — workaround still in place; no one has confirmed whether QEMU 8.x/10.x fixed the underlying INTA function 0x3F decoder bug. | OPEN (QEMU bug) |
+| `m68k` | QEMU 7.2 m68k translator has known bugs that VUMA's encoder works around (variable-length encoding edge cases, `ADDQ`/`Scc` mode-field confusion, MOVEM). QEMU 10.x is installed in CI; the workarounds (MOVEM at `m68k/mod.rs:4672–4700`, ADDI.B/CMPI.B at `5584–5614`, ROXL.L at `631`) are still in place because no one has verified whether QEMU 8.x/10.x fixed the underlying bugs. Note that m68k has broader correctness issues beyond these QEMU bugs — as of the 2026-07-31 test run, m68k passes only 80.03% of the full 1577-test corpus (see §4.5). | OPEN (QEMU bug + VUMA codegen) |
+| `hppa` | QEMU 7.2 hppa `LDIL`/`BL` decoder had multiple bugs (nullify bit position, 17-bit displacement non-linear split, `D=0` vs `D=1` register selection). VUMA's `hppa/mod.rs` encoder was rewritten to match QEMU's `%assemble_17` decoder. The `LDIL` workaround is still in place at `hppa/mod.rs:827–848`; whether QEMU 8.x+ fixed the underlying LDIL decoder bug is unverified. The hppa backend currently passes 97.59% of the full test corpus. | OPEN (QEMU bug) |
 | `riscv32` | QEMU's default rv32 CPU lacks the D (double-float) extension. Test runs require `qemu-riscv32-static -cpu max`. Not a VUMA bug. | OPEN (QEMU configuration) |
 | `mips64` | VUMA's `mips64` backend emits a *little-endian* ELF, so the LE emulator `qemu-mips64el-static` is required. `qemu-mips64-static` (BE) rejects the binary. Naming mismatch only — not a bug. | OPEN (naming mismatch) |
 
@@ -184,10 +184,14 @@ caveat.
 The test suite expects QEMU user-mode binaries on `$PATH` (one per
 backend ISA, plus `qemu-mips64el-static` for the little-endian
 `mips64` backend and `qemu-i386-static` for `x86_32`). QEMU **10.0 or
-newer** is recommended. Older QEMU 7.2.0-1 static builds still work
-for most backends but several previous-ISA-encoding workarounds that
-targeted QEMU 7.2 bugs have been removed; if you see encoding-related
-failures on an old QEMU, upgrade to 10.0+ before filing a bug.
+newer** is recommended. Older QEMU 7.2.0-1 static builds may still
+work for some backends. Several QEMU-7.2-specific workarounds (m68k
+MOVEM/ADDI.B/ROXL.L at `m68k/mod.rs`, hppa LDIL at
+`hppa/mod.rs:827–848`) are still in the encoder — they should be safe
+to remove once the minimum supported QEMU version is bumped to 8.x,
+but no one has verified whether 8.x or 10.x actually fixes the
+underlying bugs. If you see encoding-related failures on an old QEMU,
+upgrade to 10.0+ before filing a bug.
 
 ### 4.3 wasmtime for the `wasm32` row
 
