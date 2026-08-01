@@ -283,8 +283,7 @@ appropriate PMT category directory (see
 > pointer dialect (`allocate(...)`, `*ptr`). These are pre-PMT library
 > modules that have not yet been migrated. New code in `womb/kernel/` is
 > always PMT-pure; new code in `womb/lib/` should be PMT-pure whenever
-> feasible. See [`womb/crypto/README.md`](../womb/crypto/README.md) and
-> [`womb/net/README.md`](../womb/net/README.md) for the migration status.
+> feasible.
 
 ---
 
@@ -296,8 +295,10 @@ one:
 
 ### Step 1 — implement the `Backend` trait
 
-Add a new module `src/codegen/src/<arch>.rs` and implement the `Backend`
-trait (defined in `backend.rs`). The trait requires:
+Add a new module `src/codegen/src/<arch>/mod.rs` (backends are directories,
+not single `.rs` files — see any existing backend, e.g.
+[`src/codegen/src/x86_64/`](../src/codegen/src/x86_64/)) and implement the
+`Backend` trait (defined in `backend.rs`). The trait requires:
 
 | Method                  | Responsibility                                             |
 |-------------------------|------------------------------------------------------------|
@@ -341,7 +342,7 @@ the architecture. If the new backend is wasm-based (not QEMU), extend
 Add at least one PMT test under `tests/gold_standard/<arch>/` (or under an
 existing category if the test exercises a general feature) with an
 `// Expected exit code: N` header. Run the new backend on the full
-gold-standard suite to confirm agreement with the other 18 backends:
+gold-standard suite to confirm agreement with the other 19 backends:
 
 ```bash
 scripts/pi5_test_suite.sh --workers 8 --backends <arch>
@@ -357,9 +358,6 @@ Also confirm the kernel compiles on the new backend:
 > Verification is always on; the `--verify` flag has been removed from the
 > CLI. The pipeline runs IVE state verifiers + Z3 contract discharge
 > unconditionally.
-
-The full backend-adding guide (with worked examples for x86_64, aarch64, and
-riscv64) is in [`src/README.md` §Adding a new backend](../src/README.md).
 
 ---
 
@@ -430,8 +428,8 @@ file an issue against the offending backend instead.
 scripts/pi5_test_suite.sh --workers 8 --backends x86_64,aarch64,riscv64
 ```
 
-See [`tests/README.md`](../tests/README.md) for the test-suite layout and
-the runner-script reference.
+See [`testing.md`](testing.md) for the test-suite layout and the
+runner-script reference.
 
 ---
 
@@ -444,8 +442,8 @@ syscall stubs per arch, QEMU system-mode boot. Future work (K13+) will
 replace the stub inventory (no-op trap dispatch, no-op syscall indirect-call,
 AES-NI trampoline stubs, etc.) with real implementations.
 
-The full kernel architecture is in [`kernel-architecture.md`](kernel-architecture.md).
-The per-module inventory is in [`womb/kernel/README.md`](../womb/kernel/README.md).
+The full kernel architecture — including the complete per-module file
+inventory — is in [`kernel-architecture.md`](kernel-architecture.md).
 The kernel developer's recipe book (adding syscalls, drivers, filesystems,
 PMT kernel code; do/don't examples; IVE failure debugging recipe) is in
 [`kernel-developer-guide.md`](kernel-developer-guide.md). The porting guide
@@ -931,7 +929,7 @@ separate PRs first.
 
 - Reviewers will check that PMT tests use `layout` / `State<T>` / `state_new`
   only — no pointer syntax (see [§3](#3-pmt-only-test-policy)).
-- New backends must agree with the existing 18 on the full gold-standard
+- New backends must agree with the existing 19 on the full gold-standard
   suite (see [§4](#4-adding-a-new-backend)).
 - New kernel modules must follow the init-style API, use flat byte arrays
   for u32/u64 tables, use sentinel values correctly, and end with a
@@ -986,5 +984,5 @@ the same format.
 When in doubt, match the surrounding code. The codebase is its own style
 guide. For kernel questions specifically, read
 [`kernel-architecture.md`](kernel-architecture.md) and
-[`womb/kernel/README.md`](../womb/kernel/README.md) first — most of the
+[`kernel-developer-guide.md`](kernel-developer-guide.md) first — most of the
 "why is X like this" answers are there.
