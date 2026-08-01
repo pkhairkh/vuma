@@ -849,9 +849,7 @@ fn emit_instruction(
                             code.extend_from_slice(&Instruction::Srli { rd: dst_reg, rs1: dst_reg, shamt: 32 }.encode());
                         }
                         _ => {
-                            if src_reg != dst_reg {
-                                code.extend_from_slice(&Instruction::Addi { rd: dst_reg, rs1: src_reg, imm: 0 }.encode());
-                            }
+                            return emit_fp_fallback(instr);
                         }
                     }
                 }

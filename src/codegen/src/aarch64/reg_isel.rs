@@ -1173,9 +1173,7 @@ fn emit_instruction(
                             emit_instr(code, Instruction::UBFM { rd: dst_reg, rn: src_reg, immr: 0, imms: 31 });
                         }
                         _ => {
-                            if src_reg != dst_reg {
-                                emit_instr(code, Instruction::MOV { rd: dst_reg, rm: src_reg });
-                            }
+                            return emit_fp_fallback(instr);
                         }
                     }
                 }
