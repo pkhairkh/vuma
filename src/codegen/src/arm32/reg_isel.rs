@@ -883,9 +883,9 @@ fn emit_instruction(
                     }
                 }
                 _ => {
-                    if src_reg != dst_reg {
-                        code.extend_from_slice(&Instruction::Mov { rd: dst_reg, rm: src_reg, cond: Condition::Al }.encode());
-                    }
+
+                    return emit_fp_fallback(instr);
+
                 }
             }
             reads.push(phys(src_reg));
