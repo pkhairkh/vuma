@@ -7,7 +7,7 @@ set -euo pipefail
 WORKERS=4
 SKIP_BUILD=0
 NO_PUSH=0
-COMMIT=0              # --commit: opt-in to auto-commit + push (default OFF; see caveats §6 row 9)
+COMMIT=0              # --commit: opt-in to auto-commit + push (default OFF; see caveats.md §4.4)
 DRY_RUN=0             # --dry-run: show what would be committed without committing
 FRESH=0
 BACKENDS=""
@@ -755,7 +755,7 @@ def run_one(args):
             #
             # Accepted workaround: (c). Retry up to 3 times specifically on
             # rc=-13 for self_exec.vuma. All other tests get 1 attempt.
-            # See docs/architecture/caveats.md §6 row 6.
+            # See docs/caveats.md §4.4.
             max_retries = 3 if test_name == "self_exec.vuma" else 1
             for attempt in range(max_retries):
                 ep = subprocess.run(cmd, capture_output=True, timeout=exec_timeout + 3, stdin=subprocess.DEVNULL)
@@ -1040,7 +1040,7 @@ echo ""
 echo "▸ Test suite complete (exit code: $TEST_EXIT)"
 
 # ── Step 4: Commit and push results ──
-# Auto-commit is gated behind --commit (default OFF, see caveats.md §6 row 9).
+# Auto-commit is gated behind --commit (default OFF, see caveats.md §4.4).
 # Without --commit, the script prints a summary of what WOULD be committed and
 # instructions for manual commit, then exits the commit/push step WITHOUT
 # calling `git commit` or `git push`. --dry-run shows the same summary without
@@ -1107,7 +1107,7 @@ elif [ $COMMIT -eq 1 ]; then
     echo "⚠️  This will commit test_results/{failures.txt,summary.json} and push"
     echo "⚠️  to origin HEAD using the 'VUMA Test Suite' identity (or your"
     echo "⚠️  GIT_AUTHOR_* env if set). No signed commits, no PR review."
-    echo "⚠️  See docs/architecture/caveats.md §6 row 9 for context."
+    echo "⚠️  See docs/caveats.md §4.4 for context."
     echo "⚠️  ─────────────────────────────────────────────────────────────────"
     cd "$REPO_DIR"
 
@@ -1146,7 +1146,7 @@ Timestamp: $TIMESTAMP
 Pass rate: $PASS_RATE
 
 Auto-committed by pi5_test_suite.sh (--commit). No signed commits, no PR review.
-See docs/architecture/caveats.md §6 row 9. Omit --commit to skip auto-commit."; then
+See docs/caveats.md §4.4. Omit --commit to skip auto-commit."; then
             echo "ERROR: git commit failed. Test results were NOT committed."
             echo "  Run 'git status' and 'git commit' manually to diagnose."
         fi
@@ -1163,7 +1163,7 @@ See docs/architecture/caveats.md §6 row 9. Omit --commit to skip auto-commit.";
     echo "✓ Done"
 else
     # Default: auto-commit OFF. Print summary + manual commit instructions.
-    # (This is the new safe default per caveats.md §6 row 9 — the old behavior
+    # (This is the new safe default per caveats.md §4.4 — the old behavior
     # committed + pushed unconditionally on every run.)
     echo "▸ Auto-commit is OFF (no --commit flag). Test results were NOT committed/pushed."
     cd "$REPO_DIR"
@@ -1182,7 +1182,7 @@ else
     echo "  Or re-run with --commit to auto-commit (with warnings, no PR review):"
     echo "    bash scripts/pi5_test_suite.sh --skip-build --commit"
     echo ""
-    echo "  See docs/architecture/caveats.md §6 row 9 for context."
+    echo "  See docs/caveats.md §4.4 for context."
 fi
 
 echo ""
