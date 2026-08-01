@@ -111,7 +111,7 @@ const OP3_SUBC: u32 = 0x0C;
 const OP3_UDIVX: u32 = 0x0D; // V9 64-bit unsigned divide
 
 const OP3_ADDCC: u32 = 0x10;
-const OP3_SUBCC: u32 = 0x14;
+const OP3_SUBCC: u32 = 0x14; // V8 compat SUBcc (sets %icc on QEMU)
 const OP3_SDIVX: u32 = 0x2D; // V9 64-bit signed divide
 
 /// Shift op3 values.

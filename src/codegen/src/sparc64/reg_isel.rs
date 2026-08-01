@@ -333,7 +333,7 @@ fn emit_instruction(code: &mut Vec<u8>, instr: &IRInstr, alloc: &RegAllocResult,
             let c = load_to_reg(cond, alloc, code); let d = load_to_reg(dst, alloc, code);
             let f = load_to_reg(false_val, alloc, code); let t = load_to_reg(true_val, alloc, code);
             // SUBcc c, 0, %g0; MOV d, false; MOVNE d, true
-            code.extend_from_slice(&Instruction::Subcc { rd: Gpr::G0, rs1: c, rs2: Gpr::G0 }.encode());
+            code.extend_from_slice(&Instruction::Addcc { rd: Gpr::G0, rs1: c, rs2: Gpr::G0 }.encode()); // addcc G0, cond, G0 → sets Z if cond==0
             code.extend_from_slice(&Instruction::Or { rd: d, rs1: f, rs2: Gpr::G0 }.encode()); // mov d, false
             code.extend_from_slice(&Instruction::Movcc { rd: d, rs2: t, cond: COND_BNE }.encode()); // MOVNE: if c!=0, d=true
             reads.push(phys(c)); reads.push(phys(f)); reads.push(phys(t)); writes.push(phys(d)); "select".to_string()
@@ -382,17 +382,39 @@ fn emit_instruction(code: &mut Vec<u8>, instr: &IRInstr, alloc: &RegAllocResult,
             "branch".to_string()
         }
         IRInstr::CondBranch { cond, true_target, false_target, .. } => {
-            let c = load_to_reg(cond, alloc, code);
-            code.extend_from_slice(&Instruction::Subcc { rd: Gpr::G0, rs1: c, rs2: Gpr::G0 }.encode());
-            let pos1 = code.len();
-            code.extend_from_slice(&Instruction::Bne { offset: 0 }.encode());
-            code.extend_from_slice(&Instruction::Nop.encode()); // delay slot
-            fixups.push(BranchFixup { offset: pos1, target: true_target.clone() });
-            let pos2 = code.len();
-            code.extend_from_slice(&Instruction::Ba { offset: 0 }.encode());
-            code.extend_from_slice(&Instruction::Nop.encode()); // delay slot
-            fixups.push(BranchFixup { offset: pos2, target: false_target.clone() });
-            reads.push(phys(c)); "cond_branch".to_string()
+            // Special-case Immediate conditions: avoid loading into scratch reg
+            // and using Addcc (which has reliability issues with QEMU's %icc).
+            match cond {
+                IRValue::Immediate(0) => {
+                    // Always false: branch directly to false_target
+                    let pos = code.len();
+                    code.extend_from_slice(&Instruction::Ba { offset: 0 }.encode());
+                    code.extend_from_slice(&Instruction::Nop.encode()); // delay slot
+                    fixups.push(BranchFixup { offset: pos, target: false_target.clone() });
+                }
+                IRValue::Immediate(_) => {
+                    // Always true: branch directly to true_target
+                    let pos = code.len();
+                    code.extend_from_slice(&Instruction::Ba { offset: 0 }.encode());
+                    code.extend_from_slice(&Instruction::Nop.encode()); // delay slot
+                    fixups.push(BranchFixup { offset: pos, target: true_target.clone() });
+                }
+                _ => {
+                    // Register condition: use Subcc (op3=0x14, V8 compat, sets %icc on QEMU)
+                    let c = load_to_reg(cond, alloc, code);
+                    code.extend_from_slice(&Instruction::Subcc { rd: Gpr::G0, rs1: c, rs2: Gpr::G0 }.encode());
+                    let pos1 = code.len();
+                    code.extend_from_slice(&Instruction::Bne { offset: 0 }.encode());
+                    code.extend_from_slice(&Instruction::Nop.encode()); // delay slot
+                    fixups.push(BranchFixup { offset: pos1, target: true_target.clone() });
+                    let pos2 = code.len();
+                    code.extend_from_slice(&Instruction::Ba { offset: 0 }.encode());
+                    code.extend_from_slice(&Instruction::Nop.encode()); // delay slot
+                    fixups.push(BranchFixup { offset: pos2, target: false_target.clone() });
+                    reads.push(phys(c));
+                }
+            }
+            "cond_branch".to_string()
         }
         IRInstr::Syscall { nr, args, dst } => {
             let n = crate::syscall_abi::translate_or_warn(crate::backend::BackendKind::Sparc64, *nr);
@@ -439,16 +461,32 @@ fn emit_terminator(code: &mut Vec<u8>, term: &IRTerminator, alloc: &RegAllocResu
             fixups.push(BranchFixup { offset: pos, target: label.clone() });
         }
         IRTerminator::Branch { cond, true_block, false_block } => {
-            let c = load_to_reg(cond, alloc, code);
-            code.extend_from_slice(&Instruction::Subcc { rd: Gpr::G0, rs1: c, rs2: Gpr::G0 }.encode());
-            let pos1 = code.len();
-            code.extend_from_slice(&Instruction::Bne { offset: 0 }.encode());
-            code.extend_from_slice(&Instruction::Nop.encode()); // delay slot
-            fixups.push(BranchFixup { offset: pos1, target: true_block.clone() });
-            let pos2 = code.len();
-            code.extend_from_slice(&Instruction::Ba { offset: 0 }.encode());
-            code.extend_from_slice(&Instruction::Nop.encode()); // delay slot
-            fixups.push(BranchFixup { offset: pos2, target: false_block.clone() });
+            match cond {
+                IRValue::Immediate(0) => {
+                    let pos = code.len();
+                    code.extend_from_slice(&Instruction::Ba { offset: 0 }.encode());
+                    code.extend_from_slice(&Instruction::Nop.encode());
+                    fixups.push(BranchFixup { offset: pos, target: false_block.clone() });
+                }
+                IRValue::Immediate(_) => {
+                    let pos = code.len();
+                    code.extend_from_slice(&Instruction::Ba { offset: 0 }.encode());
+                    code.extend_from_slice(&Instruction::Nop.encode());
+                    fixups.push(BranchFixup { offset: pos, target: true_block.clone() });
+                }
+                _ => {
+                    let c = load_to_reg(cond, alloc, code);
+                    code.extend_from_slice(&Instruction::Subcc { rd: Gpr::G0, rs1: c, rs2: Gpr::G0 }.encode());
+                    let pos1 = code.len();
+                    code.extend_from_slice(&Instruction::Bne { offset: 0 }.encode());
+                    code.extend_from_slice(&Instruction::Nop.encode());
+                    fixups.push(BranchFixup { offset: pos1, target: true_block.clone() });
+                    let pos2 = code.len();
+                    code.extend_from_slice(&Instruction::Ba { offset: 0 }.encode());
+                    code.extend_from_slice(&Instruction::Nop.encode());
+                    fixups.push(BranchFixup { offset: pos2, target: false_block.clone() });
+                }
+            }
         }
         IRTerminator::Return(vals) => {
             if let Some(f) = vals.first() { let r = load_to_reg(f, alloc, code); if r != Gpr::I0 { code.extend_from_slice(&Instruction::Or { rd: Gpr::I0, rs1: r, rs2: Gpr::G0 }.encode()); } }
