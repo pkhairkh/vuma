@@ -1224,9 +1224,12 @@ fn emit_instruction(
                     }
                 }
                 _ => {
-                    if src_reg != dst_reg {
-                        emit_instr(code, Instruction::MOV { rd: dst_reg, rm: src_reg });
-                    }
+                    // IntToFloat, FloatToInt, FloatToUInt, UIntToFloat,
+                    // FloatToFloat — FP casts need FP instructions which
+                    // the register-based emitter doesn't support yet.
+                    // Return an error so the caller falls back to the
+                    // stack-slot ISel which has proper FP conversion code.
+                    return emit_fp_fallback(instr);
                 }
             }
             reads.push(phys(src_reg));
