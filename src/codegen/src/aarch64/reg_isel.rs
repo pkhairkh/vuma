@@ -1100,11 +1100,26 @@ fn emit_instruction(
         // ── Cmp ──
         IRInstr::Cmp { dst, kind, lhs, rhs, .. } => {
             let lhs_reg = load_to_reg(lhs, alloc, code);
-            let rhs_reg = load_to_reg(rhs, alloc, code);
+            // Use CMP with immediate (Imm12) when rhs is a small immediate.
+            // This avoids loading rhs into X9 scratch which could clobber
+            // a live value assigned to X9 by the regalloc.
+            let (rhs_reg, rhs_operand, is_imm) = match resolve_value(rhs, alloc) {
+                ResolvedVal::Imm(imm) if (0..=4095).contains(&imm) => {
+                    (Register::XZR, Operand::Imm12(imm as u16), true)
+                }
+                _ => {
+                    let r = load_to_reg(rhs, alloc, code);
+                    (r, Operand::Reg { reg: r, shift: None }, false)
+                }
+            };
             let dst_reg = load_to_reg(dst, alloc, code);
-            emit_cmp_isel(code, dst_reg, lhs_reg, rhs_reg, kind);
+            // CMP lhs, rhs_operand
+            emit_instr(code, Instruction::CMP { rn: lhs_reg, rm: rhs_operand });
+            emit_instr(code, Instruction::CSET { rd: dst_reg, cond: cmp_kind_to_cond(kind) });
             reads.push(phys(lhs_reg));
-            reads.push(phys(rhs_reg));
+            if !is_imm {
+                reads.push(phys(rhs_reg));
+            }
             writes.push(phys(dst_reg));
             "cmp".to_string()
         }
