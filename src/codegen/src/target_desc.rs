@@ -2525,8 +2525,12 @@ fn mips64_target_desc() -> TargetDesc {
 
 fn ppc64_target_desc() -> TargetDesc {
     let registers = vec![
-        // R0: volatile / scratch (allocatable but has special meaning in some insns)
-        RegDesc::gpr("R0", 0),
+        // R0: volatile / scratch. NOT allocatable — in D-form instructions
+        // (addi, cmpi, cmpli, etc.) RA=0 means literal 0, not register R0.
+        // If the regalloc assigns a live vreg to R0, D-form instructions
+        // using that vreg as the base would silently use 0 instead,
+        // causing infinite loops (e.g. arith_chinese_remainder).
+        RegDesc::gpr("R0", 0).not_allocatable(),
         // R1: stack pointer
         RegDesc::gpr("R1", 1).stack_pointer(),
         // R2: TOC pointer
