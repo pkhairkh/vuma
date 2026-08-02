@@ -5632,7 +5632,7 @@ impl Backend for HppaBackend {
             .unwrap_or(true);
         let contains_fork = func.blocks.iter().any(|b| {
             b.instructions.iter().any(|i| match i {
-                crate::ir::IRInstr::Call { func: f, .. } => f == "spawn_worker" || f == "fork",
+                crate::ir::IRInstr::Call { .. } => true,
                 crate::ir::IRInstr::Syscall { .. } => true,
                 _ => false,
             })
