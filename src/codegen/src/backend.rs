@@ -3237,6 +3237,7 @@ impl Backend for AArch64Backend {
                     // The register-based emitter does not preserve caller-
                     // saved registers around syscalls, which clobber X0-X18.
                     crate::ir::IRInstr::Syscall { .. } => true,
+                    crate::ir::IRInstr::CallIndirect { .. } => true,
                     _ => false,
                 }
             })
