@@ -993,6 +993,10 @@ fn emit_instruction(
                     emit_instr(code, Instruction::ADD { rd: dst_reg, rn: lhs_reg, rm: Operand::Reg { reg: rhs_reg, shift: None } });
                 }
             }
+            // For 32-bit types, zero-extend result (UBFM Xd, Xd, #0, #31).
+            if matches!(ty, Some(IRType::I32) | Some(IRType::U32)) {
+                emit_instr(code, Instruction::UBFM { rd: dst_reg, rn: dst_reg, immr: 0, imms: 31 });
+            }
             reads.push(phys(lhs_reg));
             reads.push(phys(rhs_reg));
             writes.push(phys(dst_reg));
