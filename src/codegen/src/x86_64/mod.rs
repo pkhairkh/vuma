@@ -4352,32 +4352,13 @@ impl Backend for X86_64Backend {
                     crate::ir::IRInstr::Call { func: fname, .. } => {
                         fname == "spawn_worker" || fname == "fork"
                     }
-                    // clone=56, vfork=58 on Linux/x86_64 (native).
-                    // ALSO check generic nr=220 (aarch64 clone, used by
-                    // the IR before syscall_abi::translate resolves it
-                    // to the native number). Without this, IPC tests
-                    // (simple_send, ping_pong, try_recv) which use
-                    // spawn_worker → clone would go through the regalloc
-                    // path, which has a register-reuse hazard around
-                    // syscalls (the allocator may assign the syscall's
-                    // dst to the same register as one of its args when
-                    // the arg is live across the syscall). Falling back
-                    // to stack-slot for fork-containing functions matches
-                    // the aarch64 backend's behavior (R1-b2-fix).
-                    //
-                    // W4-fix: ALSO fall back for ANY syscall that has a
-                    // Register arg AND a dst (return value). These are
-                    // the syscalls with the register-reuse hazard (e.g.
-                    // try_recv's read() syscall). This is overly broad
-                    // but safe — the stack-slot path handles all syscalls
-                    // correctly. The regalloc path can be re-enabled for
-                    // these once the allocator's live-range analysis is
-                    // fixed to not reuse an arg's register for the dst
-                    // when the arg is live across the syscall.
-                    crate::ir::IRInstr::Syscall { nr, .. } => {
-                        *nr == 56 || *nr == 58 || *nr == 220 || *nr == 221
-                       
-                    }
+                    // ANY syscall causes a fall-back to stack-slot ISel.
+                    // The register-based Syscall handler does not preserve
+                    // caller-saved registers around the `syscall` instruction,
+                    // which clobbers RCX and R11.  The regalloc may have
+                    // assigned live vregs to these registers.  The stack-slot
+                    // ISel handles all syscalls correctly.
+                    crate::ir::IRInstr::Syscall { .. } => true,
                     _ => false,
                 }
             })
