@@ -6812,10 +6812,7 @@ impl Backend for RiscV64Backend {
                     // clone=220, vfork=221 on Linux/riscv64 (same as aarch64).
                     // W7-fix: ALSO fall back for ANY syscall with a Register
                     // arg AND a dst — register-reuse hazard (same as x86_64).
-                    crate::ir::IRInstr::Syscall { nr, .. } => {
-                        *nr == 220 || *nr == 221
-                       
-                    }
+                    crate::ir::IRInstr::Syscall { .. } => true,
                     _ => false,
                 }
             })

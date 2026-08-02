@@ -3233,9 +3233,10 @@ impl Backend for AArch64Backend {
                     crate::ir::IRInstr::Call { func: fname, .. } => {
                         fname == "spawn_worker" || fname == "fork"
                     }
-                    // clone syscall (nr=220 on aarch64/linux) — spawn_worker
-                    // lowers to this. Also catch vfork (nr=221) just in case.
-                    crate::ir::IRInstr::Syscall { nr, .. } => *nr == 220 || *nr == 221,
+                    // ANY syscall causes a fall-back to stack-slot ISel.
+                    // The register-based emitter does not preserve caller-
+                    // saved registers around syscalls, which clobber X0-X18.
+                    crate::ir::IRInstr::Syscall { .. } => true,
                     _ => false,
                 }
             })
