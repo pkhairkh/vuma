@@ -1410,6 +1410,80 @@ fn emit_instruction(
             "atomic_cas".to_string()
         }
 
+        // ── CallIndirect (function pointer call) ──
+        IRInstr::CallIndirect { dst, func_ptr, args } => {
+            // x86_64 System V calling convention:
+            //   args in RDI, RSI, RDX, RCX, R8, R9 (first 6 integer args)
+            //   return in RAX
+            //   call via: call r10 (or any caller-saved register)
+            let arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx, Gpr::R8, Gpr::R9];
+            let has_return = dst.is_some();
+
+            // Load the function pointer into R10 (caller-saved, not an arg reg).
+            let func_ptr_reg = load_to_reg(func_ptr, alloc, code);
+
+            // Save caller-saved registers (same pattern as Call handler).
+            let saved_regs: Vec<Gpr> = if has_return {
+                vec![Gpr::Rcx, Gpr::Rdx, Gpr::Rsi, Gpr::Rdi,
+                     Gpr::R8, Gpr::R9, Gpr::R10, Gpr::R11]
+            } else {
+                vec![Gpr::Rax, Gpr::Rcx, Gpr::Rdx, Gpr::Rsi, Gpr::Rdi,
+                     Gpr::R8, Gpr::R9, Gpr::R10, Gpr::R11]
+            };
+            let need_align_pad = saved_regs.len() % 2 == 1;
+            if need_align_pad {
+                code.extend(encode_sub_reg_imm32(Gpr::Rsp, 8));
+            }
+            for &g in &saved_regs {
+                code.extend(encode_push(g));
+            }
+
+            // Move function pointer to R10 if not already there.
+            if func_ptr_reg != Gpr::R10 {
+                code.extend(encode_mov_reg_reg(Gpr::R10, func_ptr_reg));
+            }
+
+            // Set up arguments.
+            for (i, arg) in args.iter().enumerate().take(6) {
+                let arg_reg = load_to_reg(arg, alloc, code);
+                if arg_reg != arg_regs[i] {
+                    code.extend(encode_mov_reg_reg(arg_regs[i], arg_reg));
+                }
+            }
+            code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+
+            // call r10
+            // FF /2 — CALL r/m64
+            // R10 requires REX.B prefix: 41 FF D2
+            code.extend_from_slice(&[0x41, 0xFF, 0xD2]); // call r10
+
+            // Save return value.
+            let dst_reg_opt = if let Some(dst_val) = dst {
+                let dst_reg = load_to_reg(dst_val, alloc, code);
+                writes.push(phys(dst_reg));
+                Some(dst_reg)
+            } else {
+                None
+            };
+
+            // Restore caller-saved registers.
+            for &g in saved_regs.iter().rev() {
+                code.extend(encode_pop(g));
+            }
+            if need_align_pad {
+                code.extend(encode_add_reg_imm32(Gpr::Rsp, 8));
+            }
+
+            // Move return value from RAX to dst_reg.
+            if let Some(dst_reg) = dst_reg_opt {
+                if dst_reg != Gpr::Rax {
+                    code.extend(encode_mov_reg_reg(dst_reg, Gpr::Rax));
+                }
+            }
+            reads.push(phys(func_ptr_reg));
+            "call_indirect".to_string()
+        }
+
         // ── Struct/Array/TaggedUnion (these are type declarations, not instructions) ──
         // ── Unhandled instructions (emit NOP, should not appear at this stage) ──
         _ => {
