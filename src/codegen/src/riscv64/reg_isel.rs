@@ -425,7 +425,11 @@ fn emit_load_imm(code: &mut Vec<u8>, rd: Gpr, imm: i64) {
         let val = imm as i32;
         let upper = (val + 0x800) >> 12;
         let lower = val - (upper << 12);
-        code.extend_from_slice(&Instruction::Lui { rd, imm: upper as u32 }.encode());
+        // NOTE: Instruction::Lui expects the pre-shifted 32-bit immediate
+        // (bits [31:12] of the value), not the raw 20-bit imm field. The
+        // encode_u_type helper masks with 0xFFFFF000, so we must shift
+        // `upper` left by 12 before passing it in.
+        code.extend_from_slice(&Instruction::Lui { rd, imm: (upper as u32) << 12 }.encode());
         if lower != 0 {
             code.extend_from_slice(&Instruction::Addi { rd, rs1: rd, imm: lower }.encode());
         }
@@ -438,7 +442,7 @@ fn emit_load_imm(code: &mut Vec<u8>, rd: Gpr, imm: i64) {
     // Load hi into rd
     let hi_upper = ((hi as i32).wrapping_add(0x800)) >> 12;
     let hi_lower = (hi as i32) - (hi_upper << 12);
-    code.extend_from_slice(&Instruction::Lui { rd, imm: hi_upper as u32 }.encode());
+    code.extend_from_slice(&Instruction::Lui { rd, imm: (hi_upper as u32) << 12 }.encode());
     if hi_lower != 0 {
         code.extend_from_slice(&Instruction::Addi { rd, rs1: rd, imm: hi_lower }.encode());
     }
@@ -448,7 +452,7 @@ fn emit_load_imm(code: &mut Vec<u8>, rd: Gpr, imm: i64) {
     let lo_scratch = Gpr::T5;
     let lo_upper = ((lo as i32).wrapping_add(0x800)) >> 12;
     let lo_lower = (lo as i32) - (lo_upper << 12);
-    code.extend_from_slice(&Instruction::Lui { rd: lo_scratch, imm: lo_upper as u32 }.encode());
+    code.extend_from_slice(&Instruction::Lui { rd: lo_scratch, imm: (lo_upper as u32) << 12 }.encode());
     if lo_lower != 0 {
         code.extend_from_slice(&Instruction::Addi { rd: lo_scratch, rs1: lo_scratch, imm: lo_lower }.encode());
     }
@@ -671,6 +675,16 @@ fn emit_instruction(
                 _ => {
                     code.extend_from_slice(&Instruction::Add { rd: dst_reg, rs1: lhs_reg, rs2: rhs_reg }.encode());
                 }
+            }
+            // For 32-bit Add/Sub/Mul, zero-extend the lower 32 bits to 64
+            // so overflow doesn't leak into the upper half (e.g. 0xFFFFFFFF + 1
+            // must yield 0x0, not 0x100000000). Use slli+srli by 32 to clear
+            // the upper 32 bits.
+            if matches!(op, BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul)
+                && matches!(ty, Some(IRType::I32) | Some(IRType::U32))
+            {
+                code.extend_from_slice(&Instruction::Slli { rd: dst_reg, rs1: dst_reg, shamt: 32 }.encode());
+                code.extend_from_slice(&Instruction::Srli { rd: dst_reg, rs1: dst_reg, shamt: 32 }.encode());
             }
             reads.push(phys(lhs_reg));
             if !use_imm { reads.push(phys(rhs_reg)); }

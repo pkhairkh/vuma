@@ -261,9 +261,15 @@ fn emit_load_imm(code: &mut Vec<u8>, rd: Gpr, imm: i64) {
         code.extend_from_slice(&Instruction::Daddiu { rt: rd, rs: Gpr::Zero, imm: imm as i32 }.encode());
         return;
     }
+    // MIPS `lui rt, imm16` loads imm16 into bits [31:16] of rt (sign-extended
+    // to 64 bits). The immediate is 16 bits, so we split val into upper 16
+    // bits (loaded via LUI) and lower 16 bits (added via DADDIU). The
+    // +0x8000 rounding ensures that values whose low 16 bits would be
+    // interpreted as negative (bit 15 set) are loaded with an incremented
+    // upper half so the final DADDIU sign-extends correctly.
     let val = imm as i32;
-    let upper = (val + 0x800) >> 12;
-    let lower = val - (upper << 12);
+    let upper = (val + 0x8000) >> 16;
+    let lower = val - (upper << 16);
     code.extend_from_slice(&Instruction::Lui { rt: rd, imm: upper as u32 }.encode());
     if lower != 0 {
         code.extend_from_slice(&Instruction::Daddiu { rt: rd, rs: rd, imm: lower }.encode());
@@ -439,6 +445,16 @@ fn emit_instruction(
                 }
                 BinOpKind::Mul => { code.extend_from_slice(&Instruction::Dmult { rs: lhs_reg, rt: rhs_reg }.encode()); code.extend_from_slice(&Instruction::Mflo { rd: dst_reg }.encode()); code.extend_from_slice(&Instruction::Nop.encode()); }
                 _ => code.extend_from_slice(&Instruction::Daddu { rd: dst_reg, rs: lhs_reg, rt: rhs_reg }.encode()),
+            }
+            // For 32-bit Add/Sub/Mul, zero-extend the lower 32 bits to 64
+            // so overflow doesn't leak into the upper half (e.g. 0xFFFFFFFF + 1
+            // must yield 0x0, not 0x100000000). Use dsll+dsrl by 32 to clear
+            // the upper 32 bits.
+            if matches!(op, BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul)
+                && matches!(ty, Some(IRType::I32) | Some(IRType::U32))
+            {
+                code.extend_from_slice(&Instruction::Dsll { rd: dst_reg, rt: dst_reg, sa: 32 }.encode());
+                code.extend_from_slice(&Instruction::Dsrl { rd: dst_reg, rt: dst_reg, sa: 32 }.encode());
             }
             reads.push(phys(lhs_reg));
             if !use_imm { reads.push(phys(rhs_reg)); }
