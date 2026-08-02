@@ -1080,12 +1080,22 @@ fn emit_instruction(
 
         IRInstr::Call { dst, func: fname, args, is_extern, .. } => {
             let arg_regs = [Gpr::R0, Gpr::R1, Gpr::R2, Gpr::R3];
+
+            // Push caller-saved registers to preserve live values across
+            // the call. BL clobbers LR; the callee clobbers R0-R3, R12.
+            // Push {R0, R1, R2, R3, R12, LR} = 6 regs = 24 bytes.
+            let push_mask = 0x4000u32 | (1u32 << 12) | (1u32 << 14) | 0xFu32; // R0-R3, R12, LR
+            let push_instr = 0xE92D0000u32 | push_mask; // STMFD SP!, {regs}
+            code.extend_from_slice(&push_instr.to_le_bytes());
+
+            // Set up arguments in R0-R3.
             for (i, arg) in args.iter().enumerate().take(4) {
                 let arg_reg = load_to_reg(arg, alloc, code);
                 if arg_reg != arg_regs[i] {
                     code.extend_from_slice(&Instruction::Mov { rd: arg_regs[i], rm: arg_reg, cond: Condition::Al }.encode());
                 }
             }
+
             // BL <offset> — will be patched by relocation or fixup
             let offset_pos = code.len();
             let bl = 0xEB000000u32; // BL (cond=AL, LK=1)
@@ -1095,6 +1105,18 @@ fn emit_instruction(
                 symbol: fname.clone(),
                 reloc_type: "R_ARM_CALL".to_string(),
             });
+
+            // R0 has the return value. Save it in the R0 slot on the
+            // stack (which currently holds the old R0 value).
+            // STR R0, [SP] = 0xE58D0000
+            code.extend_from_slice(&0xE58D0000u32.to_le_bytes());
+
+            // Pop {R0, R1, R2, R3, R12, LR} — R0 gets the return value,
+            // others get their saved values.
+            let pop_instr = 0xE8BD0000u32 | push_mask; // LDMFD SP!, {regs}
+            code.extend_from_slice(&pop_instr.to_le_bytes());
+
+            // Move return value from R0 to dst_reg.
             if let Some(dst_val) = dst {
                 let dst_reg = load_to_reg(dst_val, alloc, code);
                 if dst_reg != Gpr::R0 {
