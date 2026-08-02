@@ -3347,6 +3347,7 @@ impl Backend for PPC64Backend {
                     // W8-fix: ALSO fall back for ANY syscall with Register
                     // args + dst (register-reuse hazard, same as x86_64/riscv64).
                     crate::ir::IRInstr::Syscall { .. } => true,
+                    crate::ir::IRInstr::CallIndirect { .. } => true,
                     _ => false,
                 }
             })

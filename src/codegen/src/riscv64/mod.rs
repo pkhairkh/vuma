@@ -6813,6 +6813,7 @@ impl Backend for RiscV64Backend {
                     // W7-fix: ALSO fall back for ANY syscall with a Register
                     // arg AND a dst — register-reuse hazard (same as x86_64).
                     crate::ir::IRInstr::Syscall { .. } => true,
+                    crate::ir::IRInstr::CallIndirect { .. } => true,
                     _ => false,
                 }
             })
