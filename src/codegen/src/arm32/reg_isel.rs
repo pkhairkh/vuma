@@ -798,32 +798,70 @@ fn emit_instruction(
         }
 
         IRInstr::Select { dst, cond, true_val, false_val, .. } => {
-            let cond_reg = load_to_reg(cond, alloc, code);
             let dst_reg = load_to_reg(dst, alloc, code);
-            let false_reg = load_to_reg(false_val, alloc, code);
-            let true_reg = load_to_reg(true_val, alloc, code);
-            // CMP cond, #0; MOV dst, false; MOVNE dst, true
-            code.extend_from_slice(&Instruction::CmpImm { rn: cond_reg, rotate: 0, imm8: 0, cond: Condition::Al }.encode());
-            code.extend_from_slice(&Instruction::Mov { rd: dst_reg, rm: false_reg, cond: Condition::Al }.encode());
-            code.extend_from_slice(&Instruction::Mov { rd: dst_reg, rm: true_reg, cond: Condition::Ne }.encode());
-            reads.push(phys(cond_reg));
-            reads.push(phys(false_reg));
-            reads.push(phys(true_reg));
+            // If cond is an immediate, evaluate at compile time.
+            if let IRValue::Immediate(c) = cond {
+                if *c != 0 {
+                    // cond = true → dst = true_val
+                    let tv = load_to_reg(true_val, alloc, code);
+                    if tv != dst_reg {
+                        code.extend_from_slice(&Instruction::Mov { rd: dst_reg, rm: tv, cond: Condition::Al }.encode());
+                    }
+                    reads.push(phys(tv));
+                } else {
+                    // cond = false → dst = false_val
+                    let fv = load_to_reg(false_val, alloc, code);
+                    if fv != dst_reg {
+                        code.extend_from_slice(&Instruction::Mov { rd: dst_reg, rm: fv, cond: Condition::Al }.encode());
+                    }
+                    reads.push(phys(fv));
+                }
+            } else {
+                // cond is a register — CMP cond, #0; MOV dst, false; MOVNE dst, true.
+                // Load false_val first and emit the mov BEFORE loading true_val:
+                // both immediates use the R12 scratch, so loading true_val would
+                // clobber the false value still sitting in R12.
+                let cond_reg = load_to_reg(cond, alloc, code);
+                code.extend_from_slice(&Instruction::CmpImm { rn: cond_reg, rotate: 0, imm8: 0, cond: Condition::Al }.encode());
+                let false_reg = load_to_reg(false_val, alloc, code);
+                code.extend_from_slice(&Instruction::Mov { rd: dst_reg, rm: false_reg, cond: Condition::Al }.encode());
+                let true_reg = load_to_reg(true_val, alloc, code);
+                code.extend_from_slice(&Instruction::Mov { rd: dst_reg, rm: true_reg, cond: Condition::Ne }.encode());
+                reads.push(phys(cond_reg));
+                reads.push(phys(false_reg));
+                reads.push(phys(true_reg));
+            }
             writes.push(phys(dst_reg));
             "select".to_string()
         }
 
         IRInstr::CtSelect { dst, cond, true_val, false_val, .. } => {
-            let cond_reg = load_to_reg(cond, alloc, code);
             let dst_reg = load_to_reg(dst, alloc, code);
-            let false_reg = load_to_reg(false_val, alloc, code);
-            let true_reg = load_to_reg(true_val, alloc, code);
-            code.extend_from_slice(&Instruction::CmpImm { rn: cond_reg, rotate: 0, imm8: 0, cond: Condition::Al }.encode());
-            code.extend_from_slice(&Instruction::Mov { rd: dst_reg, rm: false_reg, cond: Condition::Al }.encode());
-            code.extend_from_slice(&Instruction::Mov { rd: dst_reg, rm: true_reg, cond: Condition::Ne }.encode());
-            reads.push(phys(cond_reg));
-            reads.push(phys(false_reg));
-            reads.push(phys(true_reg));
+            if let IRValue::Immediate(c) = cond {
+                if *c != 0 {
+                    let tv = load_to_reg(true_val, alloc, code);
+                    if tv != dst_reg {
+                        code.extend_from_slice(&Instruction::Mov { rd: dst_reg, rm: tv, cond: Condition::Al }.encode());
+                    }
+                    reads.push(phys(tv));
+                } else {
+                    let fv = load_to_reg(false_val, alloc, code);
+                    if fv != dst_reg {
+                        code.extend_from_slice(&Instruction::Mov { rd: dst_reg, rm: fv, cond: Condition::Al }.encode());
+                    }
+                    reads.push(phys(fv));
+                }
+            } else {
+                let cond_reg = load_to_reg(cond, alloc, code);
+                code.extend_from_slice(&Instruction::CmpImm { rn: cond_reg, rotate: 0, imm8: 0, cond: Condition::Al }.encode());
+                let false_reg = load_to_reg(false_val, alloc, code);
+                code.extend_from_slice(&Instruction::Mov { rd: dst_reg, rm: false_reg, cond: Condition::Al }.encode());
+                let true_reg = load_to_reg(true_val, alloc, code);
+                code.extend_from_slice(&Instruction::Mov { rd: dst_reg, rm: true_reg, cond: Condition::Ne }.encode());
+                reads.push(phys(cond_reg));
+                reads.push(phys(false_reg));
+                reads.push(phys(true_reg));
+            }
             writes.push(phys(dst_reg));
             "ct_select".to_string()
         }

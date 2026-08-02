@@ -106,7 +106,33 @@ fn emit_instr(c: &mut Vec<u8>, instr: &IRInstr, a: &RegAllocResult, fx: &mut Vec
         IRInstr::Load { dst, addr, offset, ty } => { let d = load_to_reg(dst, a, c); let b = load_to_reg(addr, a, c); let o = *offset as i16; match ty { IRType::U8|IRType::I8 => c.extend(Instruction::Ldbu { ra: d, disp: o, rb: b }.encode()), IRType::U16|IRType::I16 => c.extend(Instruction::Ldwu { ra: d, disp: o, rb: b }.encode()), IRType::U32|IRType::I32 => c.extend(Instruction::Ldl { ra: d, disp: o, rb: b }.encode()), _ => c.extend(Instruction::Ldq { ra: d, disp: o, rb: b }.encode()), } reads.push(ph(b)); writes.push(ph(d)); "load".to_string() }
         IRInstr::Store { value, addr, offset, ty } => { let v = load_to_reg(value, a, c); let b = load_to_reg(addr, a, c); let o = *offset as i16; match ty { IRType::U8|IRType::I8 => c.extend(Instruction::Stb { ra: v, disp: o, rb: b }.encode()), IRType::U16|IRType::I16 => c.extend(Instruction::Stw { ra: v, disp: o, rb: b }.encode()), IRType::U32|IRType::I32 => c.extend(Instruction::Stl { ra: v, disp: o, rb: b }.encode()), _ => c.extend(Instruction::Stq { ra: v, disp: o, rb: b }.encode()), } reads.push(ph(v)); reads.push(ph(b)); "store".to_string() }
         IRInstr::Cmp { dst, kind, lhs, rhs, .. } => { let l = load_to_reg(lhs, a, c); let r = load_to_reg(rhs, a, c); let d = load_to_reg(dst, a, c); match kind { CmpKind::Eq => c.extend(Instruction::Cmpeq { ra: l, rb: r, rc: d }.encode()), CmpKind::Ne => { c.extend(Instruction::Cmpeq { ra: l, rb: r, rc: d }.encode()); c.extend(Instruction::Xor { ra: d, rb: Gpr::R31, rc: d }.encode()); } CmpKind::SLt => c.extend(Instruction::Cmplt { ra: l, rb: r, rc: d }.encode()), CmpKind::ULt => c.extend(Instruction::Cmpule { ra: r, rb: l, rc: d }.encode()), CmpKind::SLe => { c.extend(Instruction::Cmplt { ra: r, rb: l, rc: d }.encode()); c.extend(Instruction::Xor { ra: d, rb: Gpr::R31, rc: d }.encode()); } CmpKind::SGe => { c.extend(Instruction::Cmplt { ra: l, rb: r, rc: d }.encode()); c.extend(Instruction::Xor { ra: d, rb: Gpr::R31, rc: d }.encode()); } _ => c.extend(Instruction::Cmpeq { ra: l, rb: r, rc: d }.encode()), } reads.push(ph(l)); reads.push(ph(r)); writes.push(ph(d)); "cmp".to_string() }
-        IRInstr::Select { dst, cond, true_val, false_val, .. } | IRInstr::CtSelect { dst, cond, true_val, false_val, .. } => { let c_reg = load_to_reg(cond, a, c); let d = load_to_reg(dst, a, c); let f = load_to_reg(false_val, a, c); let t = load_to_reg(true_val, a, c); c.extend(Instruction::Or { ra: f, rb: Gpr::R31, rc: d }.encode()); c.extend(Instruction::Cmovne { ra: c_reg, rb: t, rc: d }.encode()); reads.push(ph(c_reg)); reads.push(ph(f)); reads.push(ph(t)); writes.push(ph(d)); "select".to_string() }
+        IRInstr::Select { dst, cond, true_val, false_val, .. } | IRInstr::CtSelect { dst, cond, true_val, false_val, .. } => {
+            // If cond is an immediate, evaluate at compile time. Otherwise,
+            // load false_val first, emit the move into dst, THEN load
+            // true_val and emit the conditional move. This ordering matters
+            // because load_to_reg uses a fixed scratch (R27) for immediates,
+            // so loading true_val would clobber false_val if both are Imm.
+            let d = load_to_reg(dst, a, c);
+            if let IRValue::Immediate(cv) = cond {
+                if *cv != 0 {
+                    let t = load_to_reg(true_val, a, c);
+                    c.extend(Instruction::Or { ra: t, rb: Gpr::R31, rc: d }.encode());
+                    reads.push(ph(t));
+                } else {
+                    let f = load_to_reg(false_val, a, c);
+                    c.extend(Instruction::Or { ra: f, rb: Gpr::R31, rc: d }.encode());
+                    reads.push(ph(f));
+                }
+            } else {
+                let c_reg = load_to_reg(cond, a, c);
+                let f = load_to_reg(false_val, a, c);
+                c.extend(Instruction::Or { ra: f, rb: Gpr::R31, rc: d }.encode()); // d = f
+                let t = load_to_reg(true_val, a, c);
+                c.extend(Instruction::Cmovne { ra: c_reg, rb: t, rc: d }.encode()); // if c_reg != 0, d = t
+                reads.push(ph(c_reg)); reads.push(ph(f)); reads.push(ph(t));
+            }
+            writes.push(ph(d)); "select".to_string()
+        }
         IRInstr::CtEq { dst, lhs, rhs, .. } => { let l = load_to_reg(lhs, a, c); let r = load_to_reg(rhs, a, c); let d = load_to_reg(dst, a, c); c.extend(Instruction::Cmpeq { ra: l, rb: r, rc: d }.encode()); reads.push(ph(l)); reads.push(ph(r)); writes.push(ph(d)); "ct_eq".to_string() }
         IRInstr::Cast { kind, dst, src, .. } => { let s = load_to_reg(src, a, c); let d = load_to_reg(dst, a, c); if s != d { c.extend(Instruction::Or { ra: s, rb: Gpr::R31, rc: d }.encode()); } reads.push(ph(s)); writes.push(ph(d)); "cast".to_string() }
         IRInstr::Alloc { dst, size, .. } => { let d = load_to_reg(dst, a, c); let al = ((*size as i32 + 15) & !15) as i16; c.extend(Instruction::Lda { ra: Gpr::R30, disp: -al, rb: Gpr::R30 }.encode()); c.extend(Instruction::Or { ra: Gpr::R30, rb: Gpr::R31, rc: d }.encode()); writes.push(ph(d)); "alloc".to_string() }

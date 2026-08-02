@@ -402,13 +402,34 @@ fn emit_instruction(code: &mut Vec<u8>, instr: &IRInstr, alloc: &RegAllocResult,
             reads.push(phys(l)); if !is_imm { reads.push(phys(r)); } writes.push(phys(d)); "cmp".to_string()
         }
         IRInstr::Select { dst, cond, true_val, false_val, .. } | IRInstr::CtSelect { dst, cond, true_val, false_val, .. } => {
-            let c = load_to_reg(cond, alloc, code); let d = load_to_reg(dst, alloc, code);
-            let f = load_to_reg(false_val, alloc, code); let t = load_to_reg(true_val, alloc, code);
-            // SUBcc c, 0, %g0; MOV d, false; MOVNE d, true
-            code.extend_from_slice(&Instruction::Addcc { rd: Gpr::G0, rs1: c, rs2: Gpr::G0 }.encode()); // addcc G0, cond, G0 → sets Z if cond==0
-            code.extend_from_slice(&Instruction::Or { rd: d, rs1: f, rs2: Gpr::G0 }.encode()); // mov d, false
-            code.extend_from_slice(&Instruction::Movcc { rd: d, rs2: t, cond: COND_BNE }.encode()); // MOVNE: if c!=0, d=true
-            reads.push(phys(c)); reads.push(phys(f)); reads.push(phys(t)); writes.push(phys(d)); "select".to_string()
+            let d = load_to_reg(dst, alloc, code);
+            // If cond is an immediate, evaluate at compile time.
+            if let IRValue::Immediate(c) = cond {
+                if *c != 0 {
+                    // cond = true → dst = true_val
+                    let t = load_to_reg(true_val, alloc, code);
+                    if t != d { code.extend_from_slice(&Instruction::Or { rd: d, rs1: t, rs2: Gpr::G0 }.encode()); }
+                    reads.push(phys(t));
+                } else {
+                    // cond = false → dst = false_val
+                    let f = load_to_reg(false_val, alloc, code);
+                    if f != d { code.extend_from_slice(&Instruction::Or { rd: d, rs1: f, rs2: Gpr::G0 }.encode()); }
+                    reads.push(phys(f));
+                }
+            } else {
+                // cond is a register — SUBcc c, 0, %g0; MOV d, false; MOVNE d, true.
+                // Load false_val first and emit the mov BEFORE loading true_val:
+                // both immediates use the G1 scratch, so loading true_val would
+                // clobber the false value still sitting in G1.
+                let c = load_to_reg(cond, alloc, code);
+                code.extend_from_slice(&Instruction::Addcc { rd: Gpr::G0, rs1: c, rs2: Gpr::G0 }.encode()); // addcc G0, cond, G0 → sets Z if cond==0
+                let f = load_to_reg(false_val, alloc, code);
+                code.extend_from_slice(&Instruction::Or { rd: d, rs1: f, rs2: Gpr::G0 }.encode()); // mov d, false
+                let t = load_to_reg(true_val, alloc, code);
+                code.extend_from_slice(&Instruction::Movcc { rd: d, rs2: t, cond: COND_BNE }.encode()); // MOVNE: if c!=0, d=true
+                reads.push(phys(c)); reads.push(phys(f)); reads.push(phys(t));
+            }
+            writes.push(phys(d)); "select".to_string()
         }
         IRInstr::CtEq { dst, lhs, rhs, .. } => {
             let l = load_to_reg(lhs, alloc, code); let r = load_to_reg(rhs, alloc, code); let d = load_to_reg(dst, alloc, code);
