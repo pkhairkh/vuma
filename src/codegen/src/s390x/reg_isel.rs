@@ -689,7 +689,7 @@ fn emit_instruction(
                 return emit_fp_fallback(instr);
             }
             let signed = is_signed_ty(ty.as_ref());
-            emit_div_isel(dst, lhs, rhs, ty.as_ref(), signed, alloc, code, &mut reads, &mut writes);
+            emit_div_isel(dst, lhs, rhs, ty.as_ref(), signed, false, alloc, code, &mut reads, &mut writes);
             "div".to_string()
         }
 
@@ -1301,12 +1301,20 @@ fn emit_binop_isel(
             writes.push(phys(dst_reg));
             return;
         }
-        BinOpKind::SDiv | BinOpKind::SRem => {
-            emit_div_isel(dst, lhs, rhs, ty, true, alloc, code, reads, writes);
+        BinOpKind::SDiv => {
+            emit_div_isel(dst, lhs, rhs, ty, true, false, alloc, code, reads, writes);
             return;
         }
-        BinOpKind::UDiv | BinOpKind::URem => {
-            emit_div_isel(dst, lhs, rhs, ty, false, alloc, code, reads, writes);
+        BinOpKind::SRem => {
+            emit_div_isel(dst, lhs, rhs, ty, true, true, alloc, code, reads, writes);
+            return;
+        }
+        BinOpKind::UDiv => {
+            emit_div_isel(dst, lhs, rhs, ty, false, false, alloc, code, reads, writes);
+            return;
+        }
+        BinOpKind::URem => {
+            emit_div_isel(dst, lhs, rhs, ty, false, true, alloc, code, reads, writes);
             return;
         }
         BinOpKind::And | BinOpKind::Or | BinOpKind::Xor => {
@@ -1560,6 +1568,7 @@ fn emit_div_isel(
     rhs: &IRValue,
     ty: Option<&IRType>,
     signed: bool,
+    is_rem: bool,
     alloc: &RegAllocResult,
     code: &mut Vec<u8>,
     reads: &mut Vec<PhysicalReg>,
@@ -1588,14 +1597,9 @@ fn emit_div_isel(
     }
 
     // Load rhs into R2 (we use R2 because DGR/DLGR divide R0:R1 by R2).
-    // Wait — the encoding is `DGR R1, R2` where R1 must be EVEN-numbered
-    // and the dividend pair is (R1, R1+1). So for R1=0, the pair is (R0, R1).
-    // The divisor is in R2. So we pass R0 (=Gpr::R0) as the first operand
-    // to encode_dgr, and the divisor register as the second.
     let divisor_reg = match resolve_value(rhs, alloc) {
         ResolvedVal::Reg(g) => g,
         ResolvedVal::Imm(imm) => {
-            // Load divisor into R2.
             emit_load_imm(code, Gpr::R2, imm);
             Gpr::R2
         }
@@ -1605,18 +1609,19 @@ fn emit_div_isel(
     }
 
     if signed {
-        // DGR R0, R2: signed 64-bit divide. op1=0xB9, op2=0x0D.
+        // DSGR R0, R2: signed 64-bit divide. op1=0xB9, op2=0x0D.
+        // After: R1 = quotient, R0 = remainder.
         code.extend_from_slice(&encode_dgr(Gpr::R0, divisor_reg));
     } else {
         // DLGR R0, R2: unsigned 64-bit divide. op1=0xB9, op2=0x87.
+        // After: R1 = quotient, R0 = remainder.
         code.extend_from_slice(&encode_dlgr(Gpr::R0, divisor_reg));
     }
 
-    // Quotient is now in R1. Move to dst.
-    code.extend_from_slice(&encode_lgr(dst_reg, Gpr::R1));
-
-    // For SRem/URem, the remainder is in R0 — but the caller would have
-    // used a different BinOpKind. For SDiv/UDiv/Div, the quotient is correct.
+    // For Div/SDiv/UDiv: quotient is in R1.
+    // For SRem/URem: remainder is in R0.
+    let result_reg = if is_rem { Gpr::R0 } else { Gpr::R1 };
+    code.extend_from_slice(&encode_lgr(dst_reg, result_reg));
 
     if is_32bit_ty(ty) {
         code.extend_from_slice(&encode_llgfr(dst_reg, dst_reg));
