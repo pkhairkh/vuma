@@ -2270,8 +2270,11 @@ fn arm32_target_desc() -> TargetDesc {
         RegDesc::gpr("R12", 12).not_allocatable(),
         // R13: stack pointer
         RegDesc::gpr("R13", 13).stack_pointer(),
-        // R14: link register
-        RegDesc::gpr("R14", 14).link_register(),
+        // R14: link register. NOT allocatable — BL clobbers LR with the
+        // return address. If the regalloc assigns a live vreg to R14,
+        // BL would silently corrupt it, causing wrong results in
+        // recursive functions (e.g. fibonacci).
+        RegDesc::gpr("R14", 14).link_register().not_allocatable(),
         // R15: program counter
         RegDesc::gpr("R15", 15).not_allocatable(),
         // D0-D7: FP argument/return (VFP, caller-saved)
