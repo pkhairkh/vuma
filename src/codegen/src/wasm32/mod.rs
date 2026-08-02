@@ -4664,6 +4664,7 @@ impl Backend for Wasm32Backend {
                     // Generic clone/vfork numbers (aarch64) used by the IR
                     // before syscall_abi::translate resolves them.
                     crate::ir::IRInstr::Syscall { .. } => true,
+                    crate::ir::IRInstr::CallIndirect { .. } => true,
                     _ => false,
                 }
             })

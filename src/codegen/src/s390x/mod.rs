@@ -3115,6 +3115,7 @@ impl Backend for S390XBackend {
                         fname == "spawn_worker" || fname == "fork"
                     }
                     IRInstr::Syscall { nr, .. } => true,
+                    crate::ir::IRInstr::CallIndirect { .. } => true,
                     _ => false,
                 }
             })

@@ -3739,6 +3739,7 @@ impl Backend for Mips64Backend {
                         fname == "spawn_worker" || fname == "fork"
                     }
                     crate::ir::IRInstr::Syscall { .. } => true,
+                    crate::ir::IRInstr::CallIndirect { .. } => true,
                     _ => false,
                 }
             })
