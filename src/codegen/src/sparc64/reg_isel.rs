@@ -289,6 +289,19 @@ fn emit_instruction(code: &mut Vec<u8>, instr: &IRInstr, alloc: &RegAllocResult,
             match op {
                 BinOpKind::SDiv => code.extend_from_slice(&Instruction::SDivX { rd: d, rs1: l, rs2: r }.encode()),
                 BinOpKind::UDiv => code.extend_from_slice(&Instruction::UDivX { rd: d, rs1: l, rs2: r }.encode()),
+                BinOpKind::SRem => {
+                    // SPARC V9 has no native remainder instruction.
+                    // Compute: d = l - (l / r) * r
+                    // Use G1 as scratch (not_allocatable).
+                    code.extend_from_slice(&Instruction::SDivX { rd: d, rs1: l, rs2: r }.encode());
+                    code.extend_from_slice(&Instruction::MulX { rd: Gpr::G1, rs1: d, rs2: r }.encode());
+                    code.extend_from_slice(&Instruction::Sub { rd: d, rs1: l, rs2: Gpr::G1 }.encode());
+                }
+                BinOpKind::URem => {
+                    code.extend_from_slice(&Instruction::UDivX { rd: d, rs1: l, rs2: r }.encode());
+                    code.extend_from_slice(&Instruction::MulX { rd: Gpr::G1, rs1: d, rs2: r }.encode());
+                    code.extend_from_slice(&Instruction::Sub { rd: d, rs1: l, rs2: Gpr::G1 }.encode());
+                }
                 BinOpKind::And => {
                     if use_imm { let imm = if let ResolvedVal::Imm(i) = rhs_val { i } else { 0 }; code.extend_from_slice(&Instruction::AndImm { rd: d, rs1: l, imm: imm as i32 }.encode()) }
                     else { code.extend_from_slice(&Instruction::And { rd: d, rs1: l, rs2: r }.encode()) }
