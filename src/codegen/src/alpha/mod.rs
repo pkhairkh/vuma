@@ -486,7 +486,7 @@ fn op_reg(op: u32, ra: Gpr, rb: Gpr, rc: Gpr, function: u32) -> u32 {
 }
 
 #[inline]
-fn op_lit(op: u32, ra: Gpr, lit: u8, rc: Gpr, function: u32) -> u32 {
+pub fn op_lit(op: u32, ra: Gpr, lit: u8, rc: Gpr, function: u32) -> u32 {
     // Alpha Operate literal form (per Alpha ARM):
     //   bits 31-26: opcode (6 bits)
     //   bits 25-21: ra (5 bits)
