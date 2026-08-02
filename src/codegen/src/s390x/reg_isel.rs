@@ -800,30 +800,40 @@ fn emit_instruction(
 
         // ── Select ──
         IRInstr::Select { dst, cond, true_val, false_val, ty: _ } => {
-            let cond_reg = load_to_reg(cond, alloc, code);
             let dst_reg = load_to_reg(dst, alloc, code);
-            let false_reg = load_to_reg(false_val, alloc, code);
-            // dst = false_val
-            code.extend_from_slice(&encode_lgr(dst_reg, false_reg));
-            // LTGR R0, cond: sets CC based on cond.
-            //   op1=0xB9, op2=0x02. R1=R0 (scratch), R2=cond.
-            code.extend_from_slice(&encode_rre(0xB9, 0x02, Gpr::R0, cond_reg));
-            // BRC 0x8, +skip (skip the load-true if cond == 0).
-            // Mask 0x8 = CC=0 (cond == 0). 4-byte BRC.
-            let skip_patch = code.len();
-            code.extend_from_slice(&encode_brc(0x8, 0));
-            // Load true_val into dst (overwriting false_val).
-            let true_reg = load_to_reg(true_val, alloc, code);
-            code.extend_from_slice(&encode_lgr(dst_reg, true_reg));
-            // skip_load_true: patch the BRC to jump here.
-            let skip_target = code.len() as i64;
-            let disp = (skip_target - skip_patch as i64) / 2;
-            let disp_be = (disp as i16).to_be_bytes();
-            code[skip_patch + 2..skip_patch + 4].copy_from_slice(&disp_be);
-
-            reads.push(phys(cond_reg));
-            reads.push(phys(false_reg));
-            reads.push(phys(true_reg));
+            // If cond is an immediate, evaluate at compile time.
+            if let IRValue::Immediate(c) = cond {
+                if *c != 0 {
+                    let tv = load_to_reg(true_val, alloc, code);
+                    code.extend_from_slice(&encode_lgr(dst_reg, tv));
+                    reads.push(phys(tv));
+                } else {
+                    let fv = load_to_reg(false_val, alloc, code);
+                    code.extend_from_slice(&encode_lgr(dst_reg, fv));
+                    reads.push(phys(fv));
+                }
+            } else {
+                let cond_reg = load_to_reg(cond, alloc, code);
+                // Load false_val and move to dst BEFORE loading true_val
+                // (avoids scratch clobber when both are immediates).
+                let false_reg = load_to_reg(false_val, alloc, code);
+                code.extend_from_slice(&encode_lgr(dst_reg, false_reg));
+                // LTGR R0, cond: sets CC based on cond.
+                code.extend_from_slice(&encode_rre(0xB9, 0x02, Gpr::R0, cond_reg));
+                // BRC 0x8, +skip (skip the load-true if cond == 0).
+                let skip_patch = code.len();
+                code.extend_from_slice(&encode_brc(0x8, 0));
+                // Load true_val into dst (overwriting false_val).
+                let true_reg = load_to_reg(true_val, alloc, code);
+                code.extend_from_slice(&encode_lgr(dst_reg, true_reg));
+                let skip_target = code.len() as i64;
+                let disp = (skip_target - skip_patch as i64) / 2;
+                let disp_be = (disp as i16).to_be_bytes();
+                code[skip_patch + 2..skip_patch + 4].copy_from_slice(&disp_be);
+                reads.push(phys(cond_reg));
+                reads.push(phys(false_reg));
+                reads.push(phys(true_reg));
+            }
             writes.push(phys(dst_reg));
             "select".to_string()
         }
