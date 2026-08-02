@@ -465,6 +465,13 @@ fn emit_instruction(
                     }
                 }
             }
+            // Zero-extend 32-bit result to prevent overflow from leaking
+            // into the upper 32 bits (Add/Addi are 64-bit instructions).
+            // rlwinm ra, rs, 0, 0, 31 operates on the low 32 bits and
+            // zero-extends to 64 bits (equivalent to rldicl ra, rs, 0, 32).
+            if matches!(ty, Some(IRType::I32) | Some(IRType::U32)) {
+                code.extend_from_slice(&Instruction::Rlwinm { ra: dst_reg, rs: dst_reg, sh: 0, mb: 0, me: 31 }.encode());
+            }
             reads.push(phys(lhs_reg));
             writes.push(phys(dst_reg));
             "add".to_string()
@@ -477,6 +484,11 @@ fn emit_instruction(
             let rhs_reg = load_to_reg(rhs, alloc, code);
             // subf rd, rhs, lhs (rd = lhs - rhs)
             code.extend_from_slice(&Instruction::Subf { rt: dst_reg, ra: rhs_reg, rb: lhs_reg }.encode());
+            // Zero-extend 32-bit result to prevent overflow from leaking
+            // into the upper 32 bits (Subf is a 64-bit instruction).
+            if matches!(ty, Some(IRType::I32) | Some(IRType::U32)) {
+                code.extend_from_slice(&Instruction::Rlwinm { ra: dst_reg, rs: dst_reg, sh: 0, mb: 0, me: 31 }.encode());
+            }
             reads.push(phys(lhs_reg));
             reads.push(phys(rhs_reg));
             writes.push(phys(dst_reg));
@@ -489,6 +501,11 @@ fn emit_instruction(
             let lhs_reg = load_to_reg(lhs, alloc, code);
             let rhs_reg = load_to_reg(rhs, alloc, code);
             code.extend_from_slice(&Instruction::Mulld { rt: dst_reg, ra: lhs_reg, rb: rhs_reg }.encode());
+            // Zero-extend 32-bit result to prevent overflow from leaking
+            // into the upper 32 bits (Mulld is a 64-bit instruction).
+            if matches!(ty, Some(IRType::I32) | Some(IRType::U32)) {
+                code.extend_from_slice(&Instruction::Rlwinm { ra: dst_reg, rs: dst_reg, sh: 0, mb: 0, me: 31 }.encode());
+            }
             reads.push(phys(lhs_reg));
             reads.push(phys(rhs_reg));
             writes.push(phys(dst_reg));
@@ -621,6 +638,15 @@ fn emit_instruction(
                 }
                 BinOpKind::Mul => code.extend_from_slice(&Instruction::Mulld { rt: dst_reg, ra: lhs_reg, rb: rhs_reg }.encode()),
                 _ => code.extend_from_slice(&Instruction::Add { rt: dst_reg, ra: lhs_reg, rb: rhs_reg }.encode()),
+            }
+            // Zero-extend 32-bit result to prevent overflow from leaking
+            // into the upper 32 bits (Add/Sub/Mul use 64-bit instructions).
+            // rlwinm ra, rs, 0, 0, 31 operates on the low 32 bits and
+            // zero-extends to 64 bits (equivalent to rldicl ra, rs, 0, 32).
+            if matches!(ty, Some(IRType::I32) | Some(IRType::U32))
+                && matches!(op, BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul)
+            {
+                code.extend_from_slice(&Instruction::Rlwinm { ra: dst_reg, rs: dst_reg, sh: 0, mb: 0, me: 31 }.encode());
             }
             reads.push(phys(lhs_reg));
             if !use_imm { reads.push(phys(rhs_reg)); }

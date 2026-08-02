@@ -337,6 +337,11 @@ fn emit_instruction(code: &mut Vec<u8>, instr: &IRInstr, alloc: &RegAllocResult,
                 BinOpKind::Mul => code.extend_from_slice(&Instruction::MulX { rd: d, rs1: l, rs2: r }.encode()),
                 _ => code.extend_from_slice(&Instruction::Add { rd: d, rs1: l, rs2: r }.encode()),
             }
+            // For 32-bit types, zero-extend result (sllx + srlx by 32).
+            if matches!(ty, Some(IRType::I32) | Some(IRType::U32)) {
+                code.extend_from_slice(&Instruction::SllxImm { rd: d, rs1: d, imm: 32 }.encode());
+                code.extend_from_slice(&Instruction::SrlxImm { rd: d, rs1: d, imm: 32 }.encode());
+            }
             reads.push(phys(l));
             if !use_imm { reads.push(phys(r)); }
             writes.push(phys(d)); "binop".to_string()
