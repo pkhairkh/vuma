@@ -358,21 +358,20 @@ fn emit_instruction(code: &mut Vec<u8>, instr: &IRInstr, alloc: &RegAllocResult,
             reads.push(phys(v)); reads.push(phys(b)); "store".to_string()
         }
         IRInstr::Cmp { dst, kind, lhs, rhs, .. } => {
-            let l = load_to_reg(lhs, alloc, code); let r = load_to_reg(rhs, alloc, code); let d = load_to_reg(dst, alloc, code);
-            // Branch-based comparison (more reliable than MOVcc on QEMU):
-            //   subcc %g0, l, r     (sets %icc based on l - r)
-            //   b{COND} +3           (branch if condition TRUE, skip the 'mov d,0')
-            //   mov d, 0             (delay slot — always executes)
-            //   mov d, 1             (condition was true)
-            //   <next instr>         (branch target)
-            //
-            // Wait — SPARC delay slot always executes, so:
-            //   subcc %g0, l, r
-            //   b{NCOND} +3          (branch if condition FALSE, skip mov d,1)
-            //   mov d, 0             (delay slot — always executes)
-            //   mov d, 1             (condition true — only reached if branch NOT taken)
-            //   <next instr>         (branch target — after mov d,1)
-            code.extend_from_slice(&Instruction::Subcc { rd: Gpr::G0, rs1: l, rs2: r }.encode());
+            let l = load_to_reg(lhs, alloc, code); let d = load_to_reg(dst, alloc, code);
+            // Use SubccImm (13-bit signed immediate) when rhs is a small
+            // immediate, avoiding load_to_reg which clobbers G1 scratch.
+            let (r, is_imm) = match resolve_value(rhs, alloc) {
+                ResolvedVal::Imm(imm) if (-4096..=4095).contains(&imm) => {
+                    code.extend_from_slice(&Instruction::SubccImm { rd: Gpr::G0, rs1: l, imm: imm as i32 }.encode());
+                    (Gpr::G0, true)
+                }
+                _ => {
+                    let r = load_to_reg(rhs, alloc, code);
+                    code.extend_from_slice(&Instruction::Subcc { rd: Gpr::G0, rs1: l, rs2: r }.encode());
+                    (r, false)
+                }
+            };
             // Use NEGATED condition: branch when condition is FALSE (skip mov d,1)
             let neg_cond_offset = 3i32; // skip delay slot + mov d,1
             match kind {
@@ -387,7 +386,7 @@ fn emit_instruction(code: &mut Vec<u8>, instr: &IRInstr, alloc: &RegAllocResult,
             }
             code.extend_from_slice(&Instruction::Or { rd: d, rs1: Gpr::G0, rs2: Gpr::G0 }.encode()); // delay slot: mov d, 0
             code.extend_from_slice(&Instruction::AddImm { rd: d, rs1: Gpr::G0, imm: 1 }.encode()); // condition true: mov d, 1
-            reads.push(phys(l)); reads.push(phys(r)); writes.push(phys(d)); "cmp".to_string()
+            reads.push(phys(l)); if !is_imm { reads.push(phys(r)); } writes.push(phys(d)); "cmp".to_string()
         }
         IRInstr::Select { dst, cond, true_val, false_val, .. } | IRInstr::CtSelect { dst, cond, true_val, false_val, .. } => {
             let c = load_to_reg(cond, alloc, code); let d = load_to_reg(dst, alloc, code);
