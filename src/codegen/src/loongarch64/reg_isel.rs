@@ -243,18 +243,36 @@ fn emit_instruction(code: &mut Vec<u8>, instr: &IRInstr, alloc: &RegAllocResult,
                 ResolvedVal::Reg(r) => { code.extend_from_slice(&Instruction::AddD { rd: d, rj: l, rk: r }.encode()); reads.push(phys(r)); }
                 ResolvedVal::Imm(i) => { if i >= -2048 && i <= 2047 { code.extend_from_slice(&Instruction::AddiD { rd: d, rj: l, imm12: i as i32 }.encode()); } else { let s = load_to_reg(rhs, alloc, code); code.extend_from_slice(&Instruction::AddD { rd: d, rj: l, rk: s }.encode()); } }
             }
+            // Zero-extend 32-bit result to prevent overflow from leaking
+            // into the upper 32 bits (AddD/AddiD are 64-bit instructions).
+            if matches!(ty, Some(IRType::I32) | Some(IRType::U32)) {
+                code.extend_from_slice(&Instruction::SlliD { rd: d, rj: d, imm8: 32 }.encode());
+                code.extend_from_slice(&Instruction::SrliD { rd: d, rj: d, imm8: 32 }.encode());
+            }
             reads.push(phys(l)); writes.push(phys(d)); "add".to_string()
         }
         IRInstr::Sub { dst, lhs, rhs, ty } => {
             if matches!(ty, Some(IRType::F32) | Some(IRType::F64)) { return emit_fp_fallback(instr); }
             let d = load_to_reg(dst, alloc, code); let l = load_to_reg(lhs, alloc, code); let r = load_to_reg(rhs, alloc, code);
             code.extend_from_slice(&Instruction::SubD { rd: d, rj: l, rk: r }.encode());
+            // Zero-extend 32-bit result to prevent overflow from leaking
+            // into the upper 32 bits (SubD is a 64-bit instruction).
+            if matches!(ty, Some(IRType::I32) | Some(IRType::U32)) {
+                code.extend_from_slice(&Instruction::SlliD { rd: d, rj: d, imm8: 32 }.encode());
+                code.extend_from_slice(&Instruction::SrliD { rd: d, rj: d, imm8: 32 }.encode());
+            }
             reads.push(phys(l)); reads.push(phys(r)); writes.push(phys(d)); "sub".to_string()
         }
         IRInstr::Mul { dst, lhs, rhs, ty } => {
             if matches!(ty, Some(IRType::F32) | Some(IRType::F64)) { return emit_fp_fallback(instr); }
             let d = load_to_reg(dst, alloc, code); let l = load_to_reg(lhs, alloc, code); let r = load_to_reg(rhs, alloc, code);
             code.extend_from_slice(&Instruction::MulD { rd: d, rj: l, rk: r }.encode());
+            // Zero-extend 32-bit result to prevent overflow from leaking
+            // into the upper 32 bits (MulD is a 64-bit instruction).
+            if matches!(ty, Some(IRType::I32) | Some(IRType::U32)) {
+                code.extend_from_slice(&Instruction::SlliD { rd: d, rj: d, imm8: 32 }.encode());
+                code.extend_from_slice(&Instruction::SrliD { rd: d, rj: d, imm8: 32 }.encode());
+            }
             reads.push(phys(l)); reads.push(phys(r)); writes.push(phys(d)); "mul".to_string()
         }
         // ── Div (standalone, from scg_to_ir) ──
@@ -315,6 +333,14 @@ fn emit_instruction(code: &mut Vec<u8>, instr: &IRInstr, alloc: &RegAllocResult,
                     BinOpKind::Mul => code.extend_from_slice(&Instruction::MulD { rd: d, rj: l, rk: r }.encode()),
                     _ => code.extend_from_slice(&Instruction::AddD { rd: d, rj: l, rk: r }.encode()),
                 }
+            }
+            // Zero-extend 32-bit result to prevent overflow from leaking
+            // into the upper 32 bits (Add/Sub/Mul use 64-bit instructions).
+            if matches!(ty, Some(IRType::I32) | Some(IRType::U32))
+                && matches!(op, BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul)
+            {
+                code.extend_from_slice(&Instruction::SlliD { rd: d, rj: d, imm8: 32 }.encode());
+                code.extend_from_slice(&Instruction::SrliD { rd: d, rj: d, imm8: 32 }.encode());
             }
             reads.push(phys(l)); if !use_imm { reads.push(phys(r)); } writes.push(phys(d)); "binop".to_string()
         }
