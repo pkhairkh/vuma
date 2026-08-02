@@ -511,12 +511,6 @@ fn emit_instruction(
                     code.extend(encode_add_reg_imm32(dst_reg, imm as i32));
                 }
             }
-            // For 32-bit types, zero-extend result.
-            if matches!(ty, Some(IRType::I32) | Some(IRType::U32)) {
-                let r = dst_reg as u8;
-                if r >= 8 { code.extend_from_slice(&[0x45, 0x89, 0xC0]); }
-                else { code.extend_from_slice(&[0x89, 0xC0 | r]); }
-            }
             reads.push(phys(lhs_reg));
             writes.push(phys(dst_reg));
             "add".to_string()
@@ -541,12 +535,6 @@ fn emit_instruction(
                 ResolvedVal::Imm(imm) => {
                     code.extend(encode_sub_reg_imm32(dst_reg, imm as i32));
                 }
-            }
-            // For 32-bit types, zero-extend result.
-            if matches!(ty, Some(IRType::I32) | Some(IRType::U32)) {
-                let r = dst_reg as u8;
-                if r >= 8 { code.extend_from_slice(&[0x45, 0x89, 0xC0]); }
-                else { code.extend_from_slice(&[0x89, 0xC0 | r]); }
             }
             reads.push(phys(lhs_reg));
             writes.push(phys(dst_reg));
@@ -575,12 +563,6 @@ fn emit_instruction(
                     code.extend(encode_mov_reg_imm32(scratch, imm as i32));
                     code.extend(encode_imul_reg_reg(dst_reg, scratch));
                 }
-            }
-            // For 32-bit types, zero-extend result.
-            if matches!(ty, Some(IRType::I32) | Some(IRType::U32)) {
-                let r = dst_reg as u8;
-                if r >= 8 { code.extend_from_slice(&[0x45, 0x89, 0xC0]); }
-                else { code.extend_from_slice(&[0x89, 0xC0 | r]); }
             }
             reads.push(phys(lhs_reg));
             writes.push(phys(dst_reg));
