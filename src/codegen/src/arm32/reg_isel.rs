@@ -764,17 +764,35 @@ fn emit_instruction(
 
         IRInstr::Cmp { dst, kind, lhs, rhs, .. } => {
             let lhs_reg = load_to_reg(lhs, alloc, code);
-            let rhs_reg = load_to_reg(rhs, alloc, code);
             let dst_reg = load_to_reg(dst, alloc, code);
-            // CMP lhs, rhs; MOVcc dst, #1; MOV dst, #0 (inverted)
-            code.extend_from_slice(&Instruction::Cmp { rn: lhs_reg, rm: rhs_reg, cond: Condition::Al }.encode());
+            // Use CmpImm (8-bit rotated immediate) when rhs is encodable,
+            // avoiding load_to_reg which clobbers R12 scratch.
+            let rhs_val = resolve_value(rhs, alloc);
+            let (rhs_reg, is_imm) = match &rhs_val {
+                ResolvedVal::Imm(imm) if *imm >= 0 => {
+                    if let Some((rotate, imm8)) = encode_arm_imm(*imm as u32) {
+                        code.extend_from_slice(&Instruction::CmpImm { rn: lhs_reg, rotate, imm8, cond: Condition::Al }.encode());
+                        (Gpr::R0, true)
+                    } else {
+                        let r = load_to_reg(rhs, alloc, code);
+                        (r, false)
+                    }
+                }
+                _ => {
+                    let r = load_to_reg(rhs, alloc, code);
+                    (r, false)
+                }
+            };
+            if !is_imm {
+                code.extend_from_slice(&Instruction::Cmp { rn: lhs_reg, rm: rhs_reg, cond: Condition::Al }.encode());
+            }
             let cond = cmp_kind_to_cond(kind);
             // MOV dst, #0
             code.extend_from_slice(&Instruction::MovImm { rd: dst_reg, rotate: 0, imm8: 0, cond: Condition::Al }.encode());
             // MOVcc dst, #1
             code.extend_from_slice(&Instruction::MovImm { rd: dst_reg, rotate: 0, imm8: 1, cond }.encode());
             reads.push(phys(lhs_reg));
-            reads.push(phys(rhs_reg));
+            if !is_imm { reads.push(phys(rhs_reg)); }
             writes.push(phys(dst_reg));
             "cmp".to_string()
         }

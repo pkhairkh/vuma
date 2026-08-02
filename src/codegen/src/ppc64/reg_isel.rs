@@ -712,14 +712,28 @@ fn emit_instruction(
 
         IRInstr::Cmp { dst, kind, lhs, rhs, .. } => {
             let lhs_reg = load_to_reg(lhs, alloc, code);
-            let rhs_reg = load_to_reg(rhs, alloc, code);
             let dst_reg = load_to_reg(dst, alloc, code);
-            // Use CR0 (field 0). cmp/cmpl sets CR0. Then mfcr to extract.
-            // For simplicity, use set-based approach: cmp; mfcr; rlwinm to extract CR0 bit.
-            let is_signed = matches!(kind, CmpKind::SLt | CmpKind::SLe | CmpKind::SGt | CmpKind::SGe | CmpKind::Eq | CmpKind::Ne);
-            let _ = is_signed;
-            // Use CR field 0
-            if matches!(kind, CmpKind::ULt | CmpKind::ULe | CmpKind::UGt | CmpKind::UGe) {
+            // Use Cmpi/Cmpli (immediate form) when rhs is a small immediate,
+            // avoiding load_to_reg which clobbers R11 scratch.
+            let rhs_val = resolve_value(rhs, alloc);
+            let is_unsigned = matches!(kind, CmpKind::ULt | CmpKind::ULe | CmpKind::UGt | CmpKind::UGe);
+            let use_imm = match &rhs_val {
+                ResolvedVal::Imm(imm) if is_unsigned => *imm >= 0 && *imm <= 65535,
+                ResolvedVal::Imm(imm) => *imm >= -32768 && *imm <= 32767,
+                _ => false,
+            };
+            let rhs_reg = if use_imm { Gpr::R0 } else { load_to_reg(rhs, alloc, code) };
+            if use_imm {
+                if is_unsigned {
+                    if let ResolvedVal::Imm(imm) = rhs_val {
+                        code.extend_from_slice(&Instruction::Cmpli { bf: CrField::CR0, l: 1, ra: lhs_reg, uimm: imm as u32 }.encode());
+                    }
+                } else {
+                    if let ResolvedVal::Imm(imm) = rhs_val {
+                        code.extend_from_slice(&Instruction::Cmpi { bf: CrField::CR0, l: 1, ra: lhs_reg, simm: imm as i32 }.encode());
+                    }
+                }
+            } else if is_unsigned {
                 code.extend_from_slice(&Instruction::Cmpl { bf: CrField::CR0, l: 1, ra: lhs_reg, rb: rhs_reg }.encode());
             } else {
                 code.extend_from_slice(&Instruction::Cmp { bf: CrField::CR0, l: 1, ra: lhs_reg, rb: rhs_reg }.encode());
@@ -761,7 +775,7 @@ fn emit_instruction(
                 code.extend_from_slice(&Instruction::Xori { ra: dst_reg, rs: dst_reg, uimm: 1 }.encode());
             }
             reads.push(phys(lhs_reg));
-            reads.push(phys(rhs_reg));
+            if !use_imm { reads.push(phys(rhs_reg)); }
             writes.push(phys(dst_reg));
             "cmp".to_string()
         }
