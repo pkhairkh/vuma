@@ -869,19 +869,39 @@ fn emit_instr(
         }
         IRInstr::Select { dst, cond, true_val, false_val, .. }
         | IRInstr::CtSelect { dst, cond, true_val, false_val, .. } => {
-            let c_reg = load_to_reg(cond, a, c);
+            // If cond is an immediate, evaluate at compile time. Otherwise,
+            // load false_val first, emit the copy into dst (which captures
+            // false_val before it can be clobbered), THEN load true_val and
+            // emit the conditional copy. This ordering matters because
+            // load_to_reg uses a fixed scratch (S4) for immediates, so
+            // loading true_val would clobber false_val if both are Imm.
             let d = load_to_reg(dst, a, c);
-            let f = load_to_reg(false_val, a, c);
-            let t = load_to_reg(true_val, a, c);
-            // d = f; if (c_reg != 0) d = t;
-            c.extend_from_slice(&encode_copy(f, d));
-            // cmpb,= c_reg, R0, skip  (if c_reg == 0, skip the move)
-            c.extend_from_slice(&encode_cmpb(c_reg, R0, 0b001, false, true, 8));
-            c.extend_from_slice(&encode_nop()); // delay slot (nullified if taken)
-            c.extend_from_slice(&encode_copy(t, d));
-            reads.push(ph(c_reg));
-            reads.push(ph(f));
-            reads.push(ph(t));
+            if let IRValue::Immediate(cv) = cond {
+                if *cv != 0 {
+                    let t = load_to_reg(true_val, a, c);
+                    c.extend_from_slice(&encode_copy(t, d));
+                    reads.push(ph(t));
+                } else {
+                    let f = load_to_reg(false_val, a, c);
+                    c.extend_from_slice(&encode_copy(f, d));
+                    reads.push(ph(f));
+                }
+            } else {
+                let c_reg = load_to_reg(cond, a, c);
+                let f = load_to_reg(false_val, a, c);
+                // d = f (captures false_val into dst now)
+                c.extend_from_slice(&encode_copy(f, d));
+                // Load true_val AFTER copying false_val into dst, so an
+                // immediate true_val clobbering S4 does not lose false_val.
+                let t = load_to_reg(true_val, a, c);
+                // cmpb,= c_reg, R0, skip  (if c_reg == 0, skip the move)
+                c.extend_from_slice(&encode_cmpb(c_reg, R0, 0b001, false, true, 8));
+                c.extend_from_slice(&encode_nop()); // delay slot (nullified if taken)
+                c.extend_from_slice(&encode_copy(t, d));
+                reads.push(ph(c_reg));
+                reads.push(ph(f));
+                reads.push(ph(t));
+            }
             writes.push(ph(d));
             "select".to_string()
         }

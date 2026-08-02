@@ -364,14 +364,36 @@ fn emit_instruction(code: &mut Vec<u8>, instr: &IRInstr, alloc: &RegAllocResult,
             reads.push(phys(l)); reads.push(phys(r)); writes.push(phys(d)); "cmp".to_string()
         }
         IRInstr::Select { dst, cond, true_val, false_val, .. } | IRInstr::CtSelect { dst, cond, true_val, false_val, .. } => {
-            let c = load_to_reg(cond, alloc, code); let d = load_to_reg(dst, alloc, code);
-            let f = load_to_reg(false_val, alloc, code); let t = load_to_reg(true_val, alloc, code);
-            code.extend_from_slice(&Instruction::Or { rd: d, rj: f, rk: Gpr::R0 }.encode());
-            code.extend_from_slice(&Instruction::Maskeqz { rd: d, rj: d, rk: c }.encode()); // if c==0, clear d
-            code.extend_from_slice(&Instruction::Or { rd: Gpr::T8, rj: t, rk: Gpr::R0 }.encode());
-            code.extend_from_slice(&Instruction::Masknez { rd: d, rj: d, rk: c }.encode()); // if c!=0, clear d
-            code.extend_from_slice(&Instruction::Or { rd: d, rj: d, rk: Gpr::T8 }.encode());
-            reads.push(phys(c)); reads.push(phys(f)); reads.push(phys(t)); writes.push(phys(d)); "select".to_string()
+            // If cond is an immediate, evaluate at compile time. Otherwise,
+            // load false_val first, emit Maskeqz into dst (which captures
+            // false_val before it can be clobbered), THEN load true_val and
+            // emit Masknez into T8. This ordering matters because load_to_reg
+            // uses a fixed scratch (T8) for immediates, so loading true_val
+            // would clobber false_val if both are Imm.
+            let d = load_to_reg(dst, alloc, code);
+            if let IRValue::Immediate(c) = cond {
+                if *c != 0 {
+                    let t = load_to_reg(true_val, alloc, code);
+                    code.extend_from_slice(&Instruction::Or { rd: d, rj: t, rk: Gpr::R0 }.encode());
+                    reads.push(phys(t));
+                } else {
+                    let f = load_to_reg(false_val, alloc, code);
+                    code.extend_from_slice(&Instruction::Or { rd: d, rj: f, rk: Gpr::R0 }.encode());
+                    reads.push(phys(f));
+                }
+            } else {
+                let c = load_to_reg(cond, alloc, code);
+                let f = load_to_reg(false_val, alloc, code);
+                // d = (c == 0) ? f : 0  — captures false_val into dst now.
+                code.extend_from_slice(&Instruction::Maskeqz { rd: d, rj: f, rk: c }.encode());
+                let t = load_to_reg(true_val, alloc, code);
+                // T8 = (c != 0) ? t : 0
+                code.extend_from_slice(&Instruction::Masknez { rd: Gpr::T8, rj: t, rk: c }.encode());
+                // d = d | T8
+                code.extend_from_slice(&Instruction::Or { rd: d, rj: d, rk: Gpr::T8 }.encode());
+                reads.push(phys(c)); reads.push(phys(f)); reads.push(phys(t));
+            }
+            writes.push(phys(d)); "select".to_string()
         }
         IRInstr::CtEq { dst, lhs, rhs, .. } => {
             let l = load_to_reg(lhs, alloc, code); let r = load_to_reg(rhs, alloc, code); let d = load_to_reg(dst, alloc, code);
