@@ -963,34 +963,73 @@ fn emit_instruction(
 
         // ── Select ──
         IRInstr::Select { dst, cond, true_val, false_val, .. } => {
-            let cond_reg = load_to_reg(cond, alloc, code);
-            // test cond, cond (sets ZF if cond==0)
-            code.extend(encode_test_reg_reg(cond_reg, cond_reg));
             let dst_reg = load_to_reg(dst, alloc, code);
-            let false_reg = load_to_reg(false_val, alloc, code);
-            let true_reg = load_to_reg(true_val, alloc, code);
-            // mov dst, false_val; cmovne dst, true_val
-            code.extend(encode_mov_reg_reg(dst_reg, false_reg));
-            code.extend(encode_cmovcc_reg_reg(Cc::NotEqual, dst_reg, true_reg));
-            reads.push(phys(cond_reg));
-            reads.push(phys(false_reg));
-            reads.push(phys(true_reg));
+            // If cond is an immediate, evaluate at compile time.
+            if let IRValue::Immediate(c) = cond {
+                if *c != 0 {
+                    // cond = true → dst = true_val
+                    let tv = load_to_reg(true_val, alloc, code);
+                    if tv != dst_reg {
+                        code.extend(encode_mov_reg_reg(dst_reg, tv));
+                    }
+                    reads.push(phys(tv));
+                } else {
+                    // cond = false → dst = false_val
+                    let fv = load_to_reg(false_val, alloc, code);
+                    if fv != dst_reg {
+                        code.extend(encode_mov_reg_reg(dst_reg, fv));
+                    }
+                    reads.push(phys(fv));
+                }
+            } else {
+                // cond is a register — use test + cmovne pattern.
+                let cond_reg = load_to_reg(cond, alloc, code);
+                code.extend(encode_test_reg_reg(cond_reg, cond_reg));
+                // Load false_val first, then true_val.  If both are
+                // immediates, they both use R11 scratch, so we must
+                // emit the mov BEFORE loading true_val (which would
+                // clobber R11).  Strategy:
+                //   1. mov dst, false_val  (R11 = false_val)
+                //   2. Load true_val into a DIFFERENT register.
+                //      If true_val is immediate, it goes to R11 (overwriting
+                //      false_val, but dst already has false_val).
+                //   3. cmovne dst, true_reg
+                let false_reg = load_to_reg(false_val, alloc, code);
+                code.extend(encode_mov_reg_reg(dst_reg, false_reg));
+                let true_reg = load_to_reg(true_val, alloc, code);
+                code.extend(encode_cmovcc_reg_reg(Cc::NotEqual, dst_reg, true_reg));
+                reads.push(phys(cond_reg));
+                reads.push(phys(false_reg));
+                reads.push(phys(true_reg));
+            }
             writes.push(phys(dst_reg));
             "select".to_string()
         }
 
         // ── CtSelect (constant-time select — same as Select on x86_64) ──
         IRInstr::CtSelect { dst, cond, true_val, false_val, .. } => {
-            let cond_reg = load_to_reg(cond, alloc, code);
-            code.extend(encode_test_reg_reg(cond_reg, cond_reg));
             let dst_reg = load_to_reg(dst, alloc, code);
-            let false_reg = load_to_reg(false_val, alloc, code);
-            let true_reg = load_to_reg(true_val, alloc, code);
-            code.extend(encode_mov_reg_reg(dst_reg, false_reg));
-            code.extend(encode_cmovcc_reg_reg(Cc::NotEqual, dst_reg, true_reg));
-            reads.push(phys(cond_reg));
-            reads.push(phys(false_reg));
-            reads.push(phys(true_reg));
+            if let IRValue::Immediate(c) = cond {
+                if *c != 0 {
+                    let tv = load_to_reg(true_val, alloc, code);
+                    if tv != dst_reg { code.extend(encode_mov_reg_reg(dst_reg, tv)); }
+                    reads.push(phys(tv));
+                } else {
+                    let fv = load_to_reg(false_val, alloc, code);
+                    if fv != dst_reg { code.extend(encode_mov_reg_reg(dst_reg, fv)); }
+                    reads.push(phys(fv));
+                }
+            } else {
+                let cond_reg = load_to_reg(cond, alloc, code);
+                code.extend(encode_test_reg_reg(cond_reg, cond_reg));
+                let false_reg = load_to_reg(false_val, alloc, code);
+                code.extend(encode_mov_reg_reg(dst_reg, false_reg));
+                let true_reg = load_to_reg(true_val, alloc, code);
+                code.extend(encode_cmovcc_reg_reg(Cc::NotEqual, dst_reg, true_reg));
+                reads.push(phys(cond_reg));
+                reads.push(phys(false_reg));
+                reads.push(phys(true_reg));
+            }
             writes.push(phys(dst_reg));
             "ct_select".to_string()
         }
