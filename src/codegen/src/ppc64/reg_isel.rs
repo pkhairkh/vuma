@@ -781,37 +781,80 @@ fn emit_instruction(
         }
 
         IRInstr::Select { dst, cond, true_val, false_val, .. } => {
-            let cond_reg = load_to_reg(cond, alloc, code);
             let dst_reg = load_to_reg(dst, alloc, code);
-            let false_reg = load_to_reg(false_val, alloc, code);
-            let true_reg = load_to_reg(true_val, alloc, code);
-            // cmpw cr0, cond, 0; isel dst, true, false, 2 (EQ bit)
-            // Actually: if cond != 0, take true. So:
-            //   cmplwi cr0, cond, 0  (sets CR0)
-            //   isel dst, false, true, 2  (if CR0_EQ==0, i.e. cond!=0, dst=true)
-            code.extend_from_slice(&Instruction::Cmpli { bf: CrField::CR0, l: 1, ra: cond_reg, uimm: 0 }.encode());
-            // isel: if CR[BI]==1 then rt=ra else rt=rb. BI=2 (CR0 EQ bit).
-            // We want: if cond==0 (EQ=1), dst=false; if cond!=0 (EQ=0), dst=true.
-            // So: isel dst, false_reg, true_reg, 2  (if EQ=1, dst=false; else dst=true)
-            code.extend_from_slice(&Instruction::Isel { rt: dst_reg, ra: false_reg, rb: true_reg, bi: 2 }.encode());
-            reads.push(phys(cond_reg));
-            reads.push(phys(false_reg));
-            reads.push(phys(true_reg));
+            // If cond is an immediate, evaluate at compile time.
+            if let IRValue::Immediate(c) = cond {
+                if *c != 0 {
+                    // cond = true → dst = true_val
+                    let tv = load_to_reg(true_val, alloc, code);
+                    if tv != dst_reg {
+                        code.extend_from_slice(&Instruction::Mr { ra: dst_reg, rs: tv }.encode()); // mr dst, tv
+                    }
+                    reads.push(phys(tv));
+                } else {
+                    // cond = false → dst = false_val
+                    let fv = load_to_reg(false_val, alloc, code);
+                    if fv != dst_reg {
+                        code.extend_from_slice(&Instruction::Mr { ra: dst_reg, rs: fv }.encode()); // mr dst, fv
+                    }
+                    reads.push(phys(fv));
+                }
+            } else {
+                // cond is a register — use cmpli + isel pattern.
+                let cond_reg = load_to_reg(cond, alloc, code);
+                // cmplwi cr0, cond, 0  (sets CR0; uses cond_reg now, before
+                // false_val/true_val loads may clobber R11 scratch).
+                code.extend_from_slice(&Instruction::Cmpli { bf: CrField::CR0, l: 1, ra: cond_reg, uimm: 0 }.encode());
+                // Load false_val first, then mr dst, false_val. Then load
+                // true_val (which may clobber R11 scratch, but dst already
+                // has false_val), then:
+                //   isel dst, dst, true_reg, 2
+                //   (if CR0_EQ==1 i.e. cond==0, dst=ra=dst unchanged;
+                //    if CR0_EQ==0 i.e. cond!=0, dst=rb=true_reg)
+                let false_reg = load_to_reg(false_val, alloc, code);
+                if false_reg != dst_reg {
+                    code.extend_from_slice(&Instruction::Mr { ra: dst_reg, rs: false_reg }.encode()); // mr dst, false
+                }
+                let true_reg = load_to_reg(true_val, alloc, code);
+                code.extend_from_slice(&Instruction::Isel { rt: dst_reg, ra: dst_reg, rb: true_reg, bi: 2 }.encode());
+                reads.push(phys(cond_reg));
+                reads.push(phys(false_reg));
+                reads.push(phys(true_reg));
+            }
             writes.push(phys(dst_reg));
             "select".to_string()
         }
 
         IRInstr::CtSelect { dst, cond, true_val, false_val, .. } => {
             // Same as Select
-            let cond_reg = load_to_reg(cond, alloc, code);
             let dst_reg = load_to_reg(dst, alloc, code);
-            let false_reg = load_to_reg(false_val, alloc, code);
-            let true_reg = load_to_reg(true_val, alloc, code);
-            code.extend_from_slice(&Instruction::Cmpli { bf: CrField::CR0, l: 1, ra: cond_reg, uimm: 0 }.encode());
-            code.extend_from_slice(&Instruction::Isel { rt: dst_reg, ra: false_reg, rb: true_reg, bi: 2 }.encode());
-            reads.push(phys(cond_reg));
-            reads.push(phys(false_reg));
-            reads.push(phys(true_reg));
+            if let IRValue::Immediate(c) = cond {
+                if *c != 0 {
+                    let tv = load_to_reg(true_val, alloc, code);
+                    if tv != dst_reg {
+                        code.extend_from_slice(&Instruction::Mr { ra: dst_reg, rs: tv }.encode());
+                    }
+                    reads.push(phys(tv));
+                } else {
+                    let fv = load_to_reg(false_val, alloc, code);
+                    if fv != dst_reg {
+                        code.extend_from_slice(&Instruction::Mr { ra: dst_reg, rs: fv }.encode());
+                    }
+                    reads.push(phys(fv));
+                }
+            } else {
+                let cond_reg = load_to_reg(cond, alloc, code);
+                code.extend_from_slice(&Instruction::Cmpli { bf: CrField::CR0, l: 1, ra: cond_reg, uimm: 0 }.encode());
+                let false_reg = load_to_reg(false_val, alloc, code);
+                if false_reg != dst_reg {
+                    code.extend_from_slice(&Instruction::Mr { ra: dst_reg, rs: false_reg }.encode());
+                }
+                let true_reg = load_to_reg(true_val, alloc, code);
+                code.extend_from_slice(&Instruction::Isel { rt: dst_reg, ra: dst_reg, rb: true_reg, bi: 2 }.encode());
+                reads.push(phys(cond_reg));
+                reads.push(phys(false_reg));
+                reads.push(phys(true_reg));
+            }
             writes.push(phys(dst_reg));
             "ct_select".to_string()
         }

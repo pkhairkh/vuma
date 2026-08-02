@@ -508,12 +508,23 @@ fn resolve_value(val: &IRValue, alloc: &RegAllocResult) -> ResolvedVal {
 }
 
 /// Load a value into a register. If the value is an immediate, materialise
-/// it via `emit_load_imm` using X9 as scratch.
+/// it via `emit_load_imm` using X16 (IP0) as scratch.
+///
+/// X16 is chosen because it is `not_allocatable` in `target_desc.rs`
+/// (intra-procedure-call scratch, IP0), so the register allocator never
+/// assigns a live vreg to it. Using an allocatable register (e.g. X9)
+/// would clobber any vreg the allocator assigned there, breaking later
+/// instructions that read that vreg (e.g. Select loading an immediate
+/// true_val into X9, then a Store using X9 as a base address).
+///
+/// X16 is safe within instruction emission because the value is consumed
+/// immediately (no BL between the load and the use). The linker only
+/// clobbers X16/X17 at BL veneer sites, not between instructions.
 fn load_to_reg(val: &IRValue, alloc: &RegAllocResult, code: &mut Vec<u8>) -> Register {
     match resolve_value(val, alloc) {
         ResolvedVal::Reg(r) => r,
         ResolvedVal::Imm(imm) => {
-            let scratch = Register::X9;
+            let scratch = Register::X16;
             emit_load_imm(code, scratch, imm);
             scratch
         }
@@ -1126,31 +1137,82 @@ fn emit_instruction(
 
         // ── Select (cond ? true_val : false_val) ──
         IRInstr::Select { dst, cond, true_val, false_val, .. } => {
-            let cond_reg = load_to_reg(cond, alloc, code);
             let dst_reg = load_to_reg(dst, alloc, code);
-            let true_reg = load_to_reg(true_val, alloc, code);
-            let false_reg = load_to_reg(false_val, alloc, code);
-            // CMP cond, #0; CSEL dst, true_reg, false_reg, NE
-            emit_instr(code, Instruction::CMP { rn: cond_reg, rm: Operand::Imm12(0) });
-            emit_instr(code, Instruction::CSEL { rd: dst_reg, rn: true_reg, rm: false_reg, cond: Condition::NE });
-            reads.push(phys(cond_reg));
-            reads.push(phys(true_reg));
-            reads.push(phys(false_reg));
+            // If cond is an immediate, evaluate at compile time.
+            if let IRValue::Immediate(c) = cond {
+                if *c != 0 {
+                    // cond = true → dst = true_val
+                    let tv = load_to_reg(true_val, alloc, code);
+                    if tv != dst_reg {
+                        emit_instr(code, Instruction::MOV { rd: dst_reg, rm: tv });
+                    }
+                    reads.push(phys(tv));
+                } else {
+                    // cond = false → dst = false_val
+                    let fv = load_to_reg(false_val, alloc, code);
+                    if fv != dst_reg {
+                        emit_instr(code, Instruction::MOV { rd: dst_reg, rm: fv });
+                    }
+                    reads.push(phys(fv));
+                }
+            } else {
+                // cond is a register — use CMP + CSEL pattern.
+                let cond_reg = load_to_reg(cond, alloc, code);
+                // Load false_val first, then true_val.  If both are
+                // immediates, they both use the load_to_reg scratch
+                // (X16), so we must emit the MOV BEFORE loading
+                // true_val (which would clobber the scratch).  Strategy:
+                //   1. mov dst, false_val  (scratch = false_val)
+                //   2. Load true_val into a DIFFERENT register.
+                //      If true_val is immediate, it goes to scratch
+                //      (overwriting false_val, but dst already has
+                //      false_val).
+                //   3. CMP cond, #0; CSEL dst, true_reg, dst, NE
+                let false_reg = load_to_reg(false_val, alloc, code);
+                if false_reg != dst_reg {
+                    emit_instr(code, Instruction::MOV { rd: dst_reg, rm: false_reg });
+                }
+                let true_reg = load_to_reg(true_val, alloc, code);
+                emit_instr(code, Instruction::CMP { rn: cond_reg, rm: Operand::Imm12(0) });
+                emit_instr(code, Instruction::CSEL { rd: dst_reg, rn: true_reg, rm: dst_reg, cond: Condition::NE });
+                reads.push(phys(cond_reg));
+                reads.push(phys(false_reg));
+                reads.push(phys(true_reg));
+            }
             writes.push(phys(dst_reg));
             "select".to_string()
         }
 
         // ── CtSelect (same as Select on aarch64 — CSEL is branchless) ──
         IRInstr::CtSelect { dst, cond, true_val, false_val, .. } => {
-            let cond_reg = load_to_reg(cond, alloc, code);
             let dst_reg = load_to_reg(dst, alloc, code);
-            let true_reg = load_to_reg(true_val, alloc, code);
-            let false_reg = load_to_reg(false_val, alloc, code);
-            emit_instr(code, Instruction::CMP { rn: cond_reg, rm: Operand::Imm12(0) });
-            emit_instr(code, Instruction::CSEL { rd: dst_reg, rn: true_reg, rm: false_reg, cond: Condition::NE });
-            reads.push(phys(cond_reg));
-            reads.push(phys(true_reg));
-            reads.push(phys(false_reg));
+            if let IRValue::Immediate(c) = cond {
+                if *c != 0 {
+                    let tv = load_to_reg(true_val, alloc, code);
+                    if tv != dst_reg {
+                        emit_instr(code, Instruction::MOV { rd: dst_reg, rm: tv });
+                    }
+                    reads.push(phys(tv));
+                } else {
+                    let fv = load_to_reg(false_val, alloc, code);
+                    if fv != dst_reg {
+                        emit_instr(code, Instruction::MOV { rd: dst_reg, rm: fv });
+                    }
+                    reads.push(phys(fv));
+                }
+            } else {
+                let cond_reg = load_to_reg(cond, alloc, code);
+                let false_reg = load_to_reg(false_val, alloc, code);
+                if false_reg != dst_reg {
+                    emit_instr(code, Instruction::MOV { rd: dst_reg, rm: false_reg });
+                }
+                let true_reg = load_to_reg(true_val, alloc, code);
+                emit_instr(code, Instruction::CMP { rn: cond_reg, rm: Operand::Imm12(0) });
+                emit_instr(code, Instruction::CSEL { rd: dst_reg, rn: true_reg, rm: dst_reg, cond: Condition::NE });
+                reads.push(phys(cond_reg));
+                reads.push(phys(false_reg));
+                reads.push(phys(true_reg));
+            }
             writes.push(phys(dst_reg));
             "ct_select".to_string()
         }

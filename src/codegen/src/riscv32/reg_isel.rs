@@ -746,33 +746,79 @@ fn emit_instruction(
 
         // ── Select ──
         IRInstr::Select { dst, cond, true_val, false_val, .. } => {
-            let cond_reg = load_to_reg(cond, alloc, code);
             let dst_reg = load_to_reg(dst, alloc, code);
-            let false_reg = load_to_reg(false_val, alloc, code);
-            let true_reg = load_to_reg(true_val, alloc, code);
-            // mv dst, false_val; bne cond, zero, +8; mv dst, true_val
-            code.extend_from_slice(&Instruction::Addi { rd: dst_reg, rs1: false_reg, imm: 0 }.encode()); // mv dst, false
-            code.extend_from_slice(&Instruction::Bne { rs1: cond_reg, rs2: Gpr::Zero, offset: 8 }.encode()); // skip next if cond!=0
-            code.extend_from_slice(&Instruction::Addi { rd: dst_reg, rs1: true_reg, imm: 0 }.encode()); // mv dst, true
-            reads.push(phys(cond_reg));
-            reads.push(phys(false_reg));
-            reads.push(phys(true_reg));
+            // If cond is an immediate, evaluate at compile time.
+            if let IRValue::Immediate(c) = cond {
+                if *c != 0 {
+                    // cond = true → dst = true_val
+                    let tv = load_to_reg(true_val, alloc, code);
+                    if tv != dst_reg {
+                        code.extend_from_slice(&Instruction::Addi { rd: dst_reg, rs1: tv, imm: 0 }.encode()); // mv dst, tv
+                    }
+                    reads.push(phys(tv));
+                } else {
+                    // cond = false → dst = false_val
+                    let fv = load_to_reg(false_val, alloc, code);
+                    if fv != dst_reg {
+                        code.extend_from_slice(&Instruction::Addi { rd: dst_reg, rs1: fv, imm: 0 }.encode()); // mv dst, fv
+                    }
+                    reads.push(phys(fv));
+                }
+            } else {
+                // cond is a register — use beq + mv pattern.
+                let cond_reg = load_to_reg(cond, alloc, code);
+                // Load false_val first, then mv dst, false_val. Then load
+                // true_val (which may clobber T6 if immediate, but dst
+                // already has false_val), then:
+                //   beq cond, zero, +8  (if cond == 0, skip next)
+                //   mv dst, true_val
+                let false_reg = load_to_reg(false_val, alloc, code);
+                if false_reg != dst_reg {
+                    code.extend_from_slice(&Instruction::Addi { rd: dst_reg, rs1: false_reg, imm: 0 }.encode()); // mv dst, false
+                }
+                let true_reg = load_to_reg(true_val, alloc, code);
+                // beq cond, zero, +8  (if cond == 0, skip next mv)
+                // mv dst, true_reg   (always emit so beq+8 offset is valid)
+                code.extend_from_slice(&Instruction::Beq { rs1: cond_reg, rs2: Gpr::Zero, offset: 8 }.encode());
+                code.extend_from_slice(&Instruction::Addi { rd: dst_reg, rs1: true_reg, imm: 0 }.encode()); // mv dst, true
+                reads.push(phys(cond_reg));
+                reads.push(phys(false_reg));
+                reads.push(phys(true_reg));
+            }
             writes.push(phys(dst_reg));
             "select".to_string()
         }
 
         // ── CtSelect (same as Select on riscv64) ──
         IRInstr::CtSelect { dst, cond, true_val, false_val, .. } => {
-            let cond_reg = load_to_reg(cond, alloc, code);
             let dst_reg = load_to_reg(dst, alloc, code);
-            let false_reg = load_to_reg(false_val, alloc, code);
-            let true_reg = load_to_reg(true_val, alloc, code);
-            code.extend_from_slice(&Instruction::Addi { rd: dst_reg, rs1: false_reg, imm: 0 }.encode());
-            code.extend_from_slice(&Instruction::Bne { rs1: cond_reg, rs2: Gpr::Zero, offset: 8 }.encode());
-            code.extend_from_slice(&Instruction::Addi { rd: dst_reg, rs1: true_reg, imm: 0 }.encode());
-            reads.push(phys(cond_reg));
-            reads.push(phys(false_reg));
-            reads.push(phys(true_reg));
+            if let IRValue::Immediate(c) = cond {
+                if *c != 0 {
+                    let tv = load_to_reg(true_val, alloc, code);
+                    if tv != dst_reg {
+                        code.extend_from_slice(&Instruction::Addi { rd: dst_reg, rs1: tv, imm: 0 }.encode());
+                    }
+                    reads.push(phys(tv));
+                } else {
+                    let fv = load_to_reg(false_val, alloc, code);
+                    if fv != dst_reg {
+                        code.extend_from_slice(&Instruction::Addi { rd: dst_reg, rs1: fv, imm: 0 }.encode());
+                    }
+                    reads.push(phys(fv));
+                }
+            } else {
+                let cond_reg = load_to_reg(cond, alloc, code);
+                let false_reg = load_to_reg(false_val, alloc, code);
+                if false_reg != dst_reg {
+                    code.extend_from_slice(&Instruction::Addi { rd: dst_reg, rs1: false_reg, imm: 0 }.encode());
+                }
+                let true_reg = load_to_reg(true_val, alloc, code);
+                code.extend_from_slice(&Instruction::Beq { rs1: cond_reg, rs2: Gpr::Zero, offset: 8 }.encode());
+                code.extend_from_slice(&Instruction::Addi { rd: dst_reg, rs1: true_reg, imm: 0 }.encode());
+                reads.push(phys(cond_reg));
+                reads.push(phys(false_reg));
+                reads.push(phys(true_reg));
+            }
             writes.push(phys(dst_reg));
             "ct_select".to_string()
         }
