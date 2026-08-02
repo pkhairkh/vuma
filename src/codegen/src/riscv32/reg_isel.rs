@@ -420,7 +420,7 @@ fn emit_load_imm(code: &mut Vec<u8>, rd: Gpr, imm: i64) {
     let val = imm as i32;
     let upper = (val + 0x800) >> 12;
     let lower = val - (upper << 12);
-    code.extend_from_slice(&Instruction::Lui { rd, imm: upper as u32 }.encode());
+    code.extend_from_slice(&Instruction::Lui { rd, imm: (upper as u32) << 12 }.encode());
     if lower != 0 {
         code.extend_from_slice(&Instruction::Addi { rd, rs1: rd, imm: lower }.encode());
     }
