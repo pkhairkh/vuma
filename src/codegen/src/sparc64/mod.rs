@@ -4916,10 +4916,7 @@ impl Backend for Sparc64Backend {
                     crate::ir::IRInstr::Call { func: fname, .. } => {
                         fname == "spawn_worker" || fname == "fork"
                     }
-                    crate::ir::IRInstr::Syscall { nr, .. } => {
-                        *nr == 220 || *nr == 221
-                       
-                    }
+                    crate::ir::IRInstr::Syscall { .. } => true,
                     _ => false,
                 }
             })
