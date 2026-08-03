@@ -6532,26 +6532,6 @@ fn bridge_type_to_ir_type(ty: &vuma_parser::ast::Type) -> vuma_codegen::ir::IRTy
 
 /// PMT: compute the byte size of a parser `Type` for layout field
 /// offset computation.
-fn bridge_type_size(ty: &vuma_parser::ast::Type) -> u64 {
-    use vuma_parser::ast::Type;
-    match ty {
-        Type::BDBase(name) => match name.as_str() {
-            "i8" | "u8" | "bool" => 1,
-            "i16" | "u16" => 2,
-            "i32" | "u32" | "f32" => 4,
-            "i64" | "u64" | "f64" => 8,
-            _ => 8,
-        },
-        Type::Ptr(_) | Type::RegionPtr { .. } => 8,
-        // `Channel<T>` is pointer-sized (8 on 64-bit, 4 on 32-bit) —
-        // same as Ptr.
-        // session_type field doesn't affect size.
-        Type::Channel { .. } => 8,
-        Type::Array { element, size } => bridge_type_size(element) * (*size as u64),
-        _ => 8,
-    }
-}
-
 /// PMT: compute the byte size of a parser `Type`, looking up user-defined
 /// layout names in the provided `layout_sizes` map. This fixes the nested-
 /// layout bug where `bridge_type_size` returned 8 for any user-defined
