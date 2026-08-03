@@ -1,0 +1,80 @@
+// womb/ui/render/shaders/triangle_fill.comp
+//
+// Test compute shader: fills a triangle via per-pixel coverage.
+//
+// This is a minimal compute shader used to verify the SPIR-V toolchain
+// (glslangValidator → spirv-val → spirv_to_vuma.py). It is NOT the
+// production path-tessellation shader (that's path_tessellate.comp).
+//
+// Inputs (uniform buffer, binding 0):
+//   - vertices[3]: vec2 — triangle vertex positions in clip space [-1, 1]
+//   - color: vec4 — fill color (R, G, B, A)
+//   - width, height: uint — framebuffer dimensions
+//
+// Output (storage image, binding 1):
+//   - rgba8ui image — framebuffer pixels
+//
+// Algorithm:
+//   1. Each invocation computes coverage for one pixel (x, y) where
+//      x = gl_GlobalInvocationID.x, y = gl_GlobalInvocationID.y.
+//   2. Edge function test: for each edge (v0→v1, v1→v2, v2→v0), compute
+//      the sign of the cross product. If all three have the same sign
+//      (or zero), the pixel is inside the triangle.
+//   3. If inside, write the fill color to the framebuffer.
+//
+// Reference: "Rasterization on the GPU" (Pineda, 1988) — edge function
+// barycentric coverage test.
+
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) uniform TriangleUniforms {
+    vec2 vertices[3];
+    vec4 color;
+    uint width;
+    uint height;
+} ubo;
+
+layout(set = 0, binding = 1, rgba8ui) uniform writeonly uimage2D framebuffer;
+
+// Edge function: returns positive if point is on the left side of
+// the edge (a → b), negative if on the right, zero if on the line.
+float edge_function(vec2 a, vec2 b, vec2 c) {
+    return (c.x - a.x) * (b.y - a.y) - (b.x - a.x) * (c.y - a.y);
+}
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+
+    // Bounds check.
+    if (x >= ubo.width || y >= ubo.height) {
+        return;
+    }
+
+    // Convert pixel coordinates to clip space [-1, 1].
+    vec2 pixel_pos;
+    pixel_pos.x = (float(x) + 0.5) / float(ubo.width) * 2.0 - 1.0;
+    pixel_pos.y = (float(y) + 0.5) / float(ubo.height) * 2.0 - 1.0;
+
+    // Edge function test for all three edges.
+    float e0 = edge_function(ubo.vertices[0], ubo.vertices[1], pixel_pos);
+    float e1 = edge_function(ubo.vertices[1], ubo.vertices[2], pixel_pos);
+    float e2 = edge_function(ubo.vertices[2], ubo.vertices[0], pixel_pos);
+
+    // Inside if all edges have the same sign (all >= 0 or all <= 0).
+    bool inside = (e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0) ||
+                  (e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0);
+
+    if (inside) {
+        // Write the fill color. rgba8ui expects uvec4 with [0, 255] components.
+        uvec4 out_color = uvec4(
+            uint(ubo.color.r * 255.0),
+            uint(ubo.color.g * 255.0),
+            uint(ubo.color.b * 255.0),
+            uint(ubo.color.a * 255.0)
+        );
+        imageStore(framebuffer, ivec2(x, y), out_color);
+    }
+}
