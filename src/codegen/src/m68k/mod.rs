@@ -3902,13 +3902,69 @@ fn emit_fp_binop(
                 emit_fmove_fp_to_mem(Fpr::Fp0, true, code);
                 emit_swap_f64_slot(dst_off, code);
             } else {
-                // F32 with Register operand: not yet supported via soft-float
-                // (would require __addsf3 / __subsf3 / __mulsf3 / __divsf3
-                // stubs). Stub with 0.0 as a safe default. Constant-folded
-                // F32 immediates are handled by the Immediate path above.
-                // TODO: wire up F32 soft-float stubs.
-                code.extend(ss_load_imm(S0, 0));
-                code.extend(ss_st(S0, dst_off));
+                // ── f32 arithmetic via 68881 FPU (single-precision mode) ──
+                // The 68881 auto-widens f32→ext on FMOVE.S load and
+                // auto-narrows ext→f32 on FMOVE.S store, so we reuse the
+                // same FADD.X/FSUB.X/FMUL.X/FDIV.X register-form ops as the
+                // f64 path; only the load/store precision differs.
+                //
+                // f32 stack-slot convention (matches the immediate-fold
+                // path above): the 32-bit f32 value lives at `off` (low
+                // word); the high word at `off+4` is zeroed.  No word-swap
+                // is needed (unlike f64) since a single 4-byte big-endian
+                // word is already in the FPU's expected byte order.
+                //
+                // ── f32 Immediate-operand convention ──
+                // Float literals reach codegen as **f64 bits** in the IR
+                // (see `materialize_f32_immediates` in opt.rs). Non-zero
+                // f32-bit immediates (from folded results) are materialized
+                // into vregs before codegen, so the only Immediates that
+                // reach this arm are f64-bit literals (or zero). We narrow
+                // f64→f32 at compile time and spill the 4 f32 bytes to
+                // dst_off, then FMOVE.S loads them (auto-widened to ext).
+                //
+                // Load lhs into FP0.
+                if let IRValue::Register(id) = lhs {
+                    let lhs_off = vreg_stack_slots.get(id).copied().unwrap_or(0);
+                    emit_lea_fp_disp(lhs_off, code);
+                    emit_fmove_mem_to_fp(Fpr::Fp0, false, code);
+                } else {
+                    // Immediate lhs: narrow f64→f32 bits, spill, load.
+                    let imm_bits = if let IRValue::Immediate(v) = lhs {
+                        *v as u64
+                    } else {
+                        0
+                    };
+                    let f32_bits = (f64::from_bits(imm_bits) as f32).to_bits() as i64;
+                    code.extend(ss_load_imm(Gpr::D0, f32_bits));
+                    code.extend(ss_st(Gpr::D0, dst_off));
+                    emit_lea_fp_disp(dst_off, code);
+                    emit_fmove_mem_to_fp(Fpr::Fp0, false, code);
+                }
+                // Load rhs into FP1.
+                if let IRValue::Register(id) = rhs {
+                    let rhs_off = vreg_stack_slots.get(id).copied().unwrap_or(0);
+                    emit_lea_fp_disp(rhs_off, code);
+                    emit_fmove_mem_to_fp(Fpr::Fp1, false, code);
+                } else {
+                    // Immediate rhs: narrow f64→f32 bits, spill, load.
+                    let imm_bits = if let IRValue::Immediate(v) = rhs {
+                        *v as u64
+                    } else {
+                        0
+                    };
+                    let f32_bits = (f64::from_bits(imm_bits) as f32).to_bits() as i64;
+                    code.extend(ss_load_imm(Gpr::D0, f32_bits));
+                    code.extend(ss_st(Gpr::D0, dst_off));
+                    emit_lea_fp_disp(dst_off, code);
+                    emit_fmove_mem_to_fp(Fpr::Fp1, false, code);
+                }
+                // FP0 = FP0 OP FP1 (result in FP0, ext precision).
+                emit_fp_arith(op, Fpr::Fp0, Fpr::Fp1, code);
+                // Store FP0 to dst as f32 (FMOVE.S auto-narrows ext→f32),
+                // then zero the high word to maintain the f32 slot convention.
+                emit_lea_fp_disp(dst_off, code);
+                emit_fmove_fp_to_mem(Fpr::Fp0, false, code);
                 code.extend(ss_load_imm(S0, 0));
                 code.extend(
                     Instruction::Store {
