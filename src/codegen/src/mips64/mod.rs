@@ -3729,8 +3729,8 @@ impl Backend for Mips64Backend {
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
         // ── Wave 12: Full register-based emitter dispatch ──
         let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_MIPS64")
-            .map(|v| v != "0")
-            .unwrap_or(true); // default ON
+            .map(|v| v == "1")
+            .unwrap_or(false); // default ON
 
         let contains_fork = func.blocks.iter().any(|block| {
             block.instructions.iter().any(|inst| {
