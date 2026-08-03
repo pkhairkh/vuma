@@ -3846,7 +3846,18 @@ impl AstToScg {
                 "u16" | "i16" => 2,
                 "u32" | "i32" | "f32" => 4,
                 "u64" | "i64" | "f64" => 8,
-                _ => 8,
+                _ => {
+                    // V-35 fix: compute alignment from layout fields.
+                    if let Some(fields) = self.layouts.get(name) {
+                        let mut max_align: u64 = 1;
+                        for (_fname, ftype, _) in fields {
+                            max_align = max_align.max(self.type_alignment(Some(ftype)));
+                        }
+                        max_align
+                    } else {
+                        8
+                    }
+                }
             },
             Some(Type::Ptr(_)) | Some(Type::RegionPtr { .. }) => 8,
             Some(Type::Struct { .. }) => 8,
@@ -4064,7 +4075,30 @@ impl AstToScg {
             "u16" | "i16" => 2,
             "u32" | "i32" | "f32" => 4,
             "u64" | "i64" | "f64" | "ptr" => 8,
-            _ => 8,
+            _ => {
+                // V-35 fix: look up user-defined layout names in self.layouts.
+                if let Some(fields) = self.layouts.get(name) {
+                    // Compute total size from the layout's fields.
+                    let mut size: u64 = 0;
+                    let mut max_align: u64 = 1;
+                    for (_fname, ftype, _) in fields {
+                        let falign = self.type_alignment(Some(ftype)).max(1);
+                        let fsize = self.type_size(ftype);
+                        if falign > 1 && !size.is_multiple_of(falign) {
+                            size = (size + falign - 1) & !(falign - 1);
+                        }
+                        max_align = max_align.max(falign);
+                        size += fsize;
+                    }
+                    let alignment = max_align.max(1);
+                    if size > 0 && !size.is_multiple_of(alignment) {
+                        size = (size + alignment - 1) & !(alignment - 1);
+                    }
+                    size
+                } else {
+                    8 // fallback: unknown layout name
+                }
+            }
         }
     }
 
