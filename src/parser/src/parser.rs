@@ -3913,19 +3913,29 @@ impl<'src> Parser<'src> {
         // `Type::Channel { inner: Box<i32>, session_type: None }` rather
         // than falling through to `Type::Generic { name: "Channel", ... }`.
         //
-        // The parser leaves `session_type` as `None` here — surface syntax
-        // for session-typed channels (e.g. `Channel<i32, Send<i32, End>>`)
-        // is a future parser extension; the AST node carries the field so
-        // downstream passes (IVE linear-type checker) can attach protocols
-        // programmatically.
+        // V-11: Surface syntax for session-typed channels is now supported:
+        //   Channel<T, Send<U, End>>
+        //   Channel<T, Recv<U, End>>
+        //   Channel<T, Choice<Send<U, End>, Recv<U, End>>>
+        //   Channel<T, Offer<Send<U, End>, Recv<U, End>>>
+        //   Channel<T, Recurse>
+        // When the second type-argument slot is present (after a comma),
+        // it is parsed as a session type via `parse_session_type()`.
         if self.at(TokenKind::Channel) {
             self.advance(); // consume 'Channel'
             self.expect(TokenKind::Lt)?;
             let inner = self.parse_type()?;
+            // V-11: optional session-type argument: `, <session_type>`.
+            let session_type = if self.at(TokenKind::Comma) {
+                self.advance(); // consume ','
+                Some(self.parse_session_type()?)
+            } else {
+                None
+            };
             self.expect_gt_closing_generic()?;
             return Ok(Type::Channel {
                 inner: Box::new(inner),
-                session_type: None,
+                session_type,
             });
         }
 
@@ -4036,6 +4046,92 @@ impl<'src> Parser<'src> {
             format!("expected {}, found {}", TokenKind::Gt, self.current.kind),
             self.current.span,
         ))
+    }
+
+    /// V-11: Parse a session-type annotation.
+    ///
+    /// Supported syntax:
+    ///   - `End`                      — terminal, no further operations
+    ///   - `Recurse`                  — recursion variable (μ)
+    ///   - `Send<T, S>`               — send a T, then continue as S
+    ///   - `Recv<T, S>`               — receive a T, then continue as S
+    ///   - `Choice<S1, S2, ...>`      — sender chooses one of N branches
+    ///   - `Offer<S1, S2, ...>`       — receiver offers N branches (dual of Choice)
+    ///
+    /// The session-type position is recognized inside `Channel<T, S>` (the
+    /// second type-argument slot). The function consumes one session-type
+    /// expression and returns it; the caller is responsible for consuming
+    /// the closing `>`.
+    ///
+    /// Empty `Choice<>` / `Offer<>` (zero branches) is a parse error —
+    /// branching protocols require at least one branch.
+    fn parse_session_type(&mut self) -> Result<crate::ast::SessionType, ParseError> {
+        use crate::ast::SessionType;
+        // Session-type constructors are recognized by name (the lexer
+        // leaves `Send`/`Recv`/`End`/`Recurse`/`Choice`/`Offer` as Ident
+        // tokens because they are not registered as keywords).
+        let name = self.expect_name()?;
+        match name.as_str() {
+            "End" => Ok(SessionType::End),
+            "Recurse" => Ok(SessionType::Recurse),
+            "Send" => {
+                self.expect(TokenKind::Lt)?;
+                let ty = self.parse_type()?;
+                self.expect(TokenKind::Comma)?;
+                let cont = self.parse_session_type()?;
+                self.expect_gt_closing_generic()?;
+                Ok(SessionType::Send(Box::new(ty), Box::new(cont)))
+            }
+            "Recv" => {
+                self.expect(TokenKind::Lt)?;
+                let ty = self.parse_type()?;
+                self.expect(TokenKind::Comma)?;
+                let cont = self.parse_session_type()?;
+                self.expect_gt_closing_generic()?;
+                Ok(SessionType::Recv(Box::new(ty), Box::new(cont)))
+            }
+            "Choice" => {
+                self.expect(TokenKind::Lt)?;
+                let mut branches = Vec::new();
+                branches.push(self.parse_session_type()?);
+                while self.at(TokenKind::Comma) {
+                    self.advance(); // consume ','
+                    branches.push(self.parse_session_type()?);
+                }
+                self.expect_gt_closing_generic()?;
+                if branches.is_empty() {
+                    return Err(ParseError::unexpected(
+                        "Choice<> requires at least one branch",
+                        self.current.span,
+                    ));
+                }
+                Ok(SessionType::Choice(branches))
+            }
+            "Offer" => {
+                self.expect(TokenKind::Lt)?;
+                let mut branches = Vec::new();
+                branches.push(self.parse_session_type()?);
+                while self.at(TokenKind::Comma) {
+                    self.advance(); // consume ','
+                    branches.push(self.parse_session_type()?);
+                }
+                self.expect_gt_closing_generic()?;
+                if branches.is_empty() {
+                    return Err(ParseError::unexpected(
+                        "Offer<> requires at least one branch",
+                        self.current.span,
+                    ));
+                }
+                Ok(SessionType::Offer(branches))
+            }
+            other => Err(ParseError::unexpected(
+                format!(
+                    "expected session-type constructor (End/Recurse/Send/Recv/Choice/Offer), found '{}'",
+                    other
+                ),
+                self.current.span,
+            )),
+        }
     }
 
     /// True if the current token is of the given kind.

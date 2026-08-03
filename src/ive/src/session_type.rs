@@ -178,6 +178,19 @@ pub struct SessionViolation {
 ///   then advance.
 /// - `Close`: check the current type is `End`.
 ///
+/// V-11: Choice/Offer handling. When a Send event arrives on a
+/// `Choice<S1, S2>` channel, the verifier tries to match the message
+/// type against the first Send of either branch. If a branch matches,
+/// the state advances to that branch's continuation (the Choice is
+/// replaced by the matched branch's continuation). Symmetrically, a
+/// Recv on an `Offer<S1, S2>` channel tries to match against either
+/// branch's first Recv. This is the "implicit branch selection"
+/// model — the verifier infers which branch was selected based on
+/// the message type. A future extension could add an explicit
+/// `SessionEventKind::Select { vreg, branch_idx }` event for
+/// unambiguous branch selection (needed when multiple branches
+/// start with the same message type).
+///
 /// Returns one `SessionViolation` per violation.
 pub fn verify_session_types(events: &[SessionEvent]) -> Vec<SessionViolation> {
     let mut sorted: Vec<&SessionEvent> = events.iter().collect();
@@ -227,6 +240,23 @@ pub fn verify_session_types(events: &[SessionEvent]) -> Vec<SessionViolation> {
                             state.insert(*vreg, (**cont).clone());
                         }
                     }
+                    // V-11: Choice branch selection. The sender picks a
+                    // branch by sending a message whose type matches the
+                    // first Send of one of the branches. We try each
+                    // branch in order; the first match wins.
+                    Some(SessionType::Choice(s1, s2)) => {
+                        let matched = try_match_choice_branch(
+                            &[s1.clone(), s2.clone()],
+                            msg_type,
+                            event.at_node,
+                            *vreg,
+                            &mut results,
+                            /*is_send=*/ true,
+                        );
+                        if let Some(new_state) = matched {
+                            state.insert(*vreg, new_state);
+                        }
+                    }
                     Some(other) => {
                         results.push(SessionViolation {
                             valid: false,
@@ -264,6 +294,22 @@ pub fn verify_session_types(events: &[SessionEvent]) -> Vec<SessionViolation> {
                             });
                         } else {
                             state.insert(*vreg, (**cont).clone());
+                        }
+                    }
+                    // V-11: Offer branch selection. The receiver accepts
+                    // a branch whose first Recv matches the expected type.
+                    // Symmetric to Choice: we try each branch in order.
+                    Some(SessionType::Offer(s1, s2)) => {
+                        let matched = try_match_choice_branch(
+                            &[s1.clone(), s2.clone()],
+                            expected_type,
+                            event.at_node,
+                            *vreg,
+                            &mut results,
+                            /*is_send=*/ false,
+                        );
+                        if let Some(new_state) = matched {
+                            state.insert(*vreg, new_state);
                         }
                     }
                     Some(other) => {
@@ -322,6 +368,67 @@ pub fn verify_session_types(events: &[SessionEvent]) -> Vec<SessionViolation> {
     }
 
     results
+}
+
+/// V-11: Try to match a Choice/Offer branch against the incoming message
+/// type. Returns `Some(new_state)` (the matched branch's continuation)
+/// if a branch's first Send (for Choice) or Recv (for Offer) matches
+/// the message type, or `None` if no branch matched (in which case a
+/// violation has been pushed to `results`).
+///
+/// `branches` is the slice of branch session types (typically 2 for
+/// the binary IVE Choice/Offer, but the helper supports N-ary for
+/// forward-compatibility with the AST/IR Vec-based Choice/Offer).
+/// `msg_type` is the incoming message type string. `is_send=true` for
+/// Send events (Choice), `is_send=false` for Recv events (Offer).
+fn try_match_choice_branch(
+    branches: &[SessionType],
+    msg_type: &str,
+    at_node: usize,
+    vreg: u32,
+    results: &mut Vec<SessionViolation>,
+    is_send: bool,
+) -> Option<SessionType> {
+    let expected_kind = if is_send { "Send" } else { "Recv" };
+    let protocol_kind = if is_send { "Choice" } else { "Offer" };
+    for (idx, branch) in branches.iter().enumerate() {
+        let matched_state = match (is_send, branch) {
+            (true, SessionType::Send(expected_t, cont)) => {
+                if expected_t == msg_type {
+                    Some((**cont).clone())
+                } else {
+                    None
+                }
+            }
+            (false, SessionType::Recv(expected_t, cont)) => {
+                if expected_t == msg_type {
+                    Some((**cont).clone())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(new_state) = matched_state {
+            return Some(new_state);
+        }
+        // Otherwise try the next branch.
+        let _ = idx; // (idx reserved for future error messages)
+    }
+    // No branch matched.
+    results.push(SessionViolation {
+        valid: false,
+        error: Some(format!(
+            "session violation at node {}: {} on vreg {} but no branch of {} matched message type {} (each branch must start with {}<{}>)",
+            at_node,
+            if is_send { "send" } else { "recv" },
+            vreg,
+            protocol_kind,
+            msg_type,
+            expected_kind,
+        )),
+    });
+    None
 }
 
 /// Returns true if all session-type checks passed.
