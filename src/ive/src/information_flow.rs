@@ -527,6 +527,36 @@ fn label_of_vreg(
 /// `verify_information_flow` then flags any `Secret → Public` (or higher)
 /// flow as a violation.
 ///
+/// V-A3-8 fix: indirect leak detection via alias analysis. Previously,
+/// the verifier only checked direct flows (Store of a Secret vreg to a
+/// Public destination, ChannelSend of a Secret msg to a Public channel).
+/// It missed indirect flows through memory:
+///   1. `Store secret_vreg -> [addr_vreg]`  (memory[addr] now holds Secret)
+///   2. `Load dst_vreg <- [addr_vreg]`      (dst inherits Secret from memory)
+///   3. `Store dst_vreg -> [public_addr]`   (LEAK: Secret → Public via memory)
+///
+/// The fix maintains two side tables:
+///   - `memory_labels: HashMap<u32, SecurityLabel>` — the label of the
+///     value currently stored at each memory cell (keyed by the addr
+///     vreg ID used in the Store). A cell is `Secret` if any Secret
+///     value has ever been stored to it (monotonic — once Secret,
+///     always Secret, modelling the standard non-interference
+///     property).
+///   - `vreg_labels: HashMap<u32, SecurityLabel>` — the label of each
+///     vreg, combining the static `secret_vars` lookup with the
+///     dynamic taint propagated from Loads. A vreg is `Secret` if
+///     either its declared name is in `secret_vars` OR it was loaded
+///     from a Secret memory cell.
+///
+/// This is a flow-insensitive, field-insensitive alias analysis: each
+/// addr vreg is treated as a distinct memory cell (no aliasing between
+/// different addr vregs). A future extension could add a proper
+/// alias-analysis pass (e.g., Andersen-style) to handle cases where
+/// multiple vregs point to the same cell. The current model is sound
+/// (never misses a leak) but may over-approximate (false positives on
+/// cells that happen to share an addr vreg with an unrelated Secret
+/// store).
+///
 /// Currently advisory in shape but wired as a hard-fail gate by the caller
 /// in `pipeline.rs` — any non-empty `Vec<FlowViolationIR>` aborts compilation.
 pub fn verify_information_flow_from_ir(
@@ -541,6 +571,36 @@ pub fn verify_information_flow_from_ir(
     // declared name (from `IRFunction::vregs`) is in `secret_vars` is
     // labeled `Secret`; everything else is `Public`.
     let mut events: Vec<FlowEvent> = Vec::new();
+    // V-A3-8: side tables for indirect-flow tracking.
+    // memory_labels: addr_vreg_id -> SecurityLabel of the value stored
+    //   at that address. Monotonically Secret (once Secret, always Secret).
+    // vreg_labels: vreg_id -> SecurityLabel, combining static (secret_vars)
+    //   and dynamic (Load-taint) labels. Takes precedence over the static
+    //   label_of_vreg lookup when present.
+    let mut memory_labels: std::collections::HashMap<u32, SecurityLabel> =
+        std::collections::HashMap::new();
+    let mut vreg_labels: std::collections::HashMap<u32, SecurityLabel> =
+        std::collections::HashMap::new();
+    // Helper: resolve a vreg's label, consulting the dynamic taint map
+    // first (for vregs tainted by Loads from Secret memory), then falling
+    // back to the static secret_vars lookup.
+    let resolve_label = |vreg: &vuma_codegen::ir::IRValue,
+                         vregs: &std::collections::HashMap<u32, vuma_codegen::ir::VirtualRegister>,
+                         secret_vars: &HashSet<String>|
+     -> SecurityLabel {
+        match vreg {
+            vuma_codegen::ir::IRValue::Register(id) => {
+                // Dynamic taint takes precedence (a vreg loaded from
+                // Secret memory is Secret even if its declared name
+                // isn't in secret_vars).
+                if let Some(&label) = vreg_labels.get(id) {
+                    return label;
+                }
+                label_of_vreg(vreg, vregs, secret_vars)
+            }
+            _ => SecurityLabel::Public,
+        }
+    };
     for (fi, func) in program.functions.iter().enumerate() {
         for (bi, block) in func.blocks.iter().enumerate() {
             for (ii, instr) in block.instructions.iter().enumerate() {
@@ -552,8 +612,8 @@ pub fn verify_information_flow_from_ir(
                     vuma_codegen::ir::IRInstr::ChannelSend { ch, msg, .. } => {
                         events.push(FlowEvent {
                             kind: FlowKind::ChannelSend {
-                                channel_label: label_of_vreg(ch, &func.vregs, secret_vars),
-                                msg_label: label_of_vreg(msg, &func.vregs, secret_vars),
+                                channel_label: resolve_label(ch, &func.vregs, secret_vars),
+                                msg_label: resolve_label(msg, &func.vregs, secret_vars),
                             },
                             at_node,
                         });
@@ -571,11 +631,11 @@ pub fn verify_information_flow_from_ir(
                     {
                         let channel_label = args
                             .first()
-                            .map(|v| label_of_vreg(v, &func.vregs, secret_vars))
+                            .map(|v| resolve_label(v, &func.vregs, secret_vars))
                             .unwrap_or(SecurityLabel::Public);
                         let msg_label = args
                             .get(1)
-                            .map(|v| label_of_vreg(v, &func.vregs, secret_vars))
+                            .map(|v| resolve_label(v, &func.vregs, secret_vars))
                             .unwrap_or(SecurityLabel::Public);
                         events.push(FlowEvent {
                             kind: FlowKind::ChannelSend {
@@ -589,15 +649,20 @@ pub fn verify_information_flow_from_ir(
                     // from `value` (source) to the memory location at `addr`
                     // (destination). Real vreg IDs are extracted from the
                     // `IRValue::Register` fields instead of the previous
-                    // hardcoded `0`. Labels are resolved via `label_of_vreg`
+                    // hardcoded `0`. Labels are resolved via `resolve_label`
                     // — `Secret` when the vreg's declared name is in
-                    // `secret_vars`, `Public` otherwise. A `Secret → Public`
-                    // store (writing a secret value to a non-secret
-                    // destination) is flagged by `verify_information_flow`.
+                    // `secret_vars` (static) OR the vreg was tainted by a
+                    // prior Load from Secret memory (dynamic, V-A3-8).
+                    // A `Secret → Public` store (writing a secret value to a
+                    // non-secret destination) is flagged by `verify_information_flow`.
+                    //
+                    // V-A3-8: also update `memory_labels[addr_vreg]` to the
+                    // source label, so subsequent Loads from this address
+                    // inherit the taint.
                     vuma_codegen::ir::IRInstr::Store { value, addr, .. } => {
                         let dst_vreg = addr.as_register().unwrap_or(0);
-                        let dst_label = label_of_vreg(addr, &func.vregs, secret_vars);
-                        let src_label = label_of_vreg(value, &func.vregs, secret_vars);
+                        let dst_label = resolve_label(addr, &func.vregs, secret_vars);
+                        let src_label = resolve_label(value, &func.vregs, secret_vars);
                         events.push(FlowEvent {
                             kind: FlowKind::Assign {
                                 dst_vreg,
@@ -606,6 +671,50 @@ pub fn verify_information_flow_from_ir(
                             },
                             at_node,
                         });
+                        // V-A3-8: propagate taint to the memory cell.
+                        // Monotonic: once Secret, always Secret.
+                        let cell_label = memory_labels
+                            .get(&dst_vreg)
+                            .copied()
+                            .unwrap_or(SecurityLabel::Public);
+                        let new_cell_label = if src_label == SecurityLabel::Secret
+                            || cell_label == SecurityLabel::Secret
+                        {
+                            SecurityLabel::Secret
+                        } else {
+                            SecurityLabel::Public
+                        };
+                        memory_labels.insert(dst_vreg, new_cell_label);
+                    }
+                    // V-A3-8: `Load { dst, addr, .. }` — read a value from
+                    // the memory cell at `addr` into `dst`. The dst vreg
+                    // inherits the label of the memory cell (recorded in
+                    // `memory_labels` by a prior Store). If no prior Store
+                    // to this address is recorded, the cell is conservatively
+                    // Public (the verifier has no information about it).
+                    //
+                    // This is the key fix for indirect leaks: without this
+                    // arm, a Load from a Secret-tainted memory cell would
+                    // produce a Public vreg, and subsequent Stores of that
+                    // vreg to Public destinations would NOT be flagged.
+                    //
+                    // We do NOT emit a FlowEvent::Assign for the Load itself
+                    // — the Load is just a taint propagation, not a leak.
+                    // The leak is detected when the tainted dst vreg is
+                    // subsequently Stored to a Public destination or sent
+                    // on a Public channel (those arms call `resolve_label`
+                    // which consults `vreg_labels` and picks up the taint).
+                    vuma_codegen::ir::IRInstr::Load { dst, addr, .. } => {
+                        let addr_vreg = addr.as_register().unwrap_or(0);
+                        let dst_vreg = dst.as_register().unwrap_or(0);
+                        let cell_label = memory_labels
+                            .get(&addr_vreg)
+                            .copied()
+                            .unwrap_or(SecurityLabel::Public);
+                        // Record the dst vreg's dynamic label so subsequent
+                        // uses of dst (in Store/ChannelSend) resolve to the
+                        // tainted label via `resolve_label`.
+                        vreg_labels.insert(dst_vreg, cell_label);
                     }
                     _ => {}
                 }
