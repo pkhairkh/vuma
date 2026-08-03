@@ -2928,6 +2928,76 @@ fn resolve_register_reuse_conflicts(
                         }
                     }
                 }
+
+                // W1-C: Cross-instruction conflict check.
+                //
+                // The within-instruction check above only catches conflicts
+                // between def_vreg and the CURRENT instruction's use_regs.
+                // But a conflict can also occur with a vreg defined by a
+                // PREVIOUS instruction that is still live at `pos`. Such a
+                // vreg is NOT in use_regs (it's not used by this instruction),
+                // but it occupies the same physical register as def_vreg.
+                // When this instruction writes to def_preg, it clobbers the
+                // live vreg's value.
+                //
+                // Example (stark_proof FNV loop):
+                //   pos N:   Load v29 -> R15      (hash loaded into R15)
+                //   pos N+2: Add  v33 -> R15      (counter+1 clobbers hash!)
+                //   pos N+8: Xor  v30 = v29 ^ v28 (v29 is stale!)
+                //
+                // The Add's use_regs = [v25], not [v29], so the within-inst
+                // check doesn't catch it. This cross-instruction check
+                // iterates over ALL vregs in vreg_to_preg to find any live
+                // vreg sharing def_preg.
+                //
+                // Re-fetch def_preg (may have changed after within-inst check).
+                let def_preg = match result.vreg_to_preg.get(&def_root_owned) {
+                    Some(p) => *p,
+                    None => continue, // def was spilled by within-inst check
+                };
+                let scratch = self.spill_scratch(def_preg.class.into());
+                if def_preg == scratch {
+                    continue; // scratch — spill mechanism handles it
+                }
+                // Snapshot vreg_to_preg to avoid iterator invalidation
+                // (resolve_single_conflict modifies vreg_to_preg).
+                let snapshot: Vec<(IRValueId, crate::backend::PhysicalReg)> =
+                    result.vreg_to_preg.iter().map(|(&v, &p)| (v, p)).collect();
+                for (vreg, preg) in &snapshot {
+                    if *vreg == def_root_owned {
+                        continue;
+                    }
+                    if *preg != def_preg {
+                        continue;
+                    }
+                    let vreg_root = *result.coalesced_map.get(vreg).unwrap_or(vreg);
+                    if vreg_root == def_root_owned {
+                        continue;
+                    }
+                    // Check if this vreg is live at `pos` (defined before,
+                    // live after). Using strict `< pos` for start to avoid
+                    // catching same-instruction defs.
+                    let interval = intervals.iter().find(|i| i.vreg == vreg_root);
+                    if let Some(interval) = interval {
+                        if interval.start < pos && interval.end > pos {
+                            if std::env::var("VUMA_DEBUG_REG_ISEL").is_ok() {
+                                eprintln!(
+                                    "  CROSS_INSTR_CONFLICT: def_vreg={} live_vreg={} preg={:?} pos={}",
+                                    def_root_owned, vreg_root, def_preg, pos
+                                );
+                            }
+                            self.resolve_single_conflict(
+                                result,
+                                intervals,
+                                def_root_owned,
+                                vreg_root,
+                                def_preg,
+                                pos,
+                            );
+                            break; // def_vreg reassigned, no need to check more.
+                        }
+                    }
+                }
             }
             pos += 2;
         }

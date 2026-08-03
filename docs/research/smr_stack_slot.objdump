@@ -1,0 +1,651 @@
+
+/tmp/ss_shared_memory_rw.bin:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+0000000000410000 <.text>:
+  410000:	48 8b 3c 24          	mov    (%rsp),%rdi
+  410004:	48 8d 74 24 08       	lea    0x8(%rsp),%rsi
+  410009:	48 b8 00 00 42 00 00 	movabs $0x420000,%rax
+  410010:	00 00 00 
+  410013:	48 89 38             	mov    %rdi,(%rax)
+  410016:	48 89 70 08          	mov    %rsi,0x8(%rax)
+  41001a:	e8 8f 07 00 00       	call   0x4107ae
+  41001f:	48 89 c7             	mov    %rax,%rdi
+  410022:	48 c7 c0 3c 00 00 00 	mov    $0x3c,%rax
+  410029:	0f 05                	syscall
+  41002b:	48 c7 c0 00 00 00 00 	mov    $0x0,%rax
+  410032:	0f 05                	syscall
+  410034:	c3                   	ret
+  410035:	48 c7 c0 01 00 00 00 	mov    $0x1,%rax
+  41003c:	0f 05                	syscall
+  41003e:	c3                   	ret
+  41003f:	48 c7 c0 02 00 00 00 	mov    $0x2,%rax
+  410046:	0f 05                	syscall
+  410048:	c3                   	ret
+  410049:	48 c7 c0 03 00 00 00 	mov    $0x3,%rax
+  410050:	0f 05                	syscall
+  410052:	c3                   	ret
+  410053:	48 c7 c0 04 00 00 00 	mov    $0x4,%rax
+  41005a:	0f 05                	syscall
+  41005c:	c3                   	ret
+  41005d:	48 c7 c0 05 00 00 00 	mov    $0x5,%rax
+  410064:	0f 05                	syscall
+  410066:	c3                   	ret
+  410067:	48 c7 c0 06 00 00 00 	mov    $0x6,%rax
+  41006e:	0f 05                	syscall
+  410070:	c3                   	ret
+  410071:	48 c7 c0 07 00 00 00 	mov    $0x7,%rax
+  410078:	0f 05                	syscall
+  41007a:	c3                   	ret
+  41007b:	48 c7 c0 08 00 00 00 	mov    $0x8,%rax
+  410082:	0f 05                	syscall
+  410084:	c3                   	ret
+  410085:	48 c7 c0 0a 00 00 00 	mov    $0xa,%rax
+  41008c:	0f 05                	syscall
+  41008e:	c3                   	ret
+  41008f:	48 c7 c0 0b 00 00 00 	mov    $0xb,%rax
+  410096:	0f 05                	syscall
+  410098:	c3                   	ret
+  410099:	48 c7 c0 0c 00 00 00 	mov    $0xc,%rax
+  4100a0:	0f 05                	syscall
+  4100a2:	c3                   	ret
+  4100a3:	48 c7 c0 0e 00 00 00 	mov    $0xe,%rax
+  4100aa:	0f 05                	syscall
+  4100ac:	c3                   	ret
+  4100ad:	48 c7 c0 0f 00 00 00 	mov    $0xf,%rax
+  4100b4:	0f 05                	syscall
+  4100b6:	c3                   	ret
+  4100b7:	48 c7 c0 10 00 00 00 	mov    $0x10,%rax
+  4100be:	0f 05                	syscall
+  4100c0:	c3                   	ret
+  4100c1:	48 c7 c0 16 00 00 00 	mov    $0x16,%rax
+  4100c8:	0f 05                	syscall
+  4100ca:	c3                   	ret
+  4100cb:	48 c7 c0 20 00 00 00 	mov    $0x20,%rax
+  4100d2:	0f 05                	syscall
+  4100d4:	c3                   	ret
+  4100d5:	48 c7 c0 21 00 00 00 	mov    $0x21,%rax
+  4100dc:	0f 05                	syscall
+  4100de:	c3                   	ret
+  4100df:	48 c7 c0 23 00 00 00 	mov    $0x23,%rax
+  4100e6:	0f 05                	syscall
+  4100e8:	c3                   	ret
+  4100e9:	48 c7 c0 25 00 00 00 	mov    $0x25,%rax
+  4100f0:	0f 05                	syscall
+  4100f2:	c3                   	ret
+  4100f3:	48 c7 c0 27 00 00 00 	mov    $0x27,%rax
+  4100fa:	0f 05                	syscall
+  4100fc:	c3                   	ret
+  4100fd:	48 c7 c0 39 00 00 00 	mov    $0x39,%rax
+  410104:	0f 05                	syscall
+  410106:	c3                   	ret
+  410107:	48 c7 c0 3b 00 00 00 	mov    $0x3b,%rax
+  41010e:	0f 05                	syscall
+  410110:	c3                   	ret
+  410111:	48 c7 c0 e7 00 00 00 	mov    $0xe7,%rax
+  410118:	0f 05                	syscall
+  41011a:	c3                   	ret
+  41011b:	48 c7 c0 3e 00 00 00 	mov    $0x3e,%rax
+  410122:	0f 05                	syscall
+  410124:	c3                   	ret
+  410125:	48 c7 c0 4f 00 00 00 	mov    $0x4f,%rax
+  41012c:	0f 05                	syscall
+  41012e:	c3                   	ret
+  41012f:	48 c7 c0 50 00 00 00 	mov    $0x50,%rax
+  410136:	0f 05                	syscall
+  410138:	c3                   	ret
+  410139:	48 c7 c0 48 00 00 00 	mov    $0x48,%rax
+  410140:	0f 05                	syscall
+  410142:	c3                   	ret
+  410143:	48 c7 c0 57 00 00 00 	mov    $0x57,%rax
+  41014a:	0f 05                	syscall
+  41014c:	c3                   	ret
+  41014d:	48 c7 c0 60 00 00 00 	mov    $0x60,%rax
+  410154:	0f 05                	syscall
+  410156:	c3                   	ret
+  410157:	48 c7 c0 e4 00 00 00 	mov    $0xe4,%rax
+  41015e:	0f 05                	syscall
+  410160:	c3                   	ret
+  410161:	48 c7 c0 29 00 00 00 	mov    $0x29,%rax
+  410168:	0f 05                	syscall
+  41016a:	c3                   	ret
+  41016b:	48 c7 c0 2a 00 00 00 	mov    $0x2a,%rax
+  410172:	0f 05                	syscall
+  410174:	c3                   	ret
+  410175:	48 c7 c0 2b 00 00 00 	mov    $0x2b,%rax
+  41017c:	0f 05                	syscall
+  41017e:	c3                   	ret
+  41017f:	48 c7 c0 2c 00 00 00 	mov    $0x2c,%rax
+  410186:	0f 05                	syscall
+  410188:	c3                   	ret
+  410189:	48 c7 c0 2d 00 00 00 	mov    $0x2d,%rax
+  410190:	0f 05                	syscall
+  410192:	c3                   	ret
+  410193:	48 c7 c0 2c 00 00 00 	mov    $0x2c,%rax
+  41019a:	0f 05                	syscall
+  41019c:	c3                   	ret
+  41019d:	48 c7 c0 2d 00 00 00 	mov    $0x2d,%rax
+  4101a4:	0f 05                	syscall
+  4101a6:	c3                   	ret
+  4101a7:	48 c7 c0 31 00 00 00 	mov    $0x31,%rax
+  4101ae:	0f 05                	syscall
+  4101b0:	c3                   	ret
+  4101b1:	48 c7 c0 32 00 00 00 	mov    $0x32,%rax
+  4101b8:	0f 05                	syscall
+  4101ba:	c3                   	ret
+  4101bb:	48 c7 c0 30 00 00 00 	mov    $0x30,%rax
+  4101c2:	0f 05                	syscall
+  4101c4:	c3                   	ret
+  4101c5:	48 c7 c0 23 01 00 00 	mov    $0x123,%rax
+  4101cc:	0f 05                	syscall
+  4101ce:	c3                   	ret
+  4101cf:	48 c7 c0 24 01 00 00 	mov    $0x124,%rax
+  4101d6:	0f 05                	syscall
+  4101d8:	c3                   	ret
+  4101d9:	48 c7 c0 0b 00 00 00 	mov    $0xb,%rax
+  4101e0:	0f 05                	syscall
+  4101e2:	c3                   	ret
+  4101e3:	48 c7 c0 53 00 00 00 	mov    $0x53,%rax
+  4101ea:	0f 05                	syscall
+  4101ec:	c3                   	ret
+  4101ed:	48 c7 c0 54 00 00 00 	mov    $0x54,%rax
+  4101f4:	0f 05                	syscall
+  4101f6:	c3                   	ret
+  4101f7:	48 c7 c0 52 00 00 00 	mov    $0x52,%rax
+  4101fe:	0f 05                	syscall
+  410200:	c3                   	ret
+  410201:	48 c7 c0 56 00 00 00 	mov    $0x56,%rax
+  410208:	0f 05                	syscall
+  41020a:	c3                   	ret
+  41020b:	48 c7 c0 58 00 00 00 	mov    $0x58,%rax
+  410212:	0f 05                	syscall
+  410214:	c3                   	ret
+  410215:	48 c7 c0 59 00 00 00 	mov    $0x59,%rax
+  41021c:	0f 05                	syscall
+  41021e:	c3                   	ret
+  41021f:	48 c7 c0 5a 00 00 00 	mov    $0x5a,%rax
+  410226:	0f 05                	syscall
+  410228:	c3                   	ret
+  410229:	48 c7 c0 5b 00 00 00 	mov    $0x5b,%rax
+  410230:	0f 05                	syscall
+  410232:	c3                   	ret
+  410233:	48 c7 c0 5c 00 00 00 	mov    $0x5c,%rax
+  41023a:	0f 05                	syscall
+  41023c:	c3                   	ret
+  41023d:	48 c7 c0 5d 00 00 00 	mov    $0x5d,%rax
+  410244:	0f 05                	syscall
+  410246:	c3                   	ret
+  410247:	48 c7 c0 5f 00 00 00 	mov    $0x5f,%rax
+  41024e:	0f 05                	syscall
+  410250:	c3                   	ret
+  410251:	48 c7 c0 04 01 00 00 	mov    $0x104,%rax
+  410258:	0f 05                	syscall
+  41025a:	c3                   	ret
+  41025b:	48 c7 c0 01 01 00 00 	mov    $0x101,%rax
+  410262:	0f 05                	syscall
+  410264:	c3                   	ret
+  410265:	48 c7 c0 07 01 00 00 	mov    $0x107,%rax
+  41026c:	0f 05                	syscall
+  41026e:	c3                   	ret
+  41026f:	48 c7 c0 08 01 00 00 	mov    $0x108,%rax
+  410276:	0f 05                	syscall
+  410278:	c3                   	ret
+  410279:	48 c7 c0 09 01 00 00 	mov    $0x109,%rax
+  410280:	0f 05                	syscall
+  410282:	c3                   	ret
+  410283:	48 c7 c0 0a 01 00 00 	mov    $0x10a,%rax
+  41028a:	0f 05                	syscall
+  41028c:	c3                   	ret
+  41028d:	48 c7 c0 0b 01 00 00 	mov    $0x10b,%rax
+  410294:	0f 05                	syscall
+  410296:	c3                   	ret
+  410297:	48 c7 c0 0c 01 00 00 	mov    $0x10c,%rax
+  41029e:	0f 05                	syscall
+  4102a0:	c3                   	ret
+  4102a1:	48 c7 c0 0d 01 00 00 	mov    $0x10d,%rax
+  4102a8:	0f 05                	syscall
+  4102aa:	c3                   	ret
+  4102ab:	48 c7 c0 2e 00 00 00 	mov    $0x2e,%rax
+  4102b2:	0f 05                	syscall
+  4102b4:	c3                   	ret
+  4102b5:	48 c7 c0 4a 00 00 00 	mov    $0x4a,%rax
+  4102bc:	0f 05                	syscall
+  4102be:	c3                   	ret
+  4102bf:	48 c7 c0 4b 00 00 00 	mov    $0x4b,%rax
+  4102c6:	0f 05                	syscall
+  4102c8:	c3                   	ret
+  4102c9:	48 c7 c0 a2 00 00 00 	mov    $0xa2,%rax
+  4102d0:	0f 05                	syscall
+  4102d2:	c3                   	ret
+  4102d3:	48 c7 c0 32 01 00 00 	mov    $0x132,%rax
+  4102da:	0f 05                	syscall
+  4102dc:	c3                   	ret
+  4102dd:	48 c7 c0 11 00 00 00 	mov    $0x11,%rax
+  4102e4:	0f 05                	syscall
+  4102e6:	c3                   	ret
+  4102e7:	48 c7 c0 12 00 00 00 	mov    $0x12,%rax
+  4102ee:	0f 05                	syscall
+  4102f0:	c3                   	ret
+  4102f1:	48 c7 c0 13 00 00 00 	mov    $0x13,%rax
+  4102f8:	0f 05                	syscall
+  4102fa:	c3                   	ret
+  4102fb:	48 c7 c0 14 00 00 00 	mov    $0x14,%rax
+  410302:	0f 05                	syscall
+  410304:	c3                   	ret
+  410305:	48 c7 c0 27 01 00 00 	mov    $0x127,%rax
+  41030c:	0f 05                	syscall
+  41030e:	c3                   	ret
+  41030f:	48 c7 c0 28 01 00 00 	mov    $0x128,%rax
+  410316:	0f 05                	syscall
+  410318:	c3                   	ret
+  410319:	48 c7 c0 51 00 00 00 	mov    $0x51,%rax
+  410320:	0f 05                	syscall
+  410322:	c3                   	ret
+  410323:	48 c7 c0 a1 00 00 00 	mov    $0xa1,%rax
+  41032a:	0f 05                	syscall
+  41032c:	c3                   	ret
+  41032d:	48 c7 c0 95 00 00 00 	mov    $0x95,%rax
+  410334:	0f 05                	syscall
+  410336:	c3                   	ret
+  410337:	48 c7 c0 96 00 00 00 	mov    $0x96,%rax
+  41033e:	0f 05                	syscall
+  410340:	c3                   	ret
+  410341:	48 c7 c0 97 00 00 00 	mov    $0x97,%rax
+  410348:	0f 05                	syscall
+  41034a:	c3                   	ret
+  41034b:	48 c7 c0 98 00 00 00 	mov    $0x98,%rax
+  410352:	0f 05                	syscall
+  410354:	c3                   	ret
+  410355:	48 c7 c0 1b 00 00 00 	mov    $0x1b,%rax
+  41035c:	0f 05                	syscall
+  41035e:	c3                   	ret
+  41035f:	48 c7 c0 1c 00 00 00 	mov    $0x1c,%rax
+  410366:	0f 05                	syscall
+  410368:	c3                   	ret
+  410369:	48 c7 c0 1a 00 00 00 	mov    $0x1a,%rax
+  410370:	0f 05                	syscall
+  410372:	c3                   	ret
+  410373:	48 c7 c0 61 00 00 00 	mov    $0x61,%rax
+  41037a:	0f 05                	syscall
+  41037c:	c3                   	ret
+  41037d:	48 c7 c0 a0 00 00 00 	mov    $0xa0,%rax
+  410384:	0f 05                	syscall
+  410386:	c3                   	ret
+  410387:	48 c7 c0 2e 01 00 00 	mov    $0x12e,%rax
+  41038e:	0f 05                	syscall
+  410390:	c3                   	ret
+  410391:	48 c7 c0 62 00 00 00 	mov    $0x62,%rax
+  410398:	0f 05                	syscall
+  41039a:	c3                   	ret
+  41039b:	48 c7 c0 64 00 00 00 	mov    $0x64,%rax
+  4103a2:	0f 05                	syscall
+  4103a4:	c3                   	ret
+  4103a5:	48 c7 c0 3e 01 00 00 	mov    $0x13e,%rax
+  4103ac:	0f 05                	syscall
+  4103ae:	c3                   	ret
+  4103af:	48 c7 c0 22 01 00 00 	mov    $0x122,%rax
+  4103b6:	0f 05                	syscall
+  4103b8:	c3                   	ret
+  4103b9:	48 c7 c0 1b 01 00 00 	mov    $0x11b,%rax
+  4103c0:	0f 05                	syscall
+  4103c2:	c3                   	ret
+  4103c3:	48 c7 c0 1e 01 00 00 	mov    $0x11e,%rax
+  4103ca:	0f 05                	syscall
+  4103cc:	c3                   	ret
+  4103cd:	48 c7 c0 1f 01 00 00 	mov    $0x11f,%rax
+  4103d4:	0f 05                	syscall
+  4103d6:	c3                   	ret
+  4103d7:	48 c7 c0 21 01 00 00 	mov    $0x121,%rax
+  4103de:	0f 05                	syscall
+  4103e0:	c3                   	ret
+  4103e1:	48 c7 c0 26 01 00 00 	mov    $0x126,%rax
+  4103e8:	0f 05                	syscall
+  4103ea:	c3                   	ret
+  4103eb:	48 c7 c0 fe 00 00 00 	mov    $0xfe,%rax
+  4103f2:	0f 05                	syscall
+  4103f4:	c3                   	ret
+  4103f5:	48 c7 c0 ff 00 00 00 	mov    $0xff,%rax
+  4103fc:	0f 05                	syscall
+  4103fe:	c3                   	ret
+  4103ff:	48 c7 c0 65 00 00 00 	mov    $0x65,%rax
+  410406:	0f 05                	syscall
+  410408:	c3                   	ret
+  410409:	48 c7 c0 66 00 00 00 	mov    $0x66,%rax
+  410410:	0f 05                	syscall
+  410412:	c3                   	ret
+  410413:	48 c7 c0 6b 00 00 00 	mov    $0x6b,%rax
+  41041a:	0f 05                	syscall
+  41041c:	c3                   	ret
+  41041d:	48 c7 c0 68 00 00 00 	mov    $0x68,%rax
+  410424:	0f 05                	syscall
+  410426:	c3                   	ret
+  410427:	48 c7 c0 6c 00 00 00 	mov    $0x6c,%rax
+  41042e:	0f 05                	syscall
+  410430:	c3                   	ret
+  410431:	48 c7 c0 69 00 00 00 	mov    $0x69,%rax
+  410438:	0f 05                	syscall
+  41043a:	c3                   	ret
+  41043b:	48 c7 c0 6a 00 00 00 	mov    $0x6a,%rax
+  410442:	0f 05                	syscall
+  410444:	c3                   	ret
+  410445:	48 c7 c0 75 00 00 00 	mov    $0x75,%rax
+  41044c:	0f 05                	syscall
+  41044e:	c3                   	ret
+  41044f:	48 c7 c0 77 00 00 00 	mov    $0x77,%rax
+  410456:	0f 05                	syscall
+  410458:	c3                   	ret
+  410459:	48 c7 c0 6e 00 00 00 	mov    $0x6e,%rax
+  410460:	0f 05                	syscall
+  410462:	c3                   	ret
+  410463:	48 c7 c0 7c 00 00 00 	mov    $0x7c,%rax
+  41046a:	0f 05                	syscall
+  41046c:	c3                   	ret
+  41046d:	48 c7 c0 70 00 00 00 	mov    $0x70,%rax
+  410474:	0f 05                	syscall
+  410476:	c3                   	ret
+  410477:	48 c7 c0 6d 00 00 00 	mov    $0x6d,%rax
+  41047e:	0f 05                	syscall
+  410480:	c3                   	ret
+  410481:	48 c7 c0 79 00 00 00 	mov    $0x79,%rax
+  410488:	0f 05                	syscall
+  41048a:	c3                   	ret
+  41048b:	48 c7 c0 6f 00 00 00 	mov    $0x6f,%rax
+  410492:	0f 05                	syscall
+  410494:	c3                   	ret
+  410495:	48 c7 c0 3a 00 00 00 	mov    $0x3a,%rax
+  41049c:	0f 05                	syscall
+  41049e:	c3                   	ret
+  41049f:	48 c7 c0 b3 01 00 00 	mov    $0x1b3,%rax
+  4104a6:	0f 05                	syscall
+  4104a8:	c3                   	ret
+  4104a9:	48 c7 c0 f7 00 00 00 	mov    $0xf7,%rax
+  4104b0:	0f 05                	syscall
+  4104b2:	c3                   	ret
+  4104b3:	48 c7 c0 42 01 00 00 	mov    $0x142,%rax
+  4104ba:	0f 05                	syscall
+  4104bc:	c3                   	ret
+  4104bd:	48 c7 c0 ea 00 00 00 	mov    $0xea,%rax
+  4104c4:	0f 05                	syscall
+  4104c6:	c3                   	ret
+  4104c7:	48 c7 c0 c8 00 00 00 	mov    $0xc8,%rax
+  4104ce:	0f 05                	syscall
+  4104d0:	c3                   	ret
+  4104d1:	48 c7 c0 0d 00 00 00 	mov    $0xd,%rax
+  4104d8:	0f 05                	syscall
+  4104da:	c3                   	ret
+  4104db:	48 c7 c0 d9 00 00 00 	mov    $0xd9,%rax
+  4104e2:	0f 05                	syscall
+  4104e4:	c3                   	ret
+  4104e5:	48 c7 c0 4e 00 00 00 	mov    $0x4e,%rax
+  4104ec:	0f 05                	syscall
+  4104ee:	c3                   	ret
+  4104ef:	48 c7 c0 9d 00 00 00 	mov    $0x9d,%rax
+  4104f6:	0f 05                	syscall
+  4104f8:	c3                   	ret
+  4104f9:	48 c7 c0 9e 00 00 00 	mov    $0x9e,%rax
+  410500:	0f 05                	syscall
+  410502:	c3                   	ret
+  410503:	48 c7 c0 3f 00 00 00 	mov    $0x3f,%rax
+  41050a:	0f 05                	syscall
+  41050c:	c3                   	ret
+  41050d:	48 c7 c0 63 00 00 00 	mov    $0x63,%rax
+  410514:	0f 05                	syscall
+  410516:	c3                   	ret
+  410517:	48 c7 c0 09 00 00 00 	mov    $0x9,%rax
+  41051e:	49 89 ca             	mov    %rcx,%r10
+  410521:	0f 05                	syscall
+  410523:	c3                   	ret
+  410524:	48 c7 c0 19 00 00 00 	mov    $0x19,%rax
+  41052b:	49 89 ca             	mov    %rcx,%r10
+  41052e:	0f 05                	syscall
+  410530:	c3                   	ret
+  410531:	48 c7 c0 3c 00 00 00 	mov    $0x3c,%rax
+  410538:	0f 05                	syscall
+  41053a:	cc                   	int3
+  41053b:	48 89 fe             	mov    %rdi,%rsi
+  41053e:	48 31 ff             	xor    %rdi,%rdi
+  410541:	48 c7 c2 03 00 00 00 	mov    $0x3,%rdx
+  410548:	49 c7 c2 22 00 00 00 	mov    $0x22,%r10
+  41054f:	49 c7 c0 ff ff ff ff 	mov    $0xffffffffffffffff,%r8
+  410556:	4d 31 c9             	xor    %r9,%r9
+  410559:	48 c7 c0 09 00 00 00 	mov    $0x9,%rax
+  410560:	0f 05                	syscall
+  410562:	c3                   	ret
+  410563:	48 c7 c0 0d 00 00 00 	mov    $0xd,%rax
+  41056a:	49 c7 c2 08 00 00 00 	mov    $0x8,%r10
+  410571:	0f 05                	syscall
+  410573:	c3                   	ret
+  410574:	48 c7 c0 3d 00 00 00 	mov    $0x3d,%rax
+  41057b:	4d 31 d2             	xor    %r10,%r10
+  41057e:	0f 05                	syscall
+  410580:	c3                   	ret
+  410581:	48 c7 c0 3d 00 00 00 	mov    $0x3d,%rax
+  410588:	49 89 ca             	mov    %rcx,%r10
+  41058b:	0f 05                	syscall
+  41058d:	c3                   	ret
+  41058e:	48 c7 c0 ca 00 00 00 	mov    $0xca,%rax
+  410595:	49 89 ca             	mov    %rcx,%r10
+  410598:	0f 05                	syscall
+  41059a:	c3                   	ret
+  41059b:	48 c7 c0 36 00 00 00 	mov    $0x36,%rax
+  4105a2:	49 89 ca             	mov    %rcx,%r10
+  4105a5:	0f 05                	syscall
+  4105a7:	c3                   	ret
+  4105a8:	48 c7 c0 37 00 00 00 	mov    $0x37,%rax
+  4105af:	0f 05                	syscall
+  4105b1:	c3                   	ret
+  4105b2:	48 c7 c0 21 01 00 00 	mov    $0x121,%rax
+  4105b9:	0f 05                	syscall
+  4105bb:	c3                   	ret
+  4105bc:	48 c7 c0 06 01 00 00 	mov    $0x106,%rax
+  4105c3:	0f 05                	syscall
+  4105c5:	c3                   	ret
+  4105c6:	48 c7 c0 22 01 00 00 	mov    $0x122,%rax
+  4105cd:	0f 05                	syscall
+  4105cf:	c3                   	ret
+  4105d0:	48 c7 c0 38 00 00 00 	mov    $0x38,%rax
+  4105d7:	49 89 ca             	mov    %rcx,%r10
+  4105da:	0f 05                	syscall
+  4105dc:	c3                   	ret
+  4105dd:	48 c7 c0 e9 00 00 00 	mov    $0xe9,%rax
+  4105e4:	49 89 ca             	mov    %rcx,%r10
+  4105e7:	0f 05                	syscall
+  4105e9:	c3                   	ret
+  4105ea:	48 c7 c0 e8 00 00 00 	mov    $0xe8,%rax
+  4105f1:	49 89 ca             	mov    %rcx,%r10
+  4105f4:	0f 05                	syscall
+  4105f6:	c3                   	ret
+  4105f7:	8a 07                	mov    (%rdi),%al
+  4105f9:	8a 0e                	mov    (%rsi),%cl
+  4105fb:	38 c8                	cmp    %cl,%al
+  4105fd:	75 0c                	jne    0x41060b
+  4105ff:	84 c0                	test   %al,%al
+  410601:	74 08                	je     0x41060b
+  410603:	48 ff c7             	inc    %rdi
+  410606:	48 ff c6             	inc    %rsi
+  410609:	eb ec                	jmp    0x4105f7
+  41060b:	0f b6 c0             	movzbl %al,%eax
+  41060e:	0f b6 c9             	movzbl %cl,%ecx
+  410611:	29 c8                	sub    %ecx,%eax
+  410613:	c3                   	ret
+  410614:	55                   	push   %rbp
+  410615:	48 89 e5             	mov    %rsp,%rbp
+  410618:	48 83 ec 20          	sub    $0x20,%rsp
+  41061c:	49 89 f8             	mov    %rdi,%r8
+  41061f:	4d 85 c0             	test   %r8,%r8
+  410622:	79 1e                	jns    0x410642
+  410624:	49 f7 d8             	neg    %r8
+  410627:	c6 04 24 2d          	movb   $0x2d,(%rsp)
+  41062b:	bf 01 00 00 00       	mov    $0x1,%edi
+  410630:	48 8d 34 24          	lea    (%rsp),%rsi
+  410634:	ba 01 00 00 00       	mov    $0x1,%edx
+  410639:	48 c7 c0 01 00 00 00 	mov    $0x1,%rax
+  410640:	0f 05                	syscall
+  410642:	48 8d 4c 24 14       	lea    0x14(%rsp),%rcx
+  410647:	c6 01 0a             	movb   $0xa,(%rcx)
+  41064a:	48 83 e9 01          	sub    $0x1,%rcx
+  41064e:	4d 85 c0             	test   %r8,%r8
+  410651:	75 05                	jne    0x410658
+  410653:	c6 01 30             	movb   $0x30,(%rcx)
+  410656:	eb 25                	jmp    0x41067d
+  410658:	4c 89 c0             	mov    %r8,%rax
+  41065b:	48 31 d2             	xor    %rdx,%rdx
+  41065e:	49 c7 c1 0a 00 00 00 	mov    $0xa,%r9
+  410665:	49 f7 f9             	idiv   %r9
+  410668:	49 89 c0             	mov    %rax,%r8
+  41066b:	80 c2 30             	add    $0x30,%dl
+  41066e:	88 11                	mov    %dl,(%rcx)
+  410670:	48 83 e9 01          	sub    $0x1,%rcx
+  410674:	4d 85 c0             	test   %r8,%r8
+  410677:	75 df                	jne    0x410658
+  410679:	48 83 c1 01          	add    $0x1,%rcx
+  41067d:	48 8d 54 24 15       	lea    0x15(%rsp),%rdx
+  410682:	48 29 ca             	sub    %rcx,%rdx
+  410685:	48 89 ce             	mov    %rcx,%rsi
+  410688:	bf 01 00 00 00       	mov    $0x1,%edi
+  41068d:	48 c7 c0 01 00 00 00 	mov    $0x1,%rax
+  410694:	0f 05                	syscall
+  410696:	48 83 c4 20          	add    $0x20,%rsp
+  41069a:	5d                   	pop    %rbp
+  41069b:	c3                   	ret
+  41069c:	55                   	push   %rbp
+  41069d:	48 89 e5             	mov    %rsp,%rbp
+  4106a0:	49 89 f8             	mov    %rdi,%r8
+  4106a3:	49 89 f1             	mov    %rsi,%r9
+  4106a6:	4d 85 c9             	test   %r9,%r9
+  4106a9:	74 3c                	je     0x4106e7
+  4106ab:	41 0f b6 00          	movzbl (%r8),%eax
+  4106af:	c1 e8 04             	shr    $0x4,%eax
+  4106b2:	04 30                	add    $0x30,%al
+  4106b4:	3c 3a                	cmp    $0x3a,%al
+  4106b6:	7c 02                	jl     0x4106ba
+  4106b8:	04 07                	add    $0x7,%al
+  4106ba:	88 44 24 f8          	mov    %al,-0x8(%rsp)
+  4106be:	41 0f b6 00          	movzbl (%r8),%eax
+  4106c2:	83 e0 0f             	and    $0xf,%eax
+  4106c5:	04 30                	add    $0x30,%al
+  4106c7:	3c 3a                	cmp    $0x3a,%al
+  4106c9:	7c 02                	jl     0x4106cd
+  4106cb:	04 07                	add    $0x7,%al
+  4106cd:	88 44 24 f9          	mov    %al,-0x7(%rsp)
+  4106d1:	bf 01 00 00 00       	mov    $0x1,%edi
+  4106d6:	48 8d 74 24 f8       	lea    -0x8(%rsp),%rsi
+  4106db:	ba 02 00 00 00       	mov    $0x2,%edx
+  4106e0:	48 c7 c0 01 00 00 00 	mov    $0x1,%rax
+  4106e7:	0f 05                	syscall
+  4106e9:	49 ff c0             	inc    %r8
+  4106ec:	49 ff c9             	dec    %r9
+  4106ef:	75 ba                	jne    0x4106ab
+  4106f1:	5d                   	pop    %rbp
+  4106f2:	c3                   	ret
+  4106f3:	6a 0a                	push   $0xa
+  4106f5:	48 c7 c7 01 00 00 00 	mov    $0x1,%rdi
+  4106fc:	48 89 e6             	mov    %rsp,%rsi
+  4106ff:	48 c7 c2 01 00 00 00 	mov    $0x1,%rdx
+  410706:	48 c7 c0 01 00 00 00 	mov    $0x1,%rax
+  41070d:	0f 05                	syscall
+  41070f:	58                   	pop    %rax
+  410710:	c3                   	ret
+  410711:	48 b8 00 00 42 00 00 	movabs $0x420000,%rax
+  410718:	00 00 00 
+  41071b:	48 8b 00             	mov    (%rax),%rax
+  41071e:	c3                   	ret
+  41071f:	48 b8 00 00 42 00 00 	movabs $0x420000,%rax
+  410726:	00 00 00 
+  410729:	48 8b 40 08          	mov    0x8(%rax),%rax
+  41072d:	c3                   	ret
+  41072e:	48 31 ff             	xor    %rdi,%rdi
+  410731:	48 c7 c6 00 10 00 00 	mov    $0x1000,%rsi
+  410738:	48 c7 c2 03 00 00 00 	mov    $0x3,%rdx
+  41073f:	49 c7 c2 22 00 00 00 	mov    $0x22,%r10
+  410746:	49 c7 c0 ff ff ff ff 	mov    $0xffffffffffffffff,%r8
+  41074d:	4d 31 c9             	xor    %r9,%r9
+  410750:	48 c7 c0 09 00 00 00 	mov    $0x9,%rax
+  410757:	0f 05                	syscall
+  410759:	c3                   	ret
+  41075a:	c3                   	ret
+  41075b:	0f 0b                	ud2
+  41075d:	48 c7 c7 01 00 00 00 	mov    $0x1,%rdi
+  410764:	48 c7 c0 3c 00 00 00 	mov    $0x3c,%rax
+  41076b:	0f 05                	syscall
+  41076d:	cc                   	int3
+  41076e:	48 c7 c7 86 00 00 00 	mov    $0x86,%rdi
+  410775:	48 c7 c0 3c 00 00 00 	mov    $0x3c,%rax
+  41077c:	0f 05                	syscall
+  41077e:	cc                   	int3
+  41077f:	48 c7 c7 87 00 00 00 	mov    $0x87,%rdi
+  410786:	48 c7 c0 3c 00 00 00 	mov    $0x3c,%rax
+  41078d:	0f 05                	syscall
+  41078f:	cc                   	int3
+  410790:	48 89 f8             	mov    %rdi,%rax
+  410793:	48 89 f7             	mov    %rsi,%rdi
+  410796:	ff e0                	jmp    *%rax
+  410798:	8b 07                	mov    (%rdi),%eax
+  41079a:	c3                   	ret
+  41079b:	89 37                	mov    %esi,(%rdi)
+  41079d:	c3                   	ret
+  41079e:	48 8b 07             	mov    (%rdi),%rax
+  4107a1:	c3                   	ret
+  4107a2:	48 89 37             	mov    %rsi,(%rdi)
+  4107a5:	c3                   	ret
+  4107a6:	0f b6 07             	movzbl (%rdi),%eax
+  4107a9:	c3                   	ret
+  4107aa:	40 88 37             	mov    %sil,(%rdi)
+  4107ad:	c3                   	ret
+  4107ae:	55                   	push   %rbp
+  4107af:	48 89 e5             	mov    %rsp,%rbp
+  4107b2:	48 81 ec 20 03 00 00 	sub    $0x320,%rsp
+  4107b9:	48 31 c0             	xor    %rax,%rax
+  4107bc:	48 89 45 b8          	mov    %rax,-0x48(%rbp)
+  4107c0:	48 89 45 b0          	mov    %rax,-0x50(%rbp)
+  4107c4:	48 89 45 a8          	mov    %rax,-0x58(%rbp)
+  4107c8:	48 31 c0             	xor    %rax,%rax
+  4107cb:	48 89 85 58 fe ff ff 	mov    %rax,-0x1a8(%rbp)
+  4107d2:	48 89 85 d0 fd ff ff 	mov    %rax,-0x230(%rbp)
+  4107d9:	48 89 85 e8 fc ff ff 	mov    %rax,-0x318(%rbp)
+  4107e0:	48 b8 00 00 00 00 00 	movabs $0x0,%rax
+  4107e7:	00 00 00 
+  4107ea:	48 89 85 e0 fc ff ff 	mov    %rax,-0x320(%rbp)
+  4107f1:	48 c7 c7 00 00 00 00 	mov    $0x0,%rdi
+  4107f8:	48 c7 c6 40 00 00 00 	mov    $0x40,%rsi
+  4107ff:	48 c7 c2 03 00 00 00 	mov    $0x3,%rdx
+  410806:	48 c7 c1 21 00 00 00 	mov    $0x21,%rcx
+  41080d:	49 c7 c0 ff ff ff ff 	mov    $0xffffffffffffffff,%r8
+  410814:	49 c7 c1 00 00 00 00 	mov    $0x0,%r9
+  41081b:	48 31 c0             	xor    %rax,%rax
+  41081e:	e8 f4 fc ff ff       	call   0x410517
+  410823:	48 89 45 d0          	mov    %rax,-0x30(%rbp)
+  410827:	48 8b 45 d0          	mov    -0x30(%rbp),%rax
+  41082b:	48 81 c0 00 00 00 00 	add    $0x0,%rax
+  410832:	48 89 45 f0          	mov    %rax,-0x10(%rbp)
+  410836:	48 8b 45 f0          	mov    -0x10(%rbp),%rax
+  41083a:	48 81 c0 00 00 00 00 	add    $0x0,%rax
+  410841:	48 89 45 c8          	mov    %rax,-0x38(%rbp)
+  410845:	49 ba b2 41 de fc 00 	movabs $0xfcde41b2,%r10
+  41084c:	00 00 00 
+  41084f:	4c 8b 5d c8          	mov    -0x38(%rbp),%r11
+  410853:	4d 89 13             	mov    %r10,(%r11)
+  410856:	4c 8b 55 c8          	mov    -0x38(%rbp),%r10
+  41085a:	49 8b 02             	mov    (%r10),%rax
+  41085d:	48 89 45 e0          	mov    %rax,-0x20(%rbp)
+  410861:	48 8b 45 e0          	mov    -0x20(%rbp),%rax
+  410865:	48 b9 b2 41 de fc 00 	movabs $0xfcde41b2,%rcx
+  41086c:	00 00 00 
+  41086f:	48 39 c8             	cmp    %rcx,%rax
+  410872:	0f 94 c0             	sete   %al
+  410875:	48 0f b6 c0          	movzbq %al,%rax
+  410879:	48 89 45 d8          	mov    %rax,-0x28(%rbp)
+  41087d:	48 8b 45 d8          	mov    -0x28(%rbp),%rax
+  410881:	48 85 c0             	test   %rax,%rax
+  410884:	0f 85 05 00 00 00    	jne    0x41088f
+  41088a:	e9 10 00 00 00       	jmp    0x41089f
+  41088f:	48 c7 c0 01 00 00 00 	mov    $0x1,%rax
+  410896:	48 81 c4 20 03 00 00 	add    $0x320,%rsp
+  41089d:	5d                   	pop    %rbp
+  41089e:	c3                   	ret
+  41089f:	48 c7 c0 00 00 00 00 	mov    $0x0,%rax
+  4108a6:	48 81 c4 20 03 00 00 	add    $0x320,%rsp
+  4108ad:	5d                   	pop    %rbp
+  4108ae:	c3                   	ret

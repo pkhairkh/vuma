@@ -1232,6 +1232,71 @@ pub fn encode_mov_mem16_reg16(base: Gpr, offset: i32, src: Gpr) -> Vec<u8> {
     code
 }
 
+/// Encode MOV byte [r64 + offset], imm8 (C6 /0 + imm8).
+/// Used for I8 stores of immediates — avoids needing a value register
+/// (which would conflict with R11 scratch when addr is spilled).
+pub fn encode_mov_mem8_imm8(base: Gpr, offset: i32, imm: i8) -> Vec<u8> {
+    let mut code = Vec::new();
+    let b = base.needs_rex();
+    if b {
+        if let Some(rex) = rex_prefix(false, false, false, b) {
+            code.push(rex);
+        }
+    }
+    code.push(0xC6);
+    encode_mem_operand(&mut code, 0, base, offset);
+    code.push(imm as u8);
+    code
+}
+
+/// Encode MOV word [r64 + offset], imm16 (66 C7 /0 + imm16).
+pub fn encode_mov_mem16_imm16(base: Gpr, offset: i32, imm: i16) -> Vec<u8> {
+    let mut code = Vec::new();
+    let b = base.needs_rex();
+    code.push(0x66);
+    if b {
+        if let Some(rex) = rex_prefix(false, false, false, b) {
+            code.push(rex);
+        }
+    }
+    code.push(0xC7);
+    encode_mem_operand(&mut code, 0, base, offset);
+    code.extend_from_slice(&imm.to_le_bytes());
+    code
+}
+
+/// Encode MOV dword [r64 + offset], imm32 (C7 /0 + imm32).
+/// Used for I32 stores of immediates.
+pub fn encode_mov_mem32_imm32(base: Gpr, offset: i32, imm: i32) -> Vec<u8> {
+    let mut code = Vec::new();
+    let b = base.needs_rex();
+    if b {
+        if let Some(rex) = rex_prefix(false, false, false, b) {
+            code.push(rex);
+        }
+    }
+    code.push(0xC7);
+    encode_mem_operand(&mut code, 0, base, offset);
+    code.extend_from_slice(&imm.to_le_bytes());
+    code
+}
+
+/// Encode MOV qword [r64 + offset], imm32 (REX.W + C7 /0 + imm32, sign-extended).
+/// Used for I64 stores of immediates that fit in i32 (sign-extended).
+pub fn encode_mov_mem_imm32_sext64(base: Gpr, offset: i32, imm: i32) -> Vec<u8> {
+    let mut code = Vec::new();
+    let b = base.needs_rex();
+    if let Some(rex) = rex_prefix(true, false, false, b) {
+        code.push(rex);
+    } else {
+        code.push(0x48);
+    }
+    code.push(0xC7);
+    encode_mem_operand(&mut code, 0, base, offset);
+    code.extend_from_slice(&imm.to_le_bytes());
+    code
+}
+
 /// Encode MOVZX r64, word [r64 + offset] (REX.W + 0F B7 /r with memory operand)
 pub fn encode_movzx_reg16_mem(dst: Gpr, base: Gpr, offset: i32) -> Vec<u8> {
     let mut code = Vec::new();
