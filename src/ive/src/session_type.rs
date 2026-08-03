@@ -246,7 +246,7 @@ pub fn verify_session_types(events: &[SessionEvent]) -> Vec<SessionViolation> {
                     // branch in order; the first match wins.
                     Some(SessionType::Choice(s1, s2)) => {
                         let matched = try_match_choice_branch(
-                            &[s1.clone(), s2.clone()],
+                            &[s1.as_ref().clone(), s2.as_ref().clone()],
                             msg_type,
                             event.at_node,
                             *vreg,
@@ -301,7 +301,7 @@ pub fn verify_session_types(events: &[SessionEvent]) -> Vec<SessionViolation> {
                     // Symmetric to Choice: we try each branch in order.
                     Some(SessionType::Offer(s1, s2)) => {
                         let matched = try_match_choice_branch(
-                            &[s1.clone(), s2.clone()],
+                            &[s1.as_ref().clone(), s2.as_ref().clone()],
                             expected_type,
                             event.at_node,
                             *vreg,
@@ -426,6 +426,7 @@ fn try_match_choice_branch(
             protocol_kind,
             msg_type,
             expected_kind,
+            msg_type,
         )),
     });
     None
