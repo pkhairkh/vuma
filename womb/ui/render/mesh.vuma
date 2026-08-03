@@ -1,0 +1,150 @@
+// ============================================================================
+// womb/ui/render/mesh.vuma — 3D mesh data structure + helpers
+// ============================================================================
+// This module defines the Mesh layout and helpers for 3D mesh rendering.
+// A mesh is a collection of vertices (position + texture coordinate) plus
+// an index buffer defining the triangles.
+//
+// The mesh is uploaded to the GPU as two buffers:
+//   - Vertex buffer: array of Vertex (position: vec3, tex_coord: vec2)
+//   - Index buffer: array of u32 triangle indices
+//
+// The vertex shader (mesh.vert) transforms vertices via the MVP matrix;
+// the fragment shader (mesh.frag) samples a texture.
+//
+// Layout (std140-compatible for GPU upload):
+//   Vertex {
+//     position: [f32; 3],  // 12 bytes
+//     _pad: f32,            // 4 bytes (align to 16)
+//     tex_coord: [f32; 2], // 8 bytes
+//     _pad: [f32; 2],      // 8 bytes (align to 16)
+//   }
+//   Total: 32 bytes per vertex (2 × 16-byte GPU registers)
+// ============================================================================
+
+layout Vertex {
+    x: f32,
+    y: f32,
+    z: f32,
+    _pad0: f32,
+    u: f32,
+    v: f32,
+    _pad1: f32,
+    _pad2: f32,
+}
+
+layout Mesh {
+    vertex_count: u32,
+    index_count: u32,
+    _pad: [u32; 2],
+    vertices: [Vertex; 256],
+    indices: [u32; 512],
+}
+
+// Helper: write a vertex into the mesh's vertex array.
+transform mesh_set_vertex(mesh: State<Mesh>, idx: u32, x: f32, y: f32, z: f32, u: f32, v: f32) {
+    mesh.vertices[idx].x = x;
+    mesh.vertices[idx].y = y;
+    mesh.vertices[idx].z = z;
+    mesh.vertices[idx].u = u;
+    mesh.vertices[idx].v = v;
+}
+
+// Helper: write a triangle's indices into the mesh's index array.
+transform mesh_set_triangle(mesh: State<Mesh>, tri_idx: u32, i0: u32, i1: u32, i2: u32) {
+    mesh.indices[tri_idx * 3] = i0;
+    mesh.indices[tri_idx * 3 + 1] = i1;
+    mesh.indices[tri_idx * 3 + 2] = i2;
+}
+
+// Helper: build a unit cube mesh (24 vertices, 12 triangles).
+// Each face has 4 vertices (2 triangles) with proper UV coordinates.
+transform mesh_build_cube(mesh: State<Mesh>) {
+    mesh.vertex_count = 24;
+    mesh.index_count = 36;
+
+    // Front face (z = +1)
+    mesh_set_vertex(mesh,  0, -1, -1,  1, 0, 0);
+    mesh_set_vertex(mesh,  1,  1, -1,  1, 1, 0);
+    mesh_set_vertex(mesh,  2,  1,  1,  1, 1, 1);
+    mesh_set_vertex(mesh,  3, -1,  1,  1, 0, 1);
+
+    // Back face (z = -1)
+    mesh_set_vertex(mesh,  4,  1, -1, -1, 0, 0);
+    mesh_set_vertex(mesh,  5, -1, -1, -1, 1, 0);
+    mesh_set_vertex(mesh,  6, -1,  1, -1, 1, 1);
+    mesh_set_vertex(mesh,  7,  1,  1, -1, 0, 1);
+
+    // Top face (y = +1)
+    mesh_set_vertex(mesh,  8, -1,  1,  1, 0, 0);
+    mesh_set_vertex(mesh,  9,  1,  1,  1, 1, 0);
+    mesh_set_vertex(mesh, 10,  1,  1, -1, 1, 1);
+    mesh_set_vertex(mesh, 11, -1,  1, -1, 0, 1);
+
+    // Bottom face (y = -1)
+    mesh_set_vertex(mesh, 12, -1, -1, -1, 0, 0);
+    mesh_set_vertex(mesh, 13,  1, -1, -1, 1, 0);
+    mesh_set_vertex(mesh, 14,  1, -1,  1, 1, 1);
+    mesh_set_vertex(mesh, 15, -1, -1,  1, 0, 1);
+
+    // Right face (x = +1)
+    mesh_set_vertex(mesh, 16,  1, -1,  1, 0, 0);
+    mesh_set_vertex(mesh, 17,  1, -1, -1, 1, 0);
+    mesh_set_vertex(mesh, 18,  1,  1, -1, 1, 1);
+    mesh_set_vertex(mesh, 19,  1,  1,  1, 0, 1);
+
+    // Left face (x = -1)
+    mesh_set_vertex(mesh, 20, -1, -1, -1, 0, 0);
+    mesh_set_vertex(mesh, 21, -1, -1,  1, 1, 0);
+    mesh_set_vertex(mesh, 22, -1,  1,  1, 1, 1);
+    mesh_set_vertex(mesh, 23, -1,  1, -1, 0, 1);
+
+    // 12 triangles (2 per face × 6 faces)
+    mesh_set_triangle(mesh,  0,  0,  1,  2);
+    mesh_set_triangle(mesh,  1,  0,  2,  3);
+    mesh_set_triangle(mesh,  2,  4,  5,  6);
+    mesh_set_triangle(mesh,  3,  4,  6,  7);
+    mesh_set_triangle(mesh,  4,  8,  9, 10);
+    mesh_set_triangle(mesh,  5,  8, 10, 11);
+    mesh_set_triangle(mesh,  6, 12, 13, 14);
+    mesh_set_triangle(mesh,  7, 12, 14, 15);
+    mesh_set_triangle(mesh,  8, 16, 17, 18);
+    mesh_set_triangle(mesh,  9, 16, 18, 19);
+    mesh_set_triangle(mesh, 10, 20, 21, 22);
+    mesh_set_triangle(mesh, 11, 20, 22, 23);
+}
+
+// Helper: build a perspective projection matrix (column-major, f32).
+// The matrix is stored in a [f32; 16] array (4×4, column-major).
+//
+// Parameters:
+//   fov_y: field of view in radians (e.g., 1.0472 = 60 degrees)
+//   aspect: width / height
+//   near: near clipping plane (e.g., 0.1)
+//   far: far clipping plane (e.g., 100.0)
+//
+// Returns: 16 f32 values representing the 4×4 matrix.
+transform mesh_perspective(fov_y: f32, aspect: f32, near: f32, far: f32, out: Address) {
+    f: f32 = 1.0 / fov_y;  // cot(fov_y / 2) approximation
+    // Column-major: out[col * 4 + row]
+    // Column 0
+    *(out + 0) as f32 = f / aspect;
+    *(out + 1) as f32 = 0.0;
+    *(out + 2) as f32 = 0.0;
+    *(out + 3) as f32 = 0.0;
+    // Column 1
+    *(out + 4) as f32 = 0.0;
+    *(out + 5) as f32 = f;
+    *(out + 6) as f32 = 0.0;
+    *(out + 7) as f32 = 0.0;
+    // Column 2
+    *(out + 8) as f32 = 0.0;
+    *(out + 9) as f32 = 0.0;
+    *(out + 10) as f32 = far / (near - far);
+    *(out + 11) as f32 = -1.0;
+    // Column 3
+    *(out + 12) as f32 = 0.0;
+    *(out + 13) as f32 = 0.0;
+    *(out + 14) as f32 = (far * near) / (near - far);
+    *(out + 15) as f32 = 0.0;
+}
