@@ -985,25 +985,16 @@ pub mod capability {
 
     /// Compute the 32-byte signature for `token` under `signing_key`.
     ///
-    /// Strategy: run FNV-1a four times over the same input, each time
-    /// prefixing a different 1-byte salt (0, 1, 2, 3). Each pass yields a
-    /// u64; concatenating the four little-endian u64s gives 32 bytes. The
-    /// salt prevents the four passes from producing identical 8-byte
-    /// halves, which they otherwise would (FNV-1a is deterministic).
+    /// Uses HMAC-SHA-256 (RFC 2104) via `hmac_sha256::hmac_sha256`.
+    /// This is a real MAC — unlike the prior FNV-1a x4 pseudo-signature,
+    /// it is cryptographically secure against forgery (per ADR-0007).
     ///
-    /// See the module-level SECURITY NOTE for why this is acceptable as a
-    /// tamper-detection checksum but NOT as a real MAC.
+    /// The signature covers `signature_input` (all token fields except
+    /// `signature` itself, prepended with the signing key), so any
+    /// post-grant tampering is detected by `verify_capability`.
     pub fn compute_signature(token: &CapabilityToken, signing_key: &[u8]) -> [u8; 32] {
         let base = signature_input(token, signing_key);
-        let mut sig = [0u8; 32];
-        for i in 0..4u8 {
-            let mut chunk = Vec::with_capacity(base.len() + 1);
-            chunk.push(i);
-            chunk.extend_from_slice(&base);
-            let h = fnv1a_64(&chunk);
-            sig[(i as usize) * 8..(i as usize + 1) * 8].copy_from_slice(&h.to_le_bytes());
-        }
-        sig
+        crate::hmac_sha256::hmac_sha256(signing_key, &base)
     }
 
     /// Mint a new capability token.

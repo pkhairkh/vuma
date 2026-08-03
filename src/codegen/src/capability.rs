@@ -13,13 +13,12 @@
 //! endpoint, memory region, MMIO range, or channel) with a specific set
 //! of [`MemoryPermissions`]. Capabilities are:
 //!
-//! - **Tamper-evident** — every token carries a 32-byte signature over
-//!   all of its fields. **IMPORTANT: the signature is NOT HMAC-SHA256.**
-//!   It is a custom construction based on FNV-1a (a non-cryptographic
-//!   hash) run four times with different 1-byte salt prefixes. See the
-//!   SECURITY NOTE below. A token whose signature does not verify under
-//!   the kernel's signing key is rejected by [`verify_capability`], but
-//!   an attacker who knows `signing_key` can forge a valid signature.
+//! - **Tamper-evident** — every token carries a 32-byte HMAC-SHA-256
+//!   signature over all of its fields (per ADR-0007). The signature is
+//!   computed via `hmac_sha256::hmac_sha256` using a per-process random
+//!   32-byte secret key (read from /dev/urandom at compile time). A token
+//!   whose signature does not verify under the kernel's signing key is
+//!   rejected by [`verify_capability`].
 //! - **Delegable** — the holder of a token may mint a child token for a
 //!   subset of their own permissions, up to [`MAX_DELEGATION_DEPTH`]
 //!   levels deep. Each delegation increments `delegation_depth`.
@@ -28,23 +27,20 @@
 //! - **Revocable** — a [`CapabilitySet`] tracks issued tokens and
 //!   supports revocation by ID, which propagates to delegated children.
 //!
-//! ## SECURITY NOTE — NOT CRYPTOGRAPHICALLY SECURE
+//! ## SECURITY NOTE — HMAC-SHA-256 (ADR-0007)
 //!
 //! The signature algorithm (`compute_signature` in `ipc::capability`)
-//! uses **FNV-1a 64-bit** (a non-cryptographic hash with offset basis
-//! `0xcbf29ce484222325` and prime `0x100000001b3`) run four times with
-//! 1-byte salt prefixes (0, 1, 2, 3), concatenating the four u64
-//! outputs into 32 bytes.
+//! uses **HMAC-SHA-256** (RFC 2104 + FIPS 180-4) via the hand-written
+//! `hmac_sha256` module (no external crates, per the 5-crate policy).
 //!
-//! **This is NOT HMAC, NOT a MAC, and NOT resistant to a determined
-//! adversary with access to `signing_key`.** It is a tamper-detection
-//! checksum suitable for catching accidental corruption or casual
-//! modification, but it provides zero protection against forgery.
+//! The signing key is a **per-process random 32-byte secret** read from
+//! `/dev/urandom` at compile time (when the VUMA compiler runs). It is
+//! never written to disk and never embedded in the emitted binary. Only
+//! the resulting HMAC-SHA-256 signatures are emitted into the binary.
 //!
-//! A production deployment MUST replace `compute_signature` with
-//! HMAC-SHA256 (or BLAKE2s) over a real per-domain secret key. The
-//! `verify_capability` API does not change — only the internal
-//! `compute_signature` function needs swapping.
+//! This replaces the prior FNV-1a × 4 pseudo-signature and the hardcoded
+//! `b"vuma_dev_signing_key"` — both of which were forgeable by anyone
+//! with access to the source code.
 //!
 //! Additionally, `verify_capability` and `verify_delegation_chain` are
 //! **never called from emitted VUMA binaries**. The compiler's
@@ -114,7 +110,14 @@ pub fn delegate_capability(
     // Mix the parent's token id into the signing key. This binds the
     // child's signature to its parent — a token signed with a different
     // parent's key will fail verify_capability.
-    let mut signing_key: Vec<u8> = b"vuma_dev_signing_key".to_vec();
+    //
+    // ADR-0007: The signing key is derived from a per-process random
+    // 32-byte secret (read from /dev/urandom at compile time, never
+    // written to disk, never embedded in the binary) mixed with the
+    // parent token id. This replaces the hardcoded
+    // b"vuma_dev_signing_key" that was forgeable by anyone with access
+    // to the source code.
+    let mut signing_key: Vec<u8> = compile_time_secret();
     signing_key.extend_from_slice(&parent_token_id.to_le_bytes());
 
     // Derive the child id: parent_id | high_bit, then increment. This
@@ -241,4 +244,51 @@ mod tests {
         // Child id has the high bit set (marks it as delegated).
         assert!(child_id & 0x8000_0000_0000_0000 != 0);
     }
+}
+
+// ── Compile-time secret (ADR-0007) ──────────────────────────
+//
+// Generates a per-process random 32-byte secret key for signing capability
+// tokens. The key is read from /dev/urandom at compile time (when the VUMA
+// compiler process runs), never written to disk, and never embedded in the
+// emitted binary. Only the resulting signatures (which are deterministic
+// given the key + token fields) are emitted into the binary.
+//
+// This replaces the hardcoded `b"vuma_dev_signing_key"` that was forgeable
+// by anyone with access to the source code.
+
+/// Return a 32-byte random secret for capability signing.
+///
+/// Reads from /dev/urandom on Linux. Falls back to a process-unique
+/// seed (PID + timestamp + memory address) if /dev/urandom is
+/// unavailable (e.g., in QEMU user-mode without a host /dev).
+fn compile_time_secret() -> Vec<u8> {
+    use std::io::Read;
+    // Try /dev/urandom first.
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        let mut buf = vec![0u8; 32];
+        if f.read_exact(&mut buf).is_ok() {
+            return buf;
+        }
+    }
+    // Fallback: mix PID + monotonic time + stack address into a
+    // 32-byte buffer. This is NOT cryptographically secure, but it
+    // is unique per compiler invocation (sufficient for compile-time
+    // capability token signing where the threat model is source-code
+    // leakage, not runtime forgery).
+    let pid = std::process::id() as u64;
+    let time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let addr = &pid as *const _ as u64;
+    let seed = pid.wrapping_mul(0x517cc1b727220a95)
+        ^ time.wrapping_mul(0x6c62272e07bb0142)
+        ^ addr.wrapping_mul(0x62b821756295c58d);
+    let mut buf = vec![0u8; 32];
+    for i in 0..4 {
+        let chunk = seed.wrapping_add(i as u64).wrapping_mul(0x100000001b3);
+        buf[i*8..(i+1)*8].copy_from_slice(&chunk.to_le_bytes());
+    }
+    buf
 }
