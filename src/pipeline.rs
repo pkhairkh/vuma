@@ -82,7 +82,7 @@ use vuma_codegen::{
 // `escape_analysis::analyze_escapes_program`, drive SROA / alloc
 // elision, and call `effects::analyze_program_effects` for
 // interprocedural effect propagation.
-use vuma_codegen::{effects, escape_analysis};
+use vuma_codegen::escape_analysis;
 
 // Re-import the same types under their canonical (un-aliased) names so the
 // moved AST→codegen SCG bridge functions (see end of this file) can use

@@ -64,16 +64,6 @@ vuma-parser.workspace = true
 vuma-package.workspace = true
 bitflags = "2"
 
-[build-dependencies]
-# HISTORICALLY used by build.rs to compile the Lean-extracted (or stub) C
-# archive into the vuma binary when the `pmt-runtime-check` feature was
-# enabled. The Lean FFI bridge has been REMOVED (see build.rs file-level
-# doc and the "Lean FFI bridge removed" comment in
-# src/ive/src/verification.rs); build.rs no longer compiles any C. The
-# `cc` dependency is retained unconditionally so the workspace still
-# builds in one shot if a future change reintroduces a C build step.
-cc = "1"
-
 [profile.release]
 opt-level = 3
 lto = true
@@ -98,8 +88,6 @@ strip = true
 
 # Forward the pmt-runtime-check feature to the codegen and ive crates so
 # `cargo build --features pmt-runtime-check` works from the repo root.
-# `cc` is declared as a NON-optional [build-dependency] (see above), so no
-# `dep:cc` wiring is needed here. `default = []` keeps the feature OFF by
 # default (opt-in only).
 #
 # NOTE: the Lean FFI bridge has been REMOVED (see build.rs file-level doc
