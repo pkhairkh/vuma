@@ -3928,7 +3928,7 @@ impl<'src> Parser<'src> {
             // V-11: optional session-type argument: `, <session_type>`.
             let session_type = if self.at(TokenKind::Comma) {
                 self.advance(); // consume ','
-                Some(self.parse_session_type()?)
+                Some(Box::new(self.parse_session_type()?))
             } else {
                 None
             };
