@@ -2365,16 +2365,23 @@ impl Emitter {
                 }
             }
             // ── VectorOp ───────────────────────────────────────
-            // SIMD lowering for `IRInstr::VectorOp` — emit a pre-encoded
-            // NEON word via `Instruction::NEON_RAW`. The encoder helpers
-            // (`encode_neon_add_v4s` / `_sub_v4s` / `_mul_v4s`) produce the
-            // final 32-bit machine word with fixed V0/V1/V2 operands; full
-            // vector-vreg → physical-V register allocation is deferred.
+            // V-A2-3 fix (aarch64 mirror of x86_64 commit 96018e12):
+            // The stack-slot emit path (`ss_emit_instr`'s `IRInstr::VectorOp`
+            // arm) has the full V-A2-3 fix — it uses NEON LD1/ST1 to ferry
+            // 128-bit vector values between the vregs' stack slots and V0/V1,
+            // then emits the actual NEON op (add/sub/mul V0.4s, V0.4s, V1.4s).
+            // The stack-slot path is the production default
+            // (`emit_function(func, None)` → `emit_function_stack_slot`).
             //
-            // This emit_ir_instr path is the one actually invoked by
-            // `AArch64Backend::allocate_registers` (via `emit_function`),
-            // so the NEON bytes must be emitted here, not in
-            // `arm64::InstructionSelector::select_from_ir`.
+            // This `emit_ir_instr` arm is only reached via the real-regalloc
+            // path (`VUMA_REAL_REGALLOC_AARCH64=1`, OFF by default), which
+            // uses `resolve_reg` (returns physical GPRs only — no stack-slot
+            // offsets are plumbed through). A full V-A2-3 fix for the
+            // real-regalloc path would require extending the Emitter to also
+            // spill/reload 16-byte vector vregs via LD1/ST1 around the SIMD
+            // op; that is deferred to a follow-up. Until then, this arm
+            // keeps the legacy hardcoded V0/V1/V2 form (matching the
+            // pre-V-A2-3 behaviour on x86_64's regalloc path).
             IRInstr::VectorOp { op, .. } => {
                 let (enc, mnemonic): (u32, &'static str) = match op {
                     crate::ir::VectorOpKind::Add => {
@@ -3660,11 +3667,37 @@ impl Emitter {
             alloc_offsets.insert(id, current_offset); // slot at [X29, #-current_offset]
         }
 
+        // V-A2-3 fix (aarch64 mirror of x86_64 commit 96018e12):
+        // Pre-scan the function's blocks for `IRInstr::VectorOp` and collect
+        // the set of vector vreg IDs (those used as dst/lhs/rhs of any
+        // VectorOp). Each such vreg gets a 16-byte stack slot (instead of
+        // the default 8) so that the 128-bit NEON LD1/ST1 used by the
+        // VectorOp ISel arm does not corrupt the adjacent vreg's slot.
+        let mut vector_vreg_ids: std::collections::HashSet<u32> =
+            std::collections::HashSet::new();
+        for block in &func.blocks {
+            for instr in &block.instructions {
+                if let IRInstr::VectorOp { dst, lhs, rhs, .. } = instr {
+                    if let Some(id) = dst.as_register() {
+                        vector_vreg_ids.insert(id);
+                    }
+                    if let Some(id) = lhs.as_register() {
+                        vector_vreg_ids.insert(id);
+                    }
+                    if let Some(id) = rhs.as_register() {
+                        vector_vreg_ids.insert(id);
+                    }
+                }
+            }
+        }
+
         let mut vreg_stack_slots: HashMap<u32, i32> = HashMap::new();
         let mut all_vreg_ids_sorted: Vec<u32> = all_vreg_ids.iter().copied().collect();
         all_vreg_ids_sorted.sort();
         for &id in &all_vreg_ids_sorted {
-            current_offset += 8;
+            // V-A2-3: vector vregs get 16-byte slots; scalars get 8-byte.
+            let slot_size: i32 = if vector_vreg_ids.contains(&id) { 16 } else { 8 };
+            current_offset += slot_size;
             vreg_stack_slots.insert(id, current_offset); // slot at [X29, #-current_offset]
         }
 
@@ -5714,32 +5747,91 @@ impl Emitter {
                 }
             }
             // ── VectorOp ───────────────────────────────────────
-            // SIMD lowering for `IRInstr::VectorOp` — emit a pre-encoded
-            // NEON word via `Instruction::NEON_RAW`. The encoder helpers
-            // (`encode_neon_add_v4s` / `_sub_v4s` / `_mul_v4s`) produce the
-            // final 32-bit machine word with fixed V0/V1/V2 operands; full
-            // vector-vreg → physical-V register allocation is deferred.
+            // V-A2-3 fix (aarch64 mirror of x86_64 commit 96018e12):
+            // SIMD packed op emitted by `vectorize::slp_vectorize_block`.
+            // Previously this arm hardcoded V0/V1/V2 as operands and ignored
+            // the IR-level `dst`/`lhs`/`rhs` vregs entirely — meaning the
+            // NEON instruction computed `V0 = V1 + V2` but the result was
+            // never written back to the dst vreg's stack slot, AND the
+            // lhs/rhs vregs' actual values were never loaded into V0/V1.
+            // The autovectorizer was therefore producing incorrect code for
+            // any vectorized loop.
             //
-            // This stack-slot emit path is the one actually invoked by
-            // `AArch64Backend::allocate_registers` (via
-            // `emit_function(func, None)` → `emit_function_stack_slot`),
-            // so the NEON bytes must be emitted here too — mirroring the
-            // `emit_ir_instr` arm. The previous no-op arm left SIMD
-            // instructions completely un-emitted on the stack-slot path,
-            // which broke `test_simd_emitted_in_aarch64_isel`.
-            IRInstr::VectorOp { op, .. } => {
+            // The fix ferries the 128-bit vector values between the vregs'
+            // stack slots and V0/V1 using NEON LD1/ST1 single-structure
+            // transfers (16 bytes each):
+            //   1. Compute lhs slot address into X16: SUB X16, X29, #lhs_off
+            //   2. LD1 {V0.4s}, [X16]            ; load lhs vector
+            //   3. Compute rhs slot address into X16: SUB X16, X29, #rhs_off
+            //   4. LD1 {V1.4s}, [X16]            ; load rhs vector
+            //   5. NEON op: add/sub/mul V0.4s, V0.4s, V1.4s
+            //      (aarch64 SIMD is 3-operand like AVX, so dst=src1+src2;
+            //       since lhs is in V0 and rhs is in V1, dst lands in V0)
+            //   6. Compute dst slot address into X16: SUB X16, X29, #dst_off
+            //   7. ST1 {V0.4s}, [X16]            ; store result
+            //
+            // This mirrors the x86_64 stack-slot ISel discipline (ADR+movdqu
+            // on x86_64 → SUB+LD1/ST1 on aarch64). Vector vregs are 16-byte
+            // stack slots allocated by `emit_function_stack_slot` (see the
+            // `vector_vreg_ids` pre-scan above); scalars remain 8-byte slots.
+            //
+            // The `slots` HashMap (vreg → positive offset from X29) is the
+            // same one used by `ss_load_from_slot` / `ss_store_to_slot`.
+            // X16 is the standard address-computation scratch (IP0); it is
+            // not assigned to vregs by the stack-slot path.
+            IRInstr::VectorOp { op, dst, lhs, rhs, .. } => {
+                // Resolve stack-slot offsets for lhs, rhs, dst.
+                let lhs_id = lhs.as_register().unwrap_or(0);
+                let rhs_id = rhs.as_register().unwrap_or(0);
+                let dst_id = dst.as_register().unwrap_or(0);
+                let lhs_off = slots.get(&lhs_id).copied().unwrap_or(0);
+                let rhs_off = slots.get(&rhs_id).copied().unwrap_or(0);
+                let dst_off = slots.get(&dst_id).copied().unwrap_or(0);
+
+                // 1. Load lhs into V0: SUB X16, X29, #lhs_off ; LD1 {V0.4s}, [X16]
+                self.ss_emit_slot_addr(Register::X16, lhs_off)?;
+                self.emit_instruction(Instruction::NEON_RAW {
+                    enc: crate::aarch64::encode_neon_ld1_4s(0, Register::X16),
+                    mnemonic: "ld1 {v0.4s}, [x16]",
+                })?;
+
+                // 2. Load rhs into V1: SUB X16, X29, #rhs_off ; LD1 {V1.4s}, [X16]
+                self.ss_emit_slot_addr(Register::X16, rhs_off)?;
+                self.emit_instruction(Instruction::NEON_RAW {
+                    enc: crate::aarch64::encode_neon_ld1_4s(1, Register::X16),
+                    mnemonic: "ld1 {v1.4s}, [x16]",
+                })?;
+
+                // 3. NEON op: <op> V0.4s, V0.4s, V1.4s (dst=src1+src2 form)
                 let (enc, mnemonic): (u32, &'static str) = match op {
                     crate::ir::VectorOpKind::Add => {
-                        (crate::aarch64::encode_neon_add_v4s(0, 1, 2), "add v0.4s, v1.4s, v2.4s")
+                        (
+                            crate::aarch64::encode_neon_add_v4s(0, 0, 1),
+                            "add v0.4s, v0.4s, v1.4s",
+                        )
                     }
                     crate::ir::VectorOpKind::Sub => {
-                        (crate::aarch64::encode_neon_sub_v4s(0, 1, 2), "sub v0.4s, v1.4s, v2.4s")
+                        (
+                            crate::aarch64::encode_neon_sub_v4s(0, 0, 1),
+                            "sub v0.4s, v0.4s, v1.4s",
+                        )
                     }
                     crate::ir::VectorOpKind::Mul => {
-                        (crate::aarch64::encode_neon_mul_v4s(0, 1, 2), "mul v0.4s, v1.4s, v2.4s")
+                        (
+                            crate::aarch64::encode_neon_mul_v4s(0, 0, 1),
+                            "mul v0.4s, v0.4s, v1.4s",
+                        )
                     }
                 };
                 self.emit_instruction(Instruction::NEON_RAW { enc, mnemonic })?;
+
+                // 4. Store result (V0) to dst's stack slot:
+                //    SUB X16, X29, #dst_off ; ST1 {V0.4s}, [X16]
+                self.ss_emit_slot_addr(Register::X16, dst_off)?;
+                self.emit_instruction(Instruction::NEON_RAW {
+                    enc: crate::aarch64::encode_neon_st1_4s(0, Register::X16),
+                    mnemonic: "st1 {v0.4s}, [x16]",
+                })?;
             }
             // ── Channel operations ──
             // The Call-form channel builtins (channel_open/send/recv/close)

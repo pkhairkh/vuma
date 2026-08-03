@@ -4800,19 +4800,27 @@ impl InstructionSelector {
             }
 
             // ── VectorOp ───────────────────────────────────────
-            // SIMD packed op emitted by `vectorize::slp_vectorize_block`.
-            // We invoke the existing NEON encoder helpers with fixed V0/V1/V2
-            // (indices 0/1/2) and push a single `NEON_RAW` instruction.
+            // V-A2-3 fix (aarch64 mirror of x86_64 commit 96018e12):
+            // The production emit path is `Emitter::emit_function_stack_slot`
+            // → `ss_emit_instr`'s `IRInstr::VectorOp` arm (in `emit.rs`),
+            // which has the full V-A2-3 fix: it pre-scans for vector vregs,
+            // gives them 16-byte stack slots, and lowers each VectorOp to
+            //   SUB X16, X29, #lhs_off ; LD1 {V0.4s}, [X16]
+            //   SUB X16, X29, #rhs_off ; LD1 {V1.4s}, [X16]
+            //   <op>  V0.4s, V0.4s, V1.4s
+            //   SUB X16, X29, #dst_off ; ST1 {V0.4s}, [X16]
             //
-            // Selection rules (matching the NEON encoder suite —
-            // all 4S = 4×i32, the only width the encoders currently cover):
-            //   - Add → `add v0.4s, v1.4s, v2.4s`  (0x4E208400 base)
-            //   - Sub → `sub v0.4s, v1.4s, v2.4s`  (0x6E208400 base)
-            //   - Mul → `mul v0.4s, v1.4s, v2.4s`  (0x4E209C00 base)
-            //
-            // Full vector-vreg → physical-V register allocation is deferred;
-            // the IR-level vregs are tracked for dataflow but the encoded
-            // word uses fixed V0/V1/V2.
+            // This `select_from_ir` arm is NOT called by the production emit
+            // pipeline (no caller in `emit.rs` — only the unit tests in this
+            // file construct an `InstructionSelector` directly). It is kept
+            // for documentation and the existing NEON-encoder unit tests
+            // (`encode_neon_add_v4s(0, 1, 2)` → 0x4E228420, etc., at lines
+            // 6427-6450 below). The arm therefore retains the legacy
+            // hardcoded V0/V1/V2 form; a full V-A2-3 fix here would require
+            // extending `select_from_ir`'s signature with a
+            // `vreg_offsets: &HashMap<u32, i32>` parameter (option (c) in
+            // the task description), but that is deferred because there are
+            // no production callers to consume the new parameter.
             IRInstr::VectorOp { op, lanes: _, elem_size: _, dst: _, lhs: _, rhs: _ } => {
                 let (enc, mnemonic): (u32, &'static str) = match op {
                     crate::ir::VectorOpKind::Add => {
