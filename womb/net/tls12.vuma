@@ -96,7 +96,7 @@ const TLS_MAC_HEADER_LEN: u32 = 13;                       // seq(8)+type(1)+ver(
 // womb/crypto/ (no C/Rust wrappers).  The path is relative to this file's
 // directory (womb/net/).  See resolver.rs::resolve_import_path.
 import "../crypto/hqc.vuma"   { sha256_oneshot };
-import "../crypto/hmac.vuma"  { hmac_sha256, ct_memcmp };
+import "../crypto/mac_kdf/hmac.vuma"  { hmac_sha256, ct_memcmp };
 import "../crypto/aes256.vuma" {
     aes256_cbc_encrypt,
     aes256_cbc_decrypt,

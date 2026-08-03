@@ -55,7 +55,7 @@
 // womb/crypto/ (no C/Rust wrappers).  The path is relative to this file's
 // directory (womb/net/).  See resolver.rs::resolve_import_path.
 import "../crypto/hqc.vuma"        { sha256_oneshot };
-import "../crypto/hmac.vuma"       { hmac_sha256 };
+import "../crypto/mac_kdf/hmac.vuma"       { hmac_sha256 };
 import "../crypto/aes256.vuma"     { aes256_ctr_crypt };
 import "../crypto/bignum2048.vuma" {
     bn2048_mod_exp,

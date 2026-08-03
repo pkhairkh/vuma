@@ -63,7 +63,7 @@
 // resolver.rs::resolve_import_path.
 import "socket.vuma"            { tcp_connect, tcp_send_str, tcp_recv, tcp_close };
 import "../encoding/base64.vuma" { base64_encode };
-import "../crypto/hqc.vuma"     { sha256_oneshot };
+import "../crypto/hash/sha256.vuma"     { sha256_oneshot };
 
 // ===========================================================================
 // Constants

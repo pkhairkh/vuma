@@ -145,7 +145,7 @@ const TLS13_MAX_RECORD_PAYLOAD: u32 = 16384; // per-record plaintext limit (RFC 
 // womb/crypto/ (no C/Rust wrappers).  The path is relative to this file's
 // directory (womb/net/).  See resolver.rs::resolve_import_path.
 import "../crypto/hqc.vuma"       { sha256_oneshot };
-import "../crypto/hmac.vuma"      { hmac_sha256 };
+import "../crypto/mac_kdf/hmac.vuma"      { hmac_sha256 };
 import "../crypto/hkdf.vuma"      { hkdf_extract_sha256, hkdf_expand_sha256 };
 import "../crypto/aes_modes.vuma" { aes256_gcm_encrypt, aes256_gcm_decrypt };
 
