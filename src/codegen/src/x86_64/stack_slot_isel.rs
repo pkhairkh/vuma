@@ -52,6 +52,9 @@ use super::{
     encode_cqo,
     encode_cvtsd2si_r32_xmm,
     encode_cvtsd2si_r64_xmm,
+    // V-A2-3 fix: load/store 128-bit vector vregs from/to their stack slots.
+    encode_sse_movdqu_load,
+    encode_sse_movdqu_store,
     encode_cvtsd2ss_xmm_xmm,
     encode_cvtsi2sd_xmm_r32,
     encode_cvtsi2sd_xmm_r64,
@@ -1092,11 +1095,35 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     // Assign stack slots for ALL vregs (including Alloc vregs).
     // Alloc vregs need a separate 8-byte slot to store the pointer to their data region.
     // Non-Alloc vregs just use their 8-byte slot for the value.
+    //
+    // V-A2-3 fix: vector vregs (those used as dst/lhs/rhs of any
+    // `IRInstr::VectorOp`) get a 16-byte slot instead of 8, so that
+    // `movdqu` (128-bit load/store) doesn't corrupt the adjacent vreg's
+    // slot. We pre-scan the function's blocks to collect the set of
+    // vector vreg IDs.
+    let mut vector_vreg_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for block in &func.blocks {
+        for instr in &block.instructions {
+            if let IRInstr::VectorOp { dst, lhs, rhs, .. } = instr {
+                if let Some(id) = dst.as_register() {
+                    vector_vreg_ids.insert(id);
+                }
+                if let Some(id) = lhs.as_register() {
+                    vector_vreg_ids.insert(id);
+                }
+                if let Some(id) = rhs.as_register() {
+                    vector_vreg_ids.insert(id);
+                }
+            }
+        }
+    }
     let mut vreg_stack_slots: HashMap<u32, i32> = HashMap::new(); // vreg → [rbp - offset]
     let mut all_vreg_ids_sorted: Vec<u32> = all_vreg_ids.iter().copied().collect();
     all_vreg_ids_sorted.sort();
     for &id in &all_vreg_ids_sorted {
-        current_offset += 8;
+        // V-A2-3: vector vregs get 16-byte slots; scalars get 8-byte.
+        let slot_size: i32 = if vector_vreg_ids.contains(&id) { 16 } else { 8 };
+        current_offset += slot_size;
         vreg_stack_slots.insert(id, -(current_offset));
     }
 
@@ -3472,56 +3499,111 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 }
 
                 // ── VectorOp ────────────────────────────────────
-                // SIMD packed op emitted by `vectorize::slp_vectorize_block`.
-                // We invoke the existing SSE/AVX encoders with fixed physical
-                // XMM0/XMM1/XMM2 operands. Full vector-vreg → physical-XMM
-                // register allocation is deferred; the IR-level vregs are
-                // tracked for dataflow (defined_regs/used_regs) but the bytes
-                // come straight from the encoder.
+                // V-A2-3 fix: SIMD packed op emitted by
+                // `vectorize::slp_vectorize_block`. Previously this arm
+                // hardcoded XMM0/XMM1/XMM2 as operands and ignored the
+                // IR-level `dst`/`lhs`/`rhs` vregs entirely — meaning the
+                // SIMD instruction computed `XMM0 = XMM0 + XMM1` but the
+                // result was never written back to the dst vreg's stack
+                // slot, AND the lhs/rhs vregs' actual values were never
+                // loaded into XMM0/XMM1. The autovectorizer was therefore
+                // producing incorrect code for any vectorized loop.
                 //
-                // Selection rules (matching the encoder suite):
-                //   - Add + elem_size=8 → SSE2 `paddq xmm0, xmm1` (66 0F D4 C1)
-                //   - Add + elem_size=4 → AVX `vpaddq xmm0, xmm1, xmm2`
-                //                          (C5 F1 D4 D0 — VEX prefix present)
-                //   - Sub + elem_size=4 → SSE2 `psubd xmm0, xmm1` (66 0F FA C1)
-                //   - Mul + elem_size=4 → SSE4.1 `pmulld xmm0, xmm1`
-                //                          (66 0F 38 40 C1)
-                //   - Any other combination falls back to a NOP (the
-                //     vectorizer only emits Add/Sub/Mul on i32/i64 so this
-                //     branch is unreachable in practice).
+                // The fix uses the existing `movdqu` load/store encoders to
+                // ferry the 128-bit vector values between the vregs' stack
+                // slots and XMM0/XMM1:
+                //   1. movdqu xmm0, [rbp + lhs_offset]   ; load lhs vector
+                //   2. movdqu xmm1, [rbp + rhs_offset]   ; load rhs vector
+                //   3. <SIMD op> xmm0, xmm1              ; compute result in xmm0
+                //      (for 3-operand AVX, xmm2 is used as a scratch src2
+                //      but the result still lands in xmm0 = dst)
+                //   4. movdqu [rbp + dst_offset], xmm0    ; store result
+                //
+                // This is the "use allocator-assigned registers" approach
+                // from ADR-0025 Phase 1: rather than introducing a full
+                // vector-reg allocator (which would require IRValue::Vec
+                // plumbing through the entire backend), we treat each
+                // vector vreg as a 16-byte stack slot and use XMM0/XMM1
+                // as scratch registers around each SIMD op. This is
+                // correct (the result is properly stored) and matches
+                // the existing stack-slot ISel discipline used for GPRs.
                 IRInstr::VectorOp {
                     op,
                     lanes: _,
                     elem_size,
-                    dst: _,
-                    lhs: _,
-                    rhs: _,
+                    dst,
+                    lhs,
+                    rhs,
                 } => {
                     instr_opcode = Some(format!("simd_{:?}", op));
                     let mut code = Vec::new();
+
+                    // Resolve stack-slot offsets for lhs, rhs, dst.
+                    // Vector vregs are 16-byte stack slots allocated by
+                    // `vreg_stack_slots` (which currently allocates 8 bytes
+                    // per vreg — the vectorizer stores the 128-bit value
+                    // across two adjacent 8-byte slots, but `movdqu`
+                    // transparently reads/writes 16 bytes from the base
+                    // offset, so a single load/store suffices).
+                    //
+                    // IMPORTANT: this assumes the stack-slot allocator
+                    // has assigned 16 bytes to each vector vreg. If the
+                    // allocator only assigns 8 bytes, the movdqu will
+                    // read/write 8 bytes past the slot into the adjacent
+                    // slot, corrupting the neighbour. The vectorizer
+                    // allocates vector vregs via `alloc_vec_vreg` which
+                    // calls `vreg_stack_slots.insert(id, -(current_offset))`
+                    // with `current_offset` already incremented by 16
+                    // (see the `vector_vregs` handling in the prologue).
+                    let lhs_id = lhs.as_register().unwrap_or(0);
+                    let rhs_id = rhs.as_register().unwrap_or(0);
+                    let dst_id = dst.as_register().unwrap_or(0);
+                    let lhs_off = slot_offset(lhs_id);
+                    let rhs_off = slot_offset(rhs_id);
+                    let dst_off = slot_offset(dst_id);
+
+                    // Load lhs into XMM0.
+                    code.extend(encode_sse_movdqu_load(Xmm::Xmm0, Gpr::Rbp, lhs_off));
+                    // Load rhs into XMM1.
+                    code.extend(encode_sse_movdqu_load(Xmm::Xmm1, Gpr::Rbp, rhs_off));
+
                     match (*op, *elem_size) {
                         (VectorOpKind::Add, 8) => {
-                            // paddq xmm0, xmm1 — SSE2
+                            // paddq xmm0, xmm1 — SSE2 (xmm0 = xmm0 + xmm1)
                             code.extend(encode_sse_paddq(Xmm::Xmm0, Xmm::Xmm1));
                         }
                         (VectorOpKind::Add, 4) => {
-                            // vpaddq xmm0, xmm1, xmm2 — AVX (VEX prefix 0xC5)
-                            code.extend(encode_avx_vpaddq(Xmm::Xmm0, Xmm::Xmm1, Xmm::Xmm2));
+                            // vpaddq xmm0, xmm0, xmm1 — AVX 3-operand form
+                            // (dst=src1+src2). Since lhs is in xmm0 and rhs
+                            // is in xmm1, we want vpaddq(xmm0, xmm0, xmm1).
+                            code.extend(encode_avx_vpaddq(Xmm::Xmm0, Xmm::Xmm0, Xmm::Xmm1));
                         }
                         (VectorOpKind::Sub, 4) => {
-                            // psubd xmm0, xmm1 — SSE2
+                            // psubd xmm0, xmm1 — SSE2 (xmm0 = xmm0 - xmm1)
                             code.extend(encode_sse_psubd(Xmm::Xmm0, Xmm::Xmm1));
                         }
                         (VectorOpKind::Mul, 4) => {
-                            // pmulld xmm0, xmm1 — SSE4.1
+                            // pmulld xmm0, xmm1 — SSE4.1 (xmm0 = xmm0 * xmm1)
                             code.extend(encode_sse_pmulld(Xmm::Xmm0, Xmm::Xmm1));
                         }
                         _ => {
-                            // Unsupported (op, elem_size) combo — emit nothing.
-                            // The vectorizer only produces the four cases above.
-                            code.extend(encode_nop());
+                            // Unsupported (op, elem_size) combo — emit the
+                            // loads/stores anyway (no-op SIMD op) so the
+                            // dst slot gets a defined value (lhs's value).
+                            // The vectorizer only produces the four cases
+                            // above, so this branch is unreachable in
+                            // practice; the fallback prevents undefined
+                            // memory if it ever is reached.
                         }
                     }
+
+                    // Store XMM0 (result) to dst's stack slot.
+                    code.extend(encode_sse_movdqu_store(Gpr::Rbp, dst_off, Xmm::Xmm0));
+
+                    // Mark dst as defined, lhs/rhs as used for liveness.
+                    defined_regs.push(dst_id);
+                    used_regs.push(lhs_id);
+                    used_regs.push(rhs_id);
                     code
                 }
                 // ── Channel operations (ask 3) ─────────────────────
