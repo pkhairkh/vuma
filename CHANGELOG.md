@@ -6,6 +6,47 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 where applicable.
 
+## [0.2.0-alpha.11] — Fine-Draft Remediation
+
+This release addresses the P0 and P1 items from the fine-draft papers:
+
+### P0 Security (ADR-0007)
+- **HMAC-SHA-256 replaces FNV-1a x4** in capability token signatures
+  (src/codegen/src/hmac_sha256.rs, ~150 LOC, RFC 4231 tested)
+- **Hardcoded signing key replaced** with per-process /dev/urandom secret
+- verify_capability API unchanged (automatically uses HMAC-SHA-256)
+
+### P1 IVE Soundness (ADR-0004)
+- **V-03+V-NEW-2**: build_pmt_layout_specs migrated to bridge_type_size_with_layouts
+  (multi-pass layout size resolution). IVE rederive_layout uses field.size
+  from PmtFieldSpec. Nested layouts now get correct sizes.
+- **V-40**: Dead bridge_type_size deleted (ADR-0005 Change 3)
+
+### P1 Type Threading
+- **V-A2-2**: inttofloat/floattoint now thread source/dest IRType through
+  SCG cast node (was hardcoded to I64↔F64)
+- **V-35**: type_size_from_name + type_alignment look up user-defined
+  layout names in self.layouts (was hardcoded to 8)
+
+### P1 Metrics
+- **V-A3-3**: discharge_rate denominator fixed (uses total_checked, not
+  passed+unverified). unwrap_or(0) instead of unwrap_or(100).
+
+### P2 Cleanup
+- **V-A3-7**: Dead Effect enum deleted (ADR-0021)
+- **V-40**: cc build-dep deleted (8→5 external crates, ADR-0010 compliant)
+- **V-A3-4**: Stale lean-rust-parity.yml CI workflow deleted
+- **V-WOMB-1**: 6 broken womb/net/*.vuma import paths fixed (ADR-0020)
+
+### Parser
+- **V-26 Phase 1**: Lit::Bytes(Vec<u8>) + b"..." byte string literal parsing
+
+### Test Results
+- **29963/29963 = 100.00%** across all 19 backends (verified on 16-core
+  x86_64 remote machine with QEMU 10.0.11)
+
+---
+
 ## [0.2.0-alpha.10] — ALL 19 Backends on Full Register-Based Emission
 
 This release achieves full register-based emission across ALL 19 backends
