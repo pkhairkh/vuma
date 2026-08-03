@@ -50,7 +50,13 @@ use std::time::Instant;
 /// Wrapped in `Rc<RefCell<...>>` so every per-function `BridgeCtx` can append
 /// during AST→SCG lowering; the table is drained once at the end and emitted
 /// as a single `ScgNode::Data (ReadOnly)` section.
-type StringTable = std::rc::Rc<std::cell::RefCell<Vec<(String, Vec<u8>)>>>;
+///
+/// Each entry is `(label, bytes, nul_terminate)`. `nul_terminate == true`
+/// for `Lit::String` entries (a trailing NUL byte is appended during
+/// emission so the table is also usable as a C string table). `false` for
+/// `Lit::Bytes` entries (raw byte arrays — no NUL appended, the length is
+/// known at compile time from the AST).
+type StringTable = std::rc::Rc<std::cell::RefCell<Vec<(String, Vec<u8>, bool)>>>;
 
 /// A single field of a PMT layout: `(name, ir_type, byte_offset, byte_size,
 /// type_name)`. `type_name` is the field's declared type as a string
@@ -6037,22 +6043,30 @@ pub fn bridge_ast_to_codegen_scg_with_meta(program: &AstProgram) -> (Scg, Vec<vu
     }
 
     // Emit the string table as a read-only data section.
-    // All string literals collected by flatten_expr are concatenated
-    // (NUL-terminated) and placed in .rodata. The addresses were already
-    // computed as compile-time constants (rodata_vaddr + offset).
+    // All string literals and byte arrays collected by flatten_expr are
+    // concatenated (with optional NUL terminator per entry) and placed in
+    // .rodata. The addresses were already computed as compile-time
+    // constants (rodata_vaddr + offset_within_table).
+    //
+    // V-26 Phase 2: byte literals (Lit::Bytes) share this same table but
+    // do NOT receive a NUL terminator — the length is known at compile
+    // time from the AST, so the program accesses them as fixed-size
+    // arrays via the base address + index*elem_size.
     {
         let table = shared_string_table.borrow();
         if !table.is_empty() {
-            let mut string_data: Vec<u8> = Vec::new();
-            for (_label, bytes) in table.iter() {
-                string_data.extend_from_slice(bytes);
-                string_data.push(0); // NUL terminator
+            let mut rodata_data: Vec<u8> = Vec::new();
+            for (_label, bytes, nul_terminate) in table.iter() {
+                rodata_data.extend_from_slice(bytes);
+                if *nul_terminate {
+                    rodata_data.push(0); // NUL terminator (strings only)
+                }
             }
             nodes.push(ScgNode::Data(ScgData {
                 name: "vuma_strings".to_string(),
                 kind: DataSectionKind::ReadOnly,
                 align: 1,
-                data: string_data,
+                data: rodata_data,
             }));
         }
     }
@@ -7693,7 +7707,57 @@ pub fn flatten_expr(
             Lit::Float(f) => ScgExpr::Float(*f),
             Lit::Bool(b) => ScgExpr::Int(if *b { 1 } else { 0 }),
             Lit::Address(a) => ScgExpr::Int(*a as i64),
-            Lit::Bytes(_) => ScgExpr::Int(0), // V-26: placeholder — will be .rodata address
+            Lit::Bytes(b) => {
+                // V-26 Phase 2: lower byte literals to .rodata addresses,
+                // mirroring the Lit::String path below. The byte array is
+                // placed in the shared rodata table WITHOUT a NUL terminator
+                // (the length is known at compile time from the AST). Each
+                // unique byte array is deduplicated; the absolute address is
+                // rodata_vaddr + offset_within_table.
+                const BASE_ADDR_LINUX: i64 = 0x400000;
+                const EHDR_SIZE: i64 = 64;
+                const PHDR_SIZE: i64 = 56;
+                const NUM_PHDRS: i64 = 4; // rodata + text + bss + gnu_stack
+                const RODATA_VADDR: i64 = BASE_ADDR_LINUX + EHDR_SIZE + PHDR_SIZE * NUM_PHDRS;
+
+                // Deduplicate: check if this exact byte sequence is already
+                // in the table. We compare against ALL entries (both string
+                // and byte entries) because a byte array could collide with
+                // a string's bytes (unlikely but safe to check).
+                let mut table = ctx.string_table.borrow_mut();
+                let mut offset: i64 = 0;
+                let mut found = false;
+                for (_existing_label, existing_bytes, existing_nul) in table.iter() {
+                    // For byte arrays, only deduplicate against other byte
+                    // arrays (nul_terminate == false). A byte array that
+                    // happens to match a string's bytes is NOT a match —
+                    // the string has a NUL terminator appended at emission
+                    // time, so its in-memory layout differs.
+                    if !*existing_nul && existing_bytes == b.as_slice() {
+                        found = true;
+                        break;
+                    }
+                    // Skip this entry's footprint when computing the offset:
+                    // strings contribute (len + 1) bytes (NUL), byte arrays
+                    // contribute (len) bytes.
+                    offset += existing_bytes.len() as i64 + if *existing_nul { 1 } else { 0 };
+                }
+                if !found {
+                    let label = format!("__vuma_bytes_{}", table.len());
+                    // Recompute offset as the sum of all preceding entries'
+                    // footprints (string entries get +1 for NUL, byte
+                    // entries get +0).
+                    offset = table
+                        .iter()
+                        .map(|(_, b_bytes, b_nul)| b_bytes.len() as i64 + if *b_nul { 1 } else { 0 })
+                        .sum();
+                    table.push((label, b.clone(), false));
+                }
+                drop(table);
+
+                let addr = RODATA_VADDR + offset;
+                ScgExpr::Int(addr)
+            }
             Lit::String(s) => {
                 // Lower string literals to .rodata addresses.
                 //
@@ -7722,19 +7786,27 @@ pub fn flatten_expr(
                 let mut table = ctx.string_table.borrow_mut();
                 let mut offset: i64 = 0;
                 let mut found = false;
-                for (_existing_label, existing_bytes) in table.iter() {
-                    if existing_bytes == bytes {
+                for (_existing_label, existing_bytes, existing_nul) in table.iter() {
+                    // Only deduplicate against other string entries
+                    // (nul_terminate == true). A string that happens to
+                    // match a byte array's contents is NOT a match — the
+                    // string gets a NUL terminator at emission, the byte
+                    // array does not.
+                    if *existing_nul && existing_bytes == bytes {
                         // Found a duplicate — reuse the existing label.
                         // The offset is the sum of all preceding strings' lengths (including NUL).
                         found = true;
                         break;
                     }
-                    offset += existing_bytes.len() as i64 + 1; // +1 for NUL
+                    offset += existing_bytes.len() as i64 + if *existing_nul { 1 } else { 0 };
                 }
                 if !found {
                     let label = format!("__vuma_str_{}", table.len());
-                    offset = table.iter().map(|(_, b)| b.len() as i64 + 1).sum();
-                    table.push((label, bytes.to_vec()));
+                    offset = table
+                        .iter()
+                        .map(|(_, b, b_nul)| b.len() as i64 + if *b_nul { 1 } else { 0 })
+                        .sum();
+                    table.push((label, bytes.to_vec(), true));
                 }
                 drop(table);
 
