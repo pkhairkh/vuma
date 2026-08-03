@@ -70,7 +70,6 @@ pub mod capability;
 pub mod closures;
 pub mod control_flow;
 pub mod dwarf;
-pub mod effects;
 pub mod egraph;
 pub mod emit;
 pub mod escape_analysis;
