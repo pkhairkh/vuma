@@ -5249,10 +5249,48 @@ impl IRBuilder {
                 };
                 let (from_ty, to_ty) = match kind {
                     CastKind::IntToFloat | CastKind::UIntToFloat => {
-                        (Some(IRType::I64), Some(IRType::F64))
+                        // V-A2-2 fix: determine source int type from vreg_types,
+                        // and dest float type from fn_var_types. Default to
+                        // I64→F64 if unknown (backwards-compatible).
+                        let src_i32 = if let IRValue::Register(vr) = &src_val {
+                            self.vreg_types.get(vr) == Some(&IRType::I32)
+                                || self.vreg_types.get(vr) == Some(&IRType::U32)
+                        } else {
+                            false
+                        };
+                        let dst_name = call.reassigns.as_ref().or(call.dst.as_ref());
+                        let dst_f32 = match dst_name {
+                            Some(name) => self.fn_var_types.get(name) == Some(&ScgType::F32),
+                            None => false,
+                        };
+                        match (src_i32, dst_f32) {
+                            (true, true) => (Some(IRType::I32), Some(IRType::F32)),
+                            (true, false) => (Some(IRType::I32), Some(IRType::F64)),
+                            (false, true) => (Some(IRType::I64), Some(IRType::F32)),
+                            (false, false) => (Some(IRType::I64), Some(IRType::F64)),
+                        }
                     }
                     CastKind::FloatToInt | CastKind::FloatToUInt => {
-                        (Some(IRType::F64), Some(IRType::I64))
+                        // V-A2-2 fix: determine source float type from vreg_types,
+                        // and dest int type from fn_var_types. Default to
+                        // F64→I64 if unknown (backwards-compatible).
+                        let src_f32 = if let IRValue::Register(vr) = &src_val {
+                            self.vreg_types.get(vr) == Some(&IRType::F32)
+                        } else {
+                            false
+                        };
+                        let dst_name = call.reassigns.as_ref().or(call.dst.as_ref());
+                        let dst_i32 = match dst_name {
+                            Some(name) => self.fn_var_types.get(name) == Some(&ScgType::I32)
+                                || self.fn_var_types.get(name) == Some(&ScgType::U32),
+                            None => false,
+                        };
+                        match (src_f32, dst_i32) {
+                            (true, true) => (Some(IRType::F32), Some(IRType::I32)),
+                            (true, false) => (Some(IRType::F32), Some(IRType::I64)),
+                            (false, true) => (Some(IRType::F64), Some(IRType::I32)),
+                            (false, false) => (Some(IRType::F64), Some(IRType::I64)),
+                        }
                     }
                     CastKind::FloatToFloat => {
                         // Determine source and destination types.
@@ -5282,8 +5320,12 @@ impl IRBuilder {
                     _ => unreachable!(),
                 };
                 let result_ty = match kind {
-                    CastKind::IntToFloat | CastKind::UIntToFloat => IRType::F64,
-                    CastKind::FloatToInt | CastKind::FloatToUInt => IRType::I64,
+                    CastKind::IntToFloat | CastKind::UIntToFloat => {
+                        to_ty.clone().unwrap_or(IRType::F64)
+                    }
+                    CastKind::FloatToInt | CastKind::FloatToUInt => {
+                        to_ty.clone().unwrap_or(IRType::I64)
+                    }
                     CastKind::FloatToFloat => match &to_ty {
                         Some(t) => t.clone(),
                         None => IRType::F64,
