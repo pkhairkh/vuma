@@ -435,10 +435,47 @@ fn emit_load_imm(code: &mut Vec<u8>, rd: Gpr, imm: i64) {
         }
         return;
     }
-    // Full 64-bit: load high 32 bits, shift left 32, add low 32 bits.
+    // Full 64-bit: load high 32 bits, shift left 32, OR with zero-extended
+    // low 32 bits. We cannot use `add` to combine (hi<<32) + lo because the
+    // LUI+ADDI pair sign-extends the 32-bit `lo` to 0xFFFFFFFF_<lo> when bit
+    // 31 of `lo` is set; adding that to (hi<<32) propagates the sign-
+    // extension into the high 32 bits, corrupting them by 0x1_0000_0000.
+    // (Analogous to x86_64 W1-C imm-truncation, but for RISC-V the bug is in
+    // the 64-bit immediate combine step.)
+    //
+    // Strategy matches `ss_load_imm` in mod.rs:
+    //   1. LUI+ADDI rd, hi          → rd = sign_ext_32(hi)
+    //   2. SLLI rd, rd, 32          → rd = hi << 32  (clears sign-ext)
+    //   3. LUI+ADDI t5, lo          → t5 = sign_ext_32(lo)
+    //   4. SLLI t5, t5, 32; SRLI t5, t5, 32  → t5 = zero_ext_32(lo)
+    //   5. OR  rd, rd, t5           → rd = (hi<<32) | lo = val
     let val = imm as u64;
     let hi = (val >> 32) as u32;
     let lo = (val & 0xFFFFFFFF) as u32;
+    if lo == 0 {
+        // Only hi matters: load hi and shift left 32.
+        let hi_upper = ((hi as i32).wrapping_add(0x800)) >> 12;
+        let hi_lower = (hi as i32) - (hi_upper << 12);
+        code.extend_from_slice(&Instruction::Lui { rd, imm: (hi_upper as u32) << 12 }.encode());
+        if hi_lower != 0 {
+            code.extend_from_slice(&Instruction::Addi { rd, rs1: rd, imm: hi_lower }.encode());
+        }
+        code.extend_from_slice(&Instruction::Slli { rd, rs1: rd, shamt: 32 }.encode());
+        return;
+    }
+    if hi == 0 {
+        // Only lo matters: load lo (sign-extended) and zero-extend to 64 bits.
+        let lo_upper = ((lo as i32).wrapping_add(0x800)) >> 12;
+        let lo_lower = (lo as i32) - (lo_upper << 12);
+        code.extend_from_slice(&Instruction::Lui { rd, imm: (lo_upper as u32) << 12 }.encode());
+        if lo_lower != 0 {
+            code.extend_from_slice(&Instruction::Addi { rd, rs1: rd, imm: lo_lower }.encode());
+        }
+        code.extend_from_slice(&Instruction::Slli { rd, rs1: rd, shamt: 32 }.encode());
+        code.extend_from_slice(&Instruction::Srli { rd, rs1: rd, shamt: 32 }.encode());
+        return;
+    }
+    // General case: both hi and lo are non-zero.
     // Load hi into rd
     let hi_upper = ((hi as i32).wrapping_add(0x800)) >> 12;
     let hi_lower = (hi as i32) - (hi_upper << 12);
@@ -446,9 +483,9 @@ fn emit_load_imm(code: &mut Vec<u8>, rd: Gpr, imm: i64) {
     if hi_lower != 0 {
         code.extend_from_slice(&Instruction::Addi { rd, rs1: rd, imm: hi_lower }.encode());
     }
-    // Shift left 32
+    // Shift left 32 (clears any sign-extension of hi from the high 32 bits)
     code.extend_from_slice(&Instruction::Slli { rd, rs1: rd, shamt: 32 }.encode());
-    // Load lo into t5, then add
+    // Load lo into t5, then zero-extend (SLLI 32 + SRLI 32) before OR-ing.
     let lo_scratch = Gpr::T5;
     let lo_upper = ((lo as i32).wrapping_add(0x800)) >> 12;
     let lo_lower = (lo as i32) - (lo_upper << 12);
@@ -456,7 +493,13 @@ fn emit_load_imm(code: &mut Vec<u8>, rd: Gpr, imm: i64) {
     if lo_lower != 0 {
         code.extend_from_slice(&Instruction::Addi { rd: lo_scratch, rs1: lo_scratch, imm: lo_lower }.encode());
     }
-    code.extend_from_slice(&Instruction::Add { rd, rs1: rd, rs2: lo_scratch }.encode());
+    // Zero-extend lo from 32 to 64 bits (the LUI+ADDI sign-extends).
+    code.extend_from_slice(&Instruction::Slli { rd: lo_scratch, rs1: lo_scratch, shamt: 32 }.encode());
+    code.extend_from_slice(&Instruction::Srli { rd: lo_scratch, rs1: lo_scratch, shamt: 32 }.encode());
+    // OR (not Add) to combine — after zero-extension, high 32 bits of
+    // lo_scratch are 0 and low 32 bits of rd are 0, so OR == Add, but OR
+    // documents the intent (no carry propagation).
+    code.extend_from_slice(&Instruction::Or { rd, rs1: rd, rs2: lo_scratch }.encode());
 }
 
 /// Emit spill/reload code.
