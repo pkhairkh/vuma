@@ -713,45 +713,76 @@ fn emit_instruction(
             // values to RAX or RDX that span this Div, those values would
             // be corrupted.  Save RAX/RDX before the Div, save the quotient
             // to R11 (scratch), restore RAX/RDX, then move R11 to dst.
+            //
+            // CRITICAL: RDX is *also* the upper half of the dividend, so we
+            // zero it (unsigned) before the `div`. If the divisor vreg is
+            // allocated to RDX, that zeroing would destroy the divisor and
+            // cause a divide-by-zero FPE. Resolve the divisor first and, if
+            // it currently lives in RDX, save it to R11 *before* the zeroing.
             code.extend(encode_push(Gpr::Rax));
             code.extend(encode_push(Gpr::Rdx));
 
+            // Load dividend into RAX (zero-extend upper bits for 32-bit).
+            code.extend(encode_mov_reg_reg(Gpr::Rax, lhs_reg));
             if is_32bit {
-                // 32-bit unsigned division: zero-extend EAX, zero EDX
-                code.extend(encode_mov_reg_reg(Gpr::Rax, lhs_reg));
                 // Use 32-bit mov to zero upper bits: mov eax, eax
                 code.extend_from_slice(&[0x89, 0xC0]); // mov eax, eax (zero-extends)
+            }
+
+            // Resolve the divisor BEFORE zeroing RDX. If it lives in RDX,
+            // relocate it to R11 (which is used as scratch later anyway, but
+            // is safe to use here because the dividend is already in RAX).
+            let rhs_resolved = resolve_value(rhs, alloc);
+            let div_src: Gpr = match &rhs_resolved {
+                ResolvedVal::Reg(rhs_reg) => {
+                    if *rhs_reg == Gpr::Rdx {
+                        // Save divisor to R11 before RDX gets clobbered.
+                        code.extend(encode_mov_reg_reg(Gpr::R11, Gpr::Rdx));
+                        Gpr::R11
+                    } else {
+                        *rhs_reg
+                    }
+                }
+                ResolvedVal::Imm(imm) => {
+                    if *imm != 0 {
+                        // Load immediate into RCX (caller-saved, not used by div setup).
+                        code.extend(encode_mov_reg_imm32(Gpr::Rcx, *imm as i32));
+                    }
+                    Gpr::Rcx // placeholder; div is skipped for imm==0
+                }
+            };
+
+            // Now zero RDX (upper half of dividend for unsigned div).
+            if is_32bit {
                 code.extend_from_slice(&[0x31, 0xD2]); // xor edx, edx
             } else {
-                code.extend(encode_mov_reg_reg(Gpr::Rax, lhs_reg));
                 code.extend(encode_xor_reg_reg(Gpr::Rdx, Gpr::Rdx));
             }
-            match resolve_value(rhs, alloc) {
+
+            // Emit the div instruction.
+            match &rhs_resolved {
                 ResolvedVal::Reg(rhs_reg) => {
                     if is_32bit {
                         // 32-bit div: F7 /6 (no REX.W, but need REX.B for regs >= R8)
-                        let rm = (rhs_reg as u8) & 7;
-                        if (rhs_reg as u8) >= 8 {
+                        let rm = (div_src as u8) & 7;
+                        if (div_src as u8) >= 8 {
                             // REX.B prefix for registers R8-R15
                             code.extend_from_slice(&[0x41, 0xF7, 0xF0 | rm]);
                         } else {
                             code.extend_from_slice(&[0xF7, 0xF0 | rm]);
                         }
                     } else {
-                        code.extend(encode_div_reg(rhs_reg));
+                        code.extend(encode_div_reg(div_src));
                     }
-                    reads.push(phys(rhs_reg));
+                    reads.push(phys(*rhs_reg));
                 }
                 ResolvedVal::Imm(imm) => {
-                    if imm == 0 {
+                    if *imm == 0 {
                         code.extend(encode_nop());
+                    } else if is_32bit {
+                        code.extend_from_slice(&[0xF7, 0xF1]); // div ecx
                     } else {
-                        code.extend(encode_mov_reg_imm32(Gpr::Rcx, imm as i32));
-                        if is_32bit {
-                            code.extend_from_slice(&[0xF7, 0xF1]); // div ecx
-                        } else {
-                            code.extend(encode_div_reg(Gpr::Rcx));
-                        }
+                        code.extend(encode_div_reg(Gpr::Rcx));
                     }
                 }
             }
@@ -779,13 +810,27 @@ fn emit_instruction(
                     // x86_64 idiv: rax = lhs, divide by rhs. Result in RAX, remainder in RDX.
                     // Save RAX/RDX (may hold live values) before idiv clobbers them.
                     // Use R11 as scratch to save the result before restoring.
+                    //
+                    // CRITICAL: `cqo` sign-extends RAX into RDX:RAX, clobbering
+                    // RDX. If the divisor vreg is allocated to RDX, that
+                    // sign-extension would destroy the divisor and cause a
+                    // divide-by-zero FPE. Resolve the divisor first and, if it
+                    // lives in RDX, save it to R11 *before* the `cqo`.
                     let lhs_reg = load_to_reg(lhs, alloc, code);
                     code.extend(encode_push(Gpr::Rax));
                     code.extend(encode_push(Gpr::Rdx));
                     code.extend(encode_mov_reg_reg(Gpr::Rax, lhs_reg));
-                    code.extend(encode_cqo()); // sign-extend RAX into RDX:RAX
+                    // Resolve the divisor BEFORE cqo clobbers RDX. If it lives
+                    // in RDX, relocate it to R11 (the post-idiv result temp).
                     let rhs_reg = load_to_reg(rhs, alloc, code);
-                    code.extend(encode_idiv_reg(rhs_reg));
+                    let div_src = if rhs_reg == Gpr::Rdx {
+                        code.extend(encode_mov_reg_reg(Gpr::R11, Gpr::Rdx));
+                        Gpr::R11
+                    } else {
+                        rhs_reg
+                    };
+                    code.extend(encode_cqo()); // sign-extend RAX into RDX:RAX
+                    code.extend(encode_idiv_reg(div_src));
                     // Save result to R11 BEFORE restoring RAX/RDX.
                     if *op == BinOpKind::SRem {
                         code.extend(encode_mov_reg_reg(Gpr::R11, Gpr::Rdx)); // remainder
@@ -802,13 +847,23 @@ fn emit_instruction(
                     "sdiv".to_string()
                 }
                 BinOpKind::UDiv | BinOpKind::URem => {
+                    // Same RDX-clobbering hazard as SDiv above: `xor rdx,rdx`
+                    // (to zero the upper dividend half) destroys the divisor
+                    // if it currently lives in RDX. Relocate to R11 first.
                     let lhs_reg = load_to_reg(lhs, alloc, code);
                     code.extend(encode_push(Gpr::Rax));
                     code.extend(encode_push(Gpr::Rdx));
                     code.extend(encode_mov_reg_reg(Gpr::Rax, lhs_reg));
-                    code.extend(encode_xor_reg_reg(Gpr::Rdx, Gpr::Rdx)); // zero RDX
+                    // Resolve the divisor BEFORE zeroing RDX.
                     let rhs_reg = load_to_reg(rhs, alloc, code);
-                    code.extend(encode_div_reg(rhs_reg));
+                    let div_src = if rhs_reg == Gpr::Rdx {
+                        code.extend(encode_mov_reg_reg(Gpr::R11, Gpr::Rdx));
+                        Gpr::R11
+                    } else {
+                        rhs_reg
+                    };
+                    code.extend(encode_xor_reg_reg(Gpr::Rdx, Gpr::Rdx)); // zero RDX
+                    code.extend(encode_div_reg(div_src));
                     if *op == BinOpKind::URem {
                         code.extend(encode_mov_reg_reg(Gpr::R11, Gpr::Rdx)); // remainder
                     } else {
