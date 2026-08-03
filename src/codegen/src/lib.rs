@@ -75,6 +75,9 @@ pub mod egraph;
 pub mod emit;
 pub mod escape_analysis;
 pub mod hppa;
+/// HMAC-SHA-256 (RFC 2104 + FIPS 180-4) — pure Rust, no dependencies.
+/// Replaces FNV-1a x4 pseudo-signature for capability tokens (ADR-0007).
+pub mod hmac_sha256;
 pub mod ipc;
 pub mod ipc_lowering;
 pub mod ir;
