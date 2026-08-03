@@ -7670,6 +7670,7 @@ pub fn flatten_expr(
             Lit::Float(f) => ScgExpr::Float(*f),
             Lit::Bool(b) => ScgExpr::Int(if *b { 1 } else { 0 }),
             Lit::Address(a) => ScgExpr::Int(*a as i64),
+            Lit::Bytes(_) => ScgExpr::Int(0), // V-26: placeholder — will be .rodata address
             Lit::String(s) => {
                 // Lower string literals to .rodata addresses.
                 //
@@ -10001,6 +10002,7 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                     vuma_parser::ast::Lit::Int(n) => Some(*n),
                     vuma_parser::ast::Lit::Bool(b) => Some(if *b { 1 } else { 0 }),
                     vuma_parser::ast::Lit::Address(a) => Some(*a as i64),
+                    vuma_parser::ast::Lit::Bytes(_) => None, // V-26: not an integer
                     _ => None,
                 }
             };
