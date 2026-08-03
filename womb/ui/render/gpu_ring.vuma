@@ -1,0 +1,124 @@
+// ============================================================================
+// womb/ui/render/gpu_ring.vuma — GPU ring buffer + memory management
+// ============================================================================
+// This module defines the GpuRingBuffer layout and ring allocator for
+// efficient GPU memory reuse across frames. A ring buffer avoids
+// per-frame allocation/deallocation by cycling through a fixed pool of
+// GPU buffers.
+//
+// V-28 (Persistent GPU buffer abstraction) is addressed by the ring
+// buffer: each slot in the ring is a persistent GPU buffer that gets
+// reused across frames. The ring advances on each frame, and old frames'
+// data is overwritten only after the GPU has finished using it.
+//
+// Design:
+//   - 8 buffer slots (GPU_FRAMES_IN_FLIGHT = 8).
+//   - Each slot is a fixed-size buffer (GPU_BUFFER_SIZE = 1 MiB).
+//   - gpu_ring_alloc(size, align) returns (slot_idx, offset) where
+//     the data can be written.
+//   - gpu_ring_advance() moves to the next slot (called at end of frame).
+//   - The GPU must finish using a slot before it's recycled (sync via
+//     vk_queue_submit_and_wait / mtl_queue_submit_and_wait).
+// ============================================================================
+
+layout GpuRingBuffer {
+    // Current write slot (0..7). Advanced by gpu_ring_advance().
+    current_slot: u32,
+    // Per-slot byte offset (where the next allocation starts).
+    slot_offsets: [u64; 8],
+    // Per-slot buffer handle (returned by vk_create_buffer / mtl_create_buffer).
+    // 0 = unallocated.
+    slot_buffers: [u64; 8],
+    // Total capacity per slot (bytes).
+    slot_capacity: u64,
+    // Total allocations across all frames (for stats).
+    total_allocs: u64,
+}
+
+// Initialize the ring buffer with a per-slot capacity.
+// The actual GPU buffer creation is done by the host runtime
+// (vk_create_buffer / mtl_create_buffer) — this just initializes the
+// VUMA-side tracking state.
+transform gpu_ring_init(ring: State<GpuRingBuffer>, capacity: u64) {
+    ring.current_slot = 0;
+    ring.slot_capacity = capacity;
+    ring.total_allocs = 0;
+    // Initialize all slot offsets to 0 and buffer handles to 0.
+    ring.slot_offsets[0] = 0;
+    ring.slot_offsets[1] = 0;
+    ring.slot_offsets[2] = 0;
+    ring.slot_offsets[3] = 0;
+    ring.slot_offsets[4] = 0;
+    ring.slot_offsets[5] = 0;
+    ring.slot_offsets[6] = 0;
+    ring.slot_offsets[7] = 0;
+    ring.slot_buffers[0] = 0;
+    ring.slot_buffers[1] = 0;
+    ring.slot_buffers[2] = 0;
+    ring.slot_buffers[3] = 0;
+    ring.slot_buffers[4] = 0;
+    ring.slot_buffers[5] = 0;
+    ring.slot_buffers[6] = 0;
+    ring.slot_buffers[7] = 0;
+}
+
+// Allocate `size` bytes (aligned to `align`) from the current slot.
+// Returns (slot_idx, offset) where the data can be written.
+// Returns (current_slot, 0xFFFFFFFFFFFFFFFF) if the slot is full (overflow).
+transform gpu_ring_alloc(ring: State<GpuRingBuffer>, size: u64, align: u32) -> (u32, u64) {
+    slot: u32 = ring.current_slot;
+    offset: u64 = ring.slot_offsets[slot];
+
+    // Align the offset up to `align`.
+    misaligned: u64 = offset % (align as u64);
+    padding: u64 = 0;
+    if misaligned != 0 {
+        padding = (align as u64) - misaligned;
+    }
+    aligned_offset: u64 = offset + padding;
+
+    // Check for overflow.
+    if aligned_offset + size > ring.slot_capacity {
+        // Slot is full — return a sentinel.
+        return (slot, 0xFFFFFFFFFFFFFFFF);
+    }
+
+    // Advance the slot's offset.
+    ring.slot_offsets[slot] = aligned_offset + size;
+    ring.total_allocs = ring.total_allocs + 1;
+
+    return (slot, aligned_offset);
+}
+
+// Advance to the next slot (called at end of frame, after the GPU has
+// finished using the current frame's data).
+transform gpu_ring_advance(ring: State<GpuRingBuffer>) {
+    ring.current_slot = (ring.current_slot + 1) % 8;
+    ring.slot_offsets[ring.current_slot] = 0;  // reset the new slot
+}
+
+// Reset the ring buffer (e.g., on scene change). All slots are marked
+// available.
+transform gpu_ring_reset(ring: State<GpuRingBuffer>) {
+    ring.current_slot = 0;
+    ring.total_allocs = 0;
+    ring.slot_offsets[0] = 0;
+    ring.slot_offsets[1] = 0;
+    ring.slot_offsets[2] = 0;
+    ring.slot_offsets[3] = 0;
+    ring.slot_offsets[4] = 0;
+    ring.slot_offsets[5] = 0;
+    ring.slot_offsets[6] = 0;
+    ring.slot_offsets[7] = 0;
+}
+
+// Get the buffer handle for a slot (for binding to the GPU).
+transform gpu_ring_get_buffer(ring: State<GpuRingBuffer>, slot: u32) -> u64 {
+    return ring.slot_buffers[slot];
+}
+
+// Set the buffer handle for a slot (called by the host runtime after
+// creating the GPU buffer).
+transform gpu_ring_set_buffer(ring: State<GpuRingBuffer>, slot: u32, handle: u64) {
+    ring.slot_buffers[slot] = handle;
+}
