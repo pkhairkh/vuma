@@ -6,6 +6,66 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 where applicable.
 
+## [0.2.0-alpha.14] — Full 3D Graphics Pipeline
+
+This release completes the 3D graphics stack: Vulkan graphics pipeline,
+texture support, async dispatch, and Metal graphics pipeline.
+
+### Vulkan Graphics Pipeline (W1)
+- **vk_create_render_pass**: color (R8G8B8A8_UNORM) + depth (D32_SFLOAT)
+  attachments, framebuffer creation, image layout transitions.
+- **vk_create_graphics_pipeline**: vertex + fragment shader stages,
+  vertex input layout (vec3 position + vec2 tex_coord, stride 32),
+  depth test (LESS compare), back-face culling, clockwise front face.
+- **vk_cmd_begin_render_pass / vk_cmd_end_render_pass**: clear color
+  to black, depth to 1.0.
+- **vk_cmd_bind_gfx_pipeline / vk_cmd_bind_vertex_buffer /
+  vk_cmd_bind_index_buffer / vk_cmd_bind_gfx_uniform_buffer**:
+  bind graphics pipeline + vertex/index/uniform buffers.
+- **vk_cmd_draw_indexed**: indexed draw call.
+- **vk_read_color_image**: read back color attachment for testing.
+
+### Texture Support (W2)
+- **vk_create_texture_2d**: RGBA8 texture from host data via staging
+  buffer. Transitions to SHADER_READ_ONLY_OPTIMAL. Creates image view +
+  sampler (linear filtering, repeat addressing).
+- **vk_cmd_bind_texture**: bind combined image sampler to graphics
+  descriptor set.
+- Graphics descriptor set layout: binding 0 (uniform buffer, MVP) +
+  binding 1 (combined image sampler, texture).
+
+### End-to-End 3D Cube Test (W3) — VERIFIED
+- `gpu_vulkan_cube_test.c`: renders a textured 3D cube with MVP matrix,
+  depth test, and checkerboard texture.
+- **3136/16384 pixels filled** (128 red + 170 white from texture sampling).
+- Verified on Mesa lavapipe (CPU-based Vulkan, Rocky Linux 10).
+
+### Metal Graphics Pipeline (W4)
+- **mtl_create_render_pipeline**: vertex + fragment functions from
+  metallib, vertex descriptor, RGBA8Unorm + Depth32Float formats.
+- **mtl_cmd_begin_render_pass / mtl_cmd_end_render_pass**: render
+  command encoder with color + depth attachments.
+- **mtl_create_texture / mtl_cmd_bind_texture_gfx**: RGBA8 texture
+  creation + fragment shader binding.
+- **mtl_cmd_draw_indexed**: drawIndexedPrimitives with u32 indices.
+- Source-complete; runtime requires macOS.
+
+### Async Dispatch (W5)
+- **vk_queue_submit_async**: submit command buffer without waiting,
+  returns a fence handle.
+- **vk_wait_fence**: wait for a fence with timeout (ns).
+- Enables CPU/GPU pipelining for multi-frame rendering.
+
+### Documentation
+- ADR-0026 updated with graphics pipeline + texture + async sections.
+- ADR-0027 updated with Metal graphics pipeline + texture sections.
+
+### Test Results
+- **59926/59926 = 100.00%** across all 19 CPU backends (unaffected).
+- **3D cube**: 3136/16384 pixels on Vulkan (lavapipe).
+
+---
+
 ## [0.2.0-alpha.13] — P2 Backend & CI & Lean Cluster
 
 This release completes the remaining P2 items from the fine-draft papers.
@@ -64,6 +124,67 @@ This release completes the remaining P2 items from the fine-draft papers.
   up from 1572/1591 before the RBP fix; 6 tests still fail on encoding bugs)
 
 ---
+## [0.2.0-alpha.14] — Full 3D Graphics Pipeline
+
+This release completes the 3D graphics stack: Vulkan graphics pipeline,
+texture support, async dispatch, and Metal graphics pipeline.
+
+### Vulkan Graphics Pipeline (W1)
+- **vk_create_render_pass**: color (R8G8B8A8_UNORM) + depth (D32_SFLOAT)
+  attachments, framebuffer creation, image layout transitions.
+- **vk_create_graphics_pipeline**: vertex + fragment shader stages,
+  vertex input layout (vec3 position + vec2 tex_coord, stride 32),
+  depth test (LESS compare), back-face culling, clockwise front face.
+- **vk_cmd_begin_render_pass / vk_cmd_end_render_pass**: clear color
+  to black, depth to 1.0.
+- **vk_cmd_bind_gfx_pipeline / vk_cmd_bind_vertex_buffer /
+  vk_cmd_bind_index_buffer / vk_cmd_bind_gfx_uniform_buffer**:
+  bind graphics pipeline + vertex/index/uniform buffers.
+- **vk_cmd_draw_indexed**: indexed draw call.
+- **vk_read_color_image**: read back color attachment for testing.
+
+### Texture Support (W2)
+- **vk_create_texture_2d**: RGBA8 texture from host data via staging
+  buffer. Transitions to SHADER_READ_ONLY_OPTIMAL. Creates image view +
+  sampler (linear filtering, repeat addressing).
+- **vk_cmd_bind_texture**: bind combined image sampler to graphics
+  descriptor set.
+- Graphics descriptor set layout: binding 0 (uniform buffer, MVP) +
+  binding 1 (combined image sampler, texture).
+
+### End-to-End 3D Cube Test (W3) — VERIFIED
+- `gpu_vulkan_cube_test.c`: renders a textured 3D cube with MVP matrix,
+  depth test, and checkerboard texture.
+- **3136/16384 pixels filled** (128 red + 170 white from texture sampling).
+- Verified on Mesa lavapipe (CPU-based Vulkan, Rocky Linux 10).
+
+### Metal Graphics Pipeline (W4)
+- **mtl_create_render_pipeline**: vertex + fragment functions from
+  metallib, vertex descriptor, RGBA8Unorm + Depth32Float formats.
+- **mtl_cmd_begin_render_pass / mtl_cmd_end_render_pass**: render
+  command encoder with color + depth attachments.
+- **mtl_create_texture / mtl_cmd_bind_texture_gfx**: RGBA8 texture
+  creation + fragment shader binding.
+- **mtl_cmd_draw_indexed**: drawIndexedPrimitives with u32 indices.
+- Source-complete; runtime requires macOS.
+
+### Async Dispatch (W5)
+- **vk_queue_submit_async**: submit command buffer without waiting,
+  returns a fence handle.
+- **vk_wait_fence**: wait for a fence with timeout (ns).
+- Enables CPU/GPU pipelining for multi-frame rendering.
+
+### Documentation
+- ADR-0026 updated with graphics pipeline + texture + async sections.
+- ADR-0027 updated with Metal graphics pipeline + texture sections.
+
+### Test Results
+- **59926/59926 = 100.00%** across all 19 CPU backends (unaffected).
+- **3D cube**: 3136/16384 pixels on Vulkan (lavapipe).
+
+---
+
+
 
 ## [0.2.0-alpha.12] — P1 Backend & Parser Cluster
 
