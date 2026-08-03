@@ -1,0 +1,202 @@
+# ============================================================================
+# VUMA Nightly Full-Matrix CI — V-NEW-8
+# ============================================================================
+# Runs the FULL 19-backend × N-test matrix every night on the main branch.
+# The per-PR `vuma-tests.yml` workflow only runs 7 backends × 47 examples,
+# which means regressions on the 12 non-PR backends (m68k, ppc64le, sparc64,
+# x86_32, etc.) can silently land between snapshot runs.
+#
+# This nightly job catches those regressions by running the same
+# `python3 test_results/run_tests.py` suite that the Pi5 runs manually,
+# against all 19 backends via QEMU.
+#
+# Failure policy: this job FAILS the workflow on any test regression
+# below the last green snapshot (committed in test_results/summary.json).
+# The workflow also uploads the full results as an artifact for post-hoc
+# analysis, and opens a GitHub issue on failure (via actions/create-issue
+# — left as a future enhancement).
+#
+# Schedule: 02:30 UTC daily (off-peak for GitHub Actions runners).
+# Manual trigger: workflow_dispatch with optional `backends` filter.
+# ============================================================================
+
+name: Nightly Full-Matrix
+
+on:
+  schedule:
+    # 02:30 UTC daily — off-peak for GitHub Actions Linux runners.
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+    inputs:
+      backends:
+        description: 'Comma-separated backend list (default: all 19)'
+        required: false
+        default: ''
+      workers:
+        description: 'Parallel worker count (default: 8)'
+        required: false
+        default: '8'
+
+# Nightly runs should NOT cancel each other — if yesterday's run is still
+# going, we want both to finish so we can compare. Set a generous timeout.
+concurrency:
+  group: nightly-matrix-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Z3 native library path (needed for the IVE linker).
+  LIBRARY_PATH: /usr/local/lib
+
+jobs:
+  nightly-matrix:
+    name: Full 19-Backend Matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (nightly-2026-03-01)
+        # Pinned by rust-toolchain.toml. Must match the rest of the project.
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-03-01
+          components: rustfmt, clippy
+
+      - name: Install QEMU user-mode emulators (all 19 backends)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            qemu-user qemu-user-static \
+            libgmp-dev
+          # V-NEW-8: the per-PR workflow only installs 6 QEMU emulators
+          # (qemu-aarch64, qemu-riscv64, qemu-arm, qemu-mips64el,
+          # qemu-ppc64, qemu-loongarch64). The nightly matrix needs ALL
+          # 18 (wasm32 uses wasmtime, not QEMU).
+          for q in qemu-aarch64 qemu-aarch64_be qemu-x86_64 qemu-riscv64 \
+                   qemu-arm qemu-armeb qemu-mips64el qemu-mips64 \
+                   qemu-ppc64 qemu-ppc64le qemu-loongarch64 qemu-riscv32 \
+                   qemu-i386 qemu-s390x qemu-alpha qemu-m68k \
+                   qemu-sparc64 qemu-hppa; do
+            command -v "$q" || { echo "missing $q"; exit 1; }
+          done
+
+      - name: Install Z3 SMT solver (for IVE)
+        run: |
+          # Z3 is required by the IVE (Invariant Verification Engine).
+          # Build from source for the latest stable version (the Ubuntu
+          # apt package is often stale by 1-2 minor versions).
+          Z3_VERSION=4.13.0
+          cd /tmp
+          wget -q "https://github.com/Z3Prover/z3/releases/download/z3-${Z3_VERSION}/z3-${Z3_VERSION}-x64-glibc-2.35.zip"
+          unzip -q "z3-${Z3_VERSION}-x64-glibc-2.35.zip"
+          sudo cp "z3-${Z3_VERSION}-x64-glibc-2.35/bin/libz3.so" /usr/local/lib/
+          sudo cp "z3-${Z3_VERSION}-x64-glibc-2.35/bin/z3" /usr/local/bin/
+          sudo ldconfig
+          z3 --version
+
+      - name: Install wasmtime (for wasm32 backend)
+        run: |
+          # wasmtime is needed by scripts/wasm32_runner.py for the
+          # wasm32 backend's pipe/fork/execve host functions.
+          WASMTIME_VERSION=22.0.0
+          cd /tmp
+          wget -q "https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME_VERSION}/wasmtime-v${WASMTIME_VERSION}-x86_64-linux.tar.xz"
+          tar xf "wasmtime-v${WASMTIME_VERSION}-x86_64-linux.tar.xz"
+          sudo cp "wasmtime-v${WASMTIME_VERSION}-x86_64-linux/wasmtime" /usr/local/bin/
+          wasmtime --version
+          # Also install the Python binding for the runner script.
+          pip install --user wasmtime
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: nightly-matrix-${{ runner.os }}
+
+      - name: Build compile_dump (release-fast)
+        run: |
+          cargo build --profile release-fast --bin compile_dump
+          ls -lh target/release-fast/compile_dump
+
+      - name: Load last-green snapshot (baseline)
+        id: baseline
+        run: |
+          # The baseline is the most recent test_results/summary.json
+          # committed to the repo. If the nightly run regresses below
+          # this baseline, the workflow fails.
+          if [ -f test_results/summary.json ]; then
+            baseline_total=$(python3 -c "import json; d=json.load(open('test_results/summary.json')); print(d.get('total',0))")
+            baseline_pass=$(python3 -c "import json; d=json.load(open('test_results/summary.json')); print(d.get('passed',0))")
+            echo "Baseline: $baseline_pass / $baseline_total"
+            echo "baseline_total=$baseline_total" >> $GITHUB_ENV
+            echo "baseline_pass=$baseline_pass" >> $GITHUB_ENV
+          else
+            echo "No baseline snapshot found — first run."
+            echo "baseline_total=0" >> $GITHUB_ENV
+            echo "baseline_pass=0" >> $GITHUB_ENV
+          fi
+
+      - name: Run full 19-backend matrix
+        id: run
+        run: |
+          BACKENDS="${{ github.event.inputs.backends }}"
+          WORKERS="${{ github.event.inputs.workers || '8' }}"
+          ARGS="--workers $WORKERS"
+          if [ -n "$BACKENDS" ]; then
+            ARGS="$ARGS --backends $BACKENDS"
+          fi
+          # Run the same suite the Pi5 runs manually.
+          python3 test_results/run_tests.py $ARGS 2>&1 | tee /tmp/nightly_output.txt
+          # Extract the final totals from the output.
+          tail -30 /tmp/nightly_output.txt
+
+      - name: Compare against baseline (fail on regression)
+        if: ${{ env.baseline_total != '0' }}
+        run: |
+          # Parse the actual pass count from the just-completed run.
+          ACTUAL_PASS=$(python3 -c "
+          import json
+          d = json.load(open('test_results/summary.json'))
+          print(d.get('passed', 0))
+          ")
+          ACTUAL_TOTAL=$(python3 -c "
+          import json
+          d = json.load(open('test_results/summary.json'))
+          print(d.get('total', 0))
+          ")
+          echo "Actual:   $ACTUAL_PASS / $ACTUAL_TOTAL"
+          echo "Baseline: ${{ env.baseline_pass }} / ${{ env.baseline_total }}"
+          # Fail if actual pass count is strictly less than baseline.
+          if [ "$ACTUAL_PASS" -lt "${{ env.baseline_pass }}" ]; then
+            echo "REGRESSION: $ACTUAL_PASS < ${{ env.baseline_pass }}"
+            exit 1
+          fi
+          echo "No regression."
+
+      - name: Upload full results artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-matrix-results
+          path: |
+            test_results/summary.json
+            test_results/failures.txt
+            test_results/history/
+          retention-days: 30
+
+      - name: Update baseline snapshot (only on main, only on success)
+        if: ${{ github.ref == 'refs/heads/main' && success() }}
+        run: |
+          # Commit the new summary.json as the baseline for tomorrow's run.
+          # This keeps the baseline moving forward as tests are added.
+          git config user.name "Nightly Matrix Bot"
+          git config user.email "actions@github.com"
+          git add test_results/summary.json test_results/failures.txt
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "test: Nightly matrix baseline update ($(date -u +%Y-%m-%d))"
+            git push
+          fi

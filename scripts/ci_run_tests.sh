@@ -50,19 +50,48 @@ for be_qemu in "x86_64:" "arm32:$(qemu_bin_for arm)" "mips64:$(qemu_bin_for mips
 done
 
 echo "=== Running gold standard tests on x86_64 ==="
-total=0; pass=0
+# V-NEW-6 fix: the previous pass criterion only checked that the test
+# binary didn't crash/timeout (exit codes 124/139/134). Tests that
+# exited 0 with the WRONG answer were counted as passing. The fix
+# compares the actual exit code against the expected exit code declared
+# in each .vuma file's `// Expected exit code: N` header. If the
+# header is missing, we fall back to the old "didn't crash" criterion
+# (so legacy tests without the header still work).
+total=0; pass=0; mismatch=0; missing_header=0
 for f in tests/gold_standard/*/*.vuma; do
     total=$((total + 1))
     name=$(basename "$f" .vuma)
+    # Extract expected exit code from the test file's header comment.
+    # The header is `// Expected exit code: N` where N can be negative
+    # (e.g. -1 for tests that expect a signal). We use grep + sed
+    # instead of a single regex to handle both signed and unsigned.
+    expected=$(grep -m1 -iE '^//\s*Expected exit code:\s*(-?[0-9]+)' "$f" \
+        | sed -E 's/^.*Expected exit code:\s*(-?[0-9]+).*/\1/I')
+    if [ -z "$expected" ]; then
+        # No header — fall back to old "didn't crash" criterion.
+        missing_header=$((missing_header + 1))
+        ./target/release/compile_dump "$f" /tmp/gs_${name}.bin x86_64 2>/dev/null
+        chmod +x /tmp/gs_${name}.bin 2>/dev/null
+        timeout 3 /tmp/gs_${name}.bin 2>/dev/null
+        code=$?
+        if [ $code -ne 124 ] && [ $code -ne 139 ] && [ $code -ne 134 ]; then
+            pass=$((pass + 1))
+        fi
+        continue
+    fi
     ./target/release/compile_dump "$f" /tmp/gs_${name}.bin x86_64 2>/dev/null
     chmod +x /tmp/gs_${name}.bin 2>/dev/null
     timeout 3 /tmp/gs_${name}.bin 2>/dev/null
     code=$?
-    if [ $code -ne 124 ] && [ $code -ne 139 ] && [ $code -ne 134 ]; then
+    # V-NEW-6: compare against the expected exit code.
+    if [ "$code" -eq "$expected" ]; then
         pass=$((pass + 1))
+    else
+        mismatch=$((mismatch + 1))
+        echo "  MISMATCH: $name expected=$expected got=$code"
     fi
 done
-echo "Gold standard x86_64: $pass / $total"
+echo "Gold standard x86_64: $pass / $total (mismatches: $mismatch, no-header: $missing_header)"
 
 echo "=== Running O0 vs O3 comparison ==="
 ./target/release/opt_level_test examples 2>&1 | tail -5
