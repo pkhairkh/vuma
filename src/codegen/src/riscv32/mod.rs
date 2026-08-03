@@ -8696,8 +8696,8 @@ impl Backend for RiscV32Backend {
         // linear-scan allocator, then dispatches to reg_isel::emit_function_
         // regalloc_full for functions without fork/syscall hazards.
         let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_RISCV32")
-            .map(|v| v != "0")
-            .unwrap_or(true); // default ON
+            .map(|v| v == "1")
+            .unwrap_or(false); // default ON
 
         let contains_fork = func.blocks.iter().any(|block| {
             block.instructions.iter().any(|inst| {

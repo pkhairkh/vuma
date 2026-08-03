@@ -9765,8 +9765,8 @@ impl Backend for Arm32Backend {
 
         // ── Wave 11: Full register-based emitter dispatch ──
         let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_ARM32")
-            .map(|v| v != "0")
-            .unwrap_or(true); // default ON
+            .map(|v| v == "1")
+            .unwrap_or(false); // default OFF
 
         let contains_fork = func.blocks.iter().any(|block| {
             block.instructions.iter().any(|inst| {
