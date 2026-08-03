@@ -1,0 +1,144 @@
+// ============================================================================
+// womb/ui/render/gpu_dispatch.vuma — GPU host import declarations
+// ============================================================================
+// This module declares the extern "C" functions that VUMA programs call
+// to dispatch GPU work. The implementations live in the C host runtime:
+//   - Linux/Windows: womb/ui/render/host/gpu_vulkan.c (wraps libvulkan.so)
+//   - macOS:         womb/ui/render/host/gpu_metal.m  (wraps Metal framework)
+//                    womb/ui/render/host/gpu_mps.m    (wraps Metal Performance Shaders)
+//
+// Per ADR-0022, these are "Wrap" decisions — the GPU APIs are OS-provided
+// and wrapped by a thin C shim. No Rust GPU crates (wgpu, gfx-rs, etc.).
+//
+// The VUMA program passes SPIR-V bytecode (embedded as a const byte array
+// via V-26 Phase 2) to vk_create_compute_pipeline_spirv, which creates a
+// Vulkan compute pipeline. The program then binds the pipeline, binds
+// buffers/uniforms, and dispatches compute work.
+//
+// All functions return 0 on success, non-zero on error (Vulkan VkResult
+// or Metal NSError code). The VUMA program checks the return value and
+// can exit/trap on GPU errors.
+//
+// Naming convention:
+//   vk_*  — Vulkan functions (Linux/Windows, and macOS via MoltenVK)
+//   mtl_* — native Metal functions (macOS only, no MoltenVK)
+//   mps_* — Metal Performance Shaders functions (macOS only)
+// ============================================================================
+
+extern "C" {
+    // =========================================================================
+    // Vulkan: Instance + Device setup
+    // =========================================================================
+
+    // Create a Vulkan instance (headless, no surface). Returns the VkInstance
+    // handle (as Address) or NULL on failure. The instance is owned by the
+    // host runtime — the VUMA program does not destroy it.
+    transform vk_create_instance() -> Address;
+
+    // Pick the first physical device with compute support. Returns the
+    // VkPhysicalDevice handle or NULL on failure.
+    transform vk_pick_physical_device(instance: Address) -> Address;
+
+    // Create a logical device with one compute queue. Returns the VkDevice
+    // handle or NULL. The queue family index and queue handle are returned
+    // via out-params (queue_family: *u32, queue: *Address).
+    transform vk_create_logical_device(
+        phys_device: Address,
+        queue_family: Address,  // out: *u32
+        queue: Address           // out: *Address
+    ) -> Address;
+
+    // =========================================================================
+    // Vulkan: Compute pipeline creation (from SPIR-V bytecode)
+    // =========================================================================
+
+    // Create a compute pipeline from SPIR-V bytecode embedded in the VUMA
+    // binary's .rodata section. The spirv parameter is the address of the
+    // const byte array (e.g. &TRIANGLE_FILL_SPIRV), spirv_len is its length.
+    // Returns the VkPipeline handle (as i64) or 0 on failure.
+    //
+    // The pipeline is created with:
+    //   - 0 push constants (use uniform buffers instead)
+    //   - 1 descriptor set layout (set 0) with bindings 0..N
+    //   - Layout bindings are inferred from the SPIR-V reflection
+    //     (performed by the host runtime via spirv-cross reflection)
+    transform vk_create_compute_pipeline_spirv(
+        device: Address,
+        spirv: Address,
+        spirv_len: i64
+    ) -> i64;
+
+    // =========================================================================
+    // Vulkan: Command buffer recording + dispatch
+    // =========================================================================
+
+    // Create a command pool + allocate a primary command buffer.
+    // Returns the VkCommandBuffer handle or NULL.
+    transform vk_create_command_buffer(device: Address, queue_family: u32) -> Address;
+
+    // Begin command buffer recording.
+    transform vk_cmd_begin(cmd: Address) -> i32;
+
+    // Bind a compute pipeline.
+    transform vk_cmd_bind_pipeline(cmd: Address, pipeline: i64) -> i32;
+
+    // Bind a uniform buffer to (set=0, binding=N).
+    transform vk_cmd_bind_uniform_buffer(
+        cmd: Address,
+        device: Address,
+        binding: u32,
+        data: Address,
+        size: u64
+    ) -> i32;
+
+    // Bind a storage image to (set=0, binding=N). The image is a 2D
+    // rgba8ui image of the given width/height, created by the host.
+    transform vk_cmd_bind_storage_image(
+        cmd: Address,
+        device: Address,
+        binding: u32,
+        width: u32,
+        height: u32
+    ) -> i32;
+
+    // Dispatch compute work. (x, y, z) are the workgroup counts.
+    transform vk_cmd_dispatch(cmd: Address, x: u32, y: u32, z: u32) -> i32;
+
+    // End command buffer recording.
+    transform vk_cmd_end(cmd: Address) -> i32;
+
+    // Submit the command buffer to the compute queue and wait for completion.
+    transform vk_queue_submit_and_wait(queue: Address, cmd: Address) -> i32;
+
+    // =========================================================================
+    // Vulkan: Image readback (for testing / screenshot)
+    // =========================================================================
+
+    // Read back a storage image's pixels into a host buffer. The buffer must
+    // be at least width * height * 4 bytes (rgba8ui). Returns 0 on success.
+    transform vk_read_image(
+        device: Address,
+        cmd: Address,
+        queue: Address,
+        binding: u32,
+        width: u32,
+        height: u32,
+        out_buffer: Address  // *u8, width*height*4 bytes
+    ) -> i32;
+
+    // =========================================================================
+    // Vulkan: Cleanup
+    // =========================================================================
+
+    // Destroy a compute pipeline.
+    transform vk_destroy_pipeline(device: Address, pipeline: i64);
+
+    // Destroy a command buffer + pool.
+    transform vk_destroy_command_buffer(device: Address, cmd: Address);
+
+    // Destroy the logical device.
+    transform vk_destroy_device(device: Address);
+
+    // Destroy the instance.
+    transform vk_destroy_instance(instance: Address);
+}
