@@ -6,6 +6,50 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 where applicable.
 
+## [0.2.0-alpha.12] — P1 Backend & Parser Cluster
+
+This release completes the remaining P1 items from the fine-draft papers.
+
+### P1 Codegen
+- **V-26 Phase 2**: Lit::Bytes now lowers through the .rodata emission
+  path (mirrors Lit::String). StringTable extended to (label, bytes,
+  nul_terminate) so byte arrays share the rodata table without a NUL
+  terminator. Addresses computed as compile-time i64 constants.
+- **V-46**: resolve_state_array_access now consults ctx.layouts for
+  unknown element types (was hardcoded to 1 byte). [StructType; N]
+  indexing now produces correct offsets (i * sizeof(StructType)).
+- **V-NEW-1**: allocate(<non-literal>) now threads the runtime size
+  expression through AllocationNode::Heap (mmap syscall). Was silently
+  truncated to 8 bytes via unwrap_or(8).
+
+### P1 SIMD
+- **V-A2-3**: x86_64 IRInstr::VectorOp arm now loads/stores 128-bit
+  vector vregs via movdqu instead of hardcoding XMM0/XMM1/XMM2.
+  Stack-slot allocator gives vector vregs 16-byte slots (was 8).
+  AArch64 VectorOp arm still uses hardcoded V0/V1/V2 (Register enum
+  doesn't yet include V registers — tracked separately).
+
+### P1 Session Types
+- **V-11**: Choice<Vec<SessionType>> and Offer<Vec<SessionType>> added
+  to AST and IR SessionType enums. Parser supports surface syntax:
+    Channel<T, Choice<Send<U, End>, Recv<U, End>>>
+  IVE verify_session_types handles Choice/Offer via implicit branch
+  selection (first matching branch wins). N-ary branches supported.
+
+### P1 Information Flow
+- **V-A3-8**: verify_information_flow_from_ir now detects indirect
+  leaks through memory. New memory_labels and vreg_labels side tables
+  track taint propagation: Store updates memory_labels[addr],
+  Load inherits the label into vreg_labels[dst]. Subsequent
+  Store/ChannelSend operations resolve the vreg's effective label via
+  resolve_label() which consults the dynamic taint map first.
+
+### Test Results
+- **59926/59926 = 100.00%** across all 19 backends (verified on 16-core
+  x86_64 remote machine with QEMU 10.0.11)
+
+---
+
 ## [0.2.0-alpha.11] — Fine-Draft Remediation
 
 This release addresses the P0 and P1 items from the fine-draft papers:
