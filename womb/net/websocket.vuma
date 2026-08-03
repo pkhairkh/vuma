@@ -66,7 +66,7 @@
 // Sibling-module imports — these resolve to pure-VUMA implementations in
 // womb/{crypto,encoding}/ (no C/Rust wrappers).  The path is relative to
 // this file's directory (womb/lib/).  See resolver.rs::resolve_import_path.
-import "../crypto/sha1.vuma"        { sha1_oneshot };
+import "../crypto/hash/sha1.vuma"        { sha1_oneshot };
 import "../encoding/base64.vuma"    { base64_encode };
 import "../crypto/drbg.vuma"        { drbg_init, drbg_generate };
 
