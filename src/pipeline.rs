@@ -80,7 +80,7 @@ use vuma_codegen::{
 // Escape analysis + effect analysis are wired into the O2+
 // codegen-opt stage.  We import the modules so the pipeline can call
 // `escape_analysis::analyze_escapes_program`, drive SROA / alloc
-// elision, and call `effects::analyze_program_effects` for
+// elision. (Effect analysis removed per ADR-0021.)
 // interprocedural effect propagation.
 use vuma_codegen::escape_analysis;
 
@@ -4405,7 +4405,7 @@ pub struct EscapeAndEffectsSummary {
 /// Should be called at O2+ **after** the main codegen-opt pass so the
 /// analysis sees the post-optimisation IR (and so SROA's cleanup
 /// happens before regalloc).  The effect map is computed via
-/// [`effects::analyze_program_effects`] (which now does fixpoint
+/// (Effect analysis removed per ADR-0021.)
 /// propagation across call edges); this function exposes only the
 /// `Pure`-count summary, but a later pass that wants the full map can
 /// re-call `analyze_program_effects` directly.
@@ -4427,9 +4427,10 @@ pub fn run_escape_and_effects_passes(program: &mut IRProgram) -> EscapeAndEffect
         summary.allocs_elided += elided;
     }
 
-    // Phase 2: interprocedural effect analysis on the post-transform IR.
-    let effects_map = effects::analyze_program_effects(&program.functions);
-    summary.pure_functions = effects_map.values().filter(|e| e.is_pure()).count();
+    // Phase 2: effect analysis removed (ADR-0021 — Effect enum deleted).
+    // The optimizer uses its own has_side_effects at opt.rs:527; this
+    // interprocedural analysis was dead code with zero IVE consumers.
+    summary.pure_functions = 0;
 
     summary
 }
