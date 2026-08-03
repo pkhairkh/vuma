@@ -154,8 +154,8 @@ const OP3_MOVCC: u32 = 0x2C;
 ///   0111 BVS   1111 BVC
 const COND_BA: u32 = 0x08;
 const COND_BN: u32 = 0x00;
-const COND_BNE: u32 = 0x01;
-const COND_BE: u32 = 0x09;
+const COND_BNE: u32 = 0x09;  // Fixed: was 0x01 (which is BE, not BNE)
+const COND_BE: u32 = 0x01;   // Fixed: was 0x09 (which is BNE, not BE)
 const COND_BG: u32 = 0x02;
 const COND_BLE: u32 = 0x0A;
 const COND_BGE: u32 = 0x03;
