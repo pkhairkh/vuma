@@ -473,6 +473,16 @@ fn resolve_value(val: &IRValue, alloc: &RegAllocResult) -> ResolvedVal {
             }
             // If spilled, we should have already inserted a reload.
             // Fall back to RAX as a scratch (should not happen in correct alloc).
+            if std::env::var("VUMA_DEBUG_REG_ISEL").is_ok() {
+                eprintln!(
+                    "  RESOLVE_FALLBACK: vreg={} root={} (not in vreg_to_preg) -> RAX; coalesced_map[{}]={:?}, spill_slot={:?}",
+                    vreg_id,
+                    root,
+                    vreg_id,
+                    alloc.coalesced_map.get(vreg_id),
+                    alloc.spill_slots.get(&root)
+                );
+            }
             ResolvedVal::Reg(Gpr::Rax)
         }
         IRValue::Immediate(imm) => ResolvedVal::Imm(*imm),
@@ -506,6 +516,9 @@ fn emit_spill_code(
     _callee_saved: &[Gpr],
     _frame_size: u32,
 ) {
+    if std::env::var("VUMA_DEBUG_REG_ISEL").is_ok() {
+        eprintln!("  SPILL_CODE: {}", spill);
+    }
     match spill {
         GenericSpillCode::Spill { preg, slot, .. } => {
             if let Some(gpr) = preg_to_gpr(preg) {
