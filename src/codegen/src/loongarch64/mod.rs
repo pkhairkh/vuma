@@ -2629,8 +2629,8 @@ impl Backend for LoongArch64Backend {
     fn allocate_registers(&self, func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
         // ── Wave 13: Full register-based emitter dispatch ──
         let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_LOONGARCH64")
-            .map(|v| v != "0")
-            .unwrap_or(true);
+            .map(|v| v == "1")
+            .unwrap_or(false);
 
         let contains_fork = func.blocks.iter().any(|block| {
             block.instructions.iter().any(|inst| {
