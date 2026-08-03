@@ -262,15 +262,20 @@ pub struct ProveBlockObligation {
 /// - `*T`/`Ptr<..>`/`Channel`→ align 8, size 8
 /// - `[T; N]`                → recurse on `T` (align of element, size × N)
 /// - anything else (user-defined layout name, etc.) → align 8, size 8
-///   (matches the pipeline's `_ => 8` catch-all — known small-layout bug;
-///   this verifier faithfully reproduces it so that consistency checks pass
-///   on pipeline-provided layouts).
+///   (V-03 fix: previously a known bug — now build_pmt_layout_specs uses
+///   bridge_type_size_with_layouts, so nested layout names get their real
+///   size. The IVE type_align_size still returns 8 for unknown names, but
+///   the field.size from PmtFieldSpec carries the correct value, and
+///   rederive_layout uses field.size directly for consistency).
 pub fn rederive_layout(fields: &[PmtFieldSpec]) -> (u64, Vec<(u64, u64)>) {
     let mut offset: u64 = 0;
     let mut max_align: u64 = 1; // minimum alignment is 1
     let mut result = Vec::with_capacity(fields.len());
     for field in fields {
-        let (align, size) = type_align_size(&field.type_name);
+        let (align, _size) = type_align_size(&field.type_name);
+        // V-03 fix: use field.size (from build_pmt_layout_specs) instead of
+        // type_align_size's size, which returns 8 for user-defined layout names.
+        let size = field.size;
         // Standard align-up: `(offset + align - 1) & !(align - 1)`.
         // Matches the pipeline's `if falign > 1 && offset % falign != 0`
         // branch (pipeline.rs:8870).
