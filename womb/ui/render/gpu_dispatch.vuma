@@ -386,3 +386,77 @@ extern "C" {
     // Wait for a fence to be signaled (GPU finished). Returns 0 on success.
     transform vk_wait_fence(fence: i64, timeout_ns: u64) -> i32;
 }
+
+// =========================================================================
+// Metal: Graphics Pipeline (3D mesh rendering, macOS)
+// =========================================================================
+
+extern "C" {
+    // Create a render pipeline from metallib bytecode.
+    // Sets up vertex + fragment functions, vertex descriptor (vec3 pos +
+    // vec2 tex_coord, stride 32), color format RGBA8Unorm, depth format
+    // Depth32Float. Creates the depth texture.
+    transform mtl_create_render_pipeline(
+        device: Address,
+        metallib_data: Address,
+        metallib_len: i64,
+        width: u32,
+        height: u32
+    ) -> i64;
+
+    // Begin a render pass with color + depth attachments.
+    transform mtl_cmd_begin_render_pass(
+        cmd: Address,
+        color_texture: Address,
+        width: u32,
+        height: u32
+    ) -> i32;
+
+    // Bind the render pipeline.
+    transform mtl_cmd_bind_render_pipeline(cmd: Address, pipeline: i64) -> i32;
+
+    // Bind a vertex buffer to the render encoder.
+    transform mtl_cmd_bind_vertex_buffer_gfx(
+        cmd: Address,
+        device: Address,
+        vertex_data: Address,
+        vertex_size: u64,
+        buffer_index: u32
+    ) -> i32;
+
+    // Bind a uniform buffer (MVP) to both vertex + fragment stages.
+    transform mtl_cmd_bind_gfx_uniform_buffer(
+        cmd: Address,
+        device: Address,
+        binding: u32,
+        data: Address,
+        size: u64
+    ) -> i32;
+
+    // Create a 2D RGBA8 texture from host data.
+    transform mtl_create_texture(
+        device: Address,
+        tex_data: Address,
+        width: u32,
+        height: u32
+    ) -> Address;
+
+    // Bind a texture to the fragment shader.
+    transform mtl_cmd_bind_texture_gfx(
+        cmd: Address,
+        texture: Address,
+        index: u32
+    ) -> i32;
+
+    // Draw indexed triangles.
+    transform mtl_cmd_draw_indexed(
+        cmd: Address,
+        device: Address,
+        index_data: Address,
+        index_size: u64,
+        index_count: u32
+    ) -> i32;
+
+    // End the render pass.
+    transform mtl_cmd_end_render_pass(cmd: Address) -> i32;
+}
