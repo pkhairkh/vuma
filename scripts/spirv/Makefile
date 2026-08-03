@@ -30,10 +30,12 @@
 # ============================================================================
 
 # Paths
-REPO_ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
-SHADER_DIR := $(REPO_ROOT)womb/ui/render/shaders
-SHADER_OUTPUT := $(REPO_ROOT)womb/ui/render/shaders_spirv.vuma
-SCRIPTS_DIR := $(REPO_ROOT)scripts/spirv
+# REPO_ROOT is the directory containing the Makefile's parent (scripts/spirv/).
+# So REPO_ROOT = scripts/spirv/../..
+REPO_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../..)
+SHADER_DIR := $(REPO_ROOT)/womb/ui/render/shaders
+SHADER_OUTPUT := $(REPO_ROOT)/womb/ui/render/shaders_spirv.vuma
+SCRIPTS_DIR := $(REPO_ROOT)/scripts/spirv
 
 # Tools (must be on PATH)
 GLSLANG := glslangValidator
@@ -76,32 +78,32 @@ shaders: $(SPV_FILES)
 
 # Pattern rule: %.comp → %.spv (compute shader)
 %.spv: %.comp
-	@echo "  GLSLANG  $< → $@"
-	@$(GLSLANG) $(GLSLANG_FLAGS) $@ $<
+        @echo "  GLSLANG  $< → $@"
+        @$(GLSLANG) $(GLSLANG_FLAGS) $@ $<
 
 # Pattern rule: %.vert → %.spv (vertex shader)
 %.spv: %.vert
-	@echo "  GLSLANG  $< → $@"
-	@$(GLSLANG) $(GLSLANG_FLAGS) $@ $<
+        @echo "  GLSLANG  $< → $@"
+        @$(GLSLANG) $(GLSLANG_FLAGS) $@ $<
 
 # Pattern rule: %.frag → %.spv (fragment shader)
 %.spv: %.frag
-	@echo "  GLSLANG  $< → $@"
-	@$(GLSLANG) $(GLSLANG_FLAGS) $@ $<
+        @echo "  GLSLANG  $< → $@"
+        @$(GLSLANG) $(GLSLANG_FLAGS) $@ $<
 
 # Pattern rule: %.glsl → %.spv (generic — treated as compute if no stage suffix)
 %.spv: %.glsl
-	@echo "  GLSLANG  $< → $@"
-	@$(GLSLANG) $(GLSLANG_FLAGS) $@ $<
+        @echo "  GLSLANG  $< → $@"
+        @$(GLSLANG) $(GLSLANG_FLAGS) $@ $<
 
 # Validate .spv files with spirv-val
 .PHONY: validate
 validate: $(SPV_FILES)
-	@for spv in $(SPV_FILES); do \
-		echo "  SPIRV-VAL  $$spv"; \
-		$(SPIRV_VAL) $(SPIRV_VAL_FLAGS) $$spv || exit 1; \
-	done
-	@echo "All SPIR-V shaders validated."
+        @for spv in $(SPV_FILES); do \
+                echo "  SPIRV-VAL  $$spv"; \
+                $(SPIRV_VAL) $(SPIRV_VAL_FLAGS) $$spv || exit 1; \
+        done
+        @echo "All SPIR-V shaders validated."
 
 # Cross-compile .spv → .metal (macOS only — requires spirv-cross)
 .PHONY: metal
@@ -109,31 +111,31 @@ metal: $(METAL_FILES)
 
 # Pattern rule: %.spv → %.metal
 %.metal: %.spv
-	@echo "  SPIRV-CROSS  $< → $@"
-	@$(SPIRV_CROSS) --msl --output $@ $<
+        @echo "  SPIRV-CROSS  $< → $@"
+        @$(SPIRV_CROSS) --msl --output $@ $<
 
 # Generate the VUMA const byte array file from all .spv files
 .PHONY: generate_spirv_consts
 generate_spirv_consts: $(SPV_FILES)
-	@echo "  GENERATE  $(SHADER_OUTPUT)"
-	@$(PYTHON) $(SCRIPTS_DIR)/spirv_to_vuma.py $(SPV_FILES) > $(SHADER_OUTPUT)
-	@echo "Generated $(SHADER_OUTPUT)"
+        @echo "  GENERATE  $(SHADER_OUTPUT)"
+        @$(PYTHON) $(SCRIPTS_DIR)/spirv_to_vuma.py $(SPV_FILES) > $(SHADER_OUTPUT)
+        @echo "Generated $(SHADER_OUTPUT)"
 
 # Clean all generated files
 .PHONY: clean
 clean:
-	@rm -f $(SPV_FILES) $(METAL_FILES) $(SHADER_OUTPUT)
-	@echo "Cleaned generated shader files."
+        @rm -f $(SPV_FILES) $(METAL_FILES) $(SHADER_OUTPUT)
+        @echo "Cleaned generated shader files."
 
 # List available shaders
 .PHONY: list
 list:
-	@echo "GLSL sources:"
-	@for f in $(GLSL_SHADERS) $(COMPUTE_SHADERS) $(VERT_SHADERS) $(FRAG_SHADERS); do \
-		echo "  $$f"; \
-	done
-	@echo ""
-	@echo "SPIR-V targets:"
-	@for f in $(SPV_FILES); do \
-		echo "  $$f"; \
-	done
+        @echo "GLSL sources:"
+        @for f in $(GLSL_SHADERS) $(COMPUTE_SHADERS) $(VERT_SHADERS) $(FRAG_SHADERS); do \
+                echo "  $$f"; \
+        done
+        @echo ""
+        @echo "SPIR-V targets:"
+        @for f in $(SPV_FILES); do \
+                echo "  $$f"; \
+        done
