@@ -95,8 +95,16 @@ impl Gpr {
     }
 
     /// Returns `true` if this register is available for register allocation.
+    ///
+    /// RSP is never allocatable (stack pointer).
+    /// RBP is never allocatable in the reg_isel path (frame pointer) — the
+    /// regalloc-based emitter at `reg_isel.rs` uses RBP as the frame pointer
+    /// in its prologue (`push %rbp; mov %rsp,%rbp`), so assigning RBP to a
+    /// vreg would corrupt the frame pointer when that vreg is used as a
+    /// Load/Store destination. This was the root cause of the SIGSEGV in
+    /// arith_mul_table and other reg_isel tests.
     pub fn is_allocatable(&self) -> bool {
-        !matches!(self, Gpr::Rsp)
+        !matches!(self, Gpr::Rsp | Gpr::Rbp)
     }
 
     /// Returns the standard assembly name for this register.

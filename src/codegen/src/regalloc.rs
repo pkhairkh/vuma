@@ -3170,6 +3170,7 @@ impl TargetAgnosticRegAlloc {
                 RegClass::Gpr => {
                     let preg = self.try_alloc_reg(
                         interval,
+                        intervals,
                         &mut free_caller_gprs,
                         &mut free_callee_gprs,
                         &mut active_gprs,
@@ -3183,6 +3184,7 @@ impl TargetAgnosticRegAlloc {
                 RegClass::SimdFp => {
                     let preg = self.try_alloc_reg(
                         interval,
+                        intervals,
                         &mut free_caller_fps,
                         &mut free_callee_fps,
                         &mut active_fps,
@@ -3205,6 +3207,7 @@ impl TargetAgnosticRegAlloc {
     fn try_alloc_reg(
         &self,
         interval: &LiveInterval,
+        intervals: &[LiveInterval],
         free_caller: &mut Vec<crate::backend::PhysicalReg>,
         free_callee: &mut Vec<crate::backend::PhysicalReg>,
         active: &mut Vec<(IRValueId, crate::backend::PhysicalReg, u32, u32)>,
@@ -3227,6 +3230,7 @@ impl TargetAgnosticRegAlloc {
         // No free register — need to spill or evict.
         self.spill_or_evict(
             interval,
+            intervals,
             active,
             free_caller,
             free_callee,
@@ -3239,6 +3243,7 @@ impl TargetAgnosticRegAlloc {
     fn spill_or_evict(
         &self,
         interval: &LiveInterval,
+        intervals: &[LiveInterval],
         active: &mut Vec<(IRValueId, crate::backend::PhysicalReg, u32, u32)>,
         free_caller: &mut Vec<crate::backend::PhysicalReg>,
         free_callee: &mut Vec<crate::backend::PhysicalReg>,
@@ -3246,6 +3251,11 @@ impl TargetAgnosticRegAlloc {
         result: &mut RegAllocResult,
     ) -> std::result::Result<Option<crate::backend::PhysicalReg>, crate::backend::BackendError>
     {
+        // Choose a safe spill-scratch register for this ISA + class.
+        // On x86_64 GPR this is R11 (index 11, not_allocatable); using the
+        // old default of index 5 (RBP) would corrupt the frame pointer.
+        let scratch = self.spill_scratch(interval.class);
+
         if active.is_empty() {
             // Spill the current interval entirely.
             let slot_idx = *next_spill_idx;
@@ -3253,7 +3263,13 @@ impl TargetAgnosticRegAlloc {
             let offset = Self::spill_offset(slot_idx, interval.class);
             let slot = GenericSpillSlot::new(slot_idx, offset, interval.class);
 
-            Self::gen_spill_reload(interval, &slot, result);
+            // Pre-assign the spilled vreg to the scratch register so that
+            // the emitter's `resolve_value` returns the same register that
+            // the spill/reload code loads into / stores from. Without this,
+            // `resolve_value` would fall back to RAX and the reload would be
+            // wasted (loading into scratch but the instruction reads RAX).
+            result.vreg_to_preg.insert(interval.vreg, scratch);
+            Self::gen_spill_reload(interval, scratch, &slot, result);
             result.spill_slots.insert(interval.vreg, slot);
 
             return Ok(None);
@@ -3278,7 +3294,10 @@ impl TargetAgnosticRegAlloc {
             let offset = Self::spill_offset(slot_idx, interval.class);
             let slot = GenericSpillSlot::new(slot_idx, offset, interval.class);
 
-            Self::gen_spill_reload(interval, &slot, result);
+            // Pre-assign to scratch (see comment in the active.is_empty()
+            // branch above).
+            result.vreg_to_preg.insert(interval.vreg, scratch);
+            Self::gen_spill_reload(interval, scratch, &slot, result);
             result.spill_slots.insert(interval.vreg, slot);
 
             return Ok(None);
@@ -3293,12 +3312,31 @@ impl TargetAgnosticRegAlloc {
         let slot = GenericSpillSlot::new(slot_idx, offset, interval.class);
         result.spill_slots.insert(evict_vreg, slot.clone());
 
-        // Remove the evicted vreg's physical register mapping.
-        result.vreg_to_preg.remove(&evict_vreg);
+        // Re-map the evicted vreg to the spill-scratch register (instead of
+        // removing it from `vreg_to_preg`). This ensures the emitter's
+        // `resolve_value` returns the scratch for every future use/def of
+        // the evicted vreg, matching the reload/spill code generated below.
+        result.vreg_to_preg.insert(evict_vreg, scratch);
         result.used_callee_saved.remove(&evict_reg);
 
-        // Generate eviction spill/reload code.
-        Self::gen_eviction_spill_reload(evict_vreg, evict_reg, &slot, result);
+        // Look up the evicted vreg's LiveInterval so we can generate
+        // reloads at its future use positions and spills at its future def
+        // positions.
+        let evict_interval = intervals.iter().find(|i| i.vreg == evict_vreg);
+
+        // Generate eviction spill/reload code:
+        // - boundary spill at the eviction point (saves evict_reg → slot)
+        // - reloads at future uses (slot → scratch)
+        // - spills at future defs (scratch → slot)
+        Self::gen_eviction_spill_reload(
+            evict_vreg,
+            evict_reg,
+            scratch,
+            evict_interval,
+            interval.start,
+            &slot,
+            result,
+        );
 
         // Return the freed register to the appropriate pool.
         if evict_reg.class == crate::backend::RegClass::Gpr {
@@ -3390,40 +3428,59 @@ impl TargetAgnosticRegAlloc {
         -((slot_index as i32 + 1) * size)
     }
 
+    /// Pick a safe scratch physical register for spill/reload code on the
+    /// current ISA.
+    ///
+    /// The scratch must NOT be:
+    /// - The stack pointer (RSP/x2/sp)  — clobbering it crashes immediately.
+    /// - The frame pointer (RBP/x29/R31) — clobbering it crashes the epilogue.
+    /// - Allocatable by the register allocator — otherwise a live vreg mapped
+    ///   to the same register would be silently destroyed by every spill/reload.
+    ///
+    /// ISA-specific choices (GPR):
+    /// - **x86_64**: R11 (index 11). R11 is `not_allocatable` in the target
+    ///   description (reserved as the dedicated scratch for `load_to_reg`'s
+    ///   immediate materialisation). RBP (index 5) must NOT be used — it is
+    ///   the frame pointer, and writing to it (as the old code did) corrupts
+    ///   the frame and causes a SIGSEGV in the epilogue.
+    /// - **riscv64**: x5 (t0, caller-saved temporary).
+    /// - **aarch64**: X5 (caller-saved temporary).
+    /// - **ppc64**: R5 (caller-saved temporary; ppc64 also has its own inline
+    ///   stack-slot ISel and does not consume this metadata on the production
+    ///   path).
+    ///
+    /// For SIMD/FP, index 5 is f5/V5 (caller-saved temporaries on riscv64 /
+    /// aarch64). On x86_64 the SIMD spill path is a no-op in the current
+    /// emitter (`preg_to_gpr` returns `None` for SIMD pregs), so the SIMD
+    /// scratch index is irrelevant in practice.
+    fn spill_scratch(&self, class: RegClass) -> crate::backend::PhysicalReg {
+        let idx = match (self.isa_name, class) {
+            ("x86_64", RegClass::Gpr) => 11, // R11 — not_allocatable, safe scratch
+            _ => 5,                          // X5/t0/R5 — caller-saved temp
+        };
+        crate::backend::PhysicalReg::new(class.into(), idx)
+    }
+
     /// Generate spill and reload code for an entirely-spilled interval.
+    ///
+    /// The `scratch` register (chosen by [`spill_scratch`]) is used as the
+    /// temporary that ferries values between the spill slot and the
+    /// instruction. The caller MUST also pre-assign the spilled vreg to
+    /// `scratch` in `vreg_to_preg` so that the emitter's `resolve_value`
+    /// returns the same register the spill/reload code loads into / stores
+    /// from.
     fn gen_spill_reload(
         interval: &LiveInterval,
+        scratch: crate::backend::PhysicalReg,
         slot: &GenericSpillSlot,
         result: &mut RegAllocResult,
     ) {
-        // Use a scratch register for spill/reload code annotation.
-        //
-        // Index 0 was used here historically, but on riscv64 GPR index 0 is
-        // x0/Zero (writes discarded — the Zero-register hazard flagged by
-        // CC-a-audit §7.5). Using Zero as a scratch would emit metadata
-        // that, if honored literally by a future register-based emitter,
-        // would silently drop the spill/reload value.
-        //
-        // Index 5 is safe on every ISA currently modeled:
-        //   - riscv64 : x5  = t0 (caller-saved temporary)
-        //   - aarch64 : x5  = X5 (caller-saved temporary)
-        //   - x86_64  : R5  = RBP — but x86_64 does NOT route through
-        //     `gen_spill_reload` on the metadata path (its own
-        //     `LinearScanAllocator` byte-changes spills directly); and
-        //     since the E2-a-fix, RBP is `not_allocatable` anyway.
-        //   - ppc64   : R5  (caller-saved) — ppc64 also has its own inline
-        //     stack-slot ISel and does not consume this metadata.
-        // For SimdFp, index 5 is f5/V5 (caller-saved temporaries on
-        // riscv64 / aarch64 respectively).
-        //
-        // IMPORTANT: this `gen_spill_reload` is consumed only by the
-        // metadata-only `TargetAgnosticRegAlloc`. It does NOT affect the
-        // current stack-slot production path (still 30/30 on riscv64).
-        // The fix prevents the metadata path from reporting Zero as a
-        // scratch, which would confuse future register-based emission.
-        // (Wave 3 foundational fix E3-ab.)
-        let scratch = crate::backend::PhysicalReg::new(interval.class.into(), 5);
-
+        // Spill AFTER each def (at def_pos + 1): the instruction at
+        // `def_pos` writes the vreg's new value into `scratch`, and we store
+        // it to the slot before the next instruction can clobber `scratch`.
+        // The +1 offset lands in the "gap" between instruction positions
+        // (positions increment by 2); the emitter checks `spill_code` at
+        // both `pos` (pre-instruction) and `pos + 1` (post-instruction).
         for &def_pos in &interval.def_positions {
             let spill = GenericSpillCode::Spill {
                 vreg: interval.vreg,
@@ -3437,6 +3494,9 @@ impl TargetAgnosticRegAlloc {
                 .push(spill);
         }
 
+        // Reload BEFORE each use (at use_pos): load the vreg's value from the
+        // slot into `scratch` so the instruction at `use_pos` reads the
+        // correct value from `scratch`.
         for &use_pos in &interval.use_positions {
             let reload = GenericSpillCode::Reload {
                 vreg: interval.vreg,
@@ -3447,19 +3507,79 @@ impl TargetAgnosticRegAlloc {
         }
     }
 
-    /// Generate spill code for an evicted interval.
+    /// Generate spill/reload code for an evicted interval.
+    ///
+    /// Eviction differs from entirely-spilling: the evicted vreg was live in
+    /// `evict_preg` up to the eviction point (`current_pos`), and may have
+    /// future uses/defs that need to go through the spill slot + scratch.
+    ///
+    /// 1. **Boundary spill at `current_pos`** (BEFORE the new interval's
+    ///    def): saves the old value from `evict_preg` to the slot before the
+    ///    new interval overwrites `evict_preg`. Prepended so it is emitted
+    ///    before any reload at the same position.
+    /// 2. **Reloads at future use positions** (`use_pos >= current_pos`):
+    ///    loads the slot value into `scratch` so the instruction reads the
+    ///    correct value.
+    /// 3. **Spills at future def positions** (`def_pos > current_pos`):
+    ///    stores the new value from `scratch` to the slot after the def.
+    ///
+    /// The caller MUST pre-assign the evicted vreg to `scratch` in
+    /// `vreg_to_preg` so that `resolve_value` returns `scratch` for every
+    /// future use/def of the evicted vreg.
     fn gen_eviction_spill_reload(
         evict_vreg: IRValueId,
         evict_preg: crate::backend::PhysicalReg,
+        scratch: crate::backend::PhysicalReg,
+        evict_interval: Option<&LiveInterval>,
+        current_pos: u32,
         slot: &GenericSpillSlot,
         result: &mut RegAllocResult,
     ) {
-        let spill = GenericSpillCode::Spill {
+        // 1. Boundary spill at the eviction point (NOT position 0).
+        let boundary_spill = GenericSpillCode::Spill {
             vreg: evict_vreg,
             preg: evict_preg,
             slot: slot.clone(),
         };
-        result.spill_code.entry(0).or_default().push(spill);
+        // Prepend so this spill is emitted before any reload at the same
+        // position (the emitter iterates the Vec in order).
+        result
+            .spill_code
+            .entry(current_pos)
+            .or_default()
+            .insert(0, boundary_spill);
+
+        // 2/3. Reloads at future uses + spills at future defs, going through
+        //     the spill-scratch register. The evicted vreg has already been
+        //     re-mapped to `scratch` in `vreg_to_preg` by the caller, so the
+        //     emitter's `resolve_value` will return `scratch` for every
+        //     future use/def of the evicted vreg.
+        if let Some(interval) = evict_interval {
+            // Reloads before future uses (use_pos >= current_pos).
+            for &use_pos in interval.use_positions.iter().filter(|&&p| p >= current_pos) {
+                let reload = GenericSpillCode::Reload {
+                    vreg: evict_vreg,
+                    preg: scratch,
+                    slot: slot.clone(),
+                };
+                result.spill_code.entry(use_pos).or_default().push(reload);
+            }
+            // Spills after future defs (def_pos > current_pos — the def AT
+            // current_pos belongs to the new interval, not the evicted vreg,
+            // so it's excluded).
+            for &def_pos in interval.def_positions.iter().filter(|&&p| p > current_pos) {
+                let spill = GenericSpillCode::Spill {
+                    vreg: evict_vreg,
+                    preg: scratch,
+                    slot: slot.clone(),
+                };
+                result
+                    .spill_code
+                    .entry(def_pos + 1)
+                    .or_default()
+                    .push(spill);
+            }
+        }
     }
 }
 
@@ -4821,13 +4941,15 @@ impl TargetAgnosticRegAlloc {
         let next_spill_idx = &mut *ctx.next_spill_idx;
         let result = &mut *ctx.result;
         let current_weight = ctx.current_weight;
+        let scratch = self.spill_scratch(interval.class);
 
         if active.is_empty() {
             let slot_idx = *next_spill_idx;
             *next_spill_idx += 1;
             let offset = Self::spill_offset(slot_idx, interval.class);
             let slot = GenericSpillSlot::new(slot_idx, offset, interval.class);
-            Self::gen_spill_reload(interval, &slot, result);
+            result.vreg_to_preg.insert(interval.vreg, scratch);
+            Self::gen_spill_reload(interval, scratch, &slot, result);
             result.spill_slots.insert(interval.vreg, slot);
             return Ok(None);
         }
@@ -4849,7 +4971,8 @@ impl TargetAgnosticRegAlloc {
             *next_spill_idx += 1;
             let offset = Self::spill_offset(slot_idx, interval.class);
             let slot = GenericSpillSlot::new(slot_idx, offset, interval.class);
-            Self::gen_spill_reload(interval, &slot, result);
+            result.vreg_to_preg.insert(interval.vreg, scratch);
+            Self::gen_spill_reload(interval, scratch, &slot, result);
             result.spill_slots.insert(interval.vreg, slot);
             return Ok(None);
         }
@@ -4862,10 +4985,24 @@ impl TargetAgnosticRegAlloc {
         let offset = Self::spill_offset(slot_idx, interval.class);
         let slot = GenericSpillSlot::new(slot_idx, offset, interval.class);
         result.spill_slots.insert(evict_vreg, slot.clone());
-        result.vreg_to_preg.remove(&evict_vreg);
+        result.vreg_to_preg.insert(evict_vreg, scratch);
         result.used_callee_saved.remove(&evict_reg);
 
-        Self::gen_eviction_spill_reload(evict_vreg, evict_reg, &slot, result);
+        // NOTE: `allocate_function_enhanced` is currently dead code (no
+        // production caller). We pass `None` for `evict_interval` which
+        // means no future-use reloads / future-def spills are generated —
+        // matching the prior (broken) behaviour. The production path uses
+        // `allocate_function` → `spill_or_evict` which DOES look up the
+        // evicted interval and generates full reload/spill code.
+        Self::gen_eviction_spill_reload(
+            evict_vreg,
+            evict_reg,
+            scratch,
+            None,
+            interval.start,
+            &slot,
+            result,
+        );
 
         // Return the freed register to the appropriate pool.
         if self.is_callee_saved(evict_reg) {
