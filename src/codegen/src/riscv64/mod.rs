@@ -6778,8 +6778,8 @@ impl Backend for RiscV64Backend {
         //
         // When set to "0": force stack-slot ISel (for debugging).
         let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_RISCV64")
-            .map(|v| v != "0")
-            .unwrap_or(true);
+            .map(|v| v == "1")
+            .unwrap_or(false);
 
         // ── X2-impl: contains_fork opt-out ───────────────────────────────
         //
