@@ -3209,8 +3209,8 @@ impl Backend for AArch64Backend {
         // setting + W1-fix: determinism). Set VUMA_REAL_REGALLOC_AARCH64=0
         // to opt out (fall back to stack-slot ISel) for debugging.
         let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_AARCH64")
-            .map(|v| v != "0")
-            .unwrap_or(true);
+            .map(|v| v == "1")
+            .unwrap_or(false);
         let verify_callee_saved = std::env::var("VUMA_VERIFY_CALLEE_SAVED")
             .map(|v| v == "1")
             .unwrap_or(false);
