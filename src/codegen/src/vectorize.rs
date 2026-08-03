@@ -1559,10 +1559,42 @@ mod tests {
                 }
             }
         }
-        // NEON `add v0.4s, v1.4s, v2.4s` = 0x4E228420.  Assert it's present.
+        // V-A2-3 fix (aarch64 mirror of x86_64 commit 96018e12):
+        // The VectorOp arm now loads lhs/rhs from their stack slots into
+        // V0/V1 via NEON LD1, performs the SIMD op (3-operand form:
+        // dst=src1+src2), and stores the result back to dst's stack slot
+        // via NEON ST1. So the emitted instruction stream contains:
+        //   LD1 {V0.4s}, [X16]   ; 0x4C407000 | (X16<<5) | V0 = 0x4C407200
+        //   LD1 {V1.4s}, [X16]   ; 0x4C407000 | (X16<<5) | V1 = 0x4C407201
+        //   add v0.4s, v0.4s, v1.4s  ; 0x4E208400 | (1<<16) = 0x4E218400
+        //   ST1 {V0.4s}, [X16]   ; 0x4C007000 | (X16<<5) | V0 = 0x4C007200
+        //
+        // (Previously the arm emitted only the single hardcoded NEON word
+        // 0x4E228420 = `add v0.4s, v1.4s, v2.4s`, which ignored the IR-level
+        // dst/lhs/rhs vregs entirely and never loaded/stored the actual
+        // vector values.)
+        //
+        // Assert the new 3-operand add opcode is present.
         assert!(
-            words.iter().any(|w| *w == 0x4E228420),
-            "aarch64 VectorOp(Add, v4i32) must emit NEON add v0.4s, v1.4s, v2.4s (0x4E228420); got {:08X?}",
+            words.iter().any(|w| *w == 0x4E218400),
+            "aarch64 VectorOp(Add, v4i32) must emit NEON add v0.4s, v0.4s, v1.4s (0x4E218400); got {:08X?}",
+            words
+        );
+        // Assert the LD1 loads (V0 and V1 from [X16]) are present.
+        assert!(
+            words.iter().any(|w| *w == 0x4C407200),
+            "aarch64 VectorOp(Add, v4i32) must emit LD1 {{V0.4s}}, [X16] (0x4C407200); got {:08X?}",
+            words
+        );
+        assert!(
+            words.iter().any(|w| *w == 0x4C407201),
+            "aarch64 VectorOp(Add, v4i32) must emit LD1 {{V1.4s}}, [X16] (0x4C407201); got {:08X?}",
+            words
+        );
+        // Assert the ST1 store (V0 to [X16]) is present.
+        assert!(
+            words.iter().any(|w| *w == 0x4C007200),
+            "aarch64 VectorOp(Add, v4i32) must emit ST1 {{V0.4s}}, [X16] (0x4C007200); got {:08X?}",
             words
         );
     }
