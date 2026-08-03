@@ -1632,6 +1632,15 @@ pub enum Type {
 /// a full implementation would pair it with a `Rec` variant carrying the
 /// recursive body, but for the AST-level annotation this single variant
 /// is sufficient to mark a protocol as recursive.
+///
+/// V-11: `Choice` and `Offer` variants enable branching protocols.
+/// `Choice` is the sender's perspective (the sender picks which branch
+/// to follow); `Offer` is the receiver's perspective (the receiver
+/// accepts whichever branch the sender chose). The two are duals of
+/// each other. Each branch is itself a `SessionType`, allowing arbitrary
+/// nesting. The vector is non-empty by construction (the parser rejects
+/// empty `Choice<>` / `Offer<>` syntax); a single-element vector is
+/// equivalent to a no-op branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionType {
     /// Send a value of `Type`, then continue with the inner session.
@@ -1647,6 +1656,15 @@ pub enum SessionType {
     /// `Rec` binder. Stored without a body for AST-level annotation; the
     /// type-checker treats encountering `Recurse` as "continue the loop".
     Recurse,
+    /// V-11: Sender chooses between N branches. The sender picks one
+    /// branch index (0..N-1) and continues with that branch's protocol.
+    /// The receiver must be prepared to handle any of the N branches.
+    /// Dual of `Offer`.
+    Choice(Vec<SessionType>),
+    /// V-11: Receiver offers N branches. The receiver waits for the
+    /// sender to choose a branch index, then continues with that
+    /// branch's protocol. Dual of `Choice`.
+    Offer(Vec<SessionType>),
 }
 
 impl std::fmt::Display for SessionType {
@@ -1656,6 +1674,22 @@ impl std::fmt::Display for SessionType {
             SessionType::Recv(ty, cont) => write!(f, "Recv<{}, {}>", ty, cont),
             SessionType::End => write!(f, "End"),
             SessionType::Recurse => write!(f, "Recurse"),
+            SessionType::Choice(branches) => {
+                let joined = branches
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "Choice<{}>", joined)
+            }
+            SessionType::Offer(branches) => {
+                let joined = branches
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "Offer<{}>", joined)
+            }
         }
     }
 }

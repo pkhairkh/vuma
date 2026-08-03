@@ -163,6 +163,11 @@ impl fmt::Display for Span {
 /// IR itself does not yet carry session types per-instruction — the
 /// `Option<Box<SessionType>>` lives on the `IRType::Channel` payload
 /// conceptually and is consumed by the IVE linear-type checker.
+///
+/// V-11: `Choice` and `Offer` variants mirror the AST additions,
+/// enabling branching protocols. The IVE linear-type checker must
+/// verify that each branch independently satisfies linearity (i.e.,
+/// each branch consumes the channel exactly once via its sub-protocol).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionType {
     /// Send a value of the given IRType, then continue with `continuation`.
@@ -173,6 +178,12 @@ pub enum SessionType {
     End,
     /// Recursion marker (`μ`) — loop back to the enclosing recursive binder.
     Recurse,
+    /// V-11: Sender chooses between N branches. Each branch is a
+    /// complete sub-protocol. Dual of `Offer`.
+    Choice(Vec<SessionType>),
+    /// V-11: Receiver offers N branches (accepts the sender's choice).
+    /// Each branch is a complete sub-protocol. Dual of `Choice`.
+    Offer(Vec<SessionType>),
 }
 
 impl fmt::Display for SessionType {
@@ -182,6 +193,22 @@ impl fmt::Display for SessionType {
             SessionType::Recv(ty, cont) => write!(f, "Recv<{}, {}>", ty, cont),
             SessionType::End => write!(f, "End"),
             SessionType::Recurse => write!(f, "Recurse"),
+            SessionType::Choice(branches) => {
+                let joined = branches
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "Choice<{}>", joined)
+            }
+            SessionType::Offer(branches) => {
+                let joined = branches
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "Offer<{}>", joined)
+            }
         }
     }
 }
