@@ -6628,7 +6628,7 @@ fn expand_stark_verify(
     body_blk.instructions.push(IRInstr::Cast {
         kind: CastKind::ZExt,
         dst: i_val2_ext.clone(),
-        src: i_val2,
+        src: i_val2.clone(),
         from_ty: Some(IRType::I32),
         to_ty: Some(IRType::I64),
     });
@@ -6678,16 +6678,13 @@ fn expand_stark_verify(
         offset: 0,
         ty: IRType::I64,
     });
-    body_blk.instructions.push(IRInstr::Load {
-        dst: i_val3.clone(),
-        addr: i_slot.clone(),
-        offset: 0,
-        ty: IRType::I32,
-    });
+    // Reuse i_val2 (loaded earlier) instead of loading i_val3 redundantly.
+    // The redundant load caused a scratch register conflict on 11 backends
+    // where the counter load clobbered the hash value in the FNV loop.
     body_blk.instructions.push(IRInstr::BinOp {
         op: BinOpKind::Add,
         dst: i_new.clone(),
-        lhs: i_val3,
+        lhs: i_val2.clone(),
         rhs: IRValue::Immediate(1),
         ty: Some(IRType::I32),
     });
