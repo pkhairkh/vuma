@@ -139,3 +139,27 @@ list:
 	@for f in $(SPV_FILES); do \
 	        echo "  $$f"; \
 	done
+
+# ============================================================================
+# Metal library build (macOS only — requires xcrun + Metal framework)
+# ============================================================================
+
+# Metal Shading Language → Metal library (.metallib)
+# Steps:
+#   1. .spv → .metal (via spirv-cross --msl, already done by `make metal`)
+#   2. .metal → .ir (via xcrun -sdk macosx metal -c)
+#   3. .ir → .metallib (via xcrun -sdk macosx metallib)
+
+METALLIB_FILES := $(SPV_FILES:.spv=.metallib)
+
+.PHONY: metallib
+metallib: $(METALLIB_FILES)
+
+# Pattern rule: %.metal → %.metallib
+%.ir: %.metal
+	@echo "  METAL    $< → $@"
+	@xcrun -sdk macosx metal -c $< -o $@
+
+%.metallib: %.ir
+	@echo "  METALLIB $< → $@"
+	@xcrun -sdk macosx metallib $< -o $@

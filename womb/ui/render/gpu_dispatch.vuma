@@ -142,3 +142,127 @@ extern "C" {
     // Destroy the instance.
     transform vk_destroy_instance(instance: Address);
 }
+
+// =========================================================================
+// Metal: Native macOS compute pipeline (no MoltenVK, per ADR-0022)
+// =========================================================================
+// The Metal path uses .metallib bytecode (cross-compiled from SPIR-V via
+// spirv-cross --msl, then compiled by xcrun metal). The VUMA program
+// passes the .metallib bytes (embedded as a const byte array via V-26
+// Phase 2) to mtl_create_compute_pipeline.
+
+extern "C" {
+    // Create the Metal device + command queue. Returns the MTLDevice handle.
+    transform mtl_create_device() -> Address;
+
+    // Create a compute pipeline from Metal library bytecode (.metallib).
+    // The metallib_data parameter is the address of the const byte array,
+    // metallib_len is its length. Returns the pipeline handle (i64) or 0.
+    transform mtl_create_compute_pipeline(
+        device: Address,
+        metallib_data: Address,
+        metallib_len: i64
+    ) -> i64;
+
+    // Create a command buffer.
+    transform mtl_create_command_buffer() -> Address;
+
+    // Bind a compute pipeline (creates a compute command encoder).
+    transform mtl_cmd_bind_pipeline(cmd: Address, pipeline: i64) -> i32;
+
+    // Bind a uniform buffer to the given index.
+    transform mtl_cmd_bind_uniform_buffer(
+        cmd: Address,
+        binding: u32,
+        data: Address,
+        size: u64
+    ) -> i32;
+
+    // Bind a storage texture (2D RGBA8Uint) to the given index.
+    transform mtl_cmd_bind_storage_texture(
+        cmd: Address,
+        device: Address,
+        binding: u32,
+        width: u32,
+        height: u32
+    ) -> i32;
+
+    // Dispatch compute work. (x, y, z) are the threadgroup counts.
+    // Threadgroup size is hardcoded to 16x16x1 (matches GLSL local_size).
+    transform mtl_cmd_dispatch(cmd: Address, x: u32, y: u32, z: u32) -> i32;
+
+    // Submit + wait for completion.
+    transform mtl_queue_submit_and_wait(cmd: Address) -> i32;
+
+    // Read back a texture's pixels (stub — needs texture caching).
+    transform mtl_read_texture(
+        cmd: Address,
+        binding: u32,
+        width: u32,
+        height: u32,
+        out_buffer: Address
+    ) -> i32;
+
+    // Cleanup.
+    transform mtl_destroy_pipeline(pipeline: i64);
+    transform mtl_destroy_device();
+}
+
+// =========================================================================
+// MPS: Metal Performance Shaders (macOS only)
+// =========================================================================
+// MPS provides pre-built, highly-optimized GPU kernels for common
+// operations: matrix multiply, convolution, image processing, ray
+// tracing, and linear algebra. Useful for 3D rendering where a custom
+// shader isn't needed (e.g., transform hierarchy matrix multiply, image
+// filters, ray-triangle intersection for ray tracing).
+
+extern "C" {
+    // Create the MPS device (shares the Metal device).
+    transform mps_create_device() -> Address;
+
+    // Matrix multiply: C = alpha * A * B + beta * C.
+    // A is M×K, B is K×N, C is M×N. All row-major f32.
+    // Uses MPSMatrixMultiplication (tensor cores on Apple Silicon).
+    transform mps_matrix_multiply(
+        device: Address,
+        cmd_queue: Address,
+        M: u32, K: u32, N: u32,
+        alpha: f32,
+        matrix_a: Address,
+        matrix_b: Address,
+        beta: f32,
+        matrix_c: Address
+    ) -> i32;
+
+    // Image Gaussian blur (RGBA8 texture).
+    transform mps_image_gaussian_blur(
+        device: Address,
+        cmd_queue: Address,
+        src_texture: Address,
+        dst_texture: Address,
+        sigma: f32
+    ) -> i32;
+
+    // Ray-triangle intersection (for 3D ray tracing).
+    // Tests ray_count rays against triangle_count triangles.
+    // Uses MPSRayIntersector (dedicated ray-tracing hardware on M1+).
+    transform mps_ray_intersect(
+        device: Address,
+        cmd_queue: Address,
+        ray_count: u32,
+        ray_data: Address,
+        triangle_count: u32,
+        triangle_data: Address,
+        intersection_data: Address
+    ) -> i32;
+
+    // Matrix LU decomposition (for solving linear systems).
+    transform mps_matrix_decompose_lu(
+        device: Address,
+        cmd_queue: Address,
+        M: u32,
+        matrix: Address,
+        pivot: Address
+    ) -> i32;
+}
