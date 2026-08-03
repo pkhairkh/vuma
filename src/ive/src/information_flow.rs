@@ -516,6 +516,34 @@ fn label_of_vreg(
     }
 }
 
+/// V-A3-8: Resolve a vreg's effective security label, consulting the
+/// dynamic taint map (from Loads of Secret memory) first, then falling
+/// back to the static `secret_vars` lookup.
+///
+/// This is a free function (not a closure) so it can be called from
+/// within the IR walk loop without holding an immutable borrow of
+/// `vreg_labels` — the loop body needs to mutate `vreg_labels` in the
+/// Load arm.
+fn resolve_label(
+    vreg: &vuma_codegen::ir::IRValue,
+    vregs: &std::collections::HashMap<u32, vuma_codegen::ir::VirtualRegister>,
+    secret_vars: &HashSet<String>,
+    vreg_labels: &std::collections::HashMap<u32, SecurityLabel>,
+) -> SecurityLabel {
+    match vreg {
+        vuma_codegen::ir::IRValue::Register(id) => {
+            // Dynamic taint takes precedence (a vreg loaded from
+            // Secret memory is Secret even if its declared name
+            // isn't in secret_vars).
+            if let Some(&label) = vreg_labels.get(id) {
+                return label;
+            }
+            label_of_vreg(vreg, vregs, secret_vars)
+        }
+        _ => SecurityLabel::Public,
+    }
+}
+
 /// Scan an IRProgram for information-flow violations (High → Low flows).
 /// This is the pipeline-facing wrapper.
 ///
@@ -581,26 +609,6 @@ pub fn verify_information_flow_from_ir(
         std::collections::HashMap::new();
     let mut vreg_labels: std::collections::HashMap<u32, SecurityLabel> =
         std::collections::HashMap::new();
-    // Helper: resolve a vreg's label, consulting the dynamic taint map
-    // first (for vregs tainted by Loads from Secret memory), then falling
-    // back to the static secret_vars lookup.
-    let resolve_label = |vreg: &vuma_codegen::ir::IRValue,
-                         vregs: &std::collections::HashMap<u32, vuma_codegen::ir::VirtualRegister>,
-                         secret_vars: &HashSet<String>|
-     -> SecurityLabel {
-        match vreg {
-            vuma_codegen::ir::IRValue::Register(id) => {
-                // Dynamic taint takes precedence (a vreg loaded from
-                // Secret memory is Secret even if its declared name
-                // isn't in secret_vars).
-                if let Some(&label) = vreg_labels.get(id) {
-                    return label;
-                }
-                label_of_vreg(vreg, vregs, secret_vars)
-            }
-            _ => SecurityLabel::Public,
-        }
-    };
     for (fi, func) in program.functions.iter().enumerate() {
         for (bi, block) in func.blocks.iter().enumerate() {
             for (ii, instr) in block.instructions.iter().enumerate() {
@@ -612,8 +620,8 @@ pub fn verify_information_flow_from_ir(
                     vuma_codegen::ir::IRInstr::ChannelSend { ch, msg, .. } => {
                         events.push(FlowEvent {
                             kind: FlowKind::ChannelSend {
-                                channel_label: resolve_label(ch, &func.vregs, secret_vars),
-                                msg_label: resolve_label(msg, &func.vregs, secret_vars),
+                                channel_label: resolve_label(ch, &func.vregs, secret_vars, &vreg_labels),
+                                msg_label: resolve_label(msg, &func.vregs, secret_vars, &vreg_labels),
                             },
                             at_node,
                         });
@@ -631,11 +639,11 @@ pub fn verify_information_flow_from_ir(
                     {
                         let channel_label = args
                             .first()
-                            .map(|v| resolve_label(v, &func.vregs, secret_vars))
+                            .map(|v| resolve_label(v, &func.vregs, secret_vars, &vreg_labels))
                             .unwrap_or(SecurityLabel::Public);
                         let msg_label = args
                             .get(1)
-                            .map(|v| resolve_label(v, &func.vregs, secret_vars))
+                            .map(|v| resolve_label(v, &func.vregs, secret_vars, &vreg_labels))
                             .unwrap_or(SecurityLabel::Public);
                         events.push(FlowEvent {
                             kind: FlowKind::ChannelSend {
@@ -661,8 +669,8 @@ pub fn verify_information_flow_from_ir(
                     // inherit the taint.
                     vuma_codegen::ir::IRInstr::Store { value, addr, .. } => {
                         let dst_vreg = addr.as_register().unwrap_or(0);
-                        let dst_label = resolve_label(addr, &func.vregs, secret_vars);
-                        let src_label = resolve_label(value, &func.vregs, secret_vars);
+                        let dst_label = resolve_label(addr, &func.vregs, secret_vars, &vreg_labels);
+                        let src_label = resolve_label(value, &func.vregs, secret_vars, &vreg_labels);
                         events.push(FlowEvent {
                             kind: FlowKind::Assign {
                                 dst_vreg,
