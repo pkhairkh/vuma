@@ -2209,26 +2209,80 @@ fn build_f64_eq_stub() -> Vec<u8> {
 }
 
 /// Build `__vuma_f64_lt` — f64 < f64 → i32 (0 or 1).
-/// PARTIAL: correct for non-negative values (unsigned comparison of bit
-/// patterns). For negative values, returns 0 (TODO: handle both-negative).
+///
+/// V-A2-7: Full IEEE 754 less-than via the "sortable" transformation.
+/// For an IEEE 754 double with bits `b` (as u64):
+///   sortable = (sign bit set) ? ~b : (b XOR 0x8000_0000_0000_0000)
+/// This is a strictly monotonic map from float value to unsigned 64-bit
+/// integer, so `a < b` (as f64) iff `sortable(a) <u sortable(b)`.
+/// Handles all cases the previous unsigned-compare stub got wrong:
+/// mixed signs (e.g. -1.0 < +1.0) and both-negative (e.g. -3.0 < -1.0).
+///
+/// For the 32-bit halves (hi:lo):
+///   sign     = hi >> 31            (0 or 1)
+///   neg_sign = -sign               (0 or 0xFFFFFFFF)   ← LO mask
+///   mask_hi  = neg_sign | 0x80000000                   ← HI mask
+///              (0x80000000 if sign=0; 0xFFFFFFFF if sign=1)
+///   sa_hi = hi XOR mask_hi
+///   sa_lo = lo XOR neg_sign
 fn build_f64_lt_stub() -> Vec<u8> {
     let mut code = Vec::new();
     // Input: R26=lo1, R25=hi1, R24=lo2, R23=hi2
+    //
+    // Register allocation during transformation:
+    //   R29 = constant 0x80000000 (materialized once)
+    //   R19 = sign, R20 = neg_sign  (scratch)
+    //   R21:R22 = sortable_a (sa_hi:sa_lo)
+    //   R23:R24 = sortable_b (sb_hi:sb_lo, transformed in place)
+    //   R25 = scratch (input no longer needed after sortable_a is built)
+    //   R28 = result (0 or 1)
+
+    // Materialize 0x80000000 in R29 via 31 left shifts of 1.
+    code.extend_from_slice(&encode_ldi(1, R29));
+    for _ in 0..31 {
+        code.extend_from_slice(&encode_shladd(1, R29, R0, R29));
+    }
+
+    // --- Compute sortable_a (uses R25=hi1, R26=lo1) ---
+    // R19 = sign_a = R25 >> 31
+    code.extend_from_slice(&encode_shrpw(R0, R25, 31, R19));
+    // R20 = neg_sign_a = R0 - R19  (0 or 0xFFFFFFFF)
+    code.extend_from_slice(&encode_sub(R0, R19, R20));
+    // R21 = mask_a_hi = R20 OR R29  (0x80000000 or 0xFFFFFFFF)
+    code.extend_from_slice(&encode_or(R20, R29, R21));
+    // R21 = sa_hi = R25 XOR R21
+    code.extend_from_slice(&encode_xor(R25, R21, R21));
+    // R22 = sa_lo = R26 XOR R20
+    code.extend_from_slice(&encode_xor(R26, R20, R22));
+
+    // --- Compute sortable_b (in place over R23:R24; R25 reused as scratch) ---
+    // R19 = sign_b = R23 >> 31
+    code.extend_from_slice(&encode_shrpw(R0, R23, 31, R19));
+    // R20 = neg_sign_b = R0 - R19
+    code.extend_from_slice(&encode_sub(R0, R19, R20));
+    // R25 = mask_b_hi = R20 OR R29
+    code.extend_from_slice(&encode_or(R20, R29, R25));
+    // R23 = sb_hi = R23 XOR R25
+    code.extend_from_slice(&encode_xor(R23, R25, R23));
+    // R24 = sb_lo = R24 XOR R20
+    code.extend_from_slice(&encode_xor(R24, R20, R24));
+
+    // --- Compare sortable_a (R21:R22) <u sortable_b (R23:R24) ---
     // R28 = 0 (default: not less)
     code.extend_from_slice(&encode_ldi(0, R28));
-    // If hi1 < hi2 (unsigned): a < b. cmpb,<< R25, R23, set_true
+    // If sa_hi < sb_hi (unsigned): a < b. cmpb,<< R21, R23, set_true
     let hi_lt_check = code.len();
-    code.extend_from_slice(&encode_cmpb(R25, R23, 0b100, false, false, 0)); // cond=100 (<<)
+    code.extend_from_slice(&encode_cmpb(R21, R23, 0b100, false, false, 0)); // cond=100 (<<)
     code.extend_from_slice(&encode_nop()); // delay slot
-                                           // If hi1 != hi2: not less (since hi1 >= hi2 and not <). cmpb,<> R25, R23, done
+    // If sa_hi != sb_hi (i.e. sa_hi > sb_hi): not less. cmpb,<> R21, R23, done
     let hi_ne_check = code.len();
-    code.extend_from_slice(&encode_cmpb(R25, R23, 0b001, true, false, 0));
+    code.extend_from_slice(&encode_cmpb(R21, R23, 0b001, true, false, 0));
     code.extend_from_slice(&encode_nop()); // delay slot
-                                           // hi1 == hi2: compare lo. If lo1 < lo2 (unsigned): a < b.
+    // sa_hi == sb_hi: compare lo. If sa_lo < sb_lo (unsigned): a < b.
     let lo_lt_check = code.len();
-    code.extend_from_slice(&encode_cmpb(R26, R24, 0b100, false, false, 0)); // cond=100 (<<)
+    code.extend_from_slice(&encode_cmpb(R22, R24, 0b100, false, false, 0)); // cond=100 (<<)
     code.extend_from_slice(&encode_nop()); // delay slot
-                                           // done: R28 = 0 (already set). Branch to return.
+    // done: R28 = 0 (already set). Branch to return.
     let done_branch = emit_forward_branch_placeholder(&mut code);
     // set_true: R28 = 1
     patch_cmpb_to_here(&mut code, hi_lt_check);
@@ -2244,26 +2298,52 @@ fn build_f64_lt_stub() -> Vec<u8> {
 }
 
 /// Build `__vuma_f64_le` — f64 <= f64 → i32 (0 or 1).
-/// PARTIAL: correct for non-negative values (unsigned comparison).
+///
+/// V-A2-7: Full IEEE 754 less-or-equal via the same sortable transformation
+/// used by `build_f64_lt_stub` (see that function for the algorithm).
+/// `a <= b` (as f64) iff `sortable(a) <=u sortable(b)`.
 fn build_f64_le_stub() -> Vec<u8> {
     let mut code = Vec::new();
     // Input: R26=lo1, R25=hi1, R24=lo2, R23=hi2
+    // See build_f64_lt_stub for the register-allocation strategy.
+
+    // Materialize 0x80000000 in R29 via 31 left shifts of 1.
+    code.extend_from_slice(&encode_ldi(1, R29));
+    for _ in 0..31 {
+        code.extend_from_slice(&encode_shladd(1, R29, R0, R29));
+    }
+
+    // --- Compute sortable_a (uses R25=hi1, R26=lo1) → R21:R22 ---
+    code.extend_from_slice(&encode_shrpw(R0, R25, 31, R19));
+    code.extend_from_slice(&encode_sub(R0, R19, R20));
+    code.extend_from_slice(&encode_or(R20, R29, R21));
+    code.extend_from_slice(&encode_xor(R25, R21, R21));
+    code.extend_from_slice(&encode_xor(R26, R20, R22));
+
+    // --- Compute sortable_b (in place over R23:R24; R25 reused as scratch) ---
+    code.extend_from_slice(&encode_shrpw(R0, R23, 31, R19));
+    code.extend_from_slice(&encode_sub(R0, R19, R20));
+    code.extend_from_slice(&encode_or(R20, R29, R25));
+    code.extend_from_slice(&encode_xor(R23, R25, R23));
+    code.extend_from_slice(&encode_xor(R24, R20, R24));
+
+    // --- Compare sortable_a (R21:R22) <=u sortable_b (R23:R24) ---
     // R28 = 1 (default: assume <=)
     code.extend_from_slice(&encode_ldi(1, R28));
-    // If hi1 < hi2 (unsigned): a <= b is true. cmpb,<< R25, R23, done
+    // If sa_hi < sb_hi (unsigned): a <= b is true. cmpb,<< R21, R23, done
     let hi_lt_check = code.len();
-    code.extend_from_slice(&encode_cmpb(R25, R23, 0b100, false, false, 0)); // cond=100 (<<)
+    code.extend_from_slice(&encode_cmpb(R21, R23, 0b100, false, false, 0)); // cond=100 (<<)
     code.extend_from_slice(&encode_nop()); // delay slot
-                                           // If hi1 > hi2 (unsigned): a <= b is false. cmpb,<< R23, R25, set_false
+    // If sa_hi > sb_hi (unsigned): a <= b is false. cmpb,<< R23, R21, set_false
     let hi_gt_check = code.len();
-    code.extend_from_slice(&encode_cmpb(R23, R25, 0b100, false, false, 0)); // cond=100 (<<)
+    code.extend_from_slice(&encode_cmpb(R23, R21, 0b100, false, false, 0)); // cond=100 (<<)
     code.extend_from_slice(&encode_nop()); // delay slot
-                                           // hi1 == hi2: compare lo. If lo1 <= lo2 (unsigned): true.
-                                           // cmpb,<<= R26, R24, done (cond=101, <<=)
+    // sa_hi == sb_hi: compare lo. If sa_lo <= sb_lo (unsigned): true.
+    // cmpb,<<= R22, R24, done (cond=101, <<=)
     let lo_le_check = code.len();
-    code.extend_from_slice(&encode_cmpb(R26, R24, 0b101, false, false, 0)); // cond=101 (<<=)
+    code.extend_from_slice(&encode_cmpb(R22, R24, 0b101, false, false, 0)); // cond=101 (<<=)
     code.extend_from_slice(&encode_nop()); // delay slot
-                                           // lo1 > lo2: false. Fall through to set_false.
+    // sa_lo > sb_lo: false. Fall through to set_false.
     let done_branch = emit_forward_branch_placeholder(&mut code);
     // set_false: R28 = 0
     patch_cmpb_to_here(&mut code, hi_gt_check);
@@ -3693,10 +3773,83 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                     ss_store_64(R28, R29, d_off, &mut code);
                                 }
                             } else {
-                                // F32 with Register operand: stub (store 0).
-                                // TODO: implement F32 soft-float stubs.
-                                code.extend(ss_load_imm(S0, 0));
-                                code.extend(ss_st(S0, d_off));
+                                // F32 with at least one Register operand
+                                // (V-A2-7): widen both operands to f64, perform
+                                // the F64 op via the existing soft-float stubs,
+                                // then narrow back to f32 (for arithmetic) or
+                                // store the 0/1 result (for comparisons).
+                                //
+                                // Register usage:
+                                //   S0:S1 — callee-saved scratch holding the
+                                //           widened lhs (R28:R29) across the
+                                //           second widen call.
+                                //
+                                // __vuma_f32_to_f64:  in R26 (lo), R25 (unused);  out R28:R29
+                                // __vuma_f64_to_f32:  in R26 (lo), R25 (hi);      out R28 (f32 bits)
+                                // F64 arith/cmp stubs: in R26:R25 (a), R24:R23 (b); out R28:R29
+                                let swap_args = matches!(op,
+                                    BinOpKind::SGt | BinOpKind::UGt
+                                    | BinOpKind::SGe | BinOpKind::UGe
+                                );
+                                // --- Widen lhs (f32) → f64 in R28:R29 ---
+                                code.extend(ss_load_value(lhs, &vreg_stack_slots, R26));
+                                code.extend(ss_load_imm(R25, 0));
+                                emit_softfloat_call(&mut code, &mut relocations, "__vuma_f32_to_f64");
+                                // Save widened lhs to S0:S1 (callee-saved across
+                                // the upcoming soft-float call).
+                                code.extend_from_slice(&encode_copy(R28, S0)); // S0 = lhs_lo
+                                code.extend_from_slice(&encode_copy(R29, S1)); // S1 = lhs_hi
+                                // --- Widen rhs (f32) → f64 in R28:R29 ---
+                                code.extend(ss_load_value(rhs, &vreg_stack_slots, R26));
+                                code.extend(ss_load_imm(R25, 0));
+                                emit_softfloat_call(&mut code, &mut relocations, "__vuma_f32_to_f64");
+                                // --- Set up args for the F64 op ---
+                                // Non-swap:  arg1 = lhs (S0:S1), arg2 = rhs (R28:R29).
+                                //   R26 = S0 (lhs_lo), R25 = S1 (lhs_hi),
+                                //   R24 = R28 (rhs_lo), R23 = R29 (rhs_hi).
+                                // Swap (Gt/Ge): arg1 = rhs, arg2 = lhs.
+                                //   R26 = R28 (rhs_lo), R25 = R29 (rhs_hi),
+                                //   R24 = S0 (lhs_lo), R23 = S1 (lhs_hi).
+                                if swap_args {
+                                    code.extend_from_slice(&encode_copy(R28, R26));
+                                    code.extend_from_slice(&encode_copy(R29, R25));
+                                    code.extend_from_slice(&encode_copy(S0, R24));
+                                    code.extend_from_slice(&encode_copy(S1, R23));
+                                } else {
+                                    code.extend_from_slice(&encode_copy(S0, R26));
+                                    code.extend_from_slice(&encode_copy(S1, R25));
+                                    code.extend_from_slice(&encode_copy(R28, R24));
+                                    code.extend_from_slice(&encode_copy(R29, R23));
+                                }
+                                let stub = match op {
+                                    BinOpKind::Add => "__vuma_f64_add",
+                                    BinOpKind::Sub => "__vuma_f64_sub",
+                                    BinOpKind::Mul => "__vuma_f64_mul",
+                                    BinOpKind::SDiv | BinOpKind::UDiv => "__vuma_f64_div",
+                                    BinOpKind::Eq | BinOpKind::Ne => "__vuma_f64_eq",
+                                    BinOpKind::SLt | BinOpKind::ULt
+                                    | BinOpKind::SGt | BinOpKind::UGt => "__vuma_f64_lt",
+                                    BinOpKind::SLe | BinOpKind::ULe
+                                    | BinOpKind::SGe | BinOpKind::UGe => "__vuma_f64_le",
+                                    _ => "__vuma_f64_add",
+                                };
+                                emit_softfloat_call(&mut code, &mut relocations, stub);
+                                if is_comparison {
+                                    if matches!(op, BinOpKind::Ne) {
+                                        // Ne = !Eq: XOR result with 1.
+                                        code.extend_from_slice(&encode_ldi(1, S0));
+                                        code.extend_from_slice(&encode_xor(R28, S0, R28));
+                                    }
+                                    code.extend(ss_st(R28, d_off));
+                                } else {
+                                    // Narrow f64 result → f32. The F64 op's
+                                    // result is in R28:R29; __vuma_f64_to_f32
+                                    // expects its f64 input in R26:R25.
+                                    code.extend_from_slice(&encode_copy(R28, R26));
+                                    code.extend_from_slice(&encode_copy(R29, R25));
+                                    emit_softfloat_call(&mut code, &mut relocations, "__vuma_f64_to_f32");
+                                    code.extend(ss_st(R28, d_off));
+                                }
                             }
                         } else {
                             code.extend(ss_load_value(lhs, &vreg_stack_slots, S0));
