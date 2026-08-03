@@ -7440,7 +7440,37 @@ fn resolve_state_array_access(
         "f32" => (4, Some(vuma_codegen::ir::IRType::F32)),
         "u64" | "i64" => (8, Some(vuma_codegen::ir::IRType::U64)),
         "f64" => (8, Some(vuma_codegen::ir::IRType::F64)),
-        _ => (1, None),
+        unknown => {
+            // V-46 fix: for unknown element types (typically user-defined
+            // layout/struct names), consult the layout registry to get the
+            // real element size. Previously this fell through to `(1, None)`,
+            // which meant `[StructType; N]` indexing accessed byte `i`
+            // instead of byte `i * sizeof(StructType)` — silently
+            // corrupting struct-array state fields.
+            //
+            // The IRType stays `None` because a struct element does not
+            // have a single primitive IRType; the downstream AccessNode::Load
+            // treats `ty=None` as a raw pointer-width load, which is the
+            // pre-existing behavior for struct field accesses (the caller
+            // typically immediately descends into a sub-field via a
+            // subsequent FieldAccess, which produces its own typed Load).
+            //
+            // Layout names are stored lowercase in the registry (per
+            // build_layout_registry); we try both the raw form and a
+            // case-insensitive lookup as a safety net.
+            if let Some((total_size, _fields)) = ctx.layouts.get(unknown) {
+                (*total_size, None)
+            } else {
+                // Last-resort fallback: scan layouts case-insensitively.
+                let lower = unknown.to_ascii_lowercase();
+                let found = ctx
+                    .layouts
+                    .iter()
+                    .find(|(name, _)| name.to_ascii_lowercase() == lower)
+                    .map(|(_, (size, _))| *size);
+                found.map(|s| (s, None)).unwrap_or((1, None))
+            }
+        }
     };
     Some((base_var, offset, elem_size, elem_ir_type))
 }
@@ -9309,27 +9339,78 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
             }
 
             // Check if the RHS is an allocate() call → AllocationNode::Stack
+            // (literal size) or AllocationNode::Heap (runtime size).
+            //
+            // V-NEW-1 fix: previously, allocate(<non-literal>) silently
+            // truncated the size to 8 bytes via `unwrap_or(8)`, causing
+            // under-allocation for any program that computed the size at
+            // runtime (e.g. `allocate(n * 64)` or `allocate(buf_len)`).
+            // Now: literal sizes use Stack (compile-time known, stack
+            // slot); non-literal sizes use Heap (lowers to mmap syscall
+            // via AllocationNode::Heap in scg_to_ir.rs, threading the
+            // runtime size expression through to the syscall).
             if let vuma_parser::ast::Expr::Call { callee, args, .. } = &let_stmt.value {
                 if let vuma_parser::ast::Expr::Var { name, .. } = callee.as_ref() {
                     if name == "allocate" {
-                        let size: u32 = args
-                            .first()
-                            .and_then(|a| {
-                                if let vuma_parser::ast::Expr::Lit {
-                                    value: vuma_parser::ast::Lit::Int(n),
-                                    ..
-                                } = a
-                                {
+                        let size_arg = args.first();
+                        // Try to extract a compile-time literal size.
+                        let lit_size: Option<u32> = size_arg.and_then(|a| {
+                            if let vuma_parser::ast::Expr::Lit {
+                                value: vuma_parser::ast::Lit::Int(n),
+                                ..
+                            } = a
+                            {
+                                // V-NEW-1: do NOT silently truncate
+                                // non-fitting sizes to u32. If the literal
+                                // exceeds u32::MAX, fall through to the
+                                // Heap path with the original expression
+                                // (so the runtime gets the full 64-bit
+                                // value).
+                                if *n >= 0 && *n <= u32::MAX as i64 {
                                     return Some(*n as u32);
                                 }
                                 None
-                            })
-                            .unwrap_or(8);
-                        return vec![ScgStatement::Allocation(AllocationNode::Stack {
-                            name: let_stmt.name.clone(),
-                            size,
-                            ty: ScgType::Ptr,
-                        })];
+                            } else {
+                                None
+                            }
+                        });
+                        match lit_size {
+                            Some(size) => {
+                                return vec![ScgStatement::Allocation(AllocationNode::Stack {
+                                    name: let_stmt.name.clone(),
+                                    size,
+                                    ty: ScgType::Ptr,
+                                })];
+                            }
+                            None => {
+                                // V-NEW-1: non-literal (or too-large
+                                // literal) size — thread the runtime
+                                // expression through to the Heap path.
+                                // flatten_expr emits any sub-expressions
+                                // needed to compute the size into `stmts`,
+                                // and returns the final ScgExpr for the
+                                // size value.
+                                let size_expr = match size_arg {
+                                    Some(a) => flatten_expr(a, &mut stmts, ctx),
+                                    None => ScgExpr::Int(0), // no arg — 0 bytes
+                                };
+                                // Preserve any statements emitted by
+                                // flatten_expr (e.g. intermediate
+                                // computations for `n * 64`) before the
+                                // Allocation node.
+                                stmts.push(ScgStatement::Allocation(AllocationNode::Heap {
+                                    name: let_stmt.name.clone(),
+                                    size_expr,
+                                    ty: ScgType::Ptr,
+                                }));
+                                // AllocationNode::Heap does not return a
+                                // value to the caller — the allocated
+                                // pointer is bound to `name` via the
+                                // Alloc/Syscall instruction in scg_to_ir.
+                                // Return all stmts emitted so far.
+                                return stmts;
+                            }
+                        }
                     }
                     // Other function calls → CallNode (flatten args)
                     let flat_args: Vec<ScgExpr> = args
