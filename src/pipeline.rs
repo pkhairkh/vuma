@@ -6716,44 +6716,87 @@ fn build_layout_registry(program: &AstProgram) -> LayoutRegistry {
 /// type_name)>)`); `build_pmt_layout_specs` is the verification-side
 /// representation.
 pub fn build_pmt_layout_specs(program: &AstProgram) -> HashMap<String, vuma_ive::PmtLayoutSpec> {
-    let mut layouts: HashMap<String, vuma_ive::PmtLayoutSpec> = HashMap::new();
+    // V-03 fix (ADR-0004): Use bridge_type_size_with_layouts instead of
+    // bridge_type_size, so nested user-defined layout names get their real
+    // size instead of the default 8. This mirrors build_layout_registry's
+    // multi-pass approach.
+
+    // Pass 1: collect layout definitions.
+    let mut layout_defs: Vec<(&str, &Vec<(String, vuma_parser::ast::Type)>)> = Vec::new();
     for item in &program.items {
         if let Item::LayoutDef(ld) = item {
-            let mut offset: u64 = 0;
+            layout_defs.push((ld.name.as_str(), &ld.fields));
+        }
+    }
+
+    // Pass 2: iteratively compute layout sizes (resolves nested/forward refs).
+    let mut layout_sizes: HashMap<String, u64> = HashMap::new();
+    let mut changed = true;
+    let mut iterations = 0;
+    while changed && iterations < 10 {
+        changed = false;
+        iterations += 1;
+        for (name, fields) in &layout_defs {
+            let mut size: u64 = 0;
             let mut max_align: u64 = 1;
-            let mut fields: Vec<vuma_ive::PmtFieldSpec> = Vec::new();
-            for (fname, ftype) in &ld.fields {
+            for (_fname, ftype) in *fields {
                 let falign = bridge_type_align(ftype).max(1);
-                let fsize = bridge_type_size(ftype);
-                if falign > 1 && !offset.is_multiple_of(falign) {
-                    offset = (offset + falign - 1) & !(falign - 1);
+                let fsize = bridge_type_size_with_layouts(ftype, &layout_sizes);
+                if falign > 1 && !size.is_multiple_of(falign) {
+                    size = (size + falign - 1) & !(falign - 1);
                 }
                 max_align = max_align.max(falign);
-                let type_name = match ftype {
-                    vuma_parser::ast::Type::BDBase(n) => n.clone(),
-                    other => other.to_string(),
-                };
-                fields.push(vuma_ive::PmtFieldSpec {
-                    name: fname.clone(),
-                    offset,
-                    size: fsize,
-                    type_name,
-                });
-                offset += fsize;
+                size += fsize;
             }
             let alignment = max_align.max(1);
-            if offset > 0 && !offset.is_multiple_of(alignment) {
-                offset = (offset + alignment - 1) & !(alignment - 1);
+            if size > 0 && !size.is_multiple_of(alignment) {
+                size = (size + alignment - 1) & !(alignment - 1);
             }
-            layouts.insert(
-                ld.name.clone(),
-                vuma_ive::PmtLayoutSpec {
-                    name: ld.name.clone(),
-                    total_size: offset,
-                    fields,
-                },
-            );
+            let prev = layout_sizes.get(*name).copied();
+            if prev != Some(size) {
+                layout_sizes.insert((*name).to_string(), size);
+                changed = true;
+            }
         }
+    }
+
+    // Pass 3: build PmtLayoutSpec using resolved sizes.
+    let mut layouts: HashMap<String, vuma_ive::PmtLayoutSpec> = HashMap::new();
+    for (name, fields) in &layout_defs {
+        let mut offset: u64 = 0;
+        let mut max_align: u64 = 1;
+        let mut pmt_fields: Vec<vuma_ive::PmtFieldSpec> = Vec::new();
+        for (fname, ftype) in *fields {
+            let falign = bridge_type_align(ftype).max(1);
+            let fsize = bridge_type_size_with_layouts(ftype, &layout_sizes);
+            if falign > 1 && !offset.is_multiple_of(falign) {
+                offset = (offset + falign - 1) & !(falign - 1);
+            }
+            max_align = max_align.max(falign);
+            let type_name = match ftype {
+                vuma_parser::ast::Type::BDBase(n) => n.clone(),
+                other => other.to_string(),
+            };
+            pmt_fields.push(vuma_ive::PmtFieldSpec {
+                name: fname.clone(),
+                offset,
+                size: fsize,
+                type_name,
+            });
+            offset += fsize;
+        }
+        let alignment = max_align.max(1);
+        if offset > 0 && !offset.is_multiple_of(alignment) {
+            offset = (offset + alignment - 1) & !(alignment - 1);
+        }
+        layouts.insert(
+            (*name).to_string(),
+            vuma_ive::PmtLayoutSpec {
+                name: (*name).to_string(),
+                total_size: offset,
+                fields: pmt_fields,
+            },
+        );
     }
     layouts
 }
