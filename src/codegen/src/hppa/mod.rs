@@ -5628,8 +5628,8 @@ impl Backend for HppaBackend {
         // register-based emitter first; fall back to the legacy stack-slot
         // path if regalloc fails or is disabled via VUMA_REAL_REGALLOC_HPPA=0.
         let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_HPPA")
-            .map(|v| v != "0")
-            .unwrap_or(true);
+            .map(|v| v == "1")
+            .unwrap_or(false);
         let contains_fork = func.blocks.iter().any(|b| {
             b.instructions.iter().any(|i| match i {
                 crate::ir::IRInstr::Call { .. } => true,

@@ -3097,8 +3097,8 @@ impl Backend for S390XBackend {
         //
         // When set to "0": force stack-slot ISel (for debugging).
         let real_regalloc = std::env::var("VUMA_REAL_REGALLOC_S390X")
-            .map(|v| v != "0")
-            .unwrap_or(true);
+            .map(|v| v == "1")
+            .unwrap_or(false);
 
         // ── contains_fork opt-out ───────────────────────────────────────
         // s390x syscall numbers (Linux/s390x):
