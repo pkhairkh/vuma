@@ -2128,7 +2128,7 @@ impl AstToScg {
                             crate::ast::Lit::String(s) => format!("lit_str_{}", s),
                             crate::ast::Lit::Bool(b) => format!("lit_{}", b),
                             crate::ast::Lit::Address(a) => format!("lit_{}", a),
-                            &ast::Lit::Bytes(ref _b) => { format!("bytes") },
+                            &crate::ast::Lit::Bytes(ref _b) => { format!("bytes") },
                             &ast::Lit::Bytes(ref b) => { format!("bytes:{}b", b.len()) },
                         };
                         let lit_id = scg.add_node(
@@ -3470,7 +3470,7 @@ impl AstToScg {
                     crate::ast::Lit::String(s) => format!("lit_str_{}", s),
                     crate::ast::Lit::Bool(b) => format!("lit_{}", b),
                     crate::ast::Lit::Address(a) => format!("lit_{}", a),
-                    &ast::Lit::Bytes(ref _b) => { format!("bytes") },
+                    &crate::ast::Lit::Bytes(ref _b) => { format!("bytes") },
                     &ast::Lit::Bytes(ref b) => { format!("bytes:{}b", b.len()) },
                 };
                 let lit_id = scg.add_node(
@@ -3548,7 +3548,7 @@ impl AstToScg {
                     crate::ast::Lit::String(s) => format!("lit_str_{}", s),
                     crate::ast::Lit::Bool(b) => format!("lit_{}", b),
                     crate::ast::Lit::Address(a) => format!("lit_{}", a),
-                    &ast::Lit::Bytes(ref _b) => { format!("bytes") },
+                    &crate::ast::Lit::Bytes(ref _b) => { format!("bytes") },
                     &ast::Lit::Bytes(ref b) => { format!("bytes:{}b", b.len()) },
                 };
                 let lit_id = scg.add_node(
@@ -3899,7 +3899,7 @@ impl AstToScg {
                 Lit::String(_) => "str".to_string(),
                 Lit::Bool(_) => "bool".to_string(),
                 Lit::Address(_) => "u64".to_string(),
-                &ast::Lit::Bytes(ref _b) => { format!("bytes") },
+                &crate::ast::Lit::Bytes(ref _b) => { format!("bytes") },
                 &ast::Lit::Bytes(ref b) => { format!("bytes:{}b", b.len()) },
             },
             Expr::BinOp { op, .. } => match op {
@@ -4089,7 +4089,7 @@ impl AstToScg {
                 Lit::String(s) => format!("\"{}\"", s),
                 Lit::Bool(b) => b.to_string(),
                 Lit::Address(a) => format!("0x{:X}", a),
-                &ast::Lit::Bytes(ref _b) => { format!("bytes") },
+                &crate::ast::Lit::Bytes(ref _b) => { format!("bytes") },
                 &ast::Lit::Bytes(ref b) => { format!("bytes:{}b", b.len()) },
             },
             Expr::BinOp { op, lhs, rhs, .. } => {
@@ -4344,7 +4344,7 @@ impl AstToScg {
             Lit::String(s) => format!("\"{}\"", s),
             Lit::Bool(b) => b.to_string(),
             Lit::Address(a) => format!("0x{:X}", a),
-            &ast::Lit::Bytes(ref _b) => { format!("bytes") },
+            &crate::ast::Lit::Bytes(ref _b) => { format!("bytes") },
             &ast::Lit::Bytes(ref b) => { format!("bytes:{}b", b.len()) },
         }
     }

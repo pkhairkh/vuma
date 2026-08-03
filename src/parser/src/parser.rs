@@ -7640,32 +7640,32 @@ fn diag_fn_nested_generic_type() {
     }
 }
 
-/// Parse escape sequences in a byte string literal body (V-26).
-/// Supports: \n \r \t \0 \\ \" \xHH
 fn parse_byte_string_escapes(s: &str) -> Vec<u8> {
     let mut result = Vec::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
-        if c == "\\" {
+        if c == '\\' {
             match chars.next() {
-                Some("n") => result.push(b"\n"[0]),
-                Some("r") => result.push(b"\r"[0]),
-                Some("t") => result.push(b"\t"[0]),
-                Some("0") => result.push(0),
-                Some("\\") => result.push(b"\\"),
-                Some("\"") => result.push(b"\""),
-                Some("x") => {
+                Some('n') => result.push(b'\n'),
+                Some('r') => result.push(b'\r'),
+                Some('t') => result.push(b'\t'),
+                Some('0') => result.push(0),
+                Some('\\') => result.push(b'\\'),
+                Some('"') => result.push(b'"'),
+                Some('x') => {
                     let h1 = chars.next().and_then(|c| c.to_digit(16));
                     let h2 = chars.next().and_then(|c| c.to_digit(16));
                     if let (Some(h1), Some(h2)) = (h1, h2) {
                         result.push((h1 * 16 + h2) as u8);
                     }
                 }
-                Some(other) => { result.push(b"\\"); result.push(other as u8); }
-                None => result.push(b"\\"),
+                Some(other) => { result.push(b'\\'); result.push(other as u8); }
+                None => result.push(b'\\'),
             }
         } else {
-            result.extend_from_slice(c.to_string().as_bytes());
+            for b in c.to_string().as_bytes() {
+                result.push(*b);
+            }
         }
     }
     result
