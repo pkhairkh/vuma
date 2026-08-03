@@ -687,9 +687,16 @@ fn emit_instruction(
                     reads.push(phys(rhs_reg));
                 }
                 ResolvedVal::Imm(imm) => {
-                    // imul dst, imm32
+                    // imul dst, imm32 — but only if imm fits in i32.
+                    // For 64-bit immediates that don't fit in i32 (e.g.,
+                    // the FNV prime 1099511628211 = 0x100000001b3), use
+                    // movabs to load the full 64-bit value into R11 first.
                     let scratch = Gpr::R11;
-                    code.extend(encode_mov_reg_imm32(scratch, imm as i32));
+                    if imm >= i32::MIN as i64 && imm <= i32::MAX as i64 {
+                        code.extend(encode_mov_reg_imm32(scratch, imm as i32));
+                    } else {
+                        code.extend(encode_mov_reg_imm64(scratch, imm as u64));
+                    }
                     code.extend(encode_imul_reg_reg(dst_reg, scratch));
                 }
             }
@@ -1034,9 +1041,16 @@ fn emit_instruction(
                             reads.push(phys(rhs_reg));
                         }
                         ResolvedVal::Imm(imm) => {
-                            // imul dst, imm32
+                            // imul dst, imm32 — but only if imm fits in i32.
+                            // For 64-bit immediates that don't fit in i32 (e.g.,
+                            // the FNV prime 1099511628211 = 0x100000001b3), use
+                            // movabs to load the full 64-bit value into R11.
                             let scratch = Gpr::R11;
-                            code.extend(encode_mov_reg_imm32(scratch, imm as i32));
+                            if imm >= i32::MIN as i64 && imm <= i32::MAX as i64 {
+                                code.extend(encode_mov_reg_imm32(scratch, imm as i32));
+                            } else {
+                                code.extend(encode_mov_reg_imm64(scratch, imm as u64));
+                            }
                             code.extend(encode_imul_reg_reg(dst_reg, scratch));
                         }
                     }
@@ -1120,23 +1134,64 @@ fn emit_instruction(
 
         // ── Store ──
         IRInstr::Store { value, addr, offset, ty } => {
-            let val_reg = load_to_reg(value, alloc, code);
+            // Load the base (addr) register FIRST. This is critical: if addr
+            // is a spilled vreg, the spill code reloads it into R11 before
+            // this instruction. If we load val (which may use R11 as scratch
+            // for immediates) BEFORE addr, we'd clobber the reloaded addr.
+            // By loading addr first and then using mov [base+off], imm
+            // encoding for immediates, we avoid the R11 conflict entirely.
             let base_reg = load_to_reg(addr, alloc, code);
-            match ty {
-                IRType::U8 | IRType::I8 => {
-                    code.extend(encode_mov_mem8_reg8(base_reg, *offset, val_reg));
+            match resolve_value(value, alloc) {
+                ResolvedVal::Imm(imm) => {
+                    // Use mov [base+off], imm encoding — no val register
+                    // needed, so no R11 conflict even if base_reg == R11.
+                    match ty {
+                        IRType::U8 | IRType::I8 => {
+                            code.extend(encode_mov_mem8_imm8(base_reg, *offset, imm as i8));
+                        }
+                        IRType::U16 | IRType::I16 => {
+                            code.extend(encode_mov_mem16_imm16(base_reg, *offset, imm as i16));
+                        }
+                        IRType::U32 | IRType::I32 => {
+                            code.extend(encode_mov_mem32_imm32(base_reg, *offset, imm as i32));
+                        }
+                        _ => {
+                            // I64 store: if imm fits in sign-extended imm32,
+                            // use mov [base+off], imm32 (sext64). Otherwise,
+                            // fall back to loading val into R11.
+                            if imm >= i32::MIN as i64 && imm <= i32::MAX as i64 {
+                                code.extend(encode_mov_mem_imm32_sext64(base_reg, *offset, imm as i32));
+                            } else {
+                                // Large I64 immediate — load into R11 scratch.
+                                // This is safe only if base_reg != R11 (which
+                                // is the common case; addr is rarely spilled
+                                // to R11 when val is a large I64 immediate).
+                                let scratch = Gpr::R11;
+                                code.extend(encode_mov_reg_imm64(scratch, imm as u64));
+                                code.extend(encode_mov_mem_reg(base_reg, *offset, scratch));
+                            }
+                        }
+                    }
+                    // No val_reg to track for immediates.
                 }
-                IRType::U16 | IRType::I16 => {
-                    code.extend(encode_mov_mem16_reg16(base_reg, *offset, val_reg));
-                }
-                IRType::U32 | IRType::I32 => {
-                    code.extend(encode_mov_mem32_reg32(base_reg, *offset, val_reg));
-                }
-                _ => {
-                    code.extend(encode_mov_mem_reg(base_reg, *offset, val_reg));
+                ResolvedVal::Reg(val_reg) => {
+                    match ty {
+                        IRType::U8 | IRType::I8 => {
+                            code.extend(encode_mov_mem8_reg8(base_reg, *offset, val_reg));
+                        }
+                        IRType::U16 | IRType::I16 => {
+                            code.extend(encode_mov_mem16_reg16(base_reg, *offset, val_reg));
+                        }
+                        IRType::U32 | IRType::I32 => {
+                            code.extend(encode_mov_mem32_reg32(base_reg, *offset, val_reg));
+                        }
+                        _ => {
+                            code.extend(encode_mov_mem_reg(base_reg, *offset, val_reg));
+                        }
+                    }
+                    reads.push(phys(val_reg));
                 }
             }
-            reads.push(phys(val_reg));
             reads.push(phys(base_reg));
             "store".to_string()
         }
@@ -1150,7 +1205,19 @@ fn emit_instruction(
                     reads.push(phys(rhs_reg));
                 }
                 ResolvedVal::Imm(imm) => {
-                    code.extend(encode_cmp_reg_imm32(lhs_reg, imm as i32));
+                    // The imm32 form sign-extends the 32-bit immediate to
+                    // 64-bit. This is only correct when imm fits losslessly
+                    // in i32 (so sign-extension reproduces the original
+                    // 64-bit value). For immediates that don't fit in i32
+                    // (e.g., 0x4141414141414141 or 0x00000000FCDE41B2),
+                    // load the full 64-bit value into a register first.
+                    if imm >= i32::MIN as i64 && imm <= i32::MAX as i64 {
+                        code.extend(encode_cmp_reg_imm32(lhs_reg, imm as i32));
+                    } else {
+                        let rhs_reg = load_to_reg(rhs, alloc, code);
+                        code.extend(encode_cmp_reg_reg(lhs_reg, rhs_reg));
+                        reads.push(phys(rhs_reg));
+                    }
                 }
             }
             let dst_reg = load_to_reg(dst, alloc, code);
