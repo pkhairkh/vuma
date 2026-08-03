@@ -48,16 +48,20 @@ static uint32_t         g_queue_family   = 0;
 static VkCommandPool    g_cmd_pool       = VK_NULL_HANDLE;
 static VkDescriptorPool g_desc_pool      = VK_NULL_HANDLE;
 
-// Per-pipeline descriptor set layout + pipeline layout.
+// Per-pipeline descriptor set layout + pipeline layout + single shared
+// descriptor set (set 0) that all bindings update into.
 typedef struct {
     VkDescriptorSetLayout desc_set_layout;
     VkPipelineLayout      pipeline_layout;
-    VkDescriptorSet       desc_sets[MAX_BINDINGS];
+    VkDescriptorSet       desc_set;          // single shared set 0
     VkImageView           image_views[MAX_BINDINGS];
     VkImage               images[MAX_BINDINGS];
     VkDeviceMemory        image_memory[MAX_BINDINGS];
+    VkBuffer              uniform_buffers[MAX_BINDINGS];
+    VkDeviceMemory        uniform_memory[MAX_BINDINGS];
     uint32_t              image_widths[MAX_BINDINGS];
     uint32_t              image_heights[MAX_BINDINGS];
+    int                   desc_set_allocated;
     int                   initialized;
 } PipelineState;
 
@@ -275,6 +279,24 @@ int64_t vk_create_compute_pipeline_spirv(void* device, void* spirv, int64_t spir
         return 0;
     }
     vkDestroyShaderModule(dev, shader_module, NULL);
+
+    // Allocate the single shared descriptor set (set 0) that all bindings
+    // (uniform buffer at binding 0, storage image at binding 1) will update
+    // into. This avoids the bug where each vk_cmd_bind_* allocated a
+    // separate descriptor set, causing vkCmdBindDescriptorSets to bind
+    // only the last-allocated set (missing the other binding).
+    VkDescriptorSetAllocateInfo dsai = {0};
+    dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    dsai.descriptorPool = g_desc_pool;
+    dsai.descriptorSetCount = 1;
+    dsai.pSetLayouts = &g_pipeline_state.desc_set_layout;
+    r = vkAllocateDescriptorSets(dev, &dsai, &g_pipeline_state.desc_set);
+    if (r != VK_SUCCESS) {
+        fprintf(stderr, "vk_create_compute_pipeline_spirv: vkAllocateDescriptorSets failed: %s\n",
+                vk_result_string(r));
+        return 0;
+    }
+    g_pipeline_state.desc_set_allocated = 1;
     g_pipeline_state.initialized = 1;
     return (int64_t)pipeline;
 }
@@ -318,7 +340,7 @@ int32_t vk_cmd_bind_pipeline(void* cmd, int64_t pipeline) {
 int32_t vk_cmd_bind_uniform_buffer(void* cmd, void* device, uint32_t binding,
                                     void* data, uint64_t size) {
     VkDevice dev = (VkDevice)device;
-    // Create a staging buffer + memory, copy the data, bind it.
+    // Create a uniform buffer + memory, copy the data, bind it.
     VkBufferCreateInfo bci = {0};
     bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bci.size = size;
@@ -351,30 +373,35 @@ int32_t vk_cmd_bind_uniform_buffer(void* cmd, void* device, uint32_t binding,
     vkUnmapMemory(dev, mem);
     vkBindBufferMemory(dev, buf, mem, 0);
 
-    // Allocate + update descriptor set.
-    VkDescriptorSetAllocateInfo dsai = {0};
-    dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    dsai.descriptorPool = g_desc_pool;
-    dsai.descriptorSetCount = 1;
-    dsai.pSetLayouts = &g_pipeline_state.desc_set_layout;
-    VkDescriptorSet ds;
-    vkAllocateDescriptorSets(dev, &dsai, &ds);
+    // Cache the buffer + memory for cleanup.
+    if (binding < MAX_BINDINGS) {
+        g_pipeline_state.uniform_buffers[binding] = buf;
+        g_pipeline_state.uniform_memory[binding] = mem;
+    }
 
+    // Update the SHARED descriptor set (allocated once in
+    // vk_create_compute_pipeline_spirv) with this binding's buffer info.
+    if (!g_pipeline_state.desc_set_allocated) {
+        fprintf(stderr, "vk_cmd_bind_uniform_buffer: no descriptor set allocated\n");
+        return -1;
+    }
     VkDescriptorBufferInfo dbi = {0};
     dbi.buffer = buf;
     dbi.offset = 0;
     dbi.range = size;
     VkWriteDescriptorSet wds = {0};
     wds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    wds.dstSet = ds;
+    wds.dstSet = g_pipeline_state.desc_set;
     wds.dstBinding = binding;
     wds.descriptorCount = 1;
     wds.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     wds.pBufferInfo = &dbi;
     vkUpdateDescriptorSets(dev, 1, &wds, 0, NULL);
 
+    // Bind the shared descriptor set to set 0.
     vkCmdBindDescriptorSets((VkCommandBuffer)cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                            g_pipeline_state.pipeline_layout, 0, 1, &ds, 0, NULL);
+                            g_pipeline_state.pipeline_layout, 0, 1,
+                            &g_pipeline_state.desc_set, 0, NULL);
     return 0;
 }
 
@@ -407,14 +434,19 @@ int32_t vk_cmd_bind_storage_image(void* cmd, void* device, uint32_t binding,
     VkMemoryAllocateInfo mai = {0};
     mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     mai.allocationSize = mr.size;
-    // Find DEVICE_LOCAL memory type.
+    // Find DEVICE_LOCAL memory type. Fall back to HOST_VISIBLE if
+    // DEVICE_LOCAL is not available (lavapipe may not have DEVICE_LOCAL).
     VkPhysicalDeviceMemoryProperties mp;
     vkGetPhysicalDeviceMemoryProperties(g_physical_device, &mp);
+    mai.memoryTypeIndex = 0;
     for (uint32_t i = 0; i < mp.memoryTypeCount; i++) {
-        if ((mr.memoryTypeBits & (1 << i)) &&
-            (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+        if (mr.memoryTypeBits & (1 << i)) {
+            if (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
+                mai.memoryTypeIndex = i;
+                break;
+            }
+            // Fallback: any compatible type.
             mai.memoryTypeIndex = i;
-            break;
         }
     }
     VkDeviceMemory mem;
@@ -450,30 +482,6 @@ int32_t vk_cmd_bind_storage_image(void* cmd, void* device, uint32_t binding,
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          0, 0, NULL, 0, NULL, 1, &imb);
 
-    // Allocate + update descriptor set.
-    VkDescriptorSetAllocateInfo dsai = {0};
-    dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    dsai.descriptorPool = g_desc_pool;
-    dsai.descriptorSetCount = 1;
-    dsai.pSetLayouts = &g_pipeline_state.desc_set_layout;
-    VkDescriptorSet ds;
-    vkAllocateDescriptorSets(dev, &dsai, &ds);
-
-    VkDescriptorImageInfo dii = {0};
-    dii.imageView = iv;
-    dii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    VkWriteDescriptorSet wds = {0};
-    wds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    wds.dstSet = ds;
-    wds.dstBinding = binding;
-    wds.descriptorCount = 1;
-    wds.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    wds.pImageInfo = &dii;
-    vkUpdateDescriptorSets(dev, 1, &wds, 0, NULL);
-
-    vkCmdBindDescriptorSets((VkCommandBuffer)cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                            g_pipeline_state.pipeline_layout, 0, 1, &ds, 0, NULL);
-
     // Cache for readback.
     if (binding < MAX_BINDINGS) {
         g_pipeline_state.images[binding] = img;
@@ -482,6 +490,28 @@ int32_t vk_cmd_bind_storage_image(void* cmd, void* device, uint32_t binding,
         g_pipeline_state.image_widths[binding] = width;
         g_pipeline_state.image_heights[binding] = height;
     }
+
+    // Update the SHARED descriptor set with this binding's image info.
+    if (!g_pipeline_state.desc_set_allocated) {
+        fprintf(stderr, "vk_cmd_bind_storage_image: no descriptor set allocated\n");
+        return -1;
+    }
+    VkDescriptorImageInfo dii = {0};
+    dii.imageView = iv;
+    dii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    VkWriteDescriptorSet wds = {0};
+    wds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    wds.dstSet = g_pipeline_state.desc_set;
+    wds.dstBinding = binding;
+    wds.descriptorCount = 1;
+    wds.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    wds.pImageInfo = &dii;
+    vkUpdateDescriptorSets(dev, 1, &wds, 0, NULL);
+
+    // Bind the shared descriptor set to set 0.
+    vkCmdBindDescriptorSets((VkCommandBuffer)cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            g_pipeline_state.pipeline_layout, 0, 1,
+                            &g_pipeline_state.desc_set, 0, NULL);
     return 0;
 }
 
