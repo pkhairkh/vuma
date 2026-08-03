@@ -3600,10 +3600,10 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     // Store XMM0 (result) to dst's stack slot.
                     code.extend(encode_sse_movdqu_store(Gpr::Rbp, dst_off, Xmm::Xmm0));
 
-                    // Mark dst as defined, lhs/rhs as used for liveness.
-                    defined_regs.push(dst_id);
-                    used_regs.push(lhs_id);
-                    used_regs.push(rhs_id);
+                    // Liveness tracking is handled by IRInstr::VectorOp's
+                    // defined_regs()/used_regs() methods (ir.rs), which
+                    // already return dst/lhs/rhs respectively.
+                    let _ = (dst_id, lhs_id, rhs_id); // suppress unused warnings
                     code
                 }
                 // ── Channel operations (ask 3) ─────────────────────
