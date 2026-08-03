@@ -6,6 +6,65 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 where applicable.
 
+## [0.2.0-alpha.13] — P2 Backend & CI & Lean Cluster
+
+This release completes the remaining P2 items from the fine-draft papers.
+
+### P2 Backend Softfloat
+- **V-A2-7**: HPPA F32 softfloat via widen/op/narrow (reuses existing F64
+  stubs). F64 lt/le fixed for negative operands via IEEE 754 sortable
+  transformation. Previously F32 BinOp with Register operand stored 0;
+  F64 lt/le returned wrong results for negatives.
+- **V-A2-8**: m68k F32 softfloat via 68881 FPU single-precision mode
+  (FMOVE.S auto-widens to ext, FADD.X/FMUL.X, FMOVE.S auto-narrows).
+  Previously F32 BinOp with Register operand stored 0.0.
+
+### P2 SIMD
+- **V-A2-3 aarch64**: IRInstr::VectorOp arm in ss_emit_instr now
+  loads/stores 128-bit vector vregs via LD1/ST1 from stack slots
+  (mirrors the x86_64 fix). Stack-slot allocator gives vector vregs
+  16-byte slots. Previously hardcoded V0/V1/V2 — autovectorizer
+  produced incorrect code on aarch64.
+
+### P2 CI Infrastructure
+- **V-NEW-6**: ci_run_tests.sh pass criterion now compares actual exit
+  code against expected exit code from `// Expected exit code: N`
+  header. Previously only checked "didn't crash/timeout" — tests with
+  wrong answers but clean exit passed.
+- **V-NEW-8**: New .github/workflows/nightly-matrix.yml runs the FULL
+  19-backend matrix every night at 02:30 UTC. Installs all 18 QEMU
+  emulators + Z3 4.13.0 + wasmtime 22.0.0. Compares against last-green
+  baseline, fails on regression, auto-commits new baseline on success.
+
+### P2 Lean Proofs
+- **V-A3-5**: Lean SessionType inductive extended with Choice/Offer
+  variants (List SessionType for N-ary branches). New helpers
+  try_match_choice_send / try_match_offer_recv mirror Rust's
+  try_match_choice_branch. Four new soundness theorems:
+  choice_send_matches_advances, offer_recv_matches_advances,
+  choice_send_no_match_violation, offer_recv_no_match_violation.
+
+### P2 reg_isel Debugging
+- **W5-A**: x86_64 Gpr::is_allocatable() now excludes RBP (was only
+  excluding RSP). This fixes the SIGSEGV in arith_mul_table where the
+  regalloc assigned RBP to a vreg used as a Load destination,
+  corrupting the frame pointer. 6 reg_isel tests still fail due to
+  deeper encoding bugs (reg_isel path is OFF by default, gated behind
+  VUMA_REAL_REGALLOC_X86_64=1; production stack-slot path is unaffected).
+
+### Environment Provisioning
+- Lean 4.32.2 (elan 4.2.3) installed on remote build machine for
+  V-A3-5 Lean proof verification.
+- Z3 4.13.0 installed for nightly CI (IVE SMT solver).
+
+### Test Results
+- **59926/59926 = 100.00%** across all 19 backends (production stack-slot
+  path, verified on 16-core x86_64 remote with QEMU 10.0.11)
+- **1572/1578 = 99.62%** on x86_64 reg_isel path (VUMA_REAL_REGALLOC_X86_64=1,
+  up from 1572/1591 before the RBP fix; 6 tests still fail on encoding bugs)
+
+---
+
 ## [0.2.0-alpha.12] — P1 Backend & Parser Cluster
 
 This release completes the remaining P1 items from the fine-draft papers.
