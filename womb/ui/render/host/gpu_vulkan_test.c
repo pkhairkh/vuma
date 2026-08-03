@@ -30,12 +30,23 @@ extern int32_t vk_cmd_end(void* cmd);
 extern int32_t vk_queue_submit_and_wait(void* queue, void* cmd);
 extern int32_t vk_read_image(void* device, void* cmd, void* queue, uint32_t binding, uint32_t width, uint32_t height, void* out_buffer);
 
-// Triangle uniforms (must match triangle_fill.comp layout).
+// Triangle uniforms (must match triangle_fill.comp layout, std140).
+// In std140, vec2[3] is laid out as vec4[3] (each vec2 padded to 16 bytes).
+//   vertices[0]: (x0, y0, pad, pad)  — 16 bytes
+//   vertices[1]: (x1, y1, pad, pad)  — 16 bytes
+//   vertices[2]: (x2, y2, pad, pad)  — 16 bytes
+//   color:        (r, g, b, a)       — 16 bytes (vec4, no padding)
+//   width:        u32                — 4 bytes
+//   height:       u32                — 4 bytes
+// Total: 16*3 + 16 + 8 = 72 bytes. The struct must be padded to 16-byte
+// alignment for the next binding (std140 rounds the struct up to a
+// multiple of 16).
 typedef struct {
-    float vertices[3][2];  // 3 vertices, 2 components each (vec2[3])
-    float color[4];        // RGBA
+    float vertices[3][4];  // 3 vertices, 4 floats each (vec2 padded to vec4 in std140)
+    float color[4];        // RGBA vec4
     uint32_t width;
     uint32_t height;
+    float _padding[2];     // pad to 80 bytes (16-byte aligned)
 } TriangleUniforms;
 
 // Read a .spv file into a malloc'd buffer.
@@ -97,6 +108,7 @@ int main(void) {
     const uint32_t W = 64, H = 64;
     TriangleUniforms u = {0};
     // Triangle in clip space [-1, 1]: (0, 0.5), (-0.5, -0.5), (0.5, -0.5)
+    // std140 layout: each vertex is a vec4 (x, y, 0, 0).
     u.vertices[0][0] = 0.0f;  u.vertices[0][1] = 0.5f;
     u.vertices[1][0] = -0.5f; u.vertices[1][1] = -0.5f;
     u.vertices[2][0] = 0.5f;  u.vertices[2][1] = -0.5f;
