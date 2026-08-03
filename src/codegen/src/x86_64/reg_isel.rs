@@ -535,6 +535,73 @@ fn emit_spill_code(
     }
 }
 
+/// Emit a variable shift (shl/shr/sar `%cl, %dst`) with RCX preservation.
+///
+/// x86_64 variable shifts use CL (the low byte of RCX) as the shift count.
+/// Setting up the count therefore writes to RCX, which clobbers any live
+/// vreg the regalloc may have placed there. This helper saves/restores
+/// RCX (and RAX if `dst_reg == Rcx`) around the shift so live values are
+/// preserved.
+///
+/// # Cases
+///
+/// - `dst_reg == Rcx`: the shift result must end up in RCX, but CL is also
+///   the count source. Use RAX as a temp (saved/restored via the stack):
+///   `push rax; mov rax, lhs; mov rcx, rhs; shift %cl, %rax; mov rcx, rax;
+///   pop rax`. If `rcx_orig == Rax`, rhs is loaded from the stack instead.
+/// - `rcx_orig == Rcx`: rhs is already in RCX — no setup needed, just shift.
+/// - Otherwise: `push rcx; mov rcx, rcx_orig; shift %cl, %dst; pop rcx`.
+///
+/// # Args
+/// - `code`: output byte buffer.
+/// - `dst_reg`: register holding the shift result.
+/// - `lhs_reg`: register holding the value to shift.
+/// - `rcx_orig`: register holding the shift count (moved to RCX for CL).
+/// - `lhs_in_dst`: true if lhs is already in `dst_reg` (skip `mov dst, lhs`).
+/// - `encode_shift`: one of `encode_shl_reg_cl`/`encode_shr_reg_cl`/
+///   `encode_sar_reg_cl`.
+fn emit_shift_preserve_rcx(
+    code: &mut Vec<u8>,
+    dst_reg: Gpr,
+    lhs_reg: Gpr,
+    rcx_orig: Gpr,
+    lhs_in_dst: bool,
+    encode_shift: fn(Gpr) -> Vec<u8>,
+) {
+    if dst_reg == Gpr::Rcx {
+        // dst IS rcx — use RAX as a temp (saved/restored). The result is
+        // computed in RAX, then moved to RCX (= dst).
+        code.extend(encode_push(Gpr::Rax));
+        code.extend(encode_mov_reg_reg(Gpr::Rax, lhs_reg));
+        if rcx_orig == Gpr::Rax {
+            // rhs was in RAX but we just overwrote it with lhs; recover rhs
+            // from the stack (saved by the push above).
+            code.extend(encode_mov_reg_mem(Gpr::Rcx, Gpr::Rsp, 0));
+        } else {
+            code.extend(encode_mov_reg_reg(Gpr::Rcx, rcx_orig));
+        }
+        code.extend(encode_shift(Gpr::Rax));
+        code.extend(encode_mov_reg_reg(Gpr::Rcx, Gpr::Rax));
+        code.extend(encode_pop(Gpr::Rax));
+    } else if rcx_orig == Gpr::Rcx {
+        // rhs is already in RCX — no setup needed, RCX is not clobbered.
+        if !lhs_in_dst {
+            code.extend(encode_mov_reg_reg(dst_reg, lhs_reg));
+        }
+        code.extend(encode_shift(dst_reg));
+    } else {
+        // rhs is in another register. Save RCX (may hold a live vreg),
+        // move rhs into RCX for CL, shift, then restore RCX.
+        if !lhs_in_dst {
+            code.extend(encode_mov_reg_reg(dst_reg, lhs_reg));
+        }
+        code.extend(encode_push(Gpr::Rcx));
+        code.extend(encode_mov_reg_reg(Gpr::Rcx, rcx_orig));
+        code.extend(encode_shift(dst_reg));
+        code.extend(encode_pop(Gpr::Rcx));
+    }
+}
+
 /// Emit a single IR instruction as register-based machine code.
 /// Returns (opcode_name, reads, writes).
 fn emit_instruction(
@@ -816,15 +883,17 @@ fn emit_instruction(
                 BinOpKind::Shl => {
                     let dst_reg = load_to_reg(dst, alloc, code);
                     let lhs_reg = load_to_reg(lhs, alloc, code);
-                    if !matches!(resolve_value(lhs, alloc), ResolvedVal::Reg(r) if r == dst_reg) {
-                        code.extend(encode_mov_reg_reg(dst_reg, lhs_reg));
-                    }
-                    // shl requires shift count in CL.
+                    let lhs_in_dst = matches!(resolve_value(lhs, alloc), ResolvedVal::Reg(r) if r == dst_reg);
+                    // shl requires shift count in CL — clobbers RCX.
                     let rcx_orig = load_to_reg(rhs, alloc, code);
-                    if rcx_orig != Gpr::Rcx {
-                        code.extend(encode_mov_reg_reg(Gpr::Rcx, rcx_orig));
-                    }
-                    code.extend(encode_shl_reg_cl(dst_reg));
+                    emit_shift_preserve_rcx(
+                        code,
+                        dst_reg,
+                        lhs_reg,
+                        rcx_orig,
+                        lhs_in_dst,
+                        encode_shl_reg_cl,
+                    );
                     reads.push(phys(lhs_reg));
                     writes.push(phys(dst_reg));
                     "shl".to_string()
@@ -832,18 +901,22 @@ fn emit_instruction(
                 BinOpKind::ShrL | BinOpKind::ShrA => {
                     let dst_reg = load_to_reg(dst, alloc, code);
                     let lhs_reg = load_to_reg(lhs, alloc, code);
-                    if !matches!(resolve_value(lhs, alloc), ResolvedVal::Reg(r) if r == dst_reg) {
-                        code.extend(encode_mov_reg_reg(dst_reg, lhs_reg));
-                    }
+                    let lhs_in_dst = matches!(resolve_value(lhs, alloc), ResolvedVal::Reg(r) if r == dst_reg);
+                    // shr/sar require shift count in CL — clobbers RCX.
                     let rcx_orig = load_to_reg(rhs, alloc, code);
-                    if rcx_orig != Gpr::Rcx {
-                        code.extend(encode_mov_reg_reg(Gpr::Rcx, rcx_orig));
-                    }
-                    if *op == BinOpKind::ShrA {
-                        code.extend(encode_sar_reg_cl(dst_reg));
+                    let encode_shift = if *op == BinOpKind::ShrA {
+                        encode_sar_reg_cl
                     } else {
-                        code.extend(encode_shr_reg_cl(dst_reg));
-                    }
+                        encode_shr_reg_cl
+                    };
+                    emit_shift_preserve_rcx(
+                        code,
+                        dst_reg,
+                        lhs_reg,
+                        rcx_orig,
+                        lhs_in_dst,
+                        encode_shift,
+                    );
                     reads.push(phys(lhs_reg));
                     writes.push(phys(dst_reg));
                     if *op == BinOpKind::ShrA { "sar" } else { "shr" }.to_string()

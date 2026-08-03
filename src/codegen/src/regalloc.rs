@@ -2826,8 +2826,21 @@ impl Default for RegAllocator {
 ///    reassigned to a different register or spilled. This eliminates the
 ///    "register-reuse hazard" that previously required a fallback to
 ///    stack-slot ISel for functions with syscalls.
-///
-/// Detect and resolve register-reuse conflicts.
+pub struct TargetAgnosticRegAlloc {
+    /// Name of the target ISA (for error messages).
+    isa_name: &'static str,
+    /// Caller-saved GPRs available for allocation.
+    caller_saved_gprs: Vec<crate::backend::PhysicalReg>,
+    /// Callee-saved GPRs available for allocation.
+    callee_saved_gprs: Vec<crate::backend::PhysicalReg>,
+    /// Caller-saved SIMD/FP registers available for allocation.
+    caller_saved_fps: Vec<crate::backend::PhysicalReg>,
+    /// Callee-saved SIMD/FP registers available for allocation.
+    callee_saved_fps: Vec<crate::backend::PhysicalReg>,
+}
+
+impl TargetAgnosticRegAlloc {
+    /// Detect and resolve register-reuse conflicts.
 ///
 /// A conflict occurs when the allocator assigns the same physical register
 /// to a vreg that is **used** (as an argument) and a vreg that is
@@ -2844,11 +2857,10 @@ impl Default for RegAllocator {
 /// that is free at that position. If no register is free, spill the
 /// defined vreg to a stack slot (the emitter will insert reload code).
 fn resolve_register_reuse_conflicts(
+    &self,
     func: &IRFunction,
     result: &mut RegAllocResult,
     intervals: &[LiveInterval],
-    caller_saved: &[crate::backend::PhysicalReg],
-    callee_saved: &[crate::backend::PhysicalReg],
 ) {
     let mut pos: u32 = 0;
     for block in &func.blocks {
@@ -2878,19 +2890,22 @@ fn resolve_register_reuse_conflicts(
                         continue; // different registers, no conflict
                     }
 
-                    // W1-A DIAGNOSIS: If EITHER use_preg or def_preg is the
-                    // spill-scratch register (R11 on x86_64 GPR, index 11),
-                    // there is no real conflict. The spill mechanism reloads
-                    // the use_vreg into scratch just for this instruction,
-                    // the instruction writes the new def_vreg value to
-                    // scratch, and the post-instruction spill stores scratch
-                    // to the def_vreg's slot. Treating this as a "conflict"
-                    // and removing the def_vreg from vreg_to_preg breaks the
+                    // W1-D GENERALIZATION: If EITHER use_preg or def_preg is
+                    // the spill-scratch register for this ISA + class, there
+                    // is no real conflict. The spill mechanism reloads the
+                    // use_vreg into scratch just for this instruction, the
+                    // instruction writes the new def_vreg value to scratch,
+                    // and the post-instruction spill stores scratch to the
+                    // def_vreg's slot. Treating this as a "conflict" and
+                    // removing the def_vreg from vreg_to_preg breaks the
                     // invariant that resolve_value() returns the scratch for
                     // spilled vregs, causing the emitter to fall back to RAX
                     // and emit `mov %rax, %dst` instead of `mov %r11, %dst`.
-                    let is_x86_64_gpr = conflict_class_is_x86_64_gpr(use_preg);
-                    if is_x86_64_gpr && (use_preg.index == 11 || def_preg.index == 11) {
+                    // The previous POC (commit c0eb7105) hardcoded index 11
+                    // (R11 on x86_64); this generalization uses the ISA-aware
+                    // `spill_scratch()` lookup so it works on all targets.
+                    let scratch = self.spill_scratch(use_preg.class.into());
+                    if use_preg == scratch || def_preg == scratch {
                         continue; // scratch register — no real conflict
                     }
 
@@ -2902,15 +2917,13 @@ fn resolve_register_reuse_conflicts(
                             // CONFLICT: use vreg is live after this instruction
                             // and shares a register with def vreg.
                             // Reassign def vreg to a different register.
-                            resolve_single_conflict(
+                            self.resolve_single_conflict(
                                 result,
                                 intervals,
                                 def_root_owned,
                                 use_root_owned,
                                 def_preg,
                                 pos,
-                                caller_saved,
-                                callee_saved,
                             );
                         }
                     }
@@ -2922,24 +2935,16 @@ fn resolve_register_reuse_conflicts(
     }
 }
 
-/// Helper: detect x86_64 GPR class for the W1-A diagnosis workaround.
-fn conflict_class_is_x86_64_gpr(preg: crate::backend::PhysicalReg) -> bool {
-    // The spill_scratch for x86_64 GPR is index 11 (R11). For other ISAs
-    // the scratch index differs, so this workaround is x86_64-specific.
-    preg.class == crate::backend::RegClass::Gpr
-}
-
 /// Resolve a single register-reuse conflict by reassigning the def vreg.
 #[allow(clippy::too_many_arguments)]
 fn resolve_single_conflict(
+    &self,
     result: &mut RegAllocResult,
     intervals: &[LiveInterval],
     def_vreg: IRValueId,
     _use_vreg: IRValueId,
     conflict_preg: crate::backend::PhysicalReg,
     _pos: u32,
-    caller_saved: &[crate::backend::PhysicalReg],
-    callee_saved: &[crate::backend::PhysicalReg],
 ) {
     if std::env::var("VUMA_DEBUG_REG_ISEL").is_ok() {
         eprintln!(
@@ -2977,7 +2982,7 @@ fn resolve_single_conflict(
     let backend_class = conflict_preg.class;
     let regalloc_class = match backend_class { crate::backend::RegClass::Gpr => RegClass::Gpr, _ => RegClass::SimdFp };
     let allocatable: Vec<crate::backend::PhysicalReg> = if backend_class == crate::backend::RegClass::Gpr {
-        caller_saved.iter().chain(callee_saved.iter()).cloned().collect()
+        self.caller_saved_gprs.iter().chain(self.callee_saved_gprs.iter()).cloned().collect()
     } else {
         (0..32u32).map(|i| crate::backend::PhysicalReg::new(backend_class, i)).collect()
     };
@@ -2991,34 +2996,37 @@ fn resolve_single_conflict(
     // No free register available — spill the def vreg.
     let slot_idx = result.total_spill_slots;
     result.total_spill_slots += 1;
-    let offset = if regalloc_class == RegClass::Gpr { -((slot_idx as i32 + 1) * 8) } else { -((slot_idx as i32 + 1) * 16) };
+    let offset = Self::spill_offset(slot_idx, regalloc_class);
     let slot = GenericSpillSlot::new(slot_idx, offset, regalloc_class);
     result.spill_slots.insert(def_vreg, slot.clone());
-    // Remove the physical register assignment — the vreg is now spilled.
-    result.vreg_to_preg.remove(&def_vreg);
+
+    // W1-D HARDENING: Re-map the def vreg to the spill-scratch register
+    // (instead of removing it from `vreg_to_preg`). This ensures the
+    // emitter's `resolve_value` returns the scratch for every future
+    // use/def of the def vreg, matching the spill/reload code generated
+    // below. The previous code (commit c0eb7105 and earlier) removed the
+    // def vreg from `vreg_to_preg` without generating any spill_code,
+    // causing `resolve_value` to fall back to RAX and emit `mov %rax, %dst`
+    // instead of `mov %r11, %dst`, and the post-instruction spill stored
+    // the OLD scratch value to the slot.
+    let scratch = self.spill_scratch(regalloc_class);
+    result.vreg_to_preg.insert(def_vreg, scratch);
+
+    // Generate spill/reload code so the emitter knows when to store
+    // scratch to the slot (after defs) and load from the slot into
+    // scratch (before uses). Without this, the slot would be
+    // uninitialized and the scratch would hold stale values from the
+    // conflict instruction's def.
+    if let Some(interval) = def_interval {
+        Self::gen_spill_reload(interval, scratch, &slot, result);
+    }
     if std::env::var("VUMA_DEBUG_REG_ISEL").is_ok() {
         eprintln!(
-            "  CONFLICT_SPILL: def_vreg={} removed from vreg_to_preg, new slot idx={} offset={}",
-            def_vreg, slot_idx, offset
+            "  CONFLICT_SPILL: def_vreg={} re-mapped to scratch {:?}, new slot idx={} offset={}",
+            def_vreg, scratch, slot_idx, offset
         );
     }
-    // The spill code will be generated by the emitter based on the
-    // spill_slots map. We need to add spill/reload entries.
-    // For the def vreg: spill AFTER the instruction (at pos+1),
-    // reload BEFORE each subsequent use.
-    // This is handled by the existing spill_code mechanism in the emitter.
-}
-pub struct TargetAgnosticRegAlloc {
-    /// Name of the target ISA (for error messages).
-    isa_name: &'static str,
-    /// Caller-saved GPRs available for allocation.
-    caller_saved_gprs: Vec<crate::backend::PhysicalReg>,
-    /// Callee-saved GPRs available for allocation.
-    callee_saved_gprs: Vec<crate::backend::PhysicalReg>,
-    /// Caller-saved SIMD/FP registers available for allocation.
-    caller_saved_fps: Vec<crate::backend::PhysicalReg>,
-    /// Callee-saved SIMD/FP registers available for allocation.
-    callee_saved_fps: Vec<crate::backend::PhysicalReg>,
+    }
 }
 
 impl TargetAgnosticRegAlloc {
@@ -3140,7 +3148,7 @@ impl TargetAgnosticRegAlloc {
         //
         // The fix: for each conflicting instruction, reassign the dst vreg
         // to a different physical register (or spill it if none available).
-        resolve_register_reuse_conflicts(func, &mut result, &intervals, &self.caller_saved_gprs, &self.callee_saved_gprs);
+        self.resolve_register_reuse_conflicts(func, &mut result, &intervals);
 
         Ok(result)
     }
@@ -3160,7 +3168,7 @@ impl TargetAgnosticRegAlloc {
         intervals.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end)));
 
         let mut result = self.allocate_intervals(&intervals)?;
-        resolve_register_reuse_conflicts(func, &mut result, &intervals, &self.caller_saved_gprs, &self.callee_saved_gprs);
+        self.resolve_register_reuse_conflicts(func, &mut result, &intervals);
         Ok(result)
     }
 
