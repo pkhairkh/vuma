@@ -53,6 +53,7 @@ static uint8_t* read_spv(const char* path, int64_t* out_size) {
 }
 
 int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);  // unbuffered stdout for real-time output
     printf("=== Vulkan Triangle Dispatch Test ===\n");
 
     // 1. Create instance + physical device + logical device.
