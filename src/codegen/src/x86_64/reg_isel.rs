@@ -245,6 +245,34 @@ pub fn emit_function_regalloc_full(
                     encoded: all_code[instr_start..instr_end].to_vec(),
                 });
             }
+
+            // Emit post-instruction spills (at global_pos + 1).
+            // These are post-def spills for entirely-spilled / evicted
+            // intervals: the instruction at `global_pos` wrote the vreg's
+            // new value into the spill-scratch register, and we now store
+            // it to the slot before the next instruction can clobber the
+            // scratch. The +1 offset lands in the "gap" between
+            // instruction positions (positions increment by 2); this
+            // mirrors the emit.rs spill-code path which checks both `pos`
+            // (pre-instruction) and `pos + 1` (post-instruction).
+            if let Some(spills) = alloc.spill_code.get(&(global_pos + 1)) {
+                for spill in spills {
+                    let spill_start = all_code.len();
+                    emit_spill_code(&mut all_code, spill, &callee_saved_gprs, frame_size);
+                    if all_code.len() > spill_start {
+                        instrs.push(AllocatedInstruction {
+                            opcode: match spill {
+                                GenericSpillCode::Spill { .. } => "spill".to_string(),
+                                GenericSpillCode::Reload { .. } => "reload".to_string(),
+                            },
+                            reads: vec![],
+                            writes: vec![],
+                            encoded: all_code[spill_start..].to_vec(),
+                        });
+                    }
+                }
+            }
+
             global_pos += 2;
         }
 
@@ -288,6 +316,27 @@ pub fn emit_function_regalloc_full(
                 encoded: all_code[term_start..term_end].to_vec(),
             });
         }
+
+        // Emit post-terminator spills (at global_pos + 1), mirroring the
+        // post-instruction spill path above.
+        if let Some(spills) = alloc.spill_code.get(&(global_pos + 1)) {
+            for spill in spills {
+                let spill_start = all_code.len();
+                emit_spill_code(&mut all_code, spill, &callee_saved_gprs, frame_size);
+                if all_code.len() > spill_start {
+                    instrs.push(AllocatedInstruction {
+                        opcode: match spill {
+                            GenericSpillCode::Spill { .. } => "spill".to_string(),
+                            GenericSpillCode::Reload { .. } => "reload".to_string(),
+                        },
+                        reads: vec![],
+                        writes: vec![],
+                        encoded: all_code[spill_start..].to_vec(),
+                    });
+                }
+            }
+        }
+
         global_pos += 2;
 
         blocks.push(AllocatedBlock {
