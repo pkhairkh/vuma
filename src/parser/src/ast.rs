@@ -1522,6 +1522,9 @@ pub enum Lit {
     Bool(bool),
     /// Hex address literal (e.g. `0xDEADBEEF`).
     Address(u64),
+    /// Byte string literal (e.g. `b"hello"`). Used for const byte arrays
+    /// in .rodata (V-26, ADR-0022 — blocks SPIR-V embedding).
+    Bytes(Vec<u8>),
 }
 
 // ---------------------------------------------------------------------------
