@@ -278,8 +278,7 @@ theorem choice_send_no_match_violation
   simp [process_session_event]
   rw [hstate]
   simp [hnomatch]
-  -- The violation list is `[{...}]`, which is non-empty.
-  decide
+  -- The violation list is `[{...}]`, which is non-empty (decided by simp).
 
 /-- If a Recv event on an Offer channel matches NO branch, a violation
 is reported. -/
@@ -294,6 +293,5 @@ theorem offer_recv_no_match_violation
   simp [process_session_event]
   rw [hstate]
   simp [hnomatch]
-  decide
 
 end PMT.IVE.Soundness
