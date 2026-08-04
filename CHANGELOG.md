@@ -6,6 +6,64 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 where applicable.
 
+## [0.2.0-alpha.15] — reg_isel Debugging + GPU Swapchain + CI Cleanup
+
+This release closes the register-based ISel (`VUMA_REAL_REGALLOC_*`) gate
+across all 4 architectures, adds GPU swapchain + multi-frame pipelining,
+adds the WOMB render sub-module, and cleans up CI/doc debt.
+
+### WAVE 1: reg_isel Fixes (Cluster A)
+
+- **x86_64** (6/6 tests fixed): regalloc scratch-register conflict, Div
+  RDX-divisor clobber, Shl/Shr RCX clobber, Cmp/Mul/Store imm truncation,
+  cross-instruction regalloc conflict.
+- **riscv64** (1 test fixed): `emit_load_imm` 64-bit immediate sign-extension.
+- **ppc64** (2/3 tests fixed): `emit_load_imm` 64-bit loading, Call emitter
+  caller-saved save/restore. 1 remaining: stark_proof (pre-existing).
+- **aarch64** (3/3 tests fixed): LSL/LSR/ASR register-operand encoding
+  (was using ADD-shifted base instead of LSLV/LSRV/ASRV).
+
+### WAVE 2: GPU Swapchain + Multi-frame
+
+- VK_KHR_swapchain + VK_EXT_headless_surface extension loading.
+- FrameLoop API: N command buffers, N fences, N semaphores.
+- `gpu_vulkan_swapchain_test.c`: 10 frames, 2 frames-in-flight. ✅ PASSES.
+
+### WAVE 3: GPU Scene Graph + Descriptor Reflection + Metal depth-stencil
+
+- `scene.vuma`, `scene_build.vuma`, `frame.vuma` declaration modules.
+- SPIR-V descriptor set reflection via `spirv-cross` (with fallback).
+- Metal explicit depth-stencil state (`mtl_create_depth_stencil_state`).
+- `scene_graph_test.c`: 3-cube scene graph render. ✅ PASSES.
+
+### WAVE 4: macOS Metal Verification
+
+- `gpu_metal_cube_test.m`: Metal 3D cube test (mirror of Vulkan test).
+- `README.md`: build instructions for Linux + macOS.
+
+### WAVE 5: CI Cleanup + Test Fix
+
+- V-NEW-7: Deleted duplicate `lean-proofs` job from `ci.yml`.
+- V-41: Fixed stale doc references (effects.rs, lean-rust-parity.yml).
+- V-A2-4: Marked dead-code backend arms as `unreachable!()` (9 backends).
+
+### WAVE 6: Lean Proofs
+
+- `lake build` succeeds, zero `sorry`.
+- `InformationFlow.lean`: indirect-leak theorem (V-A3-8).
+
+### WAVE 7: WOMB-Layer CI + Render Sub-module
+
+- `scripts/check_womb_imports.sh`: CI check for broken womb imports.
+- `clip.vuma`, `blend.vuma`, `gpu_encode.vuma`, `outline_to_path.vuma`.
+
+### Test Results
+
+- Production: 59926/59926 = 100.00% (all 19 backends).
+- reg_isel: x86_64 6/6, riscv64 1578/1578, ppc64 1577/1578, aarch64 1578/1578.
+- Lean: `lake build` + `lake exe test` pass, zero `sorry`.
+- GPU: all Vulkan tests pass on lavapipe.
+
 ## [0.2.0-alpha.14] — Full 3D Graphics Pipeline
 
 This release completes the 3D graphics stack: Vulkan graphics pipeline,
