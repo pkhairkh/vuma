@@ -42,9 +42,355 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <errno.h>
 
 // Maximum number of descriptor set bindings per pipeline.
 #define MAX_BINDINGS 16
+
+// ===========================================================================
+// W3-D: SPIR-V descriptor reflection via spirv-cross
+// ===========================================================================
+// vk_reflect_descriptor_sets() runs `spirv-cross <tmp.spv> --reflect` on the
+// given SPIR-V bytecode, parses the JSON output, and fills `out_bindings`
+// with one VkDescriptorSetLayoutBinding per reflected resource
+// (ubos / ssbos / images / textures / separate_images / separate_samplers).
+//
+// The `stage_flags` parameter is written into each binding's stageFlags
+// (caller passes VK_SHADER_STAGE_COMPUTE_BIT for compute pipelines,
+// VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT for graphics
+// pipelines — for graphics, call this function once per stage and merge).
+//
+// Returns: the number of bindings reflected (>= 0), or -1 on error
+// (spirv-cross not on PATH, non-zero exit, JSON parse failure, etc.).
+// On -1, the caller should fall back to the hardcoded 2-binding layout.
+//
+// The JSON parser is intentionally minimal — it tracks the current top-level
+// array ("ubos" / "ssbos" / "images" / "textures" / "separate_images" /
+// "separate_samplers") and extracts the integer value of each "binding"
+// field inside that array. Each VkDescriptorSetLayoutBinding gets:
+//   .binding        = N
+//   .descriptorType = mapped from the section name (see table below)
+//   .descriptorCount= 1
+//   .stageFlags     = stage_flags (caller-supplied)
+//
+// Section -> VkDescriptorType mapping:
+//   ubos             -> VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+//   ssbos            -> VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+//   images           -> VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+//   textures         -> VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+//   separate_images  -> VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE
+//   separate_samplers-> VK_DESCRIPTOR_TYPE_SAMPLER
+//   (push_constants are skipped — they are not descriptor bindings.)
+// ===========================================================================
+
+// Track which top-level JSON array we're currently inside.
+typedef enum {
+    SEC_NONE = 0,
+    SEC_UBOS,
+    SEC_SSBOS,
+    SEC_IMAGES,
+    SEC_TEXTURES,
+    SEC_SEPARATE_IMAGES,
+    SEC_SEPARATE_SAMPLERS,
+    SEC_OTHER,
+} reflect_section_t;
+
+// Map a section to its Vulkan descriptor type. Returns 0 if the section
+// does not correspond to a descriptor binding (e.g., push_constants).
+static VkDescriptorType reflect_section_to_desc_type(reflect_section_t s) {
+    switch (s) {
+        case SEC_UBOS:              return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        case SEC_SSBOS:             return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        case SEC_IMAGES:            return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        case SEC_TEXTURES:          return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        case SEC_SEPARATE_IMAGES:   return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        case SEC_SEPARATE_SAMPLERS: return VK_DESCRIPTOR_TYPE_SAMPLER;
+        default:                    return (VkDescriptorType)0;
+    }
+}
+
+// Minimal JSON tokenizer state for reflection parsing. We track:
+//   - current top-level array section (set when we see "<name>" : [)
+//   - current binding value (set when we see "binding" : <int>)
+//   - depth of `{` nesting so we know when an entry ends.
+//
+// We don't need a real JSON parser — the spirv-cross reflection output is
+// regular and we only need the section name + binding number per entry.
+
+// Helper: skip whitespace, return pointer to next non-ws char.
+static const char* skip_ws(const char* p) {
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    return p;
+}
+
+// Helper: match a literal string token at *p (e.g., "binding"). Returns the
+// pointer past the closing quote on match, NULL on miss.
+static const char* match_str(const char* p, const char* lit) {
+    if (*p != '"') return NULL;
+    p++;
+    size_t n = strlen(lit);
+    if (strncmp(p, lit, n) != 0 || p[n] != '"') return NULL;
+    return p + n + 1;
+}
+
+// Helper: parse an integer at *p (optionally signed). Returns the pointer
+// past the number, or NULL on parse failure. Writes the value to *out.
+static const char* parse_int(const char* p, long* out) {
+    const char* start = p;
+    if (*p == '-') p++;
+    if (*p < '0' || *p > '9') return NULL;
+    long v = 0;
+    while (*p >= '0' && *p <= '9') {
+        v = v * 10 + (*p - '0');
+        p++;
+    }
+    *out = v;
+    (void)start;
+    return p;
+}
+
+int vk_reflect_descriptor_sets(const uint32_t* spirv, size_t spirv_size,
+                                VkDescriptorSetLayoutBinding* out_bindings,
+                                int max_bindings) {
+    if (!spirv || spirv_size == 0 || !out_bindings || max_bindings <= 0) {
+        return -1;
+    }
+
+    // Write SPIR-V to a temp file. mkstemp opens the file for us; we just
+    // need to write the bytes and close it before invoking spirv-cross.
+    char tmpl[] = "/tmp/vk_reflect_XXXXXX.spv";
+    int fd = mkstemps(tmpl, 4);  // suffix_len = 4 (".spv")
+    if (fd < 0) {
+        return -1;
+    }
+    ssize_t off = 0;
+    while ((size_t)off < spirv_size) {
+        ssize_t w = write(fd, (const char*)spirv + off, spirv_size - off);
+        if (w <= 0) {
+            close(fd);
+            unlink(tmpl);
+            return -1;
+        }
+        off += w;
+    }
+    close(fd);
+
+    // Run spirv-cross <tmp> --reflect and capture stdout via a pipe.
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
+        unlink(tmpl);
+        return -1;
+    }
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]); close(pipefd[1]);
+        unlink(tmpl);
+        return -1;
+    }
+    if (pid == 0) {
+        // Child: redirect stdout to pipe, exec spirv-cross.
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[1]);
+        // Silence spirv-cross's own diagnostics on stderr.
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) { dup2(devnull, STDERR_FILENO); close(devnull); }
+        execlp("spirv-cross", "spirv-cross", tmpl, "--reflect", (char*)NULL);
+        // If execlp returns, spirv-cross is not on PATH. Exit with 127.
+        _exit(127);
+    }
+    // Parent: read child's stdout until EOF.
+    close(pipefd[1]);
+    size_t cap = 16384;
+    size_t len = 0;
+    char* buf = (char*)malloc(cap);
+    if (!buf) {
+        close(pipefd[0]);
+        unlink(tmpl);
+        return -1;
+    }
+    for (;;) {
+        if (len == cap) {
+            cap *= 2;
+            char* nb = (char*)realloc(buf, cap);
+            if (!nb) { free(buf); close(pipefd[0]); unlink(tmpl); return -1; }
+            buf = nb;
+        }
+        ssize_t r = read(pipefd[0], buf + len, cap - len);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            free(buf); close(pipefd[0]); unlink(tmpl); return -1;
+        }
+        if (r == 0) break;
+        len += (size_t)r;
+    }
+    close(pipefd[0]);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    unlink(tmpl);
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        free(buf);
+        return -1;
+    }
+    // NUL-terminate for string scanning.
+    if (len == cap) {
+        char* nb = (char*)realloc(buf, cap + 1);
+        if (!nb) { free(buf); return -1; }
+        buf = nb;
+    }
+    buf[len] = '\0';
+
+    // Parse the JSON. We walk the buffer character by character, tracking:
+    //   - current top-level section (the array we're inside)
+    //   - the last "binding" : <int> value seen in the current entry
+    //   - brace depth so we know when an entry closes
+    //
+    // On closing an entry inside a descriptor-relevant section, we emit a
+    // VkDescriptorSetLayoutBinding.
+    reflect_section_t cur_section = SEC_NONE;
+    int brace_depth = 0;
+    int in_entry = 0;        // we're inside an element of a descriptor array
+    long cur_binding = -1;
+    int count = 0;
+
+    const char* p = buf;
+    while (*p) {
+        // Skip whitespace.
+        if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') { p++; continue; }
+
+        // Handle a string token. Two cases:
+        //   (a) At brace_depth <= 1, it might be a top-level section opener
+        //       like `"ubos" : [`. Detect + record the section.
+        //   (b) At any depth, if we're inside a descriptor section entry,
+        //       watch for `"binding" : <int>` and capture the integer.
+        if (*p == '"') {
+            // (a) Try section-opener detection at top level.
+            if (brace_depth <= 1) {
+                const char* after = NULL;
+                if ((after = match_str(p, "ubos")) ||
+                    (after = match_str(p, "ssbos")) ||
+                    (after = match_str(p, "images")) ||
+                    (after = match_str(p, "textures")) ||
+                    (after = match_str(p, "separate_images")) ||
+                    (after = match_str(p, "separate_samplers"))) {
+                    const char* q = skip_ws(after);
+                    if (*q == ':') {
+                        q = skip_ws(q + 1);
+                        if (*q == '[') {
+                            if      (strncmp(p+1, "ubos",              4)  == 0) cur_section = SEC_UBOS;
+                            else if (strncmp(p+1, "ssbos",             5)  == 0) cur_section = SEC_SSBOS;
+                            else if (strncmp(p+1, "images",            6)  == 0) cur_section = SEC_IMAGES;
+                            else if (strncmp(p+1, "textures",          8)  == 0) cur_section = SEC_TEXTURES;
+                            else if (strncmp(p+1, "separate_images",  15)  == 0) cur_section = SEC_SEPARATE_IMAGES;
+                            else if (strncmp(p+1, "separate_samplers",17)  == 0) cur_section = SEC_SEPARATE_SAMPLERS;
+                            p = q + 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+            // (b) Either not a section opener, or we're deeper in the tree.
+            // Find the closing quote of this string token.
+            const char* q = p + 1;
+            while (*q && *q != '"') { if (*q == '\\') q++; if (*q) q++; }
+            if (*q != '"') { p = q; continue; }
+            // If we're inside a descriptor-section entry, look for
+            // "binding" : <int> after the closing quote.
+            if (in_entry && cur_section != SEC_NONE && cur_section != SEC_OTHER) {
+                if (strncmp(p+1, "binding", 7) == 0 && p[8] == '"') {
+                    const char* colon = skip_ws(q + 1);
+                    if (*colon == ':') {
+                        const char* vp = skip_ws(colon + 1);
+                        long v = -1;
+                        const char* after_v = parse_int(vp, &v);
+                        if (after_v) {
+                            cur_binding = v;
+                        }
+                    }
+                }
+            }
+            p = q + 1;
+            continue;
+        }
+
+        if (*p == '{') {
+            brace_depth++;
+            // If we're inside a descriptor section and this opens a child of
+            // the section's array (brace_depth == 2 means we're inside one
+            // entry of the top-level section array), mark us as in_entry.
+            if (cur_section != SEC_NONE && cur_section != SEC_OTHER && brace_depth == 2) {
+                in_entry = 1;
+                cur_binding = -1;
+            }
+            p++;
+            continue;
+        }
+        if (*p == '}') {
+            if (cur_section != SEC_NONE && cur_section != SEC_OTHER && in_entry && brace_depth == 2) {
+                // Closing an entry inside a descriptor section — emit a binding.
+                if (cur_binding >= 0 && count < max_bindings) {
+                    VkDescriptorType dt = reflect_section_to_desc_type(cur_section);
+                    if (dt != 0) {
+                        out_bindings[count].binding = (uint32_t)cur_binding;
+                        out_bindings[count].descriptorType = dt;
+                        out_bindings[count].descriptorCount = 1;
+                        out_bindings[count].stageFlags = 0;  // caller fills
+                        out_bindings[count].pImmutableSamplers = NULL;
+                        count++;
+                    }
+                }
+                in_entry = 0;
+                cur_binding = -1;
+            }
+            brace_depth--;
+            p++;
+            continue;
+        }
+        if (*p == ']') {
+            // Closing a section array.
+            if (cur_section != SEC_NONE) {
+                cur_section = SEC_NONE;
+                in_entry = 0;
+            }
+            p++;
+            continue;
+        }
+        // Any other character — skip.
+        p++;
+    }
+
+    free(buf);
+    return count;
+}
+
+// Helper: merge two reflected binding arrays (for vert+frag graphics
+// pipelines). Bindings from `b` are added to `a` (deduplicating by binding
+// number: if a binding already exists in `a`, its stageFlags are OR'd with
+// `b_extra_stage`; otherwise the binding is appended with `b_extra_stage`).
+// Returns the new count (<= max_bindings), or -1 if `a` would overflow.
+static int reflect_merge_bindings(VkDescriptorSetLayoutBinding* a, int a_count,
+                                    const VkDescriptorSetLayoutBinding* b, int b_count,
+                                    VkShaderStageFlags b_extra_stage,
+                                    int max_bindings) {
+    for (int i = 0; i < b_count; i++) {
+        int found = -1;
+        for (int j = 0; j < a_count; j++) {
+            if (a[j].binding == b[i].binding) { found = j; break; }
+        }
+        if (found >= 0) {
+            a[found].stageFlags |= b_extra_stage;
+        } else {
+            if (a_count >= max_bindings) return -1;
+            a[a_count] = b[i];
+            a[a_count].stageFlags = b_extra_stage;
+            a_count++;
+        }
+    }
+    return a_count;
+}
 
 // ---------------------------------------------------------------------------
 // Global state (single-device, single-queue)
@@ -289,22 +635,41 @@ int64_t vk_create_compute_pipeline_spirv(void* device, void* spirv, int64_t spir
         return 0;
     }
 
-    // Create a simple descriptor set layout with one uniform buffer
-    // (binding 0) and one storage image (binding 1). A real implementation
-    // would reflect the bindings from the SPIR-V bytecode.
-    VkDescriptorSetLayoutBinding bindings[2] = {0};
-    bindings[0].binding = 0;
-    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    bindings[0].descriptorCount = 1;
-    bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    bindings[1].binding = 1;
-    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    bindings[1].descriptorCount = 1;
-    bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    // W3-D: Reflect descriptor set bindings from the SPIR-V bytecode via
+    // spirv-cross. If reflection fails (spirv-cross not installed, parse
+    // error, etc.), fall back to the hardcoded 2-binding layout
+    // (uniform buffer at 0 + storage image at 1) — the legacy behavior.
+    VkDescriptorSetLayoutBinding bindings[MAX_BINDINGS] = {0};
+    int binding_count = vk_reflect_descriptor_sets(
+        code, code_size, bindings, MAX_BINDINGS);
+    if (binding_count < 0) {
+        // Fallback: hardcoded 2-binding layout (uniform buffer + storage image).
+        binding_count = 2;
+        bindings[0].binding = 0;
+        bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        bindings[0].descriptorCount = 1;
+        bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        bindings[0].pImmutableSamplers = NULL;
+        bindings[1].binding = 1;
+        bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        bindings[1].descriptorCount = 1;
+        bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        bindings[1].pImmutableSamplers = NULL;
+        fprintf(stderr, "vk_create_compute_pipeline_spirv: reflection failed, "
+                "using fallback 2-binding layout\n");
+    } else {
+        // Reflection succeeded — fill in stageFlags for each binding.
+        for (int i = 0; i < binding_count; i++) {
+            bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+            bindings[i].pImmutableSamplers = NULL;
+        }
+        fprintf(stderr, "vk_create_compute_pipeline_spirv: reflected %d binding(s)\n",
+                binding_count);
+    }
 
     VkDescriptorSetLayoutCreateInfo dsli = {0};
     dsli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    dsli.bindingCount = 2;
+    dsli.bindingCount = (uint32_t)binding_count;
     dsli.pBindings = bindings;
     vkCreateDescriptorSetLayout(dev, &dsli, NULL, &g_pipeline_state.desc_set_layout);
 
@@ -1015,20 +1380,81 @@ int64_t vk_create_graphics_pipeline(void* device, void* spirv_vert,
         return 0;
     }
 
-    // Create descriptor set layout: uniform buffer (binding 0) + combined
-    // image sampler (binding 1).
-    VkDescriptorSetLayoutBinding bindings[2] = {0};
-    bindings[0].binding = 0;
-    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    bindings[0].descriptorCount = 1;
-    bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-    bindings[1].binding = 1;
-    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    bindings[1].descriptorCount = 1;
-    bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    // W3-D: Reflect descriptor set bindings from BOTH vertex and fragment
+    // SPIR-V modules via spirv-cross, then merge. Each binding's stageFlags
+    // is set to VK_SHADER_STAGE_VERTEX_BIT (if only vert declared it),
+    // VK_SHADER_STAGE_FRAGMENT_BIT (if only frag declared it), or both OR'd
+    // (if both stages reference the same binding — common for shared UBOs).
+    //
+    // If reflection fails for either stage (spirv-cross not installed, parse
+    // error, etc.), fall back to the hardcoded 2-binding layout (uniform
+    // buffer at 0 [vert] + combined image sampler at 1 [frag]) — the legacy
+    // behavior.
+    VkDescriptorSetLayoutBinding vert_bindings[MAX_BINDINGS] = {0};
+    VkDescriptorSetLayoutBinding frag_bindings[MAX_BINDINGS] = {0};
+    VkDescriptorSetLayoutBinding bindings[MAX_BINDINGS] = {0};
+    int vert_count = vk_reflect_descriptor_sets(
+        (const uint32_t*)spirv_vert, (size_t)vert_len,
+        vert_bindings, MAX_BINDINGS);
+    int frag_count = vk_reflect_descriptor_sets(
+        (const uint32_t*)spirv_frag, (size_t)frag_len,
+        frag_bindings, MAX_BINDINGS);
+    int binding_count;
+    if (vert_count < 0 || frag_count < 0) {
+        // Fallback: hardcoded 2-binding layout.
+        binding_count = 2;
+        bindings[0].binding = 0;
+        bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        bindings[0].descriptorCount = 1;
+        bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        bindings[0].pImmutableSamplers = NULL;
+        bindings[1].binding = 1;
+        bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[1].descriptorCount = 1;
+        bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings[1].pImmutableSamplers = NULL;
+        fprintf(stderr, "vk_create_graphics_pipeline: reflection failed "
+                "(vert=%d frag=%d), using fallback 2-binding layout\n",
+                vert_count, frag_count);
+    } else {
+        // Merge: copy vert bindings with VERTEX stage, then merge frag
+        // bindings with FRAGMENT stage (deduplicating by binding number).
+        if (vert_count > MAX_BINDINGS) vert_count = MAX_BINDINGS;
+        for (int i = 0; i < vert_count; i++) {
+            bindings[i] = vert_bindings[i];
+            bindings[i].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+            bindings[i].pImmutableSamplers = NULL;
+        }
+        binding_count = vert_count;
+        int merged = reflect_merge_bindings(bindings, binding_count,
+                                             frag_bindings, frag_count,
+                                             VK_SHADER_STAGE_FRAGMENT_BIT,
+                                             MAX_BINDINGS);
+        if (merged < 0) {
+            // Overflow — fall back to hardcoded layout.
+            binding_count = 2;
+            bindings[0].binding = 0;
+            bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            bindings[0].descriptorCount = 1;
+            bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+            bindings[0].pImmutableSamplers = NULL;
+            bindings[1].binding = 1;
+            bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            bindings[1].descriptorCount = 1;
+            bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+            bindings[1].pImmutableSamplers = NULL;
+            fprintf(stderr, "vk_create_graphics_pipeline: reflection merge "
+                    "overflowed %d bindings, using fallback\n", MAX_BINDINGS);
+        } else {
+            binding_count = merged;
+            fprintf(stderr, "vk_create_graphics_pipeline: reflected %d binding(s) "
+                    "(vert=%d frag=%d)\n", binding_count, vert_count, frag_count);
+        }
+    }
+
     VkDescriptorSetLayoutCreateInfo dsli = {0};
     dsli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    dsli.bindingCount = 2;
+    dsli.bindingCount = (uint32_t)binding_count;
     dsli.pBindings = bindings;
     vkCreateDescriptorSetLayout(dev, &dsli, NULL, &g_gfx_desc_layout);
 
