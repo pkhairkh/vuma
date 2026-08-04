@@ -1,0 +1,73 @@
+// ============================================================================
+// womb/ui/render/scene_build.vuma — Builder API for scene trees
+// ============================================================================
+// Declares the builder API for constructing a Scene tree at runtime. The
+// host runtime (or a future VUMA implementation) maintains a node pool and
+// wires up parent/child pointers; the VUMA program calls these transforms
+// to populate the tree before passing it to scene_flatten (see scene.vuma).
+//
+// Per W3-B (V-WOMB-1/W3): this is a declaration module — it defines the
+// extern function signatures. The host runtime provides the bodies.
+//
+// Mat4 / SceneNode / Scene layouts are defined in scene.vuma.
+//
+// Builder contract:
+//   scene_create()           — allocates an empty Scene (root=NULL, count=0).
+//   scene_node_add_child(parent, child)
+//                            — appends child to parent.children (grows the
+//                              children array as needed). Returns 0 on
+//                              success, -1 on allocation failure or invalid
+//                              pointers.
+//   scene_node_set_transform(node, transform)
+//                            — copies transform into node.transform.
+//                              Returns 0 on success, -1 on invalid node.
+//   scene_node_set_mesh(node, mesh)
+//                            — sets node.mesh to mesh (or -1 to clear).
+//                              Returns 0 on success, -1 on invalid node.
+//
+// All builder transforms are extern "C"; the host runtime owns the node
+// pool's lifetime. The Scene returned by scene_create must be passed to
+// scene_flatten (or freed by the host) before the program exits.
+// ============================================================================
+
+// Re-declare the types here for self-containment. The compiler deduplicates
+// struct definitions by name, so a program that imports both scene.vuma and
+// scene_build.vuma sees a single Mat4 / SceneNode / Scene type.
+struct Mat4 {
+    m: [f32; 16],
+}
+
+struct SceneNode {
+    transform: Mat4,
+    mesh: i32,
+    child_count: i32,
+    children: Address,
+}
+
+struct Scene {
+    root: Address,
+    node_count: i32,
+    _pad: i32,
+}
+
+// ===========================================================================
+// Extern declarations
+// ===========================================================================
+
+extern "C" {
+    // Append `child` to `parent.children` (grows the array as needed).
+    // Returns 0 on success, -1 on allocation failure or invalid pointers.
+    transform scene_node_add_child(parent: Address, child: Address) -> i32;
+
+    // Copy `transform` into `node.transform`.
+    // Returns 0 on success, -1 on invalid node.
+    transform scene_node_set_transform(node: Address, transform: Mat4) -> i32;
+
+    // Set `node.mesh` to `mesh` (use -1 to clear).
+    // Returns 0 on success, -1 on invalid node.
+    transform scene_node_set_mesh(node: Address, mesh: i32) -> i32;
+
+    // Allocate an empty Scene (root=NULL, node_count=0). The host runtime
+    // owns the returned Scene's lifetime.
+    transform scene_create() -> Scene;
+}

@@ -1,0 +1,77 @@
+// ============================================================================
+// womb/ui/render/scene.vuma — Scene tree with transform hierarchy
+// ============================================================================
+// Declares the Mat4 (4x4 column-major matrix), SceneNode (transform + mesh
+// + child list), and Scene (root + node count) types, plus the
+// scene_flatten transform that walks the tree, multiplies transforms down
+// the hierarchy, and writes a flat buffer of (node_index, world_transform)
+// pairs to out_buf.
+//
+// Per W3-A (V-WOMB-1/W3): this is a declaration module — it defines the
+// types and the extern function signature. The host runtime (or a future
+// VUMA implementation) provides the scene_flatten body.
+//
+// Mat4 memory layout (64 bytes, 16-byte aligned):
+//   [m: [f32; 16] @ 0]  — column-major 4x4 matrix
+//   m[col * 4 + row] == matrix(row, col)
+//
+// SceneNode memory layout (80 bytes, 8-byte aligned):
+//   [transform: Mat4     @ 0 ]   — 64 bytes (local-to-parent matrix)
+//   [mesh:       i32     @ 64]   — mesh index, -1 = no mesh (leaf)
+//   [child_count: i32    @ 68]   — number of children in the children array
+//   [children:   Address @ 72]   — *SceneNode, array of child_count nodes
+//   Total: 80 bytes
+//
+// Scene memory layout (16 bytes, 8-byte aligned):
+//   [root:       Address @ 0]   — *SceneNode (root of the tree)
+//   [node_count: i32     @ 8]   — total node count (for stats / bounds)
+//   [_pad:       i32     @ 12]  — alignment padding to 16 bytes
+//   Total: 16 bytes
+//
+// Flatten output buffer layout:
+//   Each entry is 68 bytes (Mat4 + i32 mesh + i32 pad):
+//     [transform: Mat4 @ 0]
+//     [mesh:       i32 @ 64]
+//     [_pad:       i32 @ 68]
+//   Entry count = min(out_len / 68, scene.node_count).
+//   Returns the number of entries written, or -1 on error (null scene,
+//   null out_buf, negative out_len).
+// ============================================================================
+
+struct Mat4 {
+    m: [f32; 16],
+}
+
+struct SceneNode {
+    transform: Mat4,
+    mesh: i32,
+    child_count: i32,
+    children: Address,
+}
+
+struct Scene {
+    root: Address,
+    node_count: i32,
+    _pad: i32,
+}
+
+// ===========================================================================
+// Extern declarations
+// ===========================================================================
+// The host runtime (or a future VUMA implementation) provides scene_flatten.
+// The VUMA program calls it with the Scene (by value, since it's only 16
+// bytes), a pointer to the output buffer, and the buffer's capacity in
+// bytes. The walk is a depth-first traversal:
+//   flatten(node, parent_world):
+//     world = parent_world * node.transform
+//     write (world, node.mesh) to out_buf
+//     for child in node.children:
+//       flatten(child, world)
+// The root's parent_world is the identity matrix.
+//
+// Returns the number of entries written, or -1 on error.
+
+extern "C" {
+    // Flatten the scene tree into a flat (transform, mesh) buffer.
+    transform scene_flatten(scene: Scene, out_buf: Address, out_len: i32) -> i32;
+}

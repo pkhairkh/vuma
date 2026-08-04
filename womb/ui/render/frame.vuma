@@ -1,0 +1,68 @@
+// ============================================================================
+// womb/ui/render/frame.vuma — Frame orchestration (acquire -> record -> submit -> present)
+// ============================================================================
+// Declares the FrameResult struct and the frame_begin / frame_draw_scene /
+// frame_end transforms that orchestrate a single rendered frame across the
+// GPU host runtime (Vulkan swapchain or Metal CAMetalDrawable).
+//
+// Per W3-C (V-WOMB-1/W3): this is a declaration module — it defines the
+// type and the extern function signatures. The host runtime provides the
+// bodies (acquire swapchain image, begin render pass, encode scene draw,
+// end render pass, submit, present).
+//
+// FrameResult memory layout (8 bytes, 4-byte aligned):
+//   [success:     i32 @ 0]  — 0 on success, non-zero on error
+//   [image_index: i32 @ 4]  — swapchain image index (0..N-1) on success;
+//                              undefined on error
+//
+// Frame orchestration sequence:
+//   1. frame_begin(device, swapchain)
+//        - Acquires the next swapchain image (vk_acquire_next_image).
+//        - Begins recording a command buffer.
+//        - Begins the render pass (vk_cmd_begin_render_pass).
+//        - Returns FrameResult { success=0, image_index } on success.
+//   2. frame_draw_scene(cmd_buf, scene, pipeline)
+//        - Binds the graphics pipeline.
+//        - Calls scene_flatten (see scene.vuma) to produce world transforms.
+//        - For each scene node with mesh != -1, binds the mesh's vertex +
+//          index buffers, updates the MVP uniform with the node's world
+//          transform, and calls vk_cmd_draw_indexed.
+//        - Returns 0 on success, non-zero on error.
+//   3. frame_end(cmd_buf, queue, swapchain, image_index)
+//        - Ends the render pass.
+//        - Ends command buffer recording.
+//        - Submits the command buffer to the queue.
+//        - Presents the swapchain image (vk_present).
+//        - Returns 0 on success, non-zero on error.
+//
+// The cmd_buf / device / queue / swapchain handles are opaque Addresses
+// returned by the host runtime's setup functions (see gpu_dispatch.vuma).
+// The pipeline is an i64 handle returned by vk_create_graphics_pipeline
+// or mtl_create_render_pipeline.
+// ============================================================================
+
+struct FrameResult {
+    success: i32,
+    image_index: i32,
+}
+
+// ===========================================================================
+// Extern declarations
+// ===========================================================================
+
+extern "C" {
+    // Acquire the next swapchain image, begin command buffer recording, and
+    // begin the render pass. Returns FrameResult { success=0, image_index }
+    // on success, or FrameResult { success!=0, image_index=0xFFFFFFFF } on
+    // error (acquire failure, no command buffer, etc.).
+    transform frame_begin(device: Address, swapchain: Address) -> FrameResult;
+
+    // Draw a scene with the given graphics pipeline. Calls scene_flatten
+    // internally and issues one draw_indexed per scene node with mesh != -1.
+    // Returns 0 on success, non-zero on error.
+    transform frame_draw_scene(cmd_buf: Address, scene: Scene, pipeline: i64) -> i32;
+
+    // End the render pass, end command buffer recording, submit to the
+    // queue, and present the swapchain image. Returns 0 on success.
+    transform frame_end(cmd_buf: Address, queue: Address, swapchain: Address, image_index: i32) -> i32;
+}
