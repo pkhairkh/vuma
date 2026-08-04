@@ -10237,7 +10237,7 @@ impl Backend for RiscV64Backend {
                     // replacements): backend lowering not yet implemented on riscv64;
                     // emit no bytes (x86_64 is the canonical path).
                     | IRInstr::BulkCopy { .. }
-                    | IRInstr::BulkFill { .. } | IRInstr::Transform { .. } => Vec::new(),
+                    | IRInstr::BulkFill { .. } | IRInstr::Transform { .. } => unreachable!("ChannelSend/StarkProof/BulkCopy/BulkFill/Transform are lowered by ipc_lowering before reaching backend ISel"),
 
                     // CallIndirect — indirect call through func_ptr.
                     // riscv64 codegen: load args into a0-a5, load func_ptr

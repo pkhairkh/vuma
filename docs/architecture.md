@@ -57,7 +57,7 @@ structs (see §5).
 `src/scg/` lifts the AST into a typed, control-flow-annotated graph. The SCG
 performs name resolution, type checking, monomorphization of generics
 (`src/codegen/src/monomorphize.rs`), effect inference
-(`src/codegen/src/effects.rs`), escape analysis
+(deleted — see ADR-0021; effects are now handled by IVE), escape analysis
 (`src/codegen/src/escape_analysis.rs`), and alias analysis
 (`src/codegen/src/alias_analysis.rs`). The SCG is the canonical input to the
 verifier and to codegen; raw AST nodes are never seen past this stage.

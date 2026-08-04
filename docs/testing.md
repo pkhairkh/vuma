@@ -271,8 +271,10 @@ Eight workflows in `.github/workflows/`:
 | `proof-verify.yml` | Lean proof system (formal spec — standalone) |
 | `cross-compile.yml` | cross-arch matrix |
 | `release.yml` | tagged-release |
-| `lean-rust-parity.yml` | Lean↔Rust parity (hand-translation differential) |
 | `differential-test.yml` | cross-backend differential testing |
+
+> **Note**: `lean-rust-parity.yml` was removed (the FFI bridge it tested
+> no longer exists — see ADR-0005).
 
 **Manifest CI gate** (`ci.yml:56-64`). A dedicated `manifest` job
 runs in parallel with `build` (no Rust toolchain needed — just Python

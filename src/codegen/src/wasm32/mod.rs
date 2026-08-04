@@ -4324,7 +4324,7 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
         // replacements): backend lowering not yet implemented on wasm32;
         // emit nothing (x86_64 is the canonical path).
         | IRInstr::BulkCopy { .. }
-        | IRInstr::BulkFill { .. } | IRInstr::Transform { .. } => {}
+        | IRInstr::BulkFill { .. } | IRInstr::Transform { .. } => unreachable!("ChannelSend/StarkProof/BulkCopy/BulkFill/Transform are lowered by ipc_lowering before reaching backend ISel")
 
         IRInstr::CallIndirect { dst, func_ptr, args } => {
             // Indirect call through a function pointer (table slot index on

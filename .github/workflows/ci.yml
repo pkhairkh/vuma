@@ -2,7 +2,8 @@
 # VUMA CI Pipeline
 # ============================================================================
 # Runs on every push to main and on pull requests targeting main.
-# Jobs: build, manifest, test (matrix), fmt, clippy, docs, lean-proofs, qemu-smoke
+# Jobs: build, manifest, test (matrix), fmt, clippy, docs, qemu-smoke
+#       (lean-proofs moved to proof-verify.yml — V-NEW-7)
 # ============================================================================
 
 name: CI
@@ -167,56 +168,9 @@ jobs:
           path: target/doc
           retention-days: 7
 
-  # ── Lean Proofs ─────────────────────────────────────────────────────────────
-  # Builds and tests the Lean proof package under ./proof. Runs in parallel
-  # with the FAST Rust test jobs (no `needs:` dependency) so Lean failures
-  # don't block Rust developer feedback and vice versa. Strict sorry check is
-  # enabled (PMT proof library is sorry-free).
-  #
-  # ── Release gating policy (Wave 7-B) ───────────────────────────────────────
-  # Policy: "Fast Rust test jobs run in parallel for developer feedback.
-  #          Release/publish jobs gate on lean-rust-parity workflow success."
-  #
-  # This ci.yml defines NO release/publish/deploy job — every job here is a
-  # fast-feedback check and stays parallel (none of build/test/fmt/clippy/
-  # docs/qemu-smoke `needs:` a Lean job, by design). The release/publish jobs
-  # live in release.yml (triggered on `v*` tags) and are the ONLY jobs that
-  # must gate on Lean parity. That gate is enforced cross-workflow because the
-  # `lean-rust-parity` check runs in its own workflow file (Wave 7-A):
-  #   release.yml's `release` job should require the lean-rust-parity workflow
-  #   to have succeeded — either via a `workflow_run` trigger that waits on
-  #   `lean-rust-parity` completing with `success`, OR by a downstream
-  #   `needs:`-style check job that re-runs/queries it. It is intentionally NOT
-  #   wired as a plain `needs:` here because (a) ci.yml has no release job to
-  #   attach it to and (b) lean-rust-parity is a separate workflow, so a same-
-  #   workflow `needs:` is not available — `workflow_run` is the GitHub-mandated
-  #   cross-workflow gate. Until release.yml is updated, this comment is the
-  #   authoritative record of the policy; see NEEDS_FOLLOWUP 7-B.
-  lean-proofs:
-    name: Lean Proofs
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install elan (Lean toolchain)
-        run: |
-          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o /tmp/elan-init.sh
-          sh /tmp/elan-init.sh -y --default-toolchain leanprover/lean4:v4.21.0
-          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
-
-      - name: Build proofs
-        run: cd proof && lake build
-
-      - name: Check sorry (strict)
-        env:
-          # Strict mode (fail on any sorry) is enabled — the
-          # PMT proof library is sorry-free.
-          PROOF_CHECK_STRICT: "1"
-        run: ./scripts/check-lean.sh
-
-      - name: Run proof tests
-        run: cd proof && lake exe test
+  # NOTE: The `lean-proofs` job was removed from ci.yml (V-NEW-7) to avoid
+  # duplication with proof-verify.yml, which has the canonical Lean proofs job.
+  # See .github/workflows/proof-verify.yml for the `lean-proofs` job.
 
   # ── QEMU smoke test ─────────────────────────────────────────────────────────
   # Builds the compiler, then for each of the 12 QEMU backends + wasm32

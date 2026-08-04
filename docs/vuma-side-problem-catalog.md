@@ -45,7 +45,8 @@ ADR-0013. VELL is renamed to VEEE (VE^3 = Verified Expression
 Evaluation Engine) per ADR-0012. VEEE compiles to VUMA AST (ADR-0014),
 inherits PMT verification, and its incremental-computation engine
 (ADR-0016) and monotonicity types (ADR-0017) live in VEEE, not VUMA.
-The GPU path goes through MLIR→SPIR-V (ADR-0018, Proposed), not
+The GPU path goes through hand-written SPIR-V via glslangValidator
+(ADR-0022; ADR-0018's MLIR→SPIR-V approach was superseded), not
 through VUMA's CPU-only codegen. WOMB UI modules live in `womb/ui/`
 (ADR-0019) and the existing `womb/kernel/trap/irq_ring.vuma` SPSC
 ring is generalized to `womb/sync/spsc.vuma`. The dead `Effect` enum
@@ -158,7 +159,7 @@ based on verified source evidence.
 |-----|--------------------------------------------------------|---------------------|-------------|
 | V-04 | (was) Parser rejects `[T; N]` for struct T            | REDUNDANT (parser accepts; bug is V-03/V-35) | — |
 | V-05 | (was) `Expr::Index` always loads 1 byte               | REDUNDANT (already implemented at `pipeline.rs:8075`) | — |
-| V-07 | (was) `extern "C"` lacks Borrow/Marshal distinction   | REDUNDANT (`ArgMode` exists; 3-day `effects.rs` fix) | 3 days |
+| V-07 | (was) `extern "C"` lacks Borrow/Marshal distinction   | REDUNDANT (`ArgMode` exists; `effects.rs` deleted per ADR-0021) | — |
 | V-01 | (was) Add `native` backend variant                    | Out of scope (WOMB/native-host) | — |
 | V-02 | (was) Add rendering IR instructions                   | Out of scope (depends on GPU stack) | — |
 | V-GPU | GPU backend infrastructure (Vulkan/Metal/SPIR-V/WebGPU) | Greenfield — 3–6 months | tracked separately |

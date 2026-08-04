@@ -911,8 +911,8 @@ Every PR targeting `main` runs:
   via `.github/workflows/proof-verify.yml`. This CI job gates the
   *formal Lean specification*, not the compiler build. The executable
   verifier is Z3-based and runs in the regular `ci.yml` build / test jobs.
-- **Lean↔Rust parity** — `lean-rust-parity.yml` runs the
-  hand-translation differential test (`tests/pmt_parity_test*.rs`).
+- **Lean↔Rust parity** — (deleted — the `lean-rust-parity.yml` workflow
+  was removed; the FFI bridge it tested no longer exists. See ADR-0005.)
 - **Differential testing** — `differential-test.yml` runs the
   cross-backend differential test harness.
 
