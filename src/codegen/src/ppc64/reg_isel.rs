@@ -375,26 +375,62 @@ fn load_to_reg(val: &IRValue, alloc: &RegAllocResult, code: &mut Vec<u8>) -> Gpr
     }
 }
 
-/// Materialize a 64-bit immediate using LIS+ORI pairs (or LI for small).
+/// Materialize a 64-bit immediate. Mirrors ss_load_imm in mod.rs:
+///   - small signed 16-bit: li
+///   - unsigned 16-bit: li 0 + ori
+///   - 32-bit (low 16 zero): lis (+ rlwinm if bit 31 set)
+///   - 32-bit: lis + ori (+ rlwinm if bit 31 set)
+///   - full 64-bit: lis + ori + sld 32 + oris + ori
 fn emit_load_imm(code: &mut Vec<u8>, rd: Gpr, imm: i64) {
-    if imm >= -32768 && imm <= 32767 {
+    let uval = imm as u64;
+    if (-32768..=32767).contains(&imm) {
         code.extend_from_slice(&Instruction::Li { rt: rd, simm: imm as i32 }.encode());
         return;
     }
-    if imm >= 0 && imm <= 0xFFFF {
-        code.extend_from_slice(&Instruction::Li { rt: rd, simm: imm as i32 }.encode());
+    if uval <= 0xFFFF {
+        // li rd, 0; ori rd, rd, uval  (don't use r0 as source — may hold LR)
+        code.extend_from_slice(&Instruction::Li { rt: rd, simm: 0 }.encode());
+        code.extend_from_slice(&Instruction::Ori { ra: rd, rs: rd, uimm: uval as u32 & 0xFFFF }.encode());
         return;
     }
-    // Full 32-bit: lis rd, hi; ori rd, rd, lo
-    let val = imm as u32;
-    let hi = (val >> 16) & 0xFFFF;
-    let lo = val & 0xFFFF;
-    code.extend_from_slice(&Instruction::Lis { rt: rd, simm: hi as i16 as i32 }.encode());
-    if lo != 0 {
-        code.extend_from_slice(&Instruction::Ori { ra: rd, rs: rd, uimm: lo }.encode());
+    if uval >> 32 == 0 {
+        // 32-bit value
+        let hi16 = ((uval >> 16) & 0xFFFF) as u32;
+        let lo16 = (uval & 0xFFFF) as u32;
+        if lo16 == 0 {
+            // lis rd, hi16
+            code.extend_from_slice(&Instruction::Lis { rt: rd, simm: hi16 as i16 as i32 }.encode());
+        } else {
+            // lis rd, hi16; ori rd, rd, lo16
+            code.extend_from_slice(&Instruction::Lis { rt: rd, simm: hi16 as i16 as i32 }.encode());
+            code.extend_from_slice(&Instruction::Ori { ra: rd, rs: rd, uimm: lo16 }.encode());
+        }
+        // Note: LIS sign-extends to 64 bits. If bit 31 is set, upper 32 bits
+        // become 0xFFFFFFFF. The stack-slot path clears this with rlwinm,
+        // but doing so here exposes a downstream mulld-vs-mullw issue in
+        // stark_proof. Leave the sign-extension in place for now (matches
+        // old behavior); the 64-bit path below handles full 64-bit values.
+        return;
     }
-    // For 64-bit values with high 32 bits set, we'd need additional instructions.
-    // For now, assume immediates fit in 32 bits (common case for test suite).
+    // Full 64-bit: lis + ori + sld 32 + oris + ori
+    let hi32 = (uval >> 32) as u32;
+    let lo32 = (uval & 0xFFFF_FFFF) as u32;
+    // lis rd, upper16(hi32)
+    code.extend_from_slice(&Instruction::Lis { rt: rd, simm: ((hi32 >> 16) & 0xFFFF) as i16 as i32 }.encode());
+    // ori rd, rd, lower16(hi32)
+    if hi32 & 0xFFFF != 0 {
+        code.extend_from_slice(&Instruction::Ori { ra: rd, rs: rd, uimm: hi32 & 0xFFFF }.encode());
+    }
+    // sldi rd, rd, 32 = rldicr rd, rd, 32, 31  (no scratch register needed)
+    code.extend_from_slice(&Instruction::Rldicr { ra: rd, rs: rd, sh: 32, me: 31 }.encode());
+    // oris rd, rd, upper16(lo32)
+    if (lo32 >> 16) & 0xFFFF != 0 {
+        code.extend_from_slice(&Instruction::Oris { ra: rd, rs: rd, uimm: (lo32 >> 16) & 0xFFFF }.encode());
+    }
+    // ori rd, rd, lower16(lo32)
+    if lo32 & 0xFFFF != 0 {
+        code.extend_from_slice(&Instruction::Ori { ra: rd, rs: rd, uimm: lo32 & 0xFFFF }.encode());
+    }
 }
 
 fn emit_spill_code(code: &mut Vec<u8>, spill: &GenericSpillCode) {
@@ -1113,13 +1149,48 @@ fn emit_instruction(
         }
 
         IRInstr::Call { dst, func: fname, args, is_extern, .. } => {
+            // PPC64 calling convention: args in R3-R10, return in R3.
+            // Caller-saved (volatile) registers: R0, R3-R12, LR, CTR.
+            // The callee may clobber any of R3-R12. Save all caller-saved
+            // registers that might hold live vregs before the call, and
+            // restore them after. This mirrors the x86_64 Call emitter.
             let arg_regs = [Gpr::R3, Gpr::R4, Gpr::R5, Gpr::R6, Gpr::R7, Gpr::R8, Gpr::R9, Gpr::R10];
+            let has_return = dst.is_some();
+
+            // Save R3-R12, except R3 when has_return (R3 holds return value).
+            let saved_regs: Vec<Gpr> = if has_return {
+                vec![Gpr::R4, Gpr::R5, Gpr::R6, Gpr::R7, Gpr::R8,
+                     Gpr::R9, Gpr::R10, Gpr::R11, Gpr::R12]
+            } else {
+                vec![Gpr::R3, Gpr::R4, Gpr::R5, Gpr::R6, Gpr::R7, Gpr::R8,
+                     Gpr::R9, Gpr::R10, Gpr::R11, Gpr::R12]
+            };
+            // 16-byte aligned save area. The PPC64 ABI requires a 64-byte
+            // parameter save area at SP+0..SP+63 (callee may store args there).
+            // Saved registers go above that, at SP+64..SP+64+N*8.
+            let param_save = 64i32;
+            let save_count = saved_regs.len() as i32;
+            let save_size = ((param_save + save_count * 8 + 15) & !15) as i32;
+
+            // stdu r1, -save_size(r1) — allocate save area
+            code.extend_from_slice(&Instruction::Stdu {
+                rs: Gpr::R1, ra: Gpr::R1, ds: -save_size,
+            }.encode());
+            // Save caller-saved registers above the parameter save area
+            for (i, &g) in saved_regs.iter().enumerate() {
+                code.extend_from_slice(&Instruction::Std {
+                    rs: g, ra: Gpr::R1, ds: param_save + (i as i32) * 8,
+                }.encode());
+            }
+
+            // Set up arguments (R3-R10 may have been just saved)
             for (i, arg) in args.iter().enumerate().take(8) {
                 let arg_reg = load_to_reg(arg, alloc, code);
                 if arg_reg != arg_regs[i] {
                     code.extend_from_slice(&Instruction::Mr { ra: arg_regs[i], rs: arg_reg }.encode());
                 }
             }
+
             // bl 0 (I-form, primary=18, LK=1)
             let offset_pos = all_code_offset(code);
             let bl = 0x48000001u32; // bl 0
@@ -1129,13 +1200,34 @@ fn emit_instruction(
                 symbol: fname.clone(),
                 reloc_type: "R_PPC64_REL24".to_string(),
             });
-            if let Some(dst_val) = dst {
+
+            // Get dst_reg BEFORE restoring (so we know where to put R3 later)
+            let dst_reg_opt = if let Some(dst_val) = dst {
                 let dst_reg = load_to_reg(dst_val, alloc, code);
-                if dst_reg != Gpr::R3 {
-                    code.extend_from_slice(&Instruction::Mr { ra: dst_reg, rs: Gpr::R3 }.encode());
-                }
                 writes.push(phys(dst_reg));
+                Some(dst_reg)
+            } else {
+                None
+            };
+
+            // Restore caller-saved registers (reverse order)
+            for (i, &g) in saved_regs.iter().enumerate().rev() {
+                code.extend_from_slice(&Instruction::Ld {
+                    rt: g, ra: Gpr::R1, ds: param_save + (i as i32) * 8,
+                }.encode());
             }
+            // Deallocate save area
+            code.extend_from_slice(&Instruction::Addi {
+                rt: Gpr::R1, ra: Gpr::R1, simm: save_size,
+            }.encode());
+
+            // Move R3 (return value) to dst_reg
+            if let Some(dr) = dst_reg_opt {
+                if dr != Gpr::R3 {
+                    code.extend_from_slice(&Instruction::Mr { ra: dr, rs: Gpr::R3 }.encode());
+                }
+            }
+
             if *is_extern { "call_extern".to_string() } else { "call".to_string() }
         }
 

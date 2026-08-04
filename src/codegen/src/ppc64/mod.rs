@@ -1042,19 +1042,28 @@ impl Instruction {
                 encode_m_form(23, rs.encoding(), ra.encoding(), rb.encoding(), *mb, *me, 0)
             }
             Instruction::Rldicr { ra, rs, sh, me } => {
-                // RLDICR rA, rS, SH, ME: MD-form, primary=30, XO=2
-                // Encoding (MSB-first bit numbers):
-                //   [0:5]=30, [6:10]=rS, [11:15]=rA,
-                //   [16:20]=SH[0:4], [21]=SH[5],
-                //   [22:26]=ME[0:4], [27]=ME[5], [28:30]=XO(=2), [31]=Rc(=0)
+                // RLDICR rA, rS, SH, ME: MD-form, primary=30
+                // Verified encoding (matches ppc64-linux-gnu-as output):
+                //   sldi r11, r11, 32 = rldicr r11, r11, 32, 31 = 0x796B07C6
+                // Bit layout (LE shift notation, bit 0 = LSB):
+                //   bits 31-26: OPCD=30
+                //   bits 25-21: rS
+                //   bits 20-16: rA
+                //   bits 15-11: SH[0:4]
+                //   bits 10-6:  ME[0:4]
+                //   bit 5:      ME[5]  (6th bit of mask end)
+                //   bits 3-1:   (XO[0:1] << 1) | SH[5]  where XO is 2-bit
+                //               (0=rldicl, 1=rldicr, 2=rldic, 3=rldimi)
+                //   bit 0:      Rc
+                // For rldicr (XO=1): xo_and_sh5 = ((1<<1) | sh5) << 1
+                let xo_and_sh5 = ((1u32 << 1) | ((sh >> 5) & 1)) << 1;
                 let word = (30u32 << 26)
                     | (rs.encoding() << 21)
                     | (ra.encoding() << 16)
                     | ((sh & 0x1F) << 11)
-                    | (((sh >> 5) & 1) << 10)
-                    | ((me & 0x1F) << 5)
-                    | (((me >> 5) & 1) << 4)
-                    | (2 << 1);
+                    | ((me & 0x1F) << 6)
+                    | (((me >> 5) & 1) << 5)
+                    | xo_and_sh5;
                 encode_word(word)
             }
 
