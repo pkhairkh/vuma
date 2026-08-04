@@ -227,6 +227,114 @@ static id<MTLRenderPipelineState> g_render_pipeline = nil;
 // Cached depth texture.
 static id<MTLTexture> g_depth_texture = nil;
 
+// ===========================================================================
+// W3-E: Explicit depth-stencil state (B-5)
+// ===========================================================================
+// Metal requires an explicit MTLDepthStencilState object to be set on the
+// render command encoder to enable depth testing / writing. (When the
+// render pass has a depth attachment but no depth-stencil state is set,
+// Metal's behavior is effectively "depth test disabled, depth write
+// disabled" — the depth buffer is cleared but never tested or written.)
+//
+// Vulkan's vk_create_graphics_pipeline hardcodes depthTestEnable=TRUE,
+// depthWriteEnable=TRUE, depthCompareOp=LESS (see gpu_vulkan.c). To match
+// that behavior on Metal, mtl_cmd_bind_render_pipeline (below) now creates
+// a default LESS+write-enabled state and sets it on the encoder if the
+// caller hasn't set one explicitly via mtl_cmd_set_depth_stencil_state.
+//
+// The caller can also create a custom state via
+// mtl_create_depth_stencil_state(compare_op, depth_write_enable) and set
+// it on the command buffer at any time during the render pass.
+//
+//compare_op values are MTLCompareFunction enum constants:
+//   MTLCompareFunctionNever        = 0
+//   MTLCompareFunctionLess         = 1
+//   MTLCompareFunctionEqual        = 2
+//   MTLCompareFunctionLessEqual    = 3
+//   MTLCompareFunctionGreater      = 4
+//   MTLCompareFunctionNotEqual     = 5
+//   MTLCompareFunctionGreaterEqual = 6
+//   MTLCompareFunctionAlways       = 7
+
+// Cached default depth-stencil state (LESS + write enabled). Lazily
+// created on first use by mtl_cmd_bind_render_pipeline.
+static id<MTLDepthStencilState> g_default_depth_stencil = nil;
+
+// The currently-active depth-stencil state (set by either
+// mtl_cmd_bind_render_pipeline's default or by an explicit
+// mtl_cmd_set_depth_stencil_state call).
+static id<MTLDepthStencilState> g_current_depth_stencil = nil;
+
+// ---------------------------------------------------------------------------
+// mtl_create_depth_stencil_state
+// Create an MTLDepthStencilState with the given compare function and
+// depth-write flag. Returns the state handle (as void*) or NULL on failure.
+//
+// compare_op: MTLCompareFunction enum value (0..7, see table above).
+// depth_write_enable: 1 = depth buffer is writable, 0 = read-only.
+// ---------------------------------------------------------------------------
+void* mtl_create_depth_stencil_state(uint32_t compare_op,
+                                       int32_t depth_write_enable) {
+    if (!g_device) {
+        fprintf(stderr, "mtl_create_depth_stencil_state: no device (call mtl_create_device first)\n");
+        return NULL;
+    }
+    MTLDepthStencilDescriptor* desc = [[MTLDepthStencilDescriptor alloc] init];
+    desc.depthCompareFunction = (MTLCompareFunction)compare_op;
+    desc.depthWriteEnabled = (depth_write_enable != 0) ? YES : NO;
+    // Stencil is left at defaults (disabled) — Vulkan's graphics pipeline
+    // also hardcodes stencilTestEnable=FALSE.
+    NSError* err = nil;
+    // newDepthStencilStateWithDescriptor doesn't actually return an error
+    // (the API is non-throwing), but we keep the pattern for symmetry.
+    (void)err;
+    id<MTLDepthStencilState> state =
+        [g_device newDepthStencilStateWithDescriptor:desc];
+    if (!state) {
+        fprintf(stderr, "mtl_create_depth_stencil_state: newDepthStencilStateWithDescriptor failed\n");
+        return NULL;
+    }
+    return (__bridge void*)state;
+}
+
+// ---------------------------------------------------------------------------
+// mtl_cmd_set_depth_stencil_state
+// Set the active depth-stencil state on the current render command encoder.
+// The state remains in effect until the next call to this function or until
+// the render pass ends (g_render_enc is set to nil by mtl_cmd_end_render_pass).
+//
+// Pass NULL to disable depth testing + writing (depthCompareFunction=Always,
+// depthWriteEnabled=NO).
+// ---------------------------------------------------------------------------
+int32_t mtl_cmd_set_depth_stencil_state(void* cmd, void* state) {
+    (void)cmd;  // g_render_enc is global; cmd is for API symmetry with other mtl_cmd_* fns
+    if (!g_render_enc) {
+        fprintf(stderr, "mtl_cmd_set_depth_stencil_state: no active render encoder "
+                "(call mtl_cmd_begin_render_pass first)\n");
+        return -1;
+    }
+    if (state) {
+        id<MTLDepthStencilState> ds = (__bridge id<MTLDepthStencilState>)state;
+        [g_render_enc setDepthStencilState:ds];
+        g_current_depth_stencil = ds;
+    } else {
+        // Disable depth test + write. We create a one-off "disabled" state
+        // lazily and reuse it for subsequent NULL calls.
+        static id<MTLDepthStencilState> disabled_state = nil;
+        if (!disabled_state) {
+            MTLDepthStencilDescriptor* desc = [[MTLDepthStencilDescriptor alloc] init];
+            desc.depthCompareFunction = MTLCompareFunctionAlways;
+            desc.depthWriteEnabled = NO;
+            disabled_state = [g_device newDepthStencilStateWithDescriptor:desc];
+        }
+        if (disabled_state) {
+            [g_render_enc setDepthStencilState:disabled_state];
+            g_current_depth_stencil = disabled_state;
+        }
+    }
+    return 0;
+}
+
 // ---------------------------------------------------------------------------
 // mtl_create_render_pipeline
 // Creates a render pipeline from vertex + fragment function names in a
@@ -326,15 +434,36 @@ int32_t mtl_cmd_begin_render_pass(void* cmd, void* color_texture,
 
 // ---------------------------------------------------------------------------
 // mtl_cmd_bind_render_pipeline
+// Bind the render pipeline state on the active render encoder. Also sets
+// a default LESS+write-enabled depth-stencil state (matching Vulkan's
+// vk_create_graphics_pipeline defaults) unless the caller has already set
+// one explicitly via mtl_cmd_set_depth_stencil_state.
 // ---------------------------------------------------------------------------
 int32_t mtl_cmd_bind_render_pipeline(void* cmd, int64_t pipeline) {
     (void)cmd;
     id<MTLRenderPipelineState> ps = (__bridge id<MTLRenderPipelineState>)pipeline;
     [g_render_enc setRenderPipelineState:ps];
-    // Set depth-stencil state (depth test enabled, LESS compare).
-    // In a real implementation, we'd create an MTLDepthStencilState and
-    // set it here. For simplicity, we skip it — Metal enables depth test
-    // by default when the render pass has a depth attachment.
+    // W3-E: Set a default depth-stencil state (LESS + write enabled) if
+    // the caller hasn't set one explicitly. This matches Vulkan's hardcoded
+    // depthTestEnable=TRUE, depthWriteEnable=TRUE, depthCompareOp=LESS
+    // (see gpu_vulkan.c vk_create_graphics_pipeline).
+    //
+    // Metal does NOT enable depth testing by default — without an explicit
+    // MTLDepthStencilState, the depth attachment is cleared but never
+    // tested or written, so without this default the cube test would
+    // show z-fighting / incorrect depth ordering.
+    if (!g_current_depth_stencil) {
+        if (!g_default_depth_stencil) {
+            // MTLCompareFunctionLess == 1, depth_write_enable == 1.
+            void* ds = mtl_create_depth_stencil_state(
+                (uint32_t)MTLCompareFunctionLess, 1);
+            g_default_depth_stencil = (__bridge_transfer id<MTLDepthStencilState>)ds;
+        }
+        if (g_default_depth_stencil) {
+            [g_render_enc setDepthStencilState:g_default_depth_stencil];
+            g_current_depth_stencil = g_default_depth_stencil;
+        }
+    }
     return 0;
 }
 
@@ -431,11 +560,15 @@ int32_t mtl_cmd_draw_indexed(void* cmd, void* device,
 
 // ---------------------------------------------------------------------------
 // mtl_cmd_end_render_pass
-// Ends the render command encoder.
+// Ends the render command encoder. Resets the cached render encoder + the
+// currently-active depth-stencil state so the next render pass starts fresh
+// (the caller must either call mtl_cmd_set_depth_stencil_state again or
+// rely on mtl_cmd_bind_render_pipeline's default).
 // ---------------------------------------------------------------------------
 int32_t mtl_cmd_end_render_pass(void* cmd) {
     (void)cmd;
     [g_render_enc endEncoding];
     g_render_enc = nil;
+    g_current_depth_stencil = nil;  // W3-E: reset for next render pass
     return 0;
 }

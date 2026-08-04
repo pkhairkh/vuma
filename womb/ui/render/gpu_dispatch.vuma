@@ -567,3 +567,48 @@ extern "C" {
     // End the render pass.
     transform mtl_cmd_end_render_pass(cmd: Address) -> i32;
 }
+
+// ===========================================================================
+// Metal: Explicit Depth-Stencil State (W3-E, B-5)
+// ===========================================================================
+// Metal requires an explicit MTLDepthStencilState object to be set on the
+// render command encoder to enable depth testing / writing. (When the
+// render pass has a depth attachment but no depth-stencil state is set,
+// Metal's behavior is effectively "depth test disabled, depth write
+// disabled" — the depth buffer is cleared but never tested or written.)
+//
+// mtl_cmd_bind_render_pipeline (above) sets a default LESS+write-enabled
+// state automatically, matching Vulkan's hardcoded depthTestEnable=TRUE,
+// depthWriteEnable=TRUE, depthCompareOp=LESS. Callers that need a
+// different compare function or read-only depth can create a custom state
+// via mtl_create_depth_stencil_state and override the default via
+// mtl_cmd_set_depth_stencil_state.
+//
+// compare_op values are MTLCompareFunction enum constants:
+//   0 = Never, 1 = Less, 2 = Equal, 3 = LessEqual,
+//   4 = Greater, 5 = NotEqual, 6 = GreaterEqual, 7 = Always
+// (These match VkCompareOp 1:1.)
+
+extern "C" {
+    // Create an MTLDepthStencilState with the given compare function and
+    // depth-write flag. Returns the state handle (as Address) or NULL on
+    // failure (e.g., no device, descriptor allocation failed).
+    //
+    // compare_op: MTLCompareFunction enum value (0..7, see table above).
+    // depth_write_enable: 1 = depth buffer writable, 0 = read-only.
+    transform mtl_create_depth_stencil_state(
+        compare_op: u32,
+        depth_write_enable: i32
+    ) -> Address;
+
+    // Set the active depth-stencil state on the current render command
+    // encoder. The state remains in effect until the next call to this
+    // function or until the render pass ends. Pass NULL (0) to disable
+    // depth testing + writing (compare=Always, write=NO).
+    //
+    // Returns 0 on success, -1 if no render encoder is active.
+    transform mtl_cmd_set_depth_stencil_state(
+        cmd: Address,
+        state: Address
+    ) -> i32;
+}
