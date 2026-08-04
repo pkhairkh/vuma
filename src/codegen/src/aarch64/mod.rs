@@ -1373,11 +1373,19 @@ impl Instruction {
             }
 
             // ---- LSL / LSR / ASR (shifted register or immediate) ----
-            // LSL Xd, Xn, Xm uses data processing shifted register format (same as ADD)
-            // Base = 0x8B000000 (sf=1, op=00, S=0, 01011, shift, 0, Rm, imm6=0, Rn, Rd)
+            // LSL Xd, Xn, Xm (variable shift) uses the Data-processing (2 source)
+            // format: 1 0 0 11010110 Rm 001000 Rn Rd  (LSLV).
+            // 64-bit base = 0x9AC02000.
+            //
+            // NOTE: a previous version used the ADD-shifted-register base
+            // (0x8B000000 with shift=LSL/LSR/ASR in bits[23:22]), which is
+            // INCORRECT — that encodes `ADD Xd, Xn, Xm, <shift> #0` (= `Xd =
+            // Xn + Xm`), not the variable shift. The same bug applied to LSR
+            // and ASR. Fixed in W1-H.
+            //
+            // LSL Xd, Xn, #shift (immediate) = UBFM Xd, Xn, #(64-shift), #(63-shift)
             Instruction::LSL { rd, rn, rm } => match rm {
-                Operand::Reg { reg, shift: _ } => Ok(0x8B000000u32
-                    | (ShiftKind::LSL.encoding() << 22)
+                Operand::Reg { reg, shift: _ } => Ok(0x9AC02000u32  // LSLV Xd, Xn, Xm (64-bit)
                     | (reg.encoding() << 16)
                     | (rn.encoding() << 5)
                     | rd.encoding()),
@@ -1396,10 +1404,10 @@ impl Instruction {
                 }
             },
 
-            // LSR Xd, Xn, Xm: same base as ADD shifted
+            // LSR Xd, Xn, Xm (variable shift) = LSRV: 1 0 0 11010110 Rm 001001 Rn Rd
+            // 64-bit base = 0x9AC02400.
             Instruction::LSR { rd, rn, rm } => match rm {
-                Operand::Reg { reg, shift: _ } => Ok(0x8B000000u32
-                    | (ShiftKind::LSR.encoding() << 22)
+                Operand::Reg { reg, shift: _ } => Ok(0x9AC02400u32  // LSRV Xd, Xn, Xm (64-bit)
                     | (reg.encoding() << 16)
                     | (rn.encoding() << 5)
                     | rd.encoding()),
@@ -1413,10 +1421,10 @@ impl Instruction {
                     | rd.encoding()),
             },
 
-            // ASR Xd, Xn, Xm: same base as ADD shifted
+            // ASR Xd, Xn, Xm (variable shift) = ASRV: 1 0 0 11010110 Rm 001010 Rn Rd
+            // 64-bit base = 0x9AC02800.
             Instruction::ASR { rd, rn, rm } => match rm {
-                Operand::Reg { reg, shift: _ } => Ok(0x8B000000u32
-                    | (ShiftKind::ASR.encoding() << 22)
+                Operand::Reg { reg, shift: _ } => Ok(0x9AC02800u32  // ASRV Xd, Xn, Xm (64-bit)
                     | (reg.encoding() << 16)
                     | (rn.encoding() << 5)
                     | rd.encoding()),
@@ -2322,13 +2330,12 @@ impl Instruction {
                 | (rn.encoding() << 5)
                 | rd.encoding()),
 
-            // ---- LSL (shifted register or UBFM immediate) ----
-            // LSL (shifted register): same base as ADD
-            // 64-bit base=0x8B000000, 32-bit base=0x0B000000
+            // ---- LSL (variable shift LSLV or UBFM immediate) ----
+            // LSLV (variable): sf 0 0 11010110 Rm 001000 Rn Rd
+            // 64-bit base = 0x9AC02000 (with sf=1), 32-bit base = 0x1AC02000 (sf=0)
             Instruction::LSL { rd, rn, rm } => match rm {
                 Operand::Reg { reg, shift: _ } => Ok((sf << 31)
-                    | 0x0B000000u32
-                    | (ShiftKind::LSL.encoding() << 22)
+                    | 0x1AC02000u32
                     | (reg.encoding() << 16)
                     | (rn.encoding() << 5)
                     | rd.encoding()),
@@ -2351,12 +2358,12 @@ impl Instruction {
                 }
             },
 
-            // ---- LSR (shifted register or UBFM immediate) ----
-            // LSR (shifted register): same base as ADD
+            // ---- LSR (variable shift LSRV or UBFM immediate) ----
+            // LSRV (variable): sf 0 0 11010110 Rm 001001 Rn Rd
+            // 64-bit base = 0x9AC02400 (sf=1), 32-bit base = 0x1AC02400 (sf=0)
             Instruction::LSR { rd, rn, rm } => match rm {
                 Operand::Reg { reg, shift: _ } => Ok((sf << 31)
-                    | 0x0B000000u32
-                    | (ShiftKind::LSR.encoding() << 22)
+                    | 0x1AC02400u32
                     | (reg.encoding() << 16)
                     | (rn.encoding() << 5)
                     | rd.encoding()),
@@ -2377,12 +2384,12 @@ impl Instruction {
                 }
             },
 
-            // ---- ASR (shifted register or SBFM immediate) ----
-            // ASR (shifted register): same base as ADD
+            // ---- ASR (variable shift ASRV or SBFM immediate) ----
+            // ASRV (variable): sf 0 0 11010110 Rm 001010 Rn Rd
+            // 64-bit base = 0x9AC02800 (sf=1), 32-bit base = 0x1AC02800 (sf=0)
             Instruction::ASR { rd, rn, rm } => match rm {
                 Operand::Reg { reg, shift: _ } => Ok((sf << 31)
-                    | 0x0B000000u32
-                    | (ShiftKind::ASR.encoding() << 22)
+                    | 0x1AC02800u32
                     | (reg.encoding() << 16)
                     | (rn.encoding() << 5)
                     | rd.encoding()),
