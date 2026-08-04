@@ -3578,7 +3578,7 @@ fn mips64_allocate_registers_ss(
             // replacements): backend lowering not yet implemented on mips64;
             // emit nothing (x86_64 is the canonical path).
             | IRInstr::BulkCopy { .. }
-            | IRInstr::BulkFill { .. } | IRInstr::Transform { .. } => unreachable!("ChannelSend/StarkProof/BulkCopy/BulkFill/Transform are lowered by ipc_lowering before reaching backend ISel")
+            | IRInstr::BulkFill { .. } | IRInstr::Transform { .. } => unreachable!("ChannelSend/StarkProof/BulkCopy/BulkFill/Transform are lowered by ipc_lowering before reaching backend ISel"),
             }
         }
     }
