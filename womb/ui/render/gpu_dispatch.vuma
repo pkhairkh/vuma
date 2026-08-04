@@ -388,6 +388,113 @@ extern "C" {
 }
 
 // =========================================================================
+// Vulkan: Swapchain + Surface (W2-A, W2-B)
+// =========================================================================
+// Window surface creation (VK_EXT_headless_surface for CI, VK_KHR_xcb_surface
+// for real Linux windowing) + VK_KHR_swapchain for presentation. These enable
+// multi-frame pipelined rendering (see W2-C FrameLoop in gpu_vulkan.c).
+
+extern "C" {
+    // Create a Vulkan instance with the given instance extensions enabled.
+    // Pass ["VK_KHR_surface", "VK_EXT_headless_surface"] for swapchain support.
+    // The instance handle is also stored in the shim's global state.
+    transform vk_create_instance_ext(
+        ext_names: Address,   // *const *const u8
+        ext_count: u32
+    ) -> Address;
+
+    // Create a logical device with the given device extensions enabled and an
+    // EXPLICIT queue family index. Pass ["VK_KHR_swapchain"] + the queue family
+    // returned by vk_find_present_queue_family for swapchain support.
+    transform vk_create_logical_device_ext(
+        phys_device: Address,
+        ext_names: Address,   // *const *const u8
+        ext_count: u32,
+        queue_family: u32,
+        queue_family_out: Address,  // *u32
+        queue_out: Address          // *Address
+    ) -> Address;
+
+    // Create a VkSurfaceKHR via VK_EXT_headless_surface (no display needed).
+    // `width`/`height` are advisory (the swapchain specifies the actual extent).
+    // Returns VkResult (0 = VK_SUCCESS).
+    transform vk_create_headless_surface(
+        instance: Address,
+        phys_dev: Address,
+        width: u32,
+        height: u32,
+        out_surface: Address   // *VkSurfaceKHR (i64 handle)
+    ) -> i32;
+
+    // Create a VkSurfaceKHR from an XCB connection + window (Linux X11).
+    // Future use — requires a running X server. The headless surface is
+    // sufficient for testing.
+    transform vk_create_xcb_surface(
+        instance: Address,
+        connection: Address,  // xcb_connection_t*
+        window: u32,          // xcb_window_t
+        out_surface: Address  // *VkSurfaceKHR
+    ) -> i32;
+
+    // Find the first queue family that supports BOTH graphics AND presentation
+    // to the given surface. Returns 0xFFFFFFFF if none found.
+    transform vk_find_present_queue_family(
+        phys_dev: Address,
+        surface: i64
+    ) -> u32;
+
+    // Create a swapchain on the given surface. Picks VK_FORMAT_R8G8B8A8_UNORM
+    // + SRGB_NONLINEAR if available, else the first surface format. Uses FIFO
+    // present mode (vsync, always supported). Image count is clamped to surface
+    // limits with a minimum of 2. Returns VkResult (0 = VK_SUCCESS).
+    transform vk_create_swapchain(
+        device: Address,
+        phys_dev: Address,
+        surface: i64,
+        width: u32,
+        height: u32,
+        out_swapchain: Address  // *VkSwapchainKHR (i64 handle)
+    ) -> i32;
+
+    // Query swapchain images. If out_images is NULL, writes the count to
+    // *out_count. Otherwise copies up to *out_count image handles into
+    // out_images and updates *out_count.
+    transform vk_get_swapchain_images(
+        device: Address,
+        swapchain: i64,
+        out_count: Address,    // *u32
+        out_images: Address    // *VkImage, or NULL
+    ) -> i32;
+
+    // Acquire the next available swapchain image. May signal a semaphore
+    // and/or fence when the image is ready. Returns VK_SUCCESS or
+    // VK_SUBOPTIMAL_KHR (5) on success.
+    transform vk_acquire_next_image(
+        device: Address,
+        swapchain: i64,
+        timeout: u64,
+        semaphore: i64,
+        fence: i64,
+        out_index: Address     // *u32
+    ) -> i32;
+
+    // Present an acquired swapchain image. Optionally waits on a semaphore
+    // before presenting (typically the render-finished semaphore).
+    transform vk_present(
+        queue: Address,
+        swapchain: i64,
+        image_index: u32,
+        wait_semaphore: i64
+    ) -> i32;
+
+    // Destroy a swapchain (does not destroy the surface).
+    transform vk_destroy_swapchain(device: Address, swapchain: i64);
+
+    // Destroy a VkSurfaceKHR.
+    transform vk_destroy_surface(instance: Address, surface: i64);
+}
+
+// =========================================================================
 // Metal: Graphics Pipeline (3D mesh rendering, macOS)
 // =========================================================================
 

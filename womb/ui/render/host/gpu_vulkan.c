@@ -16,19 +16,28 @@
 // VUMA program calls a vk_* function.
 //
 // Design:
-//   - Single-device, single-queue (compute-only, no graphics).
-//   - Headless (no surface, no swapchain). Suitable for compute shaders
-//     and offscreen rendering.
+//   - Single-device, single-queue (compute + graphics; lavapipe's single
+//     queue supports GRAPHICS|COMPUTE|TRANSFER|SPARSE).
+//   - Headless by default (no surface, no swapchain). Suitable for compute
+//     shaders and offscreen rendering via vk_create_instance +
+//     vk_create_logical_device.
+//   - Swapchain support (W2-A, W2-B, W2-C): vk_create_instance_ext +
+//     vk_create_logical_device_ext enable VK_KHR_surface +
+//     VK_EXT_headless_surface + VK_KHR_swapchain for multi-frame pipelined
+//     rendering via the FrameLoop API (see W2-C section below).
 //   - Synchronous dispatch (vk_queue_submit_and_wait blocks until the
-//     GPU finishes). Async dispatch would require fence management and
-//     is deferred to a follow-up.
+//     GPU finishes). Async dispatch (vk_queue_submit_async + vk_wait_fence)
+//     is available for CPU/GPU pipelining without a swapchain.
 //   - Descriptor set caching: each (binding, type) pair gets a
 //     persistent descriptor set. Re-binding the same binding reuses
 //     the cached descriptor set.
 // ============================================================================
 
 #define VK_USE_PLATFORM_HEADLESS_EXT 1
+#define VK_USE_PLATFORM_XCB_KHR 1
 #include <vulkan/vulkan.h>
+#include <vulkan/vulkan_xcb.h>
+#include <xcb/xcb.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -88,24 +97,47 @@ static const char* vk_result_string(VkResult r) {
     }
 }
 
+// Forward declarations: the _ext variants are defined below but referenced
+// by the no-extension wrappers (vk_create_instance, vk_create_logical_device)
+// so they can share the same setup logic (g_instance / g_device / cmd_pool /
+// desc_pool globals).
+void* vk_create_instance_ext(const char** ext_names, uint32_t ext_count);
+void* vk_create_logical_device_ext(void* phys_device,
+                                     const char** ext_names, uint32_t ext_count,
+                                     uint32_t queue_family,
+                                     void* queue_family_out, void* queue_out);
+
 // ---------------------------------------------------------------------------
 // vk_create_instance
+// Creates a Vulkan instance with NO enabled extensions. Suitable for
+// headless compute (no surface / no swapchain). For swapchain support,
+// use vk_create_instance_ext with VK_KHR_surface + VK_EXT_headless_surface.
 // ---------------------------------------------------------------------------
 void* vk_create_instance(void) {
+    return vk_create_instance_ext(NULL, 0);
+}
+
+// ---------------------------------------------------------------------------
+// vk_create_instance_ext (W2-A)
+// Creates a Vulkan instance with the given instance extensions enabled.
+// Used by the swapchain test path which needs VK_KHR_surface +
+// VK_EXT_headless_surface. Stores the instance in g_instance (single-device,
+// single-instance global state — matches the existing shim design).
+// ---------------------------------------------------------------------------
+void* vk_create_instance_ext(const char** ext_names, uint32_t ext_count) {
     if (g_instance != VK_NULL_HANDLE) {
         return g_instance;
     }
 
     VkInstanceCreateInfo ci = {0};
     ci.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-    // No extensions needed for headless compute.
-    ci.enabledExtensionCount = 0;
-    ci.ppEnabledExtensionNames = NULL;
+    ci.enabledExtensionCount = ext_count;
+    ci.ppEnabledExtensionNames = ext_names;
     ci.enabledLayerCount = 0;
 
     VkResult r = vkCreateInstance(&ci, NULL, &g_instance);
     if (r != VK_SUCCESS) {
-        fprintf(stderr, "vk_create_instance: vkCreateInstance failed: %s\n",
+        fprintf(stderr, "vk_create_instance_ext: vkCreateInstance failed: %s\n",
                 vk_result_string(r));
         return NULL;
     }
@@ -148,13 +180,12 @@ void* vk_pick_physical_device(void* instance) {
 
 // ---------------------------------------------------------------------------
 // vk_create_logical_device
+// Creates a logical device with one compute queue and NO device extensions.
+// For swapchain support, use vk_create_logical_device_ext with
+// VK_KHR_swapchain + an explicit queue family index.
 // ---------------------------------------------------------------------------
 void* vk_create_logical_device(void* phys_device, void* queue_family_out, void* queue_out) {
     VkPhysicalDevice pd = (VkPhysicalDevice)phys_device;
-    uint32_t* qf_out = (uint32_t*)queue_family_out;
-    VkQueue* q_out = (VkQueue*)queue_out;
-
-    // Find a compute queue family.
     uint32_t qf_count = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(pd, &qf_count, NULL);
     VkQueueFamilyProperties* qf = malloc(qf_count * sizeof(VkQueueFamilyProperties));
@@ -167,12 +198,30 @@ void* vk_create_logical_device(void* phys_device, void* queue_family_out, void* 
         }
     }
     free(qf);
-    g_queue_family = family;
+    return vk_create_logical_device_ext(phys_device, NULL, 0, family,
+                                          queue_family_out, queue_out);
+}
+
+// ---------------------------------------------------------------------------
+// vk_create_logical_device_ext (W2-A)
+// Creates a logical device with the given device extensions enabled and
+// an EXPLICIT queue family index (needed for swapchain/present support,
+// where the queue family must support presentation to a VkSurfaceKHR).
+// Stores the device + queue + cmd_pool + desc_pool in the global state.
+// ---------------------------------------------------------------------------
+void* vk_create_logical_device_ext(void* phys_device,
+                                     const char** ext_names, uint32_t ext_count,
+                                     uint32_t queue_family,
+                                     void* queue_family_out, void* queue_out) {
+    VkPhysicalDevice pd = (VkPhysicalDevice)phys_device;
+    uint32_t* qf_out = (uint32_t*)queue_family_out;
+    VkQueue* q_out = (VkQueue*)queue_out;
+    g_queue_family = queue_family;
 
     float queue_priority = 1.0f;
     VkDeviceQueueCreateInfo qci = {0};
     qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-    qci.queueFamilyIndex = family;
+    qci.queueFamilyIndex = queue_family;
     qci.queueCount = 1;
     qci.pQueuePriorities = &queue_priority;
 
@@ -180,24 +229,26 @@ void* vk_create_logical_device(void* phys_device, void* queue_family_out, void* 
     ci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     ci.queueCreateInfoCount = 1;
     ci.pQueueCreateInfos = &qci;
-    // Enable no device extensions for headless compute.
-    ci.enabledExtensionCount = 0;
+    ci.enabledExtensionCount = ext_count;
+    ci.ppEnabledExtensionNames = ext_names;
+    ci.enabledLayerCount = 0;
 
     VkResult r = vkCreateDevice(pd, &ci, NULL, &g_device);
     if (r != VK_SUCCESS) {
-        fprintf(stderr, "vk_create_logical_device: vkCreateDevice failed: %s\n",
+        fprintf(stderr, "vk_create_logical_device_ext: vkCreateDevice failed: %s\n",
                 vk_result_string(r));
         return NULL;
     }
-    vkGetDeviceQueue(g_device, family, 0, &g_queue);
-    if (qf_out) *qf_out = family;
+    vkGetDeviceQueue(g_device, queue_family, 0, &g_queue);
+    if (qf_out) *qf_out = queue_family;
     if (q_out) *q_out = g_queue;
 
-    // Create the command pool.
+    // Create the command pool (RESET_COMMAND_BUFFER so per-frame command
+    // buffers can be reused via vkResetCommandBuffer).
     VkCommandPoolCreateInfo pool_ci = {0};
     pool_ci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     pool_ci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    pool_ci.queueFamilyIndex = family;
+    pool_ci.queueFamilyIndex = queue_family;
     vkCreateCommandPool(g_device, &pool_ci, NULL, &g_cmd_pool);
 
     // Create the descriptor pool.
@@ -1610,6 +1661,547 @@ int32_t vk_wait_fence(int64_t fence, uint64_t timeout_ns) {
         return 0;
     }
     return (int32_t)r;
+}
+
+// ===========================================================================
+// SWAPCHAIN + SURFACE SUPPORT (W2-A, W2-B)
+// ===========================================================================
+// VK_KHR_swapchain + VK_KHR_surface + VK_EXT_headless_surface +
+// VK_KHR_xcb_surface. Function pointers are loaded via vkGetInstanceProcAddr
+// for portability across Vulkan loaders that may not export the KHR symbols
+// (per ADR-0022 "Wrap" decision: thin shim over libvulkan.so).
+//
+// lavapipe (Mesa's software Vulkan, used in CI) supports all four extensions:
+//   - VK_KHR_surface                (instance)
+//   - VK_EXT_headless_surface       (instance)
+//   - VK_KHR_xcb_surface            (instance, requires display)
+//   - VK_KHR_swapchain              (device)
+// Plus a single queue with GRAPHICS|COMPUTE|TRANSFER|SPARSE bits that
+// supports presentation, enabling headless multi-frame render tests.
+
+// Static function pointers (loaded once, then cached).
+static PFN_vkCreateSwapchainKHR     g_pfn_CreateSwapchainKHR     = NULL;
+static PFN_vkGetSwapchainImagesKHR  g_pfn_GetSwapchainImagesKHR  = NULL;
+static PFN_vkAcquireNextImageKHR    g_pfn_AcquireNextImageKHR    = NULL;
+static PFN_vkQueuePresentKHR        g_pfn_QueuePresentKHR        = NULL;
+static PFN_vkDestroySwapchainKHR    g_pfn_DestroySwapchainKHR    = NULL;
+static PFN_vkCreateHeadlessSurfaceEXT g_pfn_CreateHeadlessSurfaceEXT = NULL;
+static PFN_vkCreateXcbSurfaceKHR    g_pfn_CreateXcbSurfaceKHR    = NULL;
+static PFN_vkGetPhysicalDeviceSurfaceSupportKHR       g_pfn_GetPhysicalDeviceSurfaceSupportKHR       = NULL;
+static PFN_vkGetPhysicalDeviceSurfaceFormatsKHR       g_pfn_GetPhysicalDeviceSurfaceFormatsKHR       = NULL;
+static PFN_vkGetPhysicalDeviceSurfacePresentModesKHR  g_pfn_GetPhysicalDeviceSurfacePresentModesKHR  = NULL;
+static PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR  g_pfn_GetPhysicalDeviceSurfaceCapabilitiesKHR  = NULL;
+static PFN_vkDestroySurfaceKHR      g_pfn_DestroySurfaceKHR      = NULL;
+
+// One-shot loader for swapchain + surface query procs. Idempotent.
+// Uses g_instance (set by vk_create_instance / vk_create_instance_ext).
+static void load_swapchain_procs(void) {
+    if (g_pfn_CreateSwapchainKHR) return;
+    if (g_instance == VK_NULL_HANDLE) return;
+    g_pfn_CreateSwapchainKHR    = (PFN_vkCreateSwapchainKHR)    vkGetInstanceProcAddr(g_instance, "vkCreateSwapchainKHR");
+    g_pfn_GetSwapchainImagesKHR = (PFN_vkGetSwapchainImagesKHR) vkGetInstanceProcAddr(g_instance, "vkGetSwapchainImagesKHR");
+    g_pfn_AcquireNextImageKHR   = (PFN_vkAcquireNextImageKHR)   vkGetInstanceProcAddr(g_instance, "vkAcquireNextImageKHR");
+    g_pfn_QueuePresentKHR       = (PFN_vkQueuePresentKHR)       vkGetInstanceProcAddr(g_instance, "vkQueuePresentKHR");
+    g_pfn_DestroySwapchainKHR   = (PFN_vkDestroySwapchainKHR)   vkGetInstanceProcAddr(g_instance, "vkDestroySwapchainKHR");
+    g_pfn_DestroySurfaceKHR     = (PFN_vkDestroySurfaceKHR)     vkGetInstanceProcAddr(g_instance, "vkDestroySurfaceKHR");
+    g_pfn_GetPhysicalDeviceSurfaceSupportKHR       = (PFN_vkGetPhysicalDeviceSurfaceSupportKHR)       vkGetInstanceProcAddr(g_instance, "vkGetPhysicalDeviceSurfaceSupportKHR");
+    g_pfn_GetPhysicalDeviceSurfaceFormatsKHR       = (PFN_vkGetPhysicalDeviceSurfaceFormatsKHR)       vkGetInstanceProcAddr(g_instance, "vkGetPhysicalDeviceSurfaceFormatsKHR");
+    g_pfn_GetPhysicalDeviceSurfacePresentModesKHR  = (PFN_vkGetPhysicalDeviceSurfacePresentModesKHR)  vkGetInstanceProcAddr(g_instance, "vkGetPhysicalDeviceSurfacePresentModesKHR");
+    g_pfn_GetPhysicalDeviceSurfaceCapabilitiesKHR  = (PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR)  vkGetInstanceProcAddr(g_instance, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
+}
+
+// One-shot loader for VK_EXT_headless_surface.
+static void load_headless_surface_proc(void) {
+    if (g_pfn_CreateHeadlessSurfaceEXT) return;
+    if (g_instance == VK_NULL_HANDLE) return;
+    g_pfn_CreateHeadlessSurfaceEXT = (PFN_vkCreateHeadlessSurfaceEXT)
+        vkGetInstanceProcAddr(g_instance, "vkCreateHeadlessSurfaceEXT");
+}
+
+// One-shot loader for VK_KHR_xcb_surface.
+static void load_xcb_surface_proc(void) {
+    if (g_pfn_CreateXcbSurfaceKHR) return;
+    if (g_instance == VK_NULL_HANDLE) return;
+    g_pfn_CreateXcbSurfaceKHR = (PFN_vkCreateXcbSurfaceKHR)
+        vkGetInstanceProcAddr(g_instance, "vkCreateXcbSurfaceKHR");
+}
+
+// ---------------------------------------------------------------------------
+// vk_create_headless_surface (W2-B)
+// Creates a VkSurfaceKHR via VK_EXT_headless_surface. No display needed —
+// suitable for CI / unit tests. `width`/`height` are advisory (the surface
+// has no real dimensions; the swapchain created against it specifies them).
+// `instance` should equal g_instance (set by vk_create_instance_ext).
+// Returns VK_SUCCESS on success, VK_ERROR_EXTENSION_NOT_PRESENT if the
+// instance was not created with VK_EXT_headless_surface enabled.
+// ---------------------------------------------------------------------------
+VkResult vk_create_headless_surface(VkInstance instance,
+                                      VkPhysicalDevice phys_dev,
+                                      uint32_t width, uint32_t height,
+                                      VkSurfaceKHR* out_surface) {
+    (void)phys_dev; (void)width; (void)height;
+    if (!out_surface) return VK_ERROR_INITIALIZATION_FAILED;
+    load_headless_surface_proc();
+    if (!g_pfn_CreateHeadlessSurfaceEXT) {
+        fprintf(stderr, "vk_create_headless_surface: VK_EXT_headless_surface not loaded "
+                        "(instance must be created with the extension enabled)\n");
+        return VK_ERROR_EXTENSION_NOT_PRESENT;
+    }
+    VkHeadlessSurfaceCreateInfoEXT ci = {0};
+    ci.sType = VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT;
+    ci.pNext = NULL;
+    ci.flags = 0;
+    return g_pfn_CreateHeadlessSurfaceEXT(instance, &ci, NULL, out_surface);
+}
+
+// ---------------------------------------------------------------------------
+// vk_create_xcb_surface (W2-B)
+// Creates a VkSurfaceKHR from an XCB connection + window. Used for real
+// Linux windowing (requires a running X server). Future use — the headless
+// surface is sufficient for testing.
+// ---------------------------------------------------------------------------
+VkResult vk_create_xcb_surface(VkInstance instance,
+                                 xcb_connection_t* connection,
+                                 xcb_window_t window,
+                                 VkSurfaceKHR* out_surface) {
+    if (!out_surface) return VK_ERROR_INITIALIZATION_FAILED;
+    load_xcb_surface_proc();
+    if (!g_pfn_CreateXcbSurfaceKHR) {
+        fprintf(stderr, "vk_create_xcb_surface: VK_KHR_xcb_surface not loaded "
+                        "(instance must be created with the extension enabled)\n");
+        return VK_ERROR_EXTENSION_NOT_PRESENT;
+    }
+    VkXcbSurfaceCreateInfoKHR ci = {0};
+    ci.sType = VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR;
+    ci.connection = connection;
+    ci.window = window;
+    return g_pfn_CreateXcbSurfaceKHR(instance, &ci, NULL, out_surface);
+}
+
+// ---------------------------------------------------------------------------
+// vk_find_present_queue_family (W2-B helper)
+// Finds the first queue family on `phys_dev` that supports BOTH graphics AND
+// presentation to `surface`. Returns 0xFFFFFFFF if none found.
+// ---------------------------------------------------------------------------
+uint32_t vk_find_present_queue_family(VkPhysicalDevice phys_dev,
+                                        VkSurfaceKHR surface) {
+    load_swapchain_procs();
+    if (!g_pfn_GetPhysicalDeviceSurfaceSupportKHR) return 0xFFFFFFFFu;
+    uint32_t qf_count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(phys_dev, &qf_count, NULL);
+    VkQueueFamilyProperties* qf = malloc(qf_count * sizeof(VkQueueFamilyProperties));
+    vkGetPhysicalDeviceQueueFamilyProperties(phys_dev, &qf_count, qf);
+    uint32_t chosen = 0xFFFFFFFFu;
+    for (uint32_t i = 0; i < qf_count; i++) {
+        VkBool32 supported = VK_FALSE;
+        g_pfn_GetPhysicalDeviceSurfaceSupportKHR(phys_dev, i, surface, &supported);
+        if (supported && (qf[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
+            chosen = i;
+            break;
+        }
+    }
+    free(qf);
+    return chosen;
+}
+
+// ---------------------------------------------------------------------------
+// vk_create_swapchain (W2-A)
+// Creates a swapchain on the given surface. Picks VK_FORMAT_R8G8B8A8_UNORM
+// + SRGB_NONLINEAR if available, else the first surface format. Uses
+// VK_PRESENT_MODE_FIFO_KHR (always supported — vsync). Image count is
+// clamped to [surfaceCaps.minImageCount, maxImageCount] with a minimum of 2.
+// Extent is clamped to [minImageExtent, maxImageExtent] when the surface
+// does not report a fixed currentExtent.
+// Returns VK_SUCCESS on success.
+// ---------------------------------------------------------------------------
+VkResult vk_create_swapchain(VkDevice device, VkPhysicalDevice phys_dev,
+                               VkSurfaceKHR surface, uint32_t width, uint32_t height,
+                               VkSwapchainKHR* out_swapchain) {
+    if (!out_swapchain) return VK_ERROR_INITIALIZATION_FAILED;
+    *out_swapchain = VK_NULL_HANDLE;
+    load_swapchain_procs();
+    if (!g_pfn_CreateSwapchainKHR || !g_pfn_GetPhysicalDeviceSurfaceCapabilitiesKHR ||
+        !g_pfn_GetPhysicalDeviceSurfaceFormatsKHR) {
+        fprintf(stderr, "vk_create_swapchain: swapchain procs not loaded "
+                        "(instance must enable VK_KHR_surface, device must enable VK_KHR_swapchain)\n");
+        return VK_ERROR_EXTENSION_NOT_PRESENT;
+    }
+
+    // Surface capabilities.
+    VkSurfaceCapabilitiesKHR caps = {0};
+    VkResult r = g_pfn_GetPhysicalDeviceSurfaceCapabilitiesKHR(phys_dev, surface, &caps);
+    if (r != VK_SUCCESS) {
+        fprintf(stderr, "vk_create_swapchain: get surface caps failed: %s\n",
+                vk_result_string(r));
+        return r;
+    }
+
+    // Image count: at least 2 (double-buffer), clamped to surface limits.
+    uint32_t img_count = caps.minImageCount;
+    if (img_count < 2) img_count = 2;
+    if (caps.maxImageCount > 0 && img_count > caps.maxImageCount) {
+        img_count = caps.maxImageCount;
+    }
+
+    // Extent: use currentExtent if defined, else clamp to limits.
+    VkExtent2D extent;
+    if (caps.currentExtent.width != 0xFFFFFFFFu) {
+        extent = caps.currentExtent;
+    } else {
+        extent.width = width;
+        extent.height = height;
+        if (extent.width  < caps.minImageExtent.width)  extent.width  = caps.minImageExtent.width;
+        if (extent.width  > caps.maxImageExtent.width)  extent.width  = caps.maxImageExtent.width;
+        if (extent.height < caps.minImageExtent.height) extent.height = caps.minImageExtent.height;
+        if (extent.height > caps.maxImageExtent.height) extent.height = caps.maxImageExtent.height;
+    }
+
+    // Surface format: prefer R8G8B8A8_UNORM + SRGB_NONLINEAR, else first.
+    uint32_t fmt_count = 0;
+    g_pfn_GetPhysicalDeviceSurfaceFormatsKHR(phys_dev, surface, &fmt_count, NULL);
+    VkSurfaceFormatKHR* fmts = NULL;
+    if (fmt_count > 0) {
+        fmts = malloc(fmt_count * sizeof(VkSurfaceFormatKHR));
+        g_pfn_GetPhysicalDeviceSurfaceFormatsKHR(phys_dev, surface, &fmt_count, fmts);
+    }
+    VkFormat chosen_format = VK_FORMAT_R8G8B8A8_UNORM;
+    VkColorSpaceKHR chosen_colorspace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    int found = 0;
+    for (uint32_t i = 0; i < fmt_count; i++) {
+        if (fmts[i].format == VK_FORMAT_R8G8B8A8_UNORM &&
+            fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+            chosen_format = fmts[i].format;
+            chosen_colorspace = fmts[i].colorSpace;
+            found = 1;
+            break;
+        }
+    }
+    if (!found && fmt_count > 0) {
+        chosen_format = fmts[0].format;
+        chosen_colorspace = fmts[0].colorSpace;
+    }
+    free(fmts);
+
+    VkSwapchainCreateInfoKHR sci = {0};
+    sci.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+    sci.surface = surface;
+    sci.minImageCount = img_count;
+    sci.imageFormat = chosen_format;
+    sci.imageColorSpace = chosen_colorspace;
+    sci.imageExtent = extent;
+    sci.imageArrayLayers = 1;
+    sci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                     VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    sci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    sci.queueFamilyIndexCount = 0;
+    sci.pQueueFamilyIndices = NULL;
+    sci.preTransform = caps.currentTransform;
+    sci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    sci.presentMode = VK_PRESENT_MODE_FIFO_KHR;  // always supported (vsync)
+    sci.clipped = VK_TRUE;
+    sci.oldSwapchain = VK_NULL_HANDLE;
+    r = g_pfn_CreateSwapchainKHR(device, &sci, NULL, out_swapchain);
+    if (r != VK_SUCCESS) {
+        fprintf(stderr, "vk_create_swapchain: vkCreateSwapchainKHR failed: %s\n",
+                vk_result_string(r));
+        return r;
+    }
+    return VK_SUCCESS;
+}
+
+// ---------------------------------------------------------------------------
+// vk_get_swapchain_images (W2-A)
+// If out_images is NULL, writes the count to *out_count. Otherwise copies
+// up to *out_count image handles into out_images and updates *out_count.
+// ---------------------------------------------------------------------------
+VkResult vk_get_swapchain_images(VkDevice device, VkSwapchainKHR swapchain,
+                                   uint32_t* out_count, VkImage* out_images) {
+    (void)device;
+    load_swapchain_procs();
+    if (!g_pfn_GetSwapchainImagesKHR) return VK_ERROR_EXTENSION_NOT_PRESENT;
+    if (!out_count) return VK_ERROR_INITIALIZATION_FAILED;
+    if (out_images == NULL) {
+        return g_pfn_GetSwapchainImagesKHR(device, swapchain, out_count, NULL);
+    }
+    return g_pfn_GetSwapchainImagesKHR(device, swapchain, out_count, out_images);
+}
+
+// ---------------------------------------------------------------------------
+// vk_acquire_next_image (W2-A)
+// Acquires the next available swapchain image. May signal a semaphore and/or
+// fence when the image is ready. Returns VK_SUCCESS or VK_SUBOPTIMAL_KHR on
+// success, VK_ERROR_OUT_OF_DATE_KHR if the swapchain needs recreation.
+// ---------------------------------------------------------------------------
+VkResult vk_acquire_next_image(VkDevice device, VkSwapchainKHR swapchain,
+                                 uint64_t timeout, VkSemaphore semaphore,
+                                 VkFence fence, uint32_t* out_index) {
+    (void)device;
+    load_swapchain_procs();
+    if (!g_pfn_AcquireNextImageKHR) return VK_ERROR_EXTENSION_NOT_PRESENT;
+    return g_pfn_AcquireNextImageKHR(device, swapchain, timeout,
+                                       semaphore, fence, out_index);
+}
+
+// ---------------------------------------------------------------------------
+// vk_present (W2-A)
+// Presents an acquired swapchain image. Optionally waits on a semaphore
+// before presenting (typically the render-finished semaphore).
+// ---------------------------------------------------------------------------
+VkResult vk_present(VkQueue queue, VkSwapchainKHR swapchain,
+                      uint32_t image_index, VkSemaphore wait_semaphore) {
+    load_swapchain_procs();
+    if (!g_pfn_QueuePresentKHR) return VK_ERROR_EXTENSION_NOT_PRESENT;
+    VkPresentInfoKHR pi = {0};
+    pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    pi.waitSemaphoreCount = (wait_semaphore != VK_NULL_HANDLE) ? 1 : 0;
+    pi.pWaitSemaphores = &wait_semaphore;
+    pi.swapchainCount = 1;
+    pi.pSwapchains = &swapchain;
+    pi.pImageIndices = &image_index;
+    pi.pResults = NULL;
+    return g_pfn_QueuePresentKHR(queue, &pi);
+}
+
+// ---------------------------------------------------------------------------
+// vk_destroy_swapchain (helper, not in the spec'd public API but used by
+// FrameLoop + tests for teardown).
+// ---------------------------------------------------------------------------
+void vk_destroy_swapchain(VkDevice device, VkSwapchainKHR swapchain) {
+    load_swapchain_procs();
+    if (g_pfn_DestroySwapchainKHR && swapchain != VK_NULL_HANDLE) {
+        g_pfn_DestroySwapchainKHR(device, swapchain, NULL);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// vk_destroy_surface (helper)
+// ---------------------------------------------------------------------------
+void vk_destroy_surface(VkInstance instance, VkSurfaceKHR surface) {
+    load_swapchain_procs();
+    if (g_pfn_DestroySurfaceKHR && surface != VK_NULL_HANDLE) {
+        g_pfn_DestroySurfaceKHR(instance, surface, NULL);
+    }
+}
+
+// ===========================================================================
+// MULTI-FRAME PIPELINING (W2-C): FrameLoop with N frames-in-flight
+// ===========================================================================
+// FrameLoop manages a fixed pool of per-frame command buffers + sync objects
+// (fence + 2 semaphores per frame). It enables CPU/GPU pipelining: while
+// frame N is being recorded, frame N-1 is being submitted, and frame N-2
+// is being executed by the GPU. The pool size (frame_count) is typically 2.
+//
+// Sync flow per frame:
+//   acquire_next_image  -> signals image_available semaphore
+//   submit              -> waits on image_available, signals render_finished
+//                          + signals render_fence (CPU-visible signal)
+//   present             -> waits on render_finished
+//   next iteration      -> waits on render_fence before reusing the cmd_buf
+//
+// The fence starts signaled (VK_FENCE_CREATE_SIGNALED_BIT) so the very
+// first acquire_and_begin does not block indefinitely.
+
+typedef struct {
+    VkCommandBuffer cmd_buf;
+    VkFence         render_fence;
+    VkSemaphore     image_available;
+    VkSemaphore     render_finished;
+    int             in_flight;
+} FrameSlot;
+
+typedef struct {
+    FrameSlot*       frames;
+    uint32_t         frame_count;
+    uint32_t         current_frame;
+    VkSwapchainKHR   swapchain;
+    VkDevice         device;
+    VkPhysicalDevice phys_dev;
+    VkQueue          queue;
+    VkCommandPool    cmd_pool;
+    VkImage*         swapchain_images;
+    uint32_t         swapchain_image_count;
+} FrameLoop;
+
+// ---------------------------------------------------------------------------
+// frame_loop_init
+// Allocates per-frame command buffers + sync objects. The caller must have
+// already created the swapchain + device + queue (so g_instance is set and
+// the swapchain procs are loadable).
+// ---------------------------------------------------------------------------
+void frame_loop_init(FrameLoop* loop, VkDevice device, VkPhysicalDevice phys_dev,
+                      VkQueue queue, VkSwapchainKHR swapchain, uint32_t frame_count) {
+    memset(loop, 0, sizeof(*loop));
+    loop->device = device;
+    loop->phys_dev = phys_dev;
+    loop->queue = queue;
+    loop->swapchain = swapchain;
+    loop->frame_count = frame_count;
+    loop->current_frame = 0;
+    loop->cmd_pool = g_cmd_pool;
+
+    load_swapchain_procs();
+    // Query swapchain images (cache for caller access via frame_loop_get_image).
+    uint32_t img_count = 0;
+    g_pfn_GetSwapchainImagesKHR(device, swapchain, &img_count, NULL);
+    loop->swapchain_image_count = img_count;
+    loop->swapchain_images = malloc(img_count * sizeof(VkImage));
+    g_pfn_GetSwapchainImagesKHR(device, swapchain, &img_count,
+                                  loop->swapchain_images);
+
+    loop->frames = calloc(frame_count, sizeof(FrameSlot));
+    for (uint32_t i = 0; i < frame_count; i++) {
+        VkCommandBufferAllocateInfo cbai = {0};
+        cbai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cbai.commandPool = loop->cmd_pool;
+        cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbai.commandBufferCount = 1;
+        vkAllocateCommandBuffers(device, &cbai, &loop->frames[i].cmd_buf);
+
+        VkFenceCreateInfo fci = {0};
+        fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        // Start signaled so the first frame_loop_acquire_and_begin doesn't
+        // wait on a fence that was never submitted.
+        fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+        vkCreateFence(device, &fci, NULL, &loop->frames[i].render_fence);
+
+        VkSemaphoreCreateInfo sci = {0};
+        sci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        vkCreateSemaphore(device, &sci, NULL, &loop->frames[i].image_available);
+        vkCreateSemaphore(device, &sci, NULL, &loop->frames[i].render_finished);
+        loop->frames[i].in_flight = 0;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// frame_loop_get_cmd_buf
+// Returns the current frame's command buffer (for recording between
+// acquire_and_begin and submit_and_present).
+// ---------------------------------------------------------------------------
+VkCommandBuffer frame_loop_get_cmd_buf(FrameLoop* loop) {
+    return loop->frames[loop->current_frame].cmd_buf;
+}
+
+// ---------------------------------------------------------------------------
+// frame_loop_get_image
+// Returns the swapchain image handle at the given index (the index returned
+// by frame_loop_acquire_and_begin).
+// ---------------------------------------------------------------------------
+VkImage frame_loop_get_image(FrameLoop* loop, uint32_t image_index) {
+    if (image_index >= loop->swapchain_image_count) return VK_NULL_HANDLE;
+    return loop->swapchain_images[image_index];
+}
+
+// ---------------------------------------------------------------------------
+// frame_loop_acquire_and_begin
+// Waits for the current frame's fence (so we don't overwrite a command
+// buffer still in use), resets the fence, acquires the next swapchain image
+// (signals image_available), and begins recording the command buffer.
+// Returns VK_SUCCESS or VK_SUBOPTIMAL_KHR on success.
+// ---------------------------------------------------------------------------
+VkResult frame_loop_acquire_and_begin(FrameLoop* loop, uint32_t* out_image_index) {
+    FrameSlot* slot = &loop->frames[loop->current_frame];
+
+    // Wait for this frame's previous submission to finish (no-op first time
+    // since the fence starts signaled).
+    VkResult r = vkWaitForFences(loop->device, 1, &slot->render_fence,
+                                   VK_TRUE, UINT64_MAX);
+    if (r != VK_SUCCESS) return r;
+    vkResetFences(loop->device, 1, &slot->render_fence);
+
+    // Acquire the next swapchain image (signal image_available when ready).
+    r = g_pfn_AcquireNextImageKHR(loop->device, loop->swapchain, UINT64_MAX,
+                                    slot->image_available, VK_NULL_HANDLE,
+                                    out_image_index);
+    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
+        return r;
+    }
+
+    // Begin recording the command buffer (one-time-submit).
+    vkResetCommandBuffer(slot->cmd_buf, 0);
+    VkCommandBufferBeginInfo cbbi = {0};
+    cbbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    r = vkBeginCommandBuffer(slot->cmd_buf, &cbbi);
+    if (r != VK_SUCCESS) return r;
+
+    slot->in_flight = 1;
+    return VK_SUCCESS;
+}
+
+// ---------------------------------------------------------------------------
+// frame_loop_submit_and_present
+// Ends command buffer recording, submits it (waiting on image_available,
+// signaling render_finished + render_fence), and presents the image
+// (waiting on render_finished). Advances current_frame to the next slot.
+// ---------------------------------------------------------------------------
+VkResult frame_loop_submit_and_present(FrameLoop* loop, uint32_t image_index) {
+    FrameSlot* slot = &loop->frames[loop->current_frame];
+
+    VkResult r = vkEndCommandBuffer(slot->cmd_buf);
+    if (r != VK_SUCCESS) return r;
+
+    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    VkSubmitInfo si = {0};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.waitSemaphoreCount = 1;
+    si.pWaitSemaphores = &slot->image_available;
+    si.pWaitDstStageMask = &wait_stage;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &slot->cmd_buf;
+    si.signalSemaphoreCount = 1;
+    si.pSignalSemaphores = &slot->render_finished;
+    r = vkQueueSubmit(loop->queue, 1, &si, slot->render_fence);
+    if (r != VK_SUCCESS) return r;
+
+    VkPresentInfoKHR pi = {0};
+    pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    pi.waitSemaphoreCount = 1;
+    pi.pWaitSemaphores = &slot->render_finished;
+    pi.swapchainCount = 1;
+    pi.pSwapchains = &loop->swapchain;
+    pi.pImageIndices = &image_index;
+    pi.pResults = NULL;
+    r = g_pfn_QueuePresentKHR(loop->queue, &pi);
+    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) return r;
+
+    loop->current_frame = (loop->current_frame + 1) % loop->frame_count;
+    return VK_SUCCESS;
+}
+
+// ---------------------------------------------------------------------------
+// frame_loop_wait_frame
+// Waits for the given frame's fence to signal. Useful for synchronous
+// teardown or for verifying all in-flight frames have completed.
+// ---------------------------------------------------------------------------
+void frame_loop_wait_frame(FrameLoop* loop, uint32_t frame_index) {
+    if (frame_index >= loop->frame_count) return;
+    FrameSlot* slot = &loop->frames[frame_index];
+    if (slot->in_flight) {
+        vkWaitForFences(loop->device, 1, &slot->render_fence, VK_TRUE, UINT64_MAX);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// frame_loop_destroy
+// Waits for the device to idle (all in-flight frames complete), then frees
+// command buffers + sync objects. Does NOT destroy the swapchain (caller
+// does that via vk_destroy_swapchain).
+// ---------------------------------------------------------------------------
+void frame_loop_destroy(FrameLoop* loop) {
+    if (loop->device) vkDeviceWaitIdle(loop->device);
+    for (uint32_t i = 0; i < loop->frame_count; i++) {
+        FrameSlot* slot = &loop->frames[i];
+        if (slot->cmd_buf) {
+            vkFreeCommandBuffers(loop->device, loop->cmd_pool, 1, &slot->cmd_buf);
+        }
+        if (slot->render_fence)     vkDestroyFence(loop->device, slot->render_fence, NULL);
+        if (slot->image_available)  vkDestroySemaphore(loop->device, slot->image_available, NULL);
+        if (slot->render_finished)  vkDestroySemaphore(loop->device, slot->render_finished, NULL);
+    }
+    free(loop->frames);
+    free(loop->swapchain_images);
+    loop->frames = NULL;
+    loop->swapchain_images = NULL;
 }
 
 // ---------------------------------------------------------------------------
