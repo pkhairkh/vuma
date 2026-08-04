@@ -1,0 +1,57 @@
+// ============================================================================
+// womb/ui/render/outline_to_path.vuma — Convert glyph outlines to renderable paths
+// ============================================================================
+// Declares the GlyphOutline struct and the outline_to_path transform that
+// converts a font glyph outline (Bezier control points + contour end
+// indices) into a flattened path buffer of straight-line segments suitable
+// for triangle-fan / stencil-and-cover rendering.
+//
+// Per W7-D (V-WOMB-1): this is a declaration module — it defines the
+// type and the extern function signature. The host runtime (or a future
+// VUMA implementation) provides the outline_to_path body.
+//
+// GlyphOutline memory layout (32 bytes, 8-byte aligned on 64-bit hosts):
+//   [points: Address         @ 0]  — *const f32 pairs (x,y), 8 bytes each
+//   [point_count: i32        @ 8]  — number of control points
+//   [_pad: i32               @ 12] — alignment padding to 16
+//   [contours: Address       @ 16] — *const u32 end-indices, one per contour
+//   [contour_count: i32      @ 24] — number of closed contours
+//   [_pad: i32               @ 28] — alignment padding to 32
+//
+// Outline format (matches FreeType / stb_truetype conventions):
+//   - Each contour is a sequence of on-curve and off-curve points.
+//   - Two consecutive off-curve points implicitly have an on-curve
+//     midpoint between them.
+//   - A quadratic Bezier runs from the previous on-curve point through
+//     one off-curve control point to the next on-curve point.
+//   - Contours are closed (the last point connects back to the first).
+//
+// Flattening: each quadratic Bezier segment is tessellated into a fixed
+// number of straight-line segments (e.g., 8 per segment, or adaptive
+// based on curve flatness). The output path buffer is a sequence of
+// (x, y) f32 pairs ready for the GPU vertex shader.
+// ============================================================================
+
+struct GlyphOutline {
+    points: Address,
+    point_count: i32,
+    contours: Address,
+    contour_count: i32,
+}
+
+// ===========================================================================
+// Extern declarations
+// ===========================================================================
+// The host runtime implements outline_to_path. The VUMA program calls
+// it with a GlyphOutline, a pointer to a pre-allocated path buffer
+// (pairs of f32 (x,y) coordinates), and the buffer's capacity in
+// points. The flattened path is written into the buffer.
+//
+// Returns the number of points written on success, or -1 on error
+// (null outline, null path_buf, negative path_len, buffer too small,
+// malformed outline — e.g., contour end index out of range).
+
+extern "C" {
+    // Convert a glyph outline to a flattened path buffer.
+    transform outline_to_path(outline: GlyphOutline, path_buf: Address, path_len: i32) -> i32;
+}

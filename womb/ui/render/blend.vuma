@@ -1,0 +1,49 @@
+// ============================================================================
+// womb/ui/render/blend.vuma — Blend modes and opacity for scene nodes
+// ============================================================================
+// Declares the BlendMode enum, the BlendState struct (mode + opacity), and
+// the blend_buffers transform that composites a source buffer onto a
+// destination buffer using the given blend state. Blend modes follow the
+// W3C Compositing and Blending Level 1 spec; opacity is a linear 0..1
+// factor applied to the source before blending.
+//
+// Per W7-B (V-WOMB-1): this is a declaration module — it defines the
+// types and the extern function signature. The host runtime (or a future
+// VUMA implementation) provides the blend_buffers body.
+//
+// BlendMode memory layout: tagged union (discriminant + payload).
+//   [tag: u32 @ 0] (payload unused — all variants are unit)
+//   Total size: 4 bytes, alignment: 4 bytes.
+//
+// BlendState memory layout (8 bytes, 4-byte aligned):
+//   [mode: BlendMode @ 0] [opacity: f32 @ 4]
+// ============================================================================
+
+enum BlendMode {
+    Normal,
+    Multiply,
+    Screen,
+    Overlay,
+    Add,
+}
+
+struct BlendState {
+    mode: BlendMode,
+    opacity: f32,
+}
+
+// ===========================================================================
+// Extern declarations
+// ===========================================================================
+// The host runtime implements blend_buffers. The VUMA program calls it
+// with pointers to the destination and source RGBA8 buffers (4 bytes per
+// pixel), the pixel count, and the BlendState. The source is composited
+// onto the destination in place; the destination buffer is modified.
+//
+// Returns 0 on success, non-zero on error (null buffers, negative len,
+// out-of-range opacity, unknown blend mode).
+
+extern "C" {
+    // Blend src onto dst using the given blend state.
+    transform blend_buffers(dst: Address, src: Address, len: i32, state: BlendState) -> i32;
+}

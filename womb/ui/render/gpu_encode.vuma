@@ -1,0 +1,53 @@
+// ============================================================================
+// womb/ui/render/gpu_encode.vuma — Encode scene to GPU command buffer
+// ============================================================================
+// Declares the GpuEncodeResult struct and the gpu_encode_scene transform
+// that flattens a scene tree (DAG of nodes with transforms, meshes, and
+// blend states) into a flat vertex buffer, then uploads it into a GPU
+// ring buffer slot for the current frame.
+//
+// Per W7-C (V-WOMB-1): this is a declaration module — it defines the
+// type and the extern function signature. The host runtime (or a future
+// VUMA implementation) provides the gpu_encode_scene body.
+//
+// GpuEncodeResult memory layout (12 bytes, 4-byte aligned):
+//   [ring_slot: i32     @ 0]  — ring buffer slot the vertices were uploaded to
+//   [vertex_count: i32  @ 4]  — number of vertices encoded
+//   [success: i32       @ 8]  — 0 on success, non-zero on error
+//
+// Scene tree shape (host-defined, opaque to VUMA except for the root
+// pointer): each node carries a 4×4 transform, an optional mesh, an
+// optional blend state, and a list of children. The flatten step
+// multiplies the transforms down the tree and produces world-space
+// vertices in the vertex buffer.
+//
+// Ring buffer integration: the upload step calls gpu_ring_alloc (see
+// womb/ui/render/gpu_ring.vuma) to reserve space in the current slot,
+// then memcpy's the vertex buffer into the GPU-visible staging buffer.
+// The returned ring_slot can be passed to vk_cmd_bind_vertex_buffer or
+// mtl_cmd_bind_vertex_buffer_gfx (see womb/ui/render/gpu_dispatch.vuma).
+// ============================================================================
+
+struct GpuEncodeResult {
+    ring_slot: i32,
+    vertex_count: i32,
+    success: i32,
+}
+
+// ===========================================================================
+// Extern declarations
+// ===========================================================================
+// The host runtime implements gpu_encode_scene. The VUMA program calls
+// it with the root of the scene tree and a pointer to the GpuRingBuffer
+// (see womb/ui/render/gpu_ring.vuma). On success, the result's success
+// field is 0, ring_slot identifies the slot the vertices were uploaded
+// to, and vertex_count is the number of vertices encoded.
+//
+// Returns a GpuEncodeResult with success != 0 on error (null scene,
+// null ring, ring overflow, malformed scene tree, etc.). On error, the
+// ring buffer is not modified.
+
+extern "C" {
+    // Flatten scene tree, encode to vertex buffer, upload to GPU ring buffer.
+    transform gpu_encode_scene(scene: Address, ring: Address) -> GpuEncodeResult;
+}

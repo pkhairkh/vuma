@@ -84,3 +84,41 @@ jobs:
           name: test-results
           path: test_results/
           retention-days: 30
+
+  # ===========================================================================
+  # womb-imports — V-WOMB-1 gate: every womb/net/*.vuma must compile cleanly
+  # ===========================================================================
+  # Compiles each `womb/net/*.vuma` library module with the `compile_dump`
+  # test driver on the x86_64 backend. Broken imports (missing modules,
+  # unresolved symbols, parser errors on the import graph) fail this job.
+  # See scripts/check_womb_imports.sh.
+  # ===========================================================================
+  womb-imports:
+    name: WOMB-Layer Import Integrity (womb/net/*.vuma)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (nightly-2026-03-01)
+        # Pinned by rust-toolchain.toml. Must match the rest of the project
+        # (ci.yml, cross-compile.yml, proof-verify.yml, release.yml,
+        # hardening.yml all pin nightly-2026-03-01).
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-03-01
+          components: rustfmt, clippy
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: womb-imports-${{ runner.os }}
+
+      - name: Build compile_dump (release-fast)
+        run: |
+          source $HOME/.cargo/env 2>/dev/null || true
+          cargo build --profile release-fast --bin compile_dump
+
+      - name: Run womb/net/*.vuma import check
+        run: bash scripts/check_womb_imports.sh

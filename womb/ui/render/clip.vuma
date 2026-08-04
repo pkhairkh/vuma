@@ -1,0 +1,39 @@
+// ============================================================================
+// womb/ui/render/clip.vuma — Path clipping to a rectangular region
+// ============================================================================
+// Declares the ClipRegion struct (integer pixel rectangle) and the
+// clip_path transform that intersects a flattened path buffer with the
+// region, discarding points that fall outside. The clipped path is
+// written back into the same buffer (in place) and the surviving point
+// count is returned.
+//
+// Per W7-B (V-WOMB-1): this is a declaration module — it defines the
+// type and the extern function signature. The host runtime (or a future
+// VUMA implementation) provides the clip_path body.
+//
+// Layout (4 × i32 = 16 bytes, 4-byte aligned):
+//   [x: i32 @ 0] [y: i32 @ 4] [w: i32 @ 8] [h: i32 @ 12]
+// ============================================================================
+
+struct ClipRegion {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+}
+
+// ===========================================================================
+// Extern declarations
+// ===========================================================================
+// The host runtime implements clip_path. The VUMA program calls it with a
+// pointer to a path buffer (pairs of i32 (x,y) coordinates), the point
+// count, and the ClipRegion. Points outside the region are dropped; the
+// remaining points are packed to the front of the buffer. Returns the
+// new point count (0..=path_len).
+//
+// Returns -1 on error (null path_buf, negative path_len, etc.).
+
+extern "C" {
+    // Clip a path buffer to the region. Returns the number of points remaining.
+    transform clip_path(path_buf: Address, path_len: i32, region: ClipRegion) -> i32;
+}
