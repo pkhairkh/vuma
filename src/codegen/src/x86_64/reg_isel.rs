@@ -1417,15 +1417,10 @@ fn emit_instruction(
         // ── Alloc (stack allocation — use RSP) ──
         IRInstr::Alloc { dst, size, .. } => {
             let dst_reg = load_to_reg(dst, alloc, code);
-            // Stack-allocate `size` bytes (16-byte aligned) and return a
-            // pointer to the LOW end of the new space in `dst_reg`.
-            // Order matters: `sub rsp, N` FIRST, then `lea dst, [rsp]`.
-            // The previous order (`lea dst, [rsp]; sub rsp, N`) put the
-            // buffer at the HIGH end ([old_rsp]), which overlaps the
-            // saved-RBP slot at [rbp] when frame_size=0, causing the
-            // subsequent store to clobber the saved RBP and corrupt the
-            // return path.
-            let aligned = ((*size as usize + 15) & !15) as i32;
+            // +16 bytes for the PMT LIVE/DEAD tombstone flag stored at
+            // [ptr + size]. Without this, when size is 16-byte-aligned,
+            // the flag overwrites saved registers or adjacent allocs.
+            let aligned = ((*size as usize + 16 + 15) & !15) as i32;
             code.extend(encode_sub_reg_imm32(Gpr::Rsp, aligned));
             code.extend(encode_lea_reg_mem(dst_reg, Gpr::Rsp, 0));
             writes.push(phys(dst_reg));

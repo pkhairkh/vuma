@@ -2394,7 +2394,8 @@ impl IRBuilder {
                     return;
                 }
                 if state_vars.contains(name) {
-                    let aligned = (*size + 15) & !15u32;
+                    // +1 byte reserves space for the PMT LIVE/DEAD tombstone flag
+                    let aligned = (*size + 1 + 15) & !15u32;
                     total = total.saturating_add(aligned);
                 }
             }
@@ -4313,7 +4314,8 @@ impl IRBuilder {
                     // within `___pmt_buffer`. `next_state_offset` advances
                     // by the aligned size after each state-typed allocation.
                     let assigned_offset = self.next_state_offset;
-                    let aligned_size = (*size + 15) & !15u32;
+                    // +1 byte for the PMT LIVE flag (see compute_total_state_buffer_size).
+                    let aligned_size = (*size + 1 + 15) & !15u32;
                     self.next_state_offset = self.next_state_offset.saturating_add(aligned_size);
                     // Emit `dst = ___pmt_buffer + assigned_offset` instead
                     // of `Alloc { dst, size }`. The Offset instruction

@@ -9278,23 +9278,13 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
                         },
                     );
                     ctx.meta_vreg += 1;
-                    let flag_off = *total_size as i64;
+                    // LIVE flag store DISABLED — overwrites adjacent stack data.
+                    // See ref_tests/BLOCKERS.md.
                     return vec![
                         ScgStatement::Allocation(AllocationNode::Stack {
                             name: let_stmt.name.clone(),
-                            size: *total_size as u32, // +1 byte for liveness flag is NOT added here —
-                            // the flag is stored at [ptr + total_size] which is within the stack
-                            // frame's allocated region (the frame is larger than total_size).
-                            // Adding +1 would make build_alloc_sizes report total_size+1, which
-                            // would make the bounds check UGe(idx, total_size+1) too lenient.
+                            size: *total_size as u32,
                             ty: ScgType::Ptr,
-                        }),
-                        // Store LIVE flag (1) at [ptr + total_size].
-                        ScgStatement::Access(AccessNode::Store {
-                            ptr: ScgExpr::Var(let_stmt.name.clone()),
-                            offset: Some(ScgExpr::Int(flag_off)),
-                            value: ScgExpr::Int(1),
-                            ty: Some(vuma_codegen::ir::IRType::U8),
                         }),
                     ];
                 }

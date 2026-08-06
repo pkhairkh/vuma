@@ -431,10 +431,13 @@ impl ModuleResolver {
                     None => continue, // Skip items without names (top-level stmts).
                 };
 
-                // If the import specifies symbols, only include those.
-                if !import.symbols.is_empty() && !import.symbols.contains(&name) {
-                    continue;
-                }
+                // BUG-3 FIX: Do NOT filter items by import.symbols. Selective-import
+                // syntax (`import "foo.vuma"::{a, b}`) is a visibility HINT, not a
+                // body filter. ALL definitions from the imported file are merged —
+                // the same as bare-import. Without this, transitive callees of
+                // imported transforms (e.g. sha256_update calls sha256_compress)
+                // vanish from the program, causing SIGILL at the ud2 FFI fallback
+                // stub. See ref_tests/BLOCKERS.md BUG-3.
 
                 // Track the source for conflict detection.
                 seen_names
