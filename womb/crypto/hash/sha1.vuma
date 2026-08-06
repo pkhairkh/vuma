@@ -1,7 +1,43 @@
-// womb/crypto/sha1.vuma — SHA-1 (NIST FIPS 180-4)
-// 80-round Merkle-Damgard hash, 512-bit blocks, 160-bit (20-byte) output.
-// Streaming API: sha1_init / sha1_update / sha1_final / sha1_oneshot.
-// All arithmetic is u32 with explicit & MASK32 after every add.
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/crypto/hash/sha1.vuma
+// SHA-1 — full FIPS-180-4 §6.1 PMT-native implementation (W1-B).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// W1-B: complete rewrite of the legacy pointer-based (Address / allocate /
+// free / *ptr) implementation into PMT-native syntax. Mirrors the structure
+// of womb/kernel/crypto/sha.vuma (W48 SHA-256) so that both hashes share
+// the same idioms:
+//   - `state_new(Layout)` arena allocation (no allocate/free)
+//   - `State<T>` pass-by-reference parameters (no Address / pointer deref)
+//   - `[u8; N]` byte arrays with literal / precomputed local-var indices
+//     for state load/store (avoids the v0.2.0-alpha.15 codegen bug noted
+//     in md5.vuma's header)
+//   - LE byte storage of u32 state words (matches sha.vuma) with explicit
+//     BE serialization at digest-emit time
+//   - u64 streaming-length counter (ctx.total) for the FIPS-180-4 §5.1.1
+//     64-bit big-endian bit-count padding suffix
+//
+// SHA-1 is cryptographically broken (collision attacks since 2017) and is
+// provided for legacy compatibility (HMAC-SHA1 in TLS 1.2 record layer,
+// Git object IDs, DSA signatures, SRP) only.
+//
+// Verified against the canonical FIPS-180-4 §B test vectors:
+//   SHA-1("")    = da39a3ee5e6b4b0d3255bfef95601890afd80709
+//   SHA-1("abc") = a9993e364706816aba3e25717850c26c9cd0d89d
+//
+// ── VUMA Key Concepts ──────────────────────────────────────────────────────
+//   - PMT layouts with [u8; N] / [u32; N] fixed-size array fields
+//   - `state_new(Layout)` arena allocation of crypto contexts + scratch
+//     buffers (message schedule W, round constants K) — usable inside
+//     any function, not just main
+//   - `State<Layout>` pass-by-reference parameters (no pointer syntax)
+//   - Byte-granular indexing on [u8; N] (ctx.state[i] reads byte i)
+//   - Typed-array scaling on [u32; N] (W.w[i] reads/writes the u32 word
+//     at slot i — VUMA's "Fix 2" typed-array index scaling)
+//   - `as u32` widening cast on u8 operands before `<<` / `+` (avoids
+//     u8+u8 overflow at the IVE layer)
+//   - u64 streaming-length counter (ctx.total) for the FIPS-180-4 §5.1.1
+//     message-length padding suffix (64-bit big-endian bit count)
 
 const MASK32: u32 = 4294967295;
 
@@ -18,189 +54,354 @@ const KC1: u32 = 1859775393;   // 0x6ED9EBA1 (rounds 20..39)
 const KC2: u32 = 2400959708;   // 0x8F1BBCDC (rounds 40..59)
 const KC3: u32 = 3395469782;   // 0xCA62C1D6 (rounds 60..79)
 
-// Rotate-left guarded against n==0 (32-n would shift by full word)
+// ────────────────────────────────────────────────────────────────────────────
+// Layouts
+// ────────────────────────────────────────────────────────────────────────────
+
+// SHA-1 context: 20-byte hash state (5 × 4-byte IV words, stored as
+// little-endian bytes — same convention as sha.vuma's Sha256Ctx), 64-byte
+// input buffer (SHA-1's block size), in-buffer byte count, and total-bytes-
+// processed counter (used by sha1_final for the FIPS-180-4 §5.1.1 message-
+// length padding suffix).
+layout Sha1Ctx = {
+    state: [u8; 20],   // 5 * 4 bytes (hash state, stored as LE bytes)
+    buf: [u8; 64],     // input buffer (one SHA-1 block)
+    len: u32,          // bytes in buffer
+    total: u64,        // total bytes processed
+}
+
+// SHA-1 input data wrapper (64 bytes — one full SHA-1 block).
+layout Sha1Data = { data: [u8; 64] }
+
+// SHA-1 digest output (20 bytes — five 32-bit hash words serialized
+// big-endian per FIPS-180-4 §5.1.2).
+layout Sha1Digest = { data: [u8; 20] }
+
+// SHA-1 message schedule (80 × u32 words = 320 bytes). Allocated via
+// state_new(Sha1W) inside sha1_compress. W[0..15] are big-endian loads
+// of the 64-byte input block; W[16..79] are expanded via the SHA-1
+// recurrence (FIPS-180-4 §6.1.2 step b: W[t] = ROTL^1(W[t-3] XOR
+// W[t-8] XOR W[t-14] XOR W[t-16])).
+layout Sha1W = { w: [u32; 80] }
+
+// SHA-1 round-constants table (80 × u32 = 320 bytes). Each round t gets
+// one of the four K constants (KC0..KC3) based on which 20-round group
+// t falls into. Held as [u32; 80] so the round loop can index K.k[t]
+// uniformly (no per-round if/else on t to pick the constant).
+layout Sha1K = { k: [u32; 80] }
+
+// ────────────────────────────────────────────────────────────────────────────
+// SHA-1 helper functions (FIPS-180-4 §4.1.1, §6.1.2).
+// ────────────────────────────────────────────────────────────────────────────
+
+// Rotate-left guarded against n==0 (32-n would shift by full word).
+// SHA-1 uses ROTL^5 (a) and ROTL^30 (b) and ROTL^1 (schedule) — all
+// non-zero — but the guard is harmless and matches md5.vuma's rotl32.
 transform rotl32(x: u32, n: u32) -> u32 {
     if n == 0 { return x; }
     return ((x << n) | (x >> (32 - n))) & MASK32;
 }
 
-transform load_u32_be(ptr: Address, off: u32) -> u32 {
-    b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
-    b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
-    return ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) & MASK32;
+// ────────────────────────────────────────────────────────────────────────────
+// State load/store helpers (LE byte <-> u32 word).
+// ────────────────────────────────────────────────────────────────────────────
+
+// load_state_le: read 4 LE bytes from ctx.state[base..base+3] as a u32.
+// The state is stored little-endian (per sha1_init's IV seeding), so
+// byte 0 is the low byte and byte 3 is the high byte of each u32 word.
+transform load_state_le(ctx: State<Sha1Ctx>, base: u64) -> u32 {
+    let b0 = ctx.state[base] as u32;
+    let b1 = ctx.state[base + 1] as u32;
+    let b2 = ctx.state[base + 2] as u32;
+    let b3 = ctx.state[base + 3] as u32;
+    return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & MASK32;
 }
 
-transform store_u32_be(ptr: Address, off: u32, val: u32) {
-    *(ptr + off)     = (val >> 24) & 255;
-    *(ptr + off + 1) = (val >> 16) & 255;
-    *(ptr + off + 2) = (val >> 8) & 255;
-    *(ptr + off + 3) = val & 255;
+// add_state_word: fold a working-variable value into the running state.
+// new_state[base..base+3] (LE) = old_state[base..base+3] (LE) + val
+// (mod 2^32). Used by sha1_compress's step d to add the post-round
+// working variables a..e back into ctx.state (FIPS-180-4 §6.1.2 step d:
+// H0 = a + H0, H1 = b + H1, ..., H4 = e + H4).
+transform add_state_word(ctx: State<Sha1Ctx>, base: u64, val: u32) {
+    let old = load_state_le(ctx, base);
+    let acc = (val + old) & MASK32;
+    ctx.state[base] = (acc & 255) as u8;
+    ctx.state[base + 1] = ((acc >> 8) & 255) as u8;
+    ctx.state[base + 2] = ((acc >> 16) & 255) as u8;
+    ctx.state[base + 3] = ((acc >> 24) & 255) as u8;
 }
 
-// Context layout (96 bytes):
-//   [ 0.. 19] H[0..4]   5 x u32 big-endian state words
-//   [20.. 23] bit_lo    low 32 bits of total message length in bits
-//   [24.. 27] bit_hi    high 32 bits of total message length in bits
-//   [28.. 31] buf_len   bytes currently in the message buffer
-//   [32.. 95] buf[64]   partial block accumulator
-transform sha1_init(ctx: Address) {
-    store_u32_be(ctx, 0,  H0I);
-    store_u32_be(ctx, 4,  H1I);
-    store_u32_be(ctx, 8,  H2I);
-    store_u32_be(ctx, 12, H3I);
-    store_u32_be(ctx, 16, H4I);
-    store_u32_be(ctx, 20, 0);
-    store_u32_be(ctx, 24, 0);
-    store_u32_be(ctx, 28, 0);
+// ────────────────────────────────────────────────────────────────────────────
+// Round-constants loader.
+// ────────────────────────────────────────────────────────────────────────────
+
+// sha1_load_k: fill K.k[0..79] with the FIPS-180-4 §4.1.1 round constants
+// expanded per-round (each of the 4 K values is broadcast across its
+// 20-round group). The expansion lets the round loop index K.k[t]
+// uniformly — no per-round branch on t to pick the constant.
+transform sha1_load_k(K: State<Sha1K>) {
+    let i = 0;
+    while i < 20 { K.k[i] = KC0; i = i + 1; }
+    while i < 40 { K.k[i] = KC1; i = i + 1; }
+    while i < 60 { K.k[i] = KC2; i = i + 1; }
+    while i < 80 { K.k[i] = KC3; i = i + 1; }
 }
 
-// Core compression: 80 rounds over a single 512-bit block.
-transform sha1_compress(ctx: Address, block: Address) {
-    a: u32 = load_u32_be(ctx, 0);
-    b: u32 = load_u32_be(ctx, 4);
-    c: u32 = load_u32_be(ctx, 8);
-    d: u32 = load_u32_be(ctx, 12);
-    e: u32 = load_u32_be(ctx, 16);
+// ────────────────────────────────────────────────────────────────────────────
+// SHA-1 API functions.
+// ────────────────────────────────────────────────────────────────────────────
 
-    // 80-word message schedule, laid out as 80 x 4 bytes = 320 bytes
-    wbuf = allocate(320);
+// sha1_init: seed the SHA-1 initial hash state into ctx.
+//
+//   ctx: caller-allocated State<Sha1Ctx> (output — modified in place).
+//
+// Writes ALL 5 SHA-1 IV words (byte-by-byte, little-endian) into
+// ctx.state[0..19], and sets ctx.len = ctx.total = 0. (buf is left
+// uninitialised — fresh state_new allocations are zeroed, and update /
+// final only read buf[0..ctx.len] before writing those positions.)
+transform sha1_init(ctx: State<Sha1Ctx>) {
+    // H0 = 0x67452301 = 1732584193 → LE bytes: 01 23 45 67.
+    ctx.state[ 0] =   1; ctx.state[ 1] =  35; ctx.state[ 2] =  69; ctx.state[ 3] = 103;
+    // H1 = 0xEFCDAB89 = 4023233417 → LE bytes: 89 AB CD EF.
+    ctx.state[ 4] = 137; ctx.state[ 5] = 171; ctx.state[ 6] = 205; ctx.state[ 7] = 239;
+    // H2 = 0x98BADCFE = 2562383102 → LE bytes: FE DC BA 98.
+    ctx.state[ 8] = 254; ctx.state[ 9] = 220; ctx.state[10] = 186; ctx.state[11] = 152;
+    // H3 = 0x10325476 = 271733878  → LE bytes: 76 54 32 10.
+    ctx.state[12] = 118; ctx.state[13] =  84; ctx.state[14] =  50; ctx.state[15] =  16;
+    // H4 = 0xC3D2E1F0 = 3285377520 → LE bytes: F0 E1 D2 C3.
+    ctx.state[16] = 240; ctx.state[17] = 225; ctx.state[18] = 210; ctx.state[19] = 195;
+    ctx.len = 0;
+    ctx.total = 0;
+}
 
-    i: u32 = 0;
+// sha1_compress: fold one 64-byte block (ctx.buf) into ctx.state via
+// the FIPS-180-4 §6.1.2 80-round SHA-1 compression.
+//
+//   ctx: caller-allocated State<Sha1Ctx> with ctx.buf populated (read)
+//        and ctx.state updated in place (write). ctx.len is not modified
+//        by compress (the caller — update or final — manages len).
+//
+// Steps (FIPS-180-4 §6.1.2):
+//   a. Build the 80-word message schedule W[0..79]:
+//        W[0..15] = big-endian load of ctx.buf[i*4..i*4+3]
+//        W[t] (16 <= t < 80) = ROTL^1(W[t-3] XOR W[t-8] XOR W[t-14] XOR W[t-16])
+//   b. Initialize working variables a..e from ctx.state[0..19] (LE):
+//        a = H0, b = H1, c = H2, d = H3, e = H4.
+//   c. Run 80 rounds (t = 0..79):
+//        T = ROTL^5(a) + f_t(b,c,d) + e + K_t + W[t]   (mod 2^32)
+//        e = d; d = c; c = ROTL^30(b); b = a; a = T.
+//      where f_t and K_t are selected by which 20-round group t is in.
+//   d. Fold a..e back into ctx.state (mod 2^32):
+//        H0 += a; H1 += b; H2 += c; H3 += d; H4 += e.
+transform sha1_compress(ctx: State<Sha1Ctx>) {
+    // Scratch buffers: 80-word message schedule + 80-word round-constants.
+    let W = state_new(Sha1W);
+    let K = state_new(Sha1K);
+    sha1_load_k(K);
+
+    // Step a: build the message schedule.
+    // W[0..15] = big-endian load of ctx.buf[i*4..i*4+3] (FIPS-180-4 §5.1.2:
+    // the input message is interpreted as 16 big-endian 32-bit words).
+    let i = 0;
     while i < 16 {
-        store_u32_be(wbuf, i * 4, load_u32_be(block, i * 4));
+        let off = i * 4;
+        let b0 = ctx.buf[off] as u32;
+        let b1 = ctx.buf[off + 1] as u32;
+        let b2 = ctx.buf[off + 2] as u32;
+        let b3 = ctx.buf[off + 3] as u32;
+        W.w[i] = ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) & MASK32;
         i = i + 1;
     }
-    // Rounds 16..79: w[i] = rotl(w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16], 1)
+    // W[16..79] = ROTL^1(W[t-3] ^ W[t-8] ^ W[t-14] ^ W[t-16])  (§6.1.2).
     i = 16;
     while i < 80 {
-        w: u32 = load_u32_be(wbuf, (i - 3) * 4)
-               ^ load_u32_be(wbuf, (i - 8) * 4)
-               ^ load_u32_be(wbuf, (i - 14) * 4)
-               ^ load_u32_be(wbuf, (i - 16) * 4);
-        w = rotl32(w, 1);
-        store_u32_be(wbuf, i * 4, w);
+        let w3  = W.w[i - 3];
+        let w8  = W.w[i - 8];
+        let w14 = W.w[i - 14];
+        let w16 = W.w[i - 16];
+        W.w[i] = rotl32((w3 ^ w8 ^ w14 ^ w16) & MASK32, 1);
         i = i + 1;
     }
 
-    i = 0;
-    while i < 80 {
-        f: u32 = 0;
-        k: u32 = 0;
-        if i < 20 {
+    // Step b: initialize working variables a..e from ctx.state (LE load).
+    let a = load_state_le(ctx,  0);
+    let b = load_state_le(ctx,  4);
+    let c = load_state_le(ctx,  8);
+    let d = load_state_le(ctx, 12);
+    let e = load_state_le(ctx, 16);
+
+    // Step c: 80 SHA-1 rounds (FIPS-180-4 §6.1.2).
+    // f_t is selected by which 20-round group t falls into:
+    //   0..19:   Ch(b,c,d) = (b AND c) XOR ((NOT b) AND d)
+    //   20..39:  Parity(b,c,d) = b XOR c XOR d
+    //   40..59:  Maj(b,c,d) = (b AND c) XOR (b AND d) XOR (c AND d)
+    //   60..79:  Parity(b,c,d) = b XOR c XOR d
+    // K_t is pre-expanded into K.k[t] by sha1_load_k.
+    let t = 0;
+    while t < 80 {
+        let f = 0;
+        let kt = K.k[t];
+        if t < 20 {
             // Ch(b,c,d) = (b AND c) XOR ((NOT b) AND d)
             f = (b & c) ^ ((b ^ MASK32) & d);
-            k = KC0;
         }
-        if i >= 20 {
-            if i < 40 {
+        if t >= 20 {
+            if t < 40 {
                 // Parity(b,c,d) = b XOR c XOR d
                 f = b ^ c ^ d;
-                k = KC1;
             }
         }
-        if i >= 40 {
-            if i < 60 {
+        if t >= 40 {
+            if t < 60 {
                 // Maj(b,c,d) = (b AND c) XOR (b AND d) XOR (c AND d)
                 f = (b & c) ^ (b & d) ^ (c & d);
-                k = KC2;
             }
         }
-        if i >= 60 {
+        if t >= 60 {
+            // Parity(b,c,d) = b XOR c XOR d
             f = b ^ c ^ d;
-            k = KC3;
         }
 
-        wi: u32 = load_u32_be(wbuf, i * 4);
-        temp: u32 = (rotl32(a, 5) + f + e + k + wi) & MASK32;
+        let wi = W.w[t];
+        let temp = (rotl32(a, 5) + f + e + kt + wi) & MASK32;
         e = d;
         d = c;
         c = rotl32(b, 30);
         b = a;
         a = temp;
-        i = i + 1;
+        t = t + 1;
     }
 
-    // Add the compressed chunk back into the running state
-    store_u32_be(ctx, 0,  (load_u32_be(ctx, 0)  + a) & MASK32);
-    store_u32_be(ctx, 4,  (load_u32_be(ctx, 4)  + b) & MASK32);
-    store_u32_be(ctx, 8,  (load_u32_be(ctx, 8)  + c) & MASK32);
-    store_u32_be(ctx, 12, (load_u32_be(ctx, 12) + d) & MASK32);
-    store_u32_be(ctx, 16, (load_u32_be(ctx, 16) + e) & MASK32);
-    free(wbuf);
+    // Step d: fold a..e back into ctx.state (H[i] += working[i] mod 2^32).
+    add_state_word(ctx,  0, a);
+    add_state_word(ctx,  4, b);
+    add_state_word(ctx,  8, c);
+    add_state_word(ctx, 12, d);
+    add_state_word(ctx, 16, e);
 }
 
-// Increment the 64-bit bit counter by `bits` (1 <= bits <= 512), carrying
-// into the high word when the low word wraps.
-transform sha1_add_bits(ctx: Address, bits: u32) {
-    lo: u32 = load_u32_be(ctx, 20);
-    hi: u32 = load_u32_be(ctx, 24);
-    new_lo: u32 = (lo + bits) & MASK32;
-    if new_lo < lo { hi = (hi + 1) & MASK32; }
-    store_u32_be(ctx, 20, new_lo);
-    store_u32_be(ctx, 24, hi);
-}
-
-transform sha1_update(ctx: Address, data: Address, len: u32) {
-    buf_len: u32 = load_u32_be(ctx, 28);
-    i: u32 = 0;
+// sha1_update: absorb `len` bytes of data into the hash state.
+//
+//   ctx:  caller-allocated State<Sha1Ctx> (modified in place).
+//   data: caller-allocated State<Sha1Data> holding the input bytes.
+//   len:  number of bytes to absorb (0..64 per call — multiple update
+//         calls chain into a multi-block hash via repeated compress).
+//
+// Buffers input bytes into ctx.buf. When ctx.len reaches 64, calls
+// sha1_compress to fold the block into ctx.state and resets ctx.len
+// to 0 (ready for the next chunk). Multi-block streaming via repeated
+// update calls is supported: if the buffer is partially full from a
+// prior call, the new bytes top it up and trigger a compression as
+// soon as 64 bytes accumulate.
+transform sha1_update(ctx: State<Sha1Ctx>, data: State<Sha1Data>, len: u64) {
+    let i = 0;
     while i < len {
-        *(ctx + 32 + buf_len) = *(data + i);
-        buf_len = buf_len + 1;
-        i = i + 1;
-        if buf_len == 64 {
-            sha1_compress(ctx, ctx + 32);
-            sha1_add_bits(ctx, 512);
-            buf_len = 0;
+        if ctx.len < 64 {
+            ctx.buf[ctx.len] = data.data[i];
+            ctx.len = ctx.len + 1;
+            if ctx.len == 64 {
+                sha1_compress(ctx);
+                ctx.len = 0;
+            }
         }
+        i = i + 1;
     }
-    store_u32_be(ctx, 28, buf_len);
+    ctx.total = ctx.total + len;
 }
 
-// Pad the buffered message per FIPS 180-4 Section 5.1.1, run the final
-// compression, and write the 20-byte digest to `out`.
-transform sha1_final(ctx: Address, out: Address) {
-    buf_len: u32 = load_u32_be(ctx, 28);
+// sha1_final: emit the 20-byte SHA-1 digest into `out`.
+//
+//   ctx: caller-allocated State<Sha1Ctx> (modified in place during
+//        the final compression(s) — ctx.state holds the final hash
+//        value after this call).
+//   out: caller-allocated State<Sha1Digest> (digest output — 20 bytes).
+//
+// Real FIPS-180-4 §5.1.1 padding + §6.1.2 final compression +
+// §5.1.2 big-endian digest serialization:
+//   1. Append 0x80 at ctx.buf[ctx.len] (the SHA-1 "1-bit" marker).
+//   2. Zero-pad to offset 56 (mod 64). If ctx.len + 1 > 56, the padding
+//      overflows into a second block — compress the first (containing
+//      the message tail + 0x80 + zero-pad), then start a fresh zero
+//      block for the bit-count suffix.
+//   3. Write the 64-bit big-endian bit count (ctx.total * 8) at
+//      ctx.buf[56..63] (FIPS-180-4 §5.1.1 length suffix).
+//   4. Run the final compression (or the second of two compressions
+//      in the overflow case).
+//   5. Serialize ctx.state as 5 big-endian u32 words into out.data
+//      (FIPS-180-4 §5.1.2: H0 high byte first, H0 low byte last, then
+//      H1, ..., H4).
+transform sha1_final(ctx: State<Sha1Ctx>, out: State<Sha1Digest>) {
+    // Total message length in bits (FIPS-180-4 §5.1.1 length suffix).
+    // ctx.total is u64 (bytes); * 8 yields the bit count.
+    let total_bits = ctx.total * 8;
 
-    // Account for the unprocessed buffered bytes in the bit counter
-    sha1_add_bits(ctx, buf_len * 8);
+    // Step 1: append the 0x80 padding bit at ctx.buf[ctx.len].
+    ctx.buf[ctx.len] = 128;
+    let pos = ctx.len + 1;
 
-    // Append the 0x80 bit after the message
-    *(ctx + 32 + buf_len) = 128;
-    buf_len = buf_len + 1;
-
-    // If not enough room for the 8-byte length suffix, pad this block with
-    // zeros, compress, and start a fresh block.
-    if buf_len > 56 {
-        while buf_len < 64 {
-            *(ctx + 32 + buf_len) = 0;
-            buf_len = buf_len + 1;
+    // Step 2: zero-pad to offset 56 (mod 64).
+    if pos < 56 {
+        // Single-block padding: zero bytes pos..55, then bit count at
+        // 56..63 — all in the current block.
+        let p = pos;
+        while p < 56 {
+            ctx.buf[p] = 0;
+            p = p + 1;
         }
-        sha1_compress(ctx, ctx + 32);
-        buf_len = 0;
+    } else {
+        // Two-block padding: zero bytes pos..63, compress this block
+        // (message tail + 0x80 + zero-pad), then start a fresh block
+        // zero-filled up to offset 56 (the bit count goes at 56..63).
+        let p = pos;
+        while p < 64 {
+            ctx.buf[p] = 0;
+            p = p + 1;
+        }
+        ctx.len = 64;
+        sha1_compress(ctx);
+        ctx.len = 0;
+        let q = 0;
+        while q < 56 {
+            ctx.buf[q] = 0;
+            q = q + 1;
+        }
     }
-    // Pad with zeros up to the length field at offset 56
-    while buf_len < 56 {
-        *(ctx + 32 + buf_len) = 0;
-        buf_len = buf_len + 1;
-    }
-    // Append 64-bit big-endian bit length (high word first, then low)
-    store_u32_be(ctx, 32 + 56, load_u32_be(ctx, 24));
-    store_u32_be(ctx, 32 + 60, load_u32_be(ctx, 20));
 
-    sha1_compress(ctx, ctx + 32);
+    // Step 3: 64-bit big-endian bit count at ctx.buf[56..63].
+    // (Byte 56 = most-significant, byte 63 = least-significant.)
+    ctx.buf[56] = ((total_bits >> 56) & 255) as u8;
+    ctx.buf[57] = ((total_bits >> 48) & 255) as u8;
+    ctx.buf[58] = ((total_bits >> 40) & 255) as u8;
+    ctx.buf[59] = ((total_bits >> 32) & 255) as u8;
+    ctx.buf[60] = ((total_bits >> 24) & 255) as u8;
+    ctx.buf[61] = ((total_bits >> 16) & 255) as u8;
+    ctx.buf[62] = ((total_bits >>  8) & 255) as u8;
+    ctx.buf[63] = (total_bits         & 255) as u8;
 
-    // Emit H[0..4] big-endian
-    i: u32 = 0;
+    // Step 4: final compression (the second compression in the overflow
+    // case — the first was done in step 2's else branch).
+    ctx.len = 64;
+    sha1_compress(ctx);
+
+    // Step 5: serialize ctx.state as 5 big-endian u32 words (§5.1.2).
+    // State is stored LE (per sha1_init); load each word LE, then
+    // write it back to out.data as 4 BE bytes (high byte first).
+    let i = 0;
     while i < 5 {
-        store_u32_be(out, i * 4, load_u32_be(ctx, i * 4));
+        let base = i * 4;
+        let word = load_state_le(ctx, base);
+        out.data[base]     = ((word >> 24) & 255) as u8;
+        out.data[base + 1] = ((word >> 16) & 255) as u8;
+        out.data[base + 2] = ((word >>  8) & 255) as u8;
+        out.data[base + 3] = ( word        & 255) as u8;
         i = i + 1;
     }
 }
 
-transform sha1_oneshot(data: Address, len: u32, out: Address) {
-    ctx = allocate(96);
+// sha1_oneshot: convenience wrapper — init + update + final in one call.
+transform sha1_oneshot(data: State<Sha1Data>, len: u64, out: State<Sha1Digest>) {
+    let ctx = state_new(Sha1Ctx);
     sha1_init(ctx);
     sha1_update(ctx, data, len);
     sha1_final(ctx, out);
-    free(ctx);
 }
