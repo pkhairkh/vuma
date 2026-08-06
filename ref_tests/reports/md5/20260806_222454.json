@@ -1,0 +1,22 @@
+{
+  "algorithm": "MD5",
+  "timestamp": "2026-08-06T22:24:54.151146+00:00",
+  "total_vectors": 10,
+  "passed": 0,
+  "failed": 10,
+  "pass_rate": "0.00%",
+  "failures": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+  ],
+  "module": "/home/z/my-project/workdir/vuma/womb/crypto/hash/md5.vuma",
+  "reference": "Python hashlib.md5 (OpenSSL)"
+}

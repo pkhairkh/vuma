@@ -1,0 +1,80 @@
+[package]
+name = "vuma-ref-tests"
+version = "0.1.0"
+edition = "2021"
+description = "Reference-implementation conformance tests for womb/* crypto modules"
+
+[[bin]]
+name = "ref_runner"
+path = "src/ref_runner.rs"
+
+[dependencies]
+# Hashes
+md-5       = "0.10"
+sha1       = "0.10"
+sha2       = "0.10"
+sha3       = "0.10"
+blake2     = "0.10"
+blake3     = "1.5"
+# Symmetric
+aes        = "0.8"
+ctr        = "0.9"
+cbc        = "0.1"
+ecb        = "0.1"
+cfb-mode   = "0.8"
+ofb        = "0.6"
+ghash      = "0.5"
+aes-gcm    = "0.10"
+aes-gcm-siv = "0.11"
+chacha20   = "0.9"
+chacha20poly1305 = "0.10"
+poly1305   = "0.8"
+salsa20    = "0.10"
+des        = "0.8"
+# MAC/KDF
+hmac       = "0.12"
+cmac       = "0.7"
+hkdf       = "0.12"
+pbkdf2     = "0.12"
+scrypt     = "0.11"
+argon2     = "0.5"
+# Bignum
+num-bigint = "0.4"
+num-traits = "0.2"
+# ECC
+p256       = { version = "0.13", features = ["ecdsa","ecdh","pem"] }
+p384       = { version = "0.13", features = ["ecdsa","ecdh","pem"] }
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+x25519-dalek  = { version = "2.0", features = ["rand_core","static_secrets"] }
+k256       = { version = "0.13", features = ["ecdsa","ecdh","arithmetic"] }
+# RSA
+rsa        = "0.9"
+# DRBG
+rand_chacha = "0.3"
+rand_core   = "0.6"
+rand        = "0.8"
+# PQ
+pqcrypto-mlkem = "0.7"
+pqcrypto-mldsa = "0.7"
+pqcrypto-sphincsplus = "0.6"
+pqcrypto-falcon = "0.2"
+pqcrypto-hqc = "0.1"
+pqcrypto-traits = "0.3"
+# Utilities
+hex        = "0.4"
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc       = "0.2"
+libsodium-sys = "0.2"
+openssl    = "0.10"
+secp256k1  = { version = "0.29", features = ["rand","rand-std","global-context","recovery"] }
+anyhow     = "1"
+thiserror  = "1"
+walkdir    = "2"
+csv        = "1"
+base64     = "0.22"
+
+# Standalone workspace — NOT a member of the vuma workspace.
+# This file has its own Cargo.lock at ref_tests/Cargo.lock.
+[workspace]
+members = []

@@ -1,0 +1,159 @@
+const MASK32: u32 = 4294967295;
+const MD5_A0: u32 = 1732584193;
+const MD5_B0: u32 = 4023233417;
+const MD5_C0: u32 = 2562383102;
+const MD5_D0: u32 = 271733878;
+const S0: u32 = 7; const S1: u32 = 12; const S2: u32 = 17; const S3: u32 = 22;
+const S4: u32 = 5; const S5: u32 = 9; const S6: u32 = 14; const S7: u32 = 20;
+const S8: u32 = 4; const S9: u32 = 11; const S10: u32 = 16; const S11: u32 = 23;
+const S12: u32 = 6; const S13: u32 = 10; const S14: u32 = 15; const S15: u32 = 21;
+
+layout Md5Ctx = { state: [u8; 16], buf: [u8; 64], len: u32, total_lo: u32, total_hi: u32 }
+layout Md5K = { k: [u32; 64] }
+layout Md5M = { m: [u32; 16] }
+
+transform md5_load_k(K: State<Md5K>) {
+    K.k[0] = 3614090360; K.k[1] = 3905402710; K.k[2] = 606105819; K.k[3] = 3250441966;
+    K.k[4] = 4118548399; K.k[5] = 1200080426; K.k[6] = 2821735955; K.k[7] = 4249261313;
+    K.k[8] = 1770035416; K.k[9] = 2336552879; K.k[10] = 4294925233; K.k[11] = 2304563134;
+    K.k[12] = 1804603682; K.k[13] = 4254626195; K.k[14] = 2792965006; K.k[15] = 1236535329;
+    K.k[16] = 4122456904; K.k[17] = 3115982417; K.k[18] = 2585797764; K.k[19] = 3942874059;
+    K.k[20] = 3712866113; K.k[21] = 2650097792; K.k[22] = 1866375312; K.k[23] = 3940257326;
+    K.k[24] = 2417469325; K.k[25] = 2304563494; K.k[26] = 4110918685; K.k[27] = 2709127959;
+    K.k[28] = 2010040352; K.k[29] = 3904418173; K.k[30] = 3783441917; K.k[31] = 2026838592;
+    K.k[32] = 2627496497; K.k[33] = 1866375312; K.k[34] = 741168079; K.k[35] = 4049829007;
+    K.k[36] = 3053147920; K.k[37] = 3949870264; K.k[38] = 587729985; K.k[39] = 4030777747;
+    K.k[40] = 3495752482; K.k[41] = 1707807981; K.k[42] = 3253427019; K.k[43] = 1272821128;
+    K.k[44] = 3662495513; K.k[45] = 2686256376; K.k[46] = 1694094439; K.k[47] = 3245019308;
+    K.k[48] = 4223185659; K.k[49] = 2751308665; K.k[50] = 1875249140; K.k[51] = 3537138525;
+    K.k[52] = 3373307053; K.k[53] = 3533710109; K.k[54] = 1302680948; K.k[55] = 4254489423;
+    K.k[56] = 3532940241; K.k[57] = 1804603682; K.k[58] = 1446553360; K.k[59] = 3864093344;
+    K.k[60] = 2108259060; K.k[61] = 4122456904; K.k[62] = 2650097792; K.k[63] = 2442655389;
+}
+
+transform rotl32(x: u32, n: u32) -> u32 {
+    if n == 0 { return x; }
+    return ((x << n) | (x >> (32 - n))) & MASK32;
+}
+
+transform md5_init(ctx: State<Md5Ctx>) {
+    ctx.state[0] = (MD5_A0 & 255) as u8;
+    ctx.state[1] = ((MD5_A0 >> 8) & 255) as u8;
+    ctx.state[2] = ((MD5_A0 >> 16) & 255) as u8;
+    ctx.state[3] = ((MD5_A0 >> 24) & 255) as u8;
+    ctx.state[4] = (MD5_B0 & 255) as u8;
+    ctx.state[5] = ((MD5_B0 >> 8) & 255) as u8;
+    ctx.state[6] = ((MD5_B0 >> 16) & 255) as u8;
+    ctx.state[7] = ((MD5_B0 >> 24) & 255) as u8;
+    ctx.state[8] = (MD5_C0 & 255) as u8;
+    ctx.state[9] = ((MD5_C0 >> 8) & 255) as u8;
+    ctx.state[10] = ((MD5_C0 >> 16) & 255) as u8;
+    ctx.state[11] = ((MD5_C0 >> 24) & 255) as u8;
+    ctx.state[12] = (MD5_D0 & 255) as u8;
+    ctx.state[13] = ((MD5_D0 >> 8) & 255) as u8;
+    ctx.state[14] = ((MD5_D0 >> 16) & 255) as u8;
+    ctx.state[15] = ((MD5_D0 >> 24) & 255) as u8;
+    ctx.len = 0; ctx.total_lo = 0; ctx.total_hi = 0;
+}
+
+transform md5_compress(ctx: State<Md5Ctx>) {
+    let K = state_new(Md5K);
+    md5_load_k(K);
+    let M = state_new(Md5M);
+    let j: u32 = 0;
+    while j < 16 {
+        let off = j * 4;
+        let mb0 = ctx.buf[off] as u32;
+        let mb1 = ctx.buf[off + 1] as u32;
+        let mb2 = ctx.buf[off + 2] as u32;
+        let mb3 = ctx.buf[off + 3] as u32;
+        M.m[j] = (mb0 | (mb1 << 8) | (mb2 << 16) | (mb3 << 24)) & MASK32;
+        j = j + 1;
+    }
+    let a0 = (ctx.state[0] as u32) | ((ctx.state[1] as u32) << 8) | ((ctx.state[2] as u32) << 16) | ((ctx.state[3] as u32) << 24);
+    let b0 = (ctx.state[4] as u32) | ((ctx.state[5] as u32) << 8) | ((ctx.state[6] as u32) << 16) | ((ctx.state[7] as u32) << 24);
+    let c0 = (ctx.state[8] as u32) | ((ctx.state[9] as u32) << 8) | ((ctx.state[10] as u32) << 16) | ((ctx.state[11] as u32) << 24);
+    let d0 = (ctx.state[12] as u32) | ((ctx.state[13] as u32) << 8) | ((ctx.state[14] as u32) << 16) | ((ctx.state[15] as u32) << 24);
+    
+    let a: u32 = a0;
+    let b: u32 = b0;
+    let c: u32 = c0;
+    let d: u32 = d0;
+    
+    let round: u32 = 0;
+    while round < 64 {
+        let f: u32 = 0;
+        let g: u32 = 0;
+        let s: u32 = 0;
+        
+        if round < 16 {
+            f = (b & c) ^ ((b ^ MASK32) & d);
+            g = round;
+            if round % 4 == 0 { s = S0; }
+            if round % 4 == 1 { s = S1; }
+            if round % 4 == 2 { s = S2; }
+            if round % 4 == 3 { s = S3; }
+        }
+        if round >= 16 {
+            if round < 32 {
+                f = (d & b) ^ ((d ^ MASK32) & c);
+                g = (5 * round + 1) % 16;
+                if round % 4 == 0 { s = S4; }
+                if round % 4 == 1 { s = S5; }
+                if round % 4 == 2 { s = S6; }
+                if round % 4 == 3 { s = S7; }
+            }
+        }
+        if round >= 32 {
+            if round < 48 {
+                f = b ^ c ^ d;
+                g = (3 * round + 5) % 16;
+                if round % 4 == 0 { s = S8; }
+                if round % 4 == 1 { s = S9; }
+                if round % 4 == 2 { s = S10; }
+                if round % 4 == 3 { s = S11; }
+            }
+        }
+        if round >= 48 {
+            f = c ^ (b | (d ^ MASK32));
+            g = (7 * round) % 16;
+            if round % 4 == 0 { s = S12; }
+            if round % 4 == 1 { s = S13; }
+            if round % 4 == 2 { s = S14; }
+            if round % 4 == 3 { s = S15; }
+        }
+        
+        let temp: u32 = d;
+        d = c;
+        c = b;
+        let mg = M.m[g];
+        let ki = K.k[round];
+        let new_b = (b + rotl32((a + f + ki + mg) & MASK32, s)) & MASK32;
+        b = new_b;
+        a = temp;
+        
+        round = round + 1;
+    }
+    
+    let na = (a0 + a) & MASK32;
+    let nb = (b0 + b) & MASK32;
+    let nc = (c0 + c) & MASK32;
+    let nd = (d0 + d) & MASK32;
+    ctx.state[0] = (na & 255) as u8;
+    ctx.state[1] = ((na >> 8) & 255) as u8;
+    ctx.state[2] = ((na >> 16) & 255) as u8;
+    ctx.state[3] = ((na >> 24) & 255) as u8;
+    ctx.state[4] = (nb & 255) as u8;
+    ctx.state[5] = ((nb >> 8) & 255) as u8;
+    ctx.state[6] = ((nb >> 16) & 255) as u8;
+    ctx.state[7] = ((nb >> 24) & 255) as u8;
+    ctx.state[8] = (nc & 255) as u8;
+    ctx.state[9] = ((nc >> 8) & 255) as u8;
+    ctx.state[10] = ((nc >> 16) & 255) as u8;
+    ctx.state[11] = ((nc >> 24) & 255) as u8;
+    ctx.state[12] = (nd & 255) as u8;
+    ctx.state[13] = ((nd >> 8) & 255) as u8;
+    ctx.state[14] = ((nd >> 16) & 255) as u8;
+    ctx.state[15] = ((nd >> 24) & 255) as u8;
+}
+
