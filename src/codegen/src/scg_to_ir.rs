@@ -4676,12 +4676,19 @@ impl IRBuilder {
         let dst_vreg = self.alloc_vreg();
         ir_func.register_vreg(VirtualRegister::named(dst_vreg, &cast.dst));
         names.insert(cast.dst.clone(), dst_vreg);
+        // Record the TARGET type in vreg_types so subsequent operations
+        // (e.g. BinOp ShrL) inherit the correct type. Without this, a
+        // u32→u64 cast followed by >> 32 gets ty=U32 instead of ty=U64,
+        // producing UNDEFINED instructions on aarch64 (UBFM with immr=32
+        // for 32-bit is invalid).
+        let to_ir_ty = cast.to_ty.to_ir_type();
+        self.vreg_types.insert(dst_vreg, to_ir_ty.clone());
         ir_func.current_block().push(IRInstruction::Cast {
             kind: cast.kind,
             dst: IRValue::Register(dst_vreg),
             src: src_val,
             from_ty: Some(cast.from_ty.to_ir_type()),
-            to_ty: Some(cast.to_ty.to_ir_type()),
+            to_ty: Some(to_ir_ty),
         });
         Ok(())
     }

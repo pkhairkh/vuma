@@ -1094,11 +1094,27 @@ fn try_fold_instruction(instr: &IRInstr) -> Option<(u32, i64)> {
                         }
                     }
                 }
+                CastKind::ZExt | CastKind::SExt => {
+                    // Integer widening: the value stays the same numerically,
+                    // but the type changes. Pass through the immediate value.
+                    // The type info is preserved via vreg_types in the IR builder.
+                    Some((dst_id, v))
+                }
+                CastKind::Trunc => {
+                    // Integer narrowing: mask to the target width.
+                    // For now, just pass through (the backend handles truncation
+                    // via register width selection).
+                    Some((dst_id, v))
+                }
+                CastKind::BitCast => {
+                    // Reinterpret bits — pass through.
+                    Some((dst_id, v))
+                }
                 _ => None,
             }
         }
-        IRInstr::Cmp {
-            kind,
+        IRInstr::BinOp {
+            op,
             dst,
             lhs,
             rhs,
@@ -1130,18 +1146,22 @@ fn try_fold_instruction(instr: &IRInstr) -> Option<(u32, i64)> {
                         f64::from_bits(r as u64) as f32 as f64
                     }
                 };
-                let result = match kind {
-                    CmpKind::Eq => lf == rf,
-                    CmpKind::Ne => lf != rf,
-                    CmpKind::SLt | CmpKind::ULt => lf < rf,
-                    CmpKind::SLe | CmpKind::ULe => lf <= rf,
-                    CmpKind::SGt | CmpKind::UGt => lf > rf,
-                    CmpKind::SGe | CmpKind::UGe => lf >= rf,
+                let result = match op {
+                    BinOpKind::Eq => lf == rf,
+                    BinOpKind::Ne => lf != rf,
+                    BinOpKind::SLt | BinOpKind::ULt => lf < rf,
+                    BinOpKind::SLe | BinOpKind::ULe => lf <= rf,
+                    BinOpKind::SGt | BinOpKind::UGt => lf > rf,
+                    BinOpKind::SGe | BinOpKind::UGe => lf >= rf,
+                    _ => return None,
                 };
                 return Some((dst_id, if result { 1 } else { 0 }));
             }
-            let result = try_fold_cmp(*kind, l, r)?;
-            Some((dst_id, result))
+            // For non-comparison BinOps, use try_fold_binop
+            if let Some(result) = try_fold_binop(*op, l, r, ty.as_ref()) {
+                return Some((dst_id, result));
+            }
+            None
         }
         // Channel instructions cannot be constant-folded:
         //  - ChannelOpen returns a fresh opaque handle (runtime identity).

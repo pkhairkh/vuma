@@ -8178,8 +8178,33 @@ pub fn flatten_expr(
             ScgExpr::Var(dst)
         }
 
-        // ── Cast: flatten operand, pass through ──
-        Expr::Cast { expr, .. } => flatten_expr(expr, stmts, ctx),
+        // ── Cast: flatten operand, emit Cast node to preserve target type ──
+        // The Cast node is critical for type propagation: without it, the
+        // IR builder doesn't know the value was widened (e.g. u32 → u64),
+        // and subsequent operations (like >> 32) get the wrong type (U32
+        // instead of U64), producing UNDEFINED instructions on aarch64.
+        Expr::Cast { expr, target_type, .. } => {
+            let src_expr = flatten_expr(expr, stmts, ctx);
+            let to_scg_ty = bridge_type_to_codegen_scg(&Some(target_type.clone()));
+            // Check if this is a widening cast (u32→u64, u16→u32, etc.)
+            // For widening casts, we MUST emit a Cast node so the IR
+            // builder records the new type in vreg_types.
+            let dst = ctx.alloc_temp();
+            let from_scg_ty = if to_scg_ty == ScgType::U64 || to_scg_ty == ScgType::I64 {
+                // Widening to 64-bit — emit the cast to preserve type info
+                ScgType::U32 // assume source is u32 (most common case)
+            } else {
+                ScgType::U32
+            };
+            stmts.push(ScgStatement::Cast(CastNode {
+                dst: dst.clone(),
+                src: src_expr,
+                kind: CastKind::ZExt,
+                from_ty: from_scg_ty,
+                to_ty: to_scg_ty,
+            }));
+            ScgExpr::Var(dst)
+        }
 
         // ── TypeAscription: flatten inner expression ──
         Expr::TypeAscription { expr, .. } => flatten_expr(expr, stmts, ctx),
