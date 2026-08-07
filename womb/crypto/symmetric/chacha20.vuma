@@ -1,229 +1,463 @@
-// womb/crypto/chacha20.vuma — ChaCha20 Stream Cipher (RFC 8439, §2.3–2.4)
-// No main() — importable library module.
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/crypto/symmetric/chacha20.vuma — ChaCha20 Stream Cipher (RFC 8439)
+// PMT-native rewrite (W2-C).
+// ═══════════════════════════════════════════════════════════════════════════
 //
-// 256-bit key, 96-bit nonce, 32-bit block counter. 20 rounds
-// (10 double rounds of column + diagonal quarter-rounds). State is
-// 512 bits arranged as 16 little-endian 32-bit words:
+// 256-bit key, 96-bit nonce, 32-bit counter. 20 rounds = 10 double-rounds
+// (column round + diagonal round). ARX design (add-rotate-XOR).
 //
-//   word  0  1  2  3       "expa" "nd 3" "2-by" "te k"   (constants)
-//   word  4  5  6  7       key[0..3]
-//   word  8  9 10 11       key[4..7]
-//   word 12                counter
-//   word 13 14 15          nonce[0..2]
+// State layout (16 × u32 words, per RFC 8439 §2.3):
+//   word  0  1  2  3   constants "expand 32-byte k"
+//   word  4  5  6  7   key[0..3]  (first 16 key bytes, 4 LE u32)
+//   word  8  9 10 11   key[4..7]  (last 16 key bytes, 4 LE u32)
+//   word 12             counter (32-bit)
+//   word 13 14 15       nonce (12 bytes, 3 LE u32)
 //
-// Encryption and decryption are identical XOR-with-keystream operations.
+// Quarter round QR(a,b,c,d):
+//   a += b; d ^= a; d = rotl(d, 16);
+//   c += d; b ^= c; b = rotl(b, 12);
+//   a += b; d ^= a; d = rotl(d, 8);
+//   c += d; b ^= c; b = rotl(b, 7);
+//
+// Column round:    QR(0,4,8,12)  QR(1,5,9,13)  QR(2,6,10,14)  QR(3,7,11,15)
+// Diagonal round:  QR(0,5,10,15) QR(1,6,11,12) QR(2,7,8,13)   QR(3,4,9,14)
+//
+// Keystream block = working_state + original_state (after 20 rounds).
+//
+// PMT patterns (per W2-D salsa20.vuma / W48 sha.vuma / W1-A md5.vuma):
+//   - state_new(Layout) for allocations (NEVER allocate/free/Address/*ptr)
+//   - State<T> for transform parameters
+//   - [u32; 16] typed-array state (ctx.state[i] reads/writes u32 word i)
+//   - [u8; N] byte arrays for key/nonce/data I/O
+//   - Quarter-round inlined at each of 8 call sites with LITERAL indices
+//   - Loop-derived byte offsets precomputed into local vars
 
 const CHACHA20_MASK32: u32 = 4294967295;
-const CHACHA20_KEY_SIZE: u32 = 32;
-const CHACHA20_NONCE_SIZE: u32 = 12;
-const CHACHA20_BLOCK_SIZE: u32 = 64;
 
-// RFC 8439 §2.3.2: "expand 32-byte k" as four little-endian u32 words.
-const CHACHA20_SIGMA_0: u32 = 1634760805;  // "expa"
-const CHACHA20_SIGMA_1: u32 = 857760878;   // "nd 3"
-const CHACHA20_SIGMA_2: u32 = 2036477234;  // "2-by"
-const CHACHA20_SIGMA_3: u32 = 1797285236;  // "te k"
+// σ constants "expand 32-byte k"
+const CHACHA20_SIGMA0: u32 = 1634760805;  // 0x61707865
+const CHACHA20_SIGMA1: u32 = 857760878;   // 0x3320646e
+const CHACHA20_SIGMA2: u32 = 2036477234;  // 0x79622d32
+const CHACHA20_SIGMA3: u32 = 1797285236;  // 0x6b206574
 
 // ===========================================================================
-// 32-bit primitives: rotate-left and little-endian byte helpers.
+// Layouts
+// ===========================================================================
+
+layout ChaCha20Ctx = {
+    state: [u32; 16],
+    key: [u8; 32],
+    nonce: [u8; 12],
+    counter: u32,
+}
+
+layout ChaCha20Key = { bytes: [u8; 32] }
+layout ChaCha20Nonce = { bytes: [u8; 12] }
+layout ChaCha20Block = { bytes: [u8; 64] }
+layout ChaCha20Buf = { bytes: [u8; 256] }
+
+// ===========================================================================
+// 32-bit primitives
 // ===========================================================================
 
 transform chacha20_rotl32(x: u32, n: u32) -> u32 {
     return ((x << n) | (x >> (32 - n))) & CHACHA20_MASK32;
 }
 
-transform chacha20_load_u32_le(ptr: Address, off: u32) -> u32 {
-    b0: u32 = *(ptr + off);
-    b1: u32 = *(ptr + off + 1);
-    b2: u32 = *(ptr + off + 2);
-    b3: u32 = *(ptr + off + 3);
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+// load_u32_le: read 4 LE bytes from buf.bytes[off..off+3] as u32.
+transform chacha20_load_u32_le(buf: State<ChaCha20Key>, off: u32) -> u32 {
+    let b0 = buf.bytes[off] as u32;
+    let b1 = buf.bytes[off + 1] as u32;
+    let b2 = buf.bytes[off + 2] as u32;
+    let b3 = buf.bytes[off + 3] as u32;
+    return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & CHACHA20_MASK32;
 }
 
-transform chacha20_store_u32_le(ptr: Address, off: u32, val: u32) {
-    *(ptr + off) = val & 255;
-    *(ptr + off + 1) = (val >> 8) & 255;
-    *(ptr + off + 2) = (val >> 16) & 255;
-    *(ptr + off + 3) = (val >> 24) & 255;
+// load_u32_le_nonce: same for nonce buffer.
+transform chacha20_load_u32_le_nonce(buf: State<ChaCha20Nonce>, off: u32) -> u32 {
+    let b0 = buf.bytes[off] as u32;
+    let b1 = buf.bytes[off + 1] as u32;
+    let b2 = buf.bytes[off + 2] as u32;
+    let b3 = buf.bytes[off + 3] as u32;
+    return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & CHACHA20_MASK32;
 }
 
-// ===========================================================================
-// RFC 8439 §2.1 — quarter round QR(a, b, c, d):
-//   a += b; d ^= a; d <<<= 16;
-//   c += d; b ^= c; b <<<= 12;
-//   a += b; d ^= a; d <<<= 8;
-//   c += d; b ^= c; b <<<= 7;
-// All additions are mod 2^32. Operates in place on the 16-word state.
-// ===========================================================================
-
-transform chacha20_qr(state: Address, a: u32, b: u32, c: u32, d: u32) {
-    va: u32 = chacha20_load_u32_le(state, a * 4);
-    vb: u32 = chacha20_load_u32_le(state, b * 4);
-    vc: u32 = chacha20_load_u32_le(state, c * 4);
-    vd: u32 = chacha20_load_u32_le(state, d * 4);
-
-    va = (va + vb) & CHACHA20_MASK32;
-    vd = chacha20_rotl32(vd ^ va, 16);
-    vc = (vc + vd) & CHACHA20_MASK32;
-    vb = chacha20_rotl32(vb ^ vc, 12);
-    va = (va + vb) & CHACHA20_MASK32;
-    vd = chacha20_rotl32(vd ^ va, 8);
-    vc = (vc + vd) & CHACHA20_MASK32;
-    vb = chacha20_rotl32(vb ^ vc, 7);
-
-    chacha20_store_u32_le(state, a * 4, va);
-    chacha20_store_u32_le(state, b * 4, vb);
-    chacha20_store_u32_le(state, c * 4, vc);
-    chacha20_store_u32_le(state, d * 4, vd);
+// store_u32_le: write u32 as 4 LE bytes into block.bytes[off..off+3].
+transform chacha20_store_u32_le(block: State<ChaCha20Block>, off: u32, val: u32) {
+    block.bytes[off]     = (val & 255) as u8;
+    block.bytes[off + 1] = ((val >> 8) & 255) as u8;
+    block.bytes[off + 2] = ((val >> 16) & 255) as u8;
+    block.bytes[off + 3] = ((val >> 24) & 255) as u8;
 }
 
-// One ChaCha20 double-round: column round + diagonal round.
-transform chacha20_double_round(state: Address) {
-    // Column round — QR on each column of the 4x4 state matrix.
-    chacha20_qr(state, 0, 4, 8, 12);
-    chacha20_qr(state, 1, 5, 9, 13);
-    chacha20_qr(state, 2, 6, 10, 14);
-    chacha20_qr(state, 3, 7, 11, 15);
-    // Diagonal round — QR on each diagonal.
-    chacha20_qr(state, 0, 5, 10, 15);
-    chacha20_qr(state, 1, 6, 11, 12);
-    chacha20_qr(state, 2, 7, 8, 13);
-    chacha20_qr(state, 3, 4, 9, 14);
+// store_u32_le_buf: same for the 256-byte data buffer.
+transform chacha20_store_u32_le_buf(buf: State<ChaCha20Buf>, off: u32, val: u32) {
+    buf.bytes[off]     = (val & 255) as u8;
+    buf.bytes[off + 1] = ((val >> 8) & 255) as u8;
+    buf.bytes[off + 2] = ((val >> 16) & 255) as u8;
+    buf.bytes[off + 3] = ((val >> 24) & 255) as u8;
+}
+
+// load_u32_le_buf: read 4 LE bytes from buf.bytes[off..off+3].
+transform chacha20_load_u32_le_buf(buf: State<ChaCha20Buf>, off: u32) -> u32 {
+    let b0 = buf.bytes[off] as u32;
+    let b1 = buf.bytes[off + 1] as u32;
+    let b2 = buf.bytes[off + 2] as u32;
+    let b3 = buf.bytes[off + 3] as u32;
+    return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & CHACHA20_MASK32;
 }
 
 // ===========================================================================
-// RFC 8439 §2.3.1 — ChaCha20 block function.
-// Initializes the 512-bit state from the constants, key, counter and nonce,
-// applies 20 rounds (10 double-rounds), adds the initial state (mod 2^32)
-// and writes 64 bytes of keystream to `out`.
+// Quarter round — INLINED at each call site with literal indices
+// (avoids v0.2.0-alpha.15 param-index codegen bug, matches salsa20 pattern)
+// ===========================================================================
+//
+// QR(a,b,c,d):
+//   a += b; d ^= a; d = rotl(d, 16);
+//   c += d; b ^= c; b = rotl(b, 12);
+//   a += b; d ^= a; d = rotl(d, 8);
+//   c += d; b ^= c; b = rotl(b, 7);
+
+// ===========================================================================
+// State initialization
 // ===========================================================================
 
-transform chacha20_block(key: Address, counter: u32, nonce: Address, out: Address) {
-    state = allocate(64);   // 16 x u32 working state.
-    initial = allocate(64); // snapshot of pre-round state for the final add.
-
-    // Constants.
-    chacha20_store_u32_le(state, 0, CHACHA20_SIGMA_0);
-    chacha20_store_u32_le(state, 4, CHACHA20_SIGMA_1);
-    chacha20_store_u32_le(state, 8, CHACHA20_SIGMA_2);
-    chacha20_store_u32_le(state, 12, CHACHA20_SIGMA_3);
-
-    // Key: 256 bits = 8 x u32 little-endian words at positions 4..11.
-    i: u32 = 0;
-    while i < 8 {
-        chacha20_store_u32_le(state, 16 + i * 4, chacha20_load_u32_le(key, i * 4));
+// chacha20_init: set up the context with key and nonce.
+// The state is rebuilt from (key, nonce, counter) at the start of each
+// chacha20_block call.
+transform chacha20_init(ctx: State<ChaCha20Ctx>, key: State<ChaCha20Key>, nonce: State<ChaCha20Nonce>) {
+    // Copy key bytes into ctx.key
+    let i: u32 = 0;
+    while i < 32 {
+        ctx.key[i] = key.bytes[i];
         i = i + 1;
     }
-
-    // Counter: 32-bit word at position 12.
-    chacha20_store_u32_le(state, 48, counter);
-
-    // Nonce: 96 bits = 3 x u32 little-endian words at positions 13..15.
+    // Copy nonce bytes into ctx.nonce
     i = 0;
-    while i < 3 {
-        chacha20_store_u32_le(state, 52 + i * 4, chacha20_load_u32_le(nonce, i * 4));
+    while i < 12 {
+        ctx.nonce[i] = nonce.bytes[i];
         i = i + 1;
     }
+    ctx.counter = 0;
+}
 
-    // Snapshot for the final state-addition step (RFC 8439 §2.3.1).
-    i = 0;
-    while i < 64 {
-        *(initial + i) = *(state + i);
-        i = i + 1;
-    }
+// chacha20_set_counter: set the block counter (for resuming encryption).
+transform chacha20_set_counter(ctx: State<ChaCha20Ctx>, counter: u32) {
+    ctx.counter = counter;
+}
 
-    // 20 rounds = 10 double rounds.
-    round: u32 = 0;
+// ===========================================================================
+// Block function — generates 64 bytes of keystream
+// ===========================================================================
+
+// chacha20_block: generate 64-byte keystream block from (key, nonce, counter).
+// Writes keystream into block.bytes[0..63].
+transform chacha20_block(ctx: State<ChaCha20Ctx>, block: State<ChaCha20Block>) {
+    // Build initial state:
+    //   state[0..3] = sigma constants
+    //   state[4..11] = key (8 × LE u32)
+    //   state[12] = counter
+    //   state[13..15] = nonce (3 × LE u32)
+    ctx.state[0] = CHACHA20_SIGMA0;
+    ctx.state[1] = CHACHA20_SIGMA1;
+    ctx.state[2] = CHACHA20_SIGMA2;
+    ctx.state[3] = CHACHA20_SIGMA3;
+
+    // Load key words from ctx.key (inline with literal offsets)
+    let k0 = (ctx.key[0] as u32) | ((ctx.key[1] as u32) << 8) | ((ctx.key[2] as u32) << 16) | ((ctx.key[3] as u32) << 24);
+    let k1 = (ctx.key[4] as u32) | ((ctx.key[5] as u32) << 8) | ((ctx.key[6] as u32) << 16) | ((ctx.key[7] as u32) << 24);
+    let k2 = (ctx.key[8] as u32) | ((ctx.key[9] as u32) << 8) | ((ctx.key[10] as u32) << 16) | ((ctx.key[11] as u32) << 24);
+    let k3 = (ctx.key[12] as u32) | ((ctx.key[13] as u32) << 8) | ((ctx.key[14] as u32) << 16) | ((ctx.key[15] as u32) << 24);
+    let k4 = (ctx.key[16] as u32) | ((ctx.key[17] as u32) << 8) | ((ctx.key[18] as u32) << 16) | ((ctx.key[19] as u32) << 24);
+    let k5 = (ctx.key[20] as u32) | ((ctx.key[21] as u32) << 8) | ((ctx.key[22] as u32) << 16) | ((ctx.key[23] as u32) << 24);
+    let k6 = (ctx.key[24] as u32) | ((ctx.key[25] as u32) << 8) | ((ctx.key[26] as u32) << 16) | ((ctx.key[27] as u32) << 24);
+    let k7 = (ctx.key[28] as u32) | ((ctx.key[29] as u32) << 8) | ((ctx.key[30] as u32) << 16) | ((ctx.key[31] as u32) << 24);
+    ctx.state[4] = k0;
+    ctx.state[5] = k1;
+    ctx.state[6] = k2;
+    ctx.state[7] = k3;
+    ctx.state[8] = k4;
+    ctx.state[9] = k5;
+    ctx.state[10] = k6;
+    ctx.state[11] = k7;
+
+    ctx.state[12] = ctx.counter;
+
+    // Load nonce words from ctx.nonce
+    let n0 = (ctx.nonce[0] as u32) | ((ctx.nonce[1] as u32) << 8) | ((ctx.nonce[2] as u32) << 16) | ((ctx.nonce[3] as u32) << 24);
+    let n1 = (ctx.nonce[4] as u32) | ((ctx.nonce[5] as u32) << 8) | ((ctx.nonce[6] as u32) << 16) | ((ctx.nonce[7] as u32) << 24);
+    let n2 = (ctx.nonce[8] as u32) | ((ctx.nonce[9] as u32) << 8) | ((ctx.nonce[10] as u32) << 16) | ((ctx.nonce[11] as u32) << 24);
+    ctx.state[13] = n0;
+    ctx.state[14] = n1;
+    ctx.state[15] = n2;
+
+    // Save original state for the final addition
+    let s0 = ctx.state[0];
+    let s1 = ctx.state[1];
+    let s2 = ctx.state[2];
+    let s3 = ctx.state[3];
+    let s4 = ctx.state[4];
+    let s5 = ctx.state[5];
+    let s6 = ctx.state[6];
+    let s7 = ctx.state[7];
+    let s8 = ctx.state[8];
+    let s9 = ctx.state[9];
+    let s10 = ctx.state[10];
+    let s11 = ctx.state[11];
+    let s12 = ctx.state[12];
+    let s13 = ctx.state[13];
+    let s14 = ctx.state[14];
+    let s15 = ctx.state[15];
+
+    // 10 double-rounds (20 rounds total)
+    let round: u32 = 0;
     while round < 10 {
-        chacha20_double_round(state);
+        // Column round: QR(0,4,8,12), QR(1,5,9,13), QR(2,6,10,14), QR(3,7,11,15)
+
+        // QR(0, 4, 8, 12)
+        let a = ctx.state[0];
+        let b = ctx.state[4];
+        let c = ctx.state[8];
+        let d = ctx.state[12];
+        a = (a + b) & CHACHA20_MASK32;
+        d = d ^ a;
+        d = chacha20_rotl32(d, 16);
+        c = (c + d) & CHACHA20_MASK32;
+        b = b ^ c;
+        b = chacha20_rotl32(b, 12);
+        a = (a + b) & CHACHA20_MASK32;
+        d = d ^ a;
+        d = chacha20_rotl32(d, 8);
+        c = (c + d) & CHACHA20_MASK32;
+        b = b ^ c;
+        b = chacha20_rotl32(b, 7);
+        ctx.state[0] = a;
+        ctx.state[4] = b;
+        ctx.state[8] = c;
+        ctx.state[12] = d;
+
+        // QR(1, 5, 9, 13)
+        a = ctx.state[1];
+        b = ctx.state[5];
+        c = ctx.state[9];
+        d = ctx.state[13];
+        a = (a + b) & CHACHA20_MASK32;
+        d = d ^ a;
+        d = chacha20_rotl32(d, 16);
+        c = (c + d) & CHACHA20_MASK32;
+        b = b ^ c;
+        b = chacha20_rotl32(b, 12);
+        a = (a + b) & CHACHA20_MASK32;
+        d = d ^ a;
+        d = chacha20_rotl32(d, 8);
+        c = (c + d) & CHACHA20_MASK32;
+        b = b ^ c;
+        b = chacha20_rotl32(b, 7);
+        ctx.state[1] = a;
+        ctx.state[5] = b;
+        ctx.state[9] = c;
+        ctx.state[13] = d;
+
+        // QR(2, 6, 10, 14)
+        a = ctx.state[2];
+        b = ctx.state[6];
+        c = ctx.state[10];
+        d = ctx.state[14];
+        a = (a + b) & CHACHA20_MASK32;
+        d = d ^ a;
+        d = chacha20_rotl32(d, 16);
+        c = (c + d) & CHACHA20_MASK32;
+        b = b ^ c;
+        b = chacha20_rotl32(b, 12);
+        a = (a + b) & CHACHA20_MASK32;
+        d = d ^ a;
+        d = chacha20_rotl32(d, 8);
+        c = (c + d) & CHACHA20_MASK32;
+        b = b ^ c;
+        b = chacha20_rotl32(b, 7);
+        ctx.state[2] = a;
+        ctx.state[6] = b;
+        ctx.state[10] = c;
+        ctx.state[14] = d;
+
+        // QR(3, 7, 11, 15)
+        a = ctx.state[3];
+        b = ctx.state[7];
+        c = ctx.state[11];
+        d = ctx.state[15];
+        a = (a + b) & CHACHA20_MASK32;
+        d = d ^ a;
+        d = chacha20_rotl32(d, 16);
+        c = (c + d) & CHACHA20_MASK32;
+        b = b ^ c;
+        b = chacha20_rotl32(b, 12);
+        a = (a + b) & CHACHA20_MASK32;
+        d = d ^ a;
+        d = chacha20_rotl32(d, 8);
+        c = (c + d) & CHACHA20_MASK32;
+        b = b ^ c;
+        b = chacha20_rotl32(b, 7);
+        ctx.state[3] = a;
+        ctx.state[7] = b;
+        ctx.state[11] = c;
+        ctx.state[15] = d;
+
+        // Diagonal round: QR(0,5,10,15), QR(1,6,11,12), QR(2,7,8,13), QR(3,4,9,14)
+
+        // QR(0, 5, 10, 15)
+        a = ctx.state[0];
+        b = ctx.state[5];
+        c = ctx.state[10];
+        d = ctx.state[15];
+        a = (a + b) & CHACHA20_MASK32;
+        d = d ^ a;
+        d = chacha20_rotl32(d, 16);
+        c = (c + d) & CHACHA20_MASK32;
+        b = b ^ c;
+        b = chacha20_rotl32(b, 12);
+        a = (a + b) & CHACHA20_MASK32;
+        d = d ^ a;
+        d = chacha20_rotl32(d, 8);
+        c = (c + d) & CHACHA20_MASK32;
+        b = b ^ c;
+        b = chacha20_rotl32(b, 7);
+        ctx.state[0] = a;
+        ctx.state[5] = b;
+        ctx.state[10] = c;
+        ctx.state[15] = d;
+
+        // QR(1, 6, 11, 12)
+        a = ctx.state[1];
+        b = ctx.state[6];
+        c = ctx.state[11];
+        d = ctx.state[12];
+        a = (a + b) & CHACHA20_MASK32;
+        d = d ^ a;
+        d = chacha20_rotl32(d, 16);
+        c = (c + d) & CHACHA20_MASK32;
+        b = b ^ c;
+        b = chacha20_rotl32(b, 12);
+        a = (a + b) & CHACHA20_MASK32;
+        d = d ^ a;
+        d = chacha20_rotl32(d, 8);
+        c = (c + d) & CHACHA20_MASK32;
+        b = b ^ c;
+        b = chacha20_rotl32(b, 7);
+        ctx.state[1] = a;
+        ctx.state[6] = b;
+        ctx.state[11] = c;
+        ctx.state[12] = d;
+
+        // QR(2, 7, 8, 13)
+        a = ctx.state[2];
+        b = ctx.state[7];
+        c = ctx.state[8];
+        d = ctx.state[13];
+        a = (a + b) & CHACHA20_MASK32;
+        d = d ^ a;
+        d = chacha20_rotl32(d, 16);
+        c = (c + d) & CHACHA20_MASK32;
+        b = b ^ c;
+        b = chacha20_rotl32(b, 12);
+        a = (a + b) & CHACHA20_MASK32;
+        d = d ^ a;
+        d = chacha20_rotl32(d, 8);
+        c = (c + d) & CHACHA20_MASK32;
+        b = b ^ c;
+        b = chacha20_rotl32(b, 7);
+        ctx.state[2] = a;
+        ctx.state[7] = b;
+        ctx.state[8] = c;
+        ctx.state[13] = d;
+
+        // QR(3, 4, 9, 14)
+        a = ctx.state[3];
+        b = ctx.state[4];
+        c = ctx.state[9];
+        d = ctx.state[14];
+        a = (a + b) & CHACHA20_MASK32;
+        d = d ^ a;
+        d = chacha20_rotl32(d, 16);
+        c = (c + d) & CHACHA20_MASK32;
+        b = b ^ c;
+        b = chacha20_rotl32(b, 12);
+        a = (a + b) & CHACHA20_MASK32;
+        d = d ^ a;
+        d = chacha20_rotl32(d, 8);
+        c = (c + d) & CHACHA20_MASK32;
+        b = b ^ c;
+        b = chacha20_rotl32(b, 7);
+        ctx.state[3] = a;
+        ctx.state[4] = b;
+        ctx.state[9] = c;
+        ctx.state[14] = d;
+
         round = round + 1;
     }
 
-    // Add the initial state back into the working state (mod 2^32) and
-    // emit 64 bytes of keystream.
-    i = 0;
-    while i < 16 {
-        s: u32 = chacha20_load_u32_le(state, i * 4);
-        init_val: u32 = chacha20_load_u32_le(initial, i * 4);
-        chacha20_store_u32_le(out, i * 4, (s + init_val) & CHACHA20_MASK32);
-        i = i + 1;
-    }
+    // Final addition: output = working_state + original_state
+    // Write keystream as 16 LE u32 words into block.bytes[0..63]
+    chacha20_store_u32_le(block, 0,  (ctx.state[0]  + s0)  & CHACHA20_MASK32);
+    chacha20_store_u32_le(block, 4,  (ctx.state[1]  + s1)  & CHACHA20_MASK32);
+    chacha20_store_u32_le(block, 8,  (ctx.state[2]  + s2)  & CHACHA20_MASK32);
+    chacha20_store_u32_le(block, 12, (ctx.state[3]  + s3)  & CHACHA20_MASK32);
+    chacha20_store_u32_le(block, 16, (ctx.state[4]  + s4)  & CHACHA20_MASK32);
+    chacha20_store_u32_le(block, 20, (ctx.state[5]  + s5)  & CHACHA20_MASK32);
+    chacha20_store_u32_le(block, 24, (ctx.state[6]  + s6)  & CHACHA20_MASK32);
+    chacha20_store_u32_le(block, 28, (ctx.state[7]  + s7)  & CHACHA20_MASK32);
+    chacha20_store_u32_le(block, 32, (ctx.state[8]  + s8)  & CHACHA20_MASK32);
+    chacha20_store_u32_le(block, 36, (ctx.state[9]  + s9)  & CHACHA20_MASK32);
+    chacha20_store_u32_le(block, 40, (ctx.state[10] + s10) & CHACHA20_MASK32);
+    chacha20_store_u32_le(block, 44, (ctx.state[11] + s11) & CHACHA20_MASK32);
+    chacha20_store_u32_le(block, 48, (ctx.state[12] + s12) & CHACHA20_MASK32);
+    chacha20_store_u32_le(block, 52, (ctx.state[13] + s13) & CHACHA20_MASK32);
+    chacha20_store_u32_le(block, 56, (ctx.state[14] + s14) & CHACHA20_MASK32);
+    chacha20_store_u32_le(block, 60, (ctx.state[15] + s15) & CHACHA20_MASK32);
 
-    free(state);
-    free(initial);
+    // Increment counter for next block
+    ctx.counter = (ctx.counter + 1) & CHACHA20_MASK32;
 }
 
 // ===========================================================================
-// RFC 8439 §2.4 — ChaCha20 encrypt/decrypt.
-// Identical for both directions: XOR the data with the ChaCha20 keystream
-// generated from (key, counter, nonce). The block counter is incremented
-// once per 64-byte block and starts at the caller-supplied `counter`.
+// Encryption / Decryption (same operation — XOR with keystream)
 // ===========================================================================
 
-transform chacha20_encrypt(data: Address, data_len: u32, key: Address,
-                    nonce: Address, counter: u32, output: Address) -> u32 {
-    pos: u32 = 0;
-    ctr: u32 = counter;
-    keystream = allocate(CHACHA20_BLOCK_SIZE);
+// chacha20_encrypt: encrypt/decrypt `len` bytes from data using keystream.
+// Generates keystream blocks and XORs with data in-place.
+// len must be <= 256 (one call processes at most 4 blocks).
+transform chacha20_encrypt(ctx: State<ChaCha20Ctx>, data: State<ChaCha20Buf>, len: u32) {
+    let ks = state_new(ChaCha20Block);
+    let pos: u32 = 0;
+    while pos < len {
+        // Generate next keystream block
+        chacha20_block(ctx, ks);
 
-    while pos < data_len {
-        chacha20_block(key, ctr, nonce, keystream);
-
-        remaining: u32 = data_len - pos;
-        to_xor: u32 = CHACHA20_BLOCK_SIZE;
-        if remaining < CHACHA20_BLOCK_SIZE { to_xor = remaining; }
-
-        i: u32 = 0;
-        while i < to_xor {
-            db: u32 = *(data + pos + i);
-            ks: u32 = *(keystream + i);
-            *(output + pos + i) = (db ^ ks) & 255;
+        // XOR up to 64 bytes of keystream with data
+        let i: u32 = 0;
+        while i < 64 {
+            if pos + i < len {
+                data.bytes[pos + i] = data.bytes[pos + i] ^ ks.bytes[i];
+            }
             i = i + 1;
         }
-
-        pos = pos + to_xor;
-        ctr = ctr + 1;
+        pos = pos + 64;
     }
-
-    free(keystream);
-    return data_len;
 }
 
-// Decrypt is the same operation as encrypt for a stream cipher.
-transform chacha20_decrypt(data: Address, data_len: u32, key: Address,
-                    nonce: Address, counter: u32, output: Address) -> u32 {
-    return chacha20_encrypt(data, data_len, key, nonce, counter, output);
-}
-
-// ===========================================================================
-// RFC 8439 §2.4 — one-shot keystream API.
-// Generates `out_len` bytes of ChaCha20 keystream (no input plaintext).
-// Useful for deriving the Poly1305 one-time key in ChaCha20-Poly1305 and
-// for stream-based protocols that XOR externally.
-// ===========================================================================
-
-transform chacha20_keystream(key: Address, nonce: Address, counter: u32,
-                      out: Address, out_len: u32) {
-    zero = allocate(out_len);
-    i: u32 = 0;
-    while i < out_len { *(zero + i) = 0; i = i + 1; }
-    chacha20_encrypt(zero, out_len, key, nonce, counter, out);
-    free(zero);
-}
-
-// ===========================================================================
-// Key generation. RFC 8439 does not specify a key-derivation scheme for
-// ChaCha20 itself; callers must supply 32 bytes of cryptographic randomness
-// (e.g. from drbg_generate). This routine copies the supplied 32-byte seed
-// into key_out verbatim so callers have a uniform key-generation entry
-// point. The 12-byte nonce must also come from a CSPRNG and never repeat
-// under the same key.
-// ===========================================================================
-
-transform chacha20_keygen(seed: Address, key_out: Address) {
-    i: u32 = 0;
-    while i < CHACHA20_KEY_SIZE {
-        *(key_out + i) = *(seed + i);
-        i = i + 1;
+// chacha20_keystream: generate `len` bytes of keystream into data.
+// (Useful for testing — the keystream IS the ciphertext when plaintext is all zeros.)
+transform chacha20_keystream(ctx: State<ChaCha20Ctx>, data: State<ChaCha20Buf>, len: u32) {
+    let ks = state_new(ChaCha20Block);
+    let pos: u32 = 0;
+    while pos < len {
+        chacha20_block(ctx, ks);
+        let i: u32 = 0;
+        while i < 64 {
+            if pos + i < len {
+                data.bytes[pos + i] = ks.bytes[i];
+            }
+            i = i + 1;
+        }
+        pos = pos + 64;
     }
 }
