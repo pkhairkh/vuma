@@ -9,22 +9,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
-name = "cc"
-version = "1.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5add81bb678e6cb321aff7fa0dc7689ad82b112dbc032cea19f91d6b8e3582b9"
-dependencies = [
- "find-msvc-tools",
- "shlex",
-]
-
-[[package]]
-name = "find-msvc-tools"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
-
-[[package]]
 name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -37,17 +21,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
-name = "shlex"
-version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
-
-[[package]]
 name = "vuma"
-version = "0.2.0-alpha.10"
+version = "0.2.0-alpha.15"
 dependencies = [
  "bitflags",
- "cc",
  "vuma-bd",
  "vuma-codegen",
  "vuma-core",
@@ -59,21 +36,21 @@ dependencies = [
 
 [[package]]
 name = "vuma-bd"
-version = "0.2.0-alpha.10"
+version = "0.2.0-alpha.15"
 dependencies = [
  "vuma-scg",
 ]
 
 [[package]]
 name = "vuma-codegen"
-version = "0.2.0-alpha.10"
+version = "0.2.0-alpha.15"
 dependencies = [
  "vuma-scg",
 ]
 
 [[package]]
 name = "vuma-core"
-version = "0.2.0-alpha.10"
+version = "0.2.0-alpha.15"
 dependencies = [
  "vuma-bd",
  "vuma-codegen",
@@ -84,7 +61,7 @@ dependencies = [
 
 [[package]]
 name = "vuma-ive"
-version = "0.2.0-alpha.10"
+version = "0.2.0-alpha.15"
 dependencies = [
  "vuma-bd",
  "vuma-codegen",
@@ -94,22 +71,22 @@ dependencies = [
 
 [[package]]
 name = "vuma-package"
-version = "0.2.0-alpha.10"
+version = "0.2.0-alpha.15"
 
 [[package]]
 name = "vuma-parser"
-version = "0.2.0-alpha.10"
+version = "0.2.0-alpha.15"
 dependencies = [
  "vuma-scg",
 ]
 
 [[package]]
 name = "vuma-scg"
-version = "0.2.0-alpha.10"
+version = "0.2.0-alpha.15"
 
 [[package]]
 name = "vuma-tests"
-version = "0.2.0-alpha.10"
+version = "0.2.0-alpha.15"
 dependencies = [
  "vuma",
  "vuma-bd",
