@@ -2263,12 +2263,22 @@ fn wasm_type_for_dedicated_arith(
         Some(IRType::I64) | Some(IRType::U64) => return WasmType::I64,
         _ => {}
     }
-    // ty is None or U32/U16/U8: check if the lhs register was widened
-    // to I64 via a Cast (vreg_types records the cast's target type).
-    // This handles the case where a ZExt cast was constant-folded into
-    // Add{rhs:0, ty:Some(U32)} — the Add's ty says U32 but the vreg
-    // is actually I64. Without this, subsequent I64 operations on the
-    // result would use I32 wasm ops, causing type mismatches.
+    // W0-wasm32-cmp: When `ty` is explicitly a 32-bit-or-smaller integer type,
+    // the operation MUST be done as I32 (same fix as wasm_type_for_binop).
+    if ir_ty.is_some() {
+        if let IRValue::Register(id) = lhs {
+            if let Some(WasmType::I64) = vreg_types.get(id) {
+                return WasmType::I64;
+            }
+        }
+        if let IRValue::Register(id) = rhs {
+            if let Some(WasmType::I64) = vreg_types.get(id) {
+                return WasmType::I64;
+            }
+        }
+        return WasmType::I32;
+    }
+    // ty is None: check if operands were widened to I64 via a Cast.
     if let IRValue::Register(id) = lhs {
         if let Some(WasmType::I64) = vreg_types.get(id) {
             return WasmType::I64;
@@ -2307,14 +2317,21 @@ fn infer_wasm_type_from_operands(
             }
         }
     }
-    // Check Immediate operands: if the value doesn't fit in i32 (high 32 bits
-    // are non-zero), it's a 64-bit pattern (e.g. a constant-folded f64 bit
-    // pattern like 0x408F400000000000 for 1000.0).  Use I64 to preserve the
-    // full 64 bits; later `push_value`/`pop_to_vreg` will bitcast to F64 when
-    // a float consumer is encountered.
+    // Check Immediate operands: if the value doesn't fit in 32 bits (high 32
+    // bits are non-zero when interpreted as UNSIGNED), it's a 64-bit pattern
+    // (e.g. a constant-folded f64 bit pattern like 0x408F400000000000 for
+    // 1000.0).  Use I64 to preserve the full 64 bits; later
+    // `push_value`/`pop_to_vreg` will bitcast to F64 when a float consumer
+    // is encountered.
+    //
+    // W0-wasm32-cmp: Use UNSIGNED comparison ((*v as u64) > 0xFFFFFFFF)
+    // instead of SIGNED (*v != (*v as i32 as i64)). The signed check
+    // incorrectly classifies u32 values with the high bit set (e.g.
+    // 0xFFFFFFFF = MASK32) as I64, causing & MASK32 and & 255 operations
+    // to be done as I64 with spurious i64.extend_i32_s sign-extensions.
     for val in [lhs, rhs] {
         if let IRValue::Immediate(v) = val {
-            if *v != (*v as i32 as i64) {
+            if (*v as u64) > 0xFFFFFFFF {
                 return WasmType::I64;
             }
         }
@@ -2369,9 +2386,24 @@ fn wasm_type_for_binop(
             _ => {} // U32/U16/U8: fall through to vreg_types check
         }
     }
-    // Check if operands were widened to I64 via a Cast (vreg_types records
-    // the cast's target type). This handles folded ZExt casts where the
-    // BinOp's ty is Some(U32) but the vreg is actually I64.
+    // W0-wasm32-cmp: When `ty` is explicitly a 32-bit-or-smaller integer type,
+    // the operation MUST be done as I32, even if an Immediate operand exceeds
+    // i32::MAX (e.g. 4294967295 = MASK32). Without this, & MASK32 would be
+    // done as I64 with spurious i64.extend_i32_s sign-extensions.
+    if ir_ty.is_some() {
+        if let IRValue::Register(id) = lhs {
+            if let Some(WasmType::I64) = vreg_types.get(id) {
+                return WasmType::I64;
+            }
+        }
+        if let IRValue::Register(id) = rhs {
+            if let Some(WasmType::I64) = vreg_types.get(id) {
+                return WasmType::I64;
+            }
+        }
+        return WasmType::I32;
+    }
+    // ty is None: check if operands were widened to I64 via a Cast.
     if let IRValue::Register(id) = lhs {
         if let Some(WasmType::I64) = vreg_types.get(id) {
             return WasmType::I64;
@@ -3843,10 +3875,50 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             };
 
             ctx.push_value(src, Some(&src_ty));
+            // W0-wasm32-cast: Dispatch on the actual src_ty AND on to_ty.
+            // When src is already I64 and the cast is ZExt/SExt, emit Nop
+            // (the value is already I64). When to_ty is a sub-word type
+            // (U8/U16/U32), produce I32 (not I64) since wasm32 has no i8/i16
+            // locals — the trailing i32.store8/store16 truncates as needed.
+            let target_wide = matches!(to_ty, Some(IRType::I64) | Some(IRType::U64));
             let (wasm_op, result_ty) = match kind {
-                CastKind::Trunc => (WasmInstr::I32WrapI64, WasmType::I32),
-                CastKind::SExt => (WasmInstr::I64ExtendI32S, WasmType::I64),
-                CastKind::ZExt => (WasmInstr::I64ExtendI32U, WasmType::I64),
+                CastKind::Trunc => {
+                    if src_ty == WasmType::I32 {
+                        (WasmInstr::Nop, WasmType::I32)
+                    } else {
+                        (WasmInstr::I32WrapI64, WasmType::I32)
+                    }
+                }
+                CastKind::SExt => {
+                    if target_wide {
+                        if src_ty == WasmType::I64 {
+                            (WasmInstr::Nop, WasmType::I64)
+                        } else {
+                            (WasmInstr::I64ExtendI32S, WasmType::I64)
+                        }
+                    } else {
+                        if src_ty == WasmType::I64 {
+                            (WasmInstr::I32WrapI64, WasmType::I32)
+                        } else {
+                            (WasmInstr::Nop, WasmType::I32)
+                        }
+                    }
+                }
+                CastKind::ZExt => {
+                    if target_wide {
+                        if src_ty == WasmType::I64 {
+                            (WasmInstr::Nop, WasmType::I64)
+                        } else {
+                            (WasmInstr::I64ExtendI32U, WasmType::I64)
+                        }
+                    } else {
+                        if src_ty == WasmType::I64 {
+                            (WasmInstr::I32WrapI64, WasmType::I32)
+                        } else {
+                            (WasmInstr::Nop, WasmType::I32)
+                        }
+                    }
+                }
                 CastKind::BitCast => {
                     // BitCast reinterprets the bits of a value as a different
                     // type of the same size.  Use the proper Wasm reinterpret
