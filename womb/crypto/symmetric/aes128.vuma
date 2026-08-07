@@ -1,856 +1,416 @@
-// womb/crypto/aes128.vuma — AES-128 (NIST FIPS 197)
-// 128-bit key, 10 rounds, 176-byte round key schedule.
-// Includes encrypt AND decrypt (inverse cipher).
+// womb/crypto/symmetric/aes128.vuma — AES-128 (NIST FIPS 197)
+// 128-bit key (16 bytes, Nk=4), 10 rounds, 176-byte round key schedule.
+// PMT-native rewrite (W2-A1). Includes encrypt AND decrypt (inverse cipher).
+//
+// PMT patterns (per W48 sha.vuma / W1-A md5.vuma):
+//   - state_new(Layout) for allocations (NEVER allocate/free/Address/*ptr)
+//   - State<T> for transform parameters that take pointers
+//   - [u8; N] byte arrays with LITERAL indices for state load/store
+//   - Precompute loop-variable indices into local vars (let off = i * 4;)
+//     before array access (avoids v0.2.0-alpha.15 param-index codegen bug)
+//   - S-box / inverse S-box stored as [u8; 256] fields in AesCtx
+//   - add_round_key inlined into encrypt/decrypt (avoids passing round as
+//     a function parameter — the index-offset-as-param codegen bug)
+//   - Separate gmul2/gmul3/gmul9/gmul11/gmul13/gmul14 transforms (avoids
+//     the shared-function-with-literal-args codegen bug)
+//   - Decimal literals for all S-box values
+//
 // No main() — importable library module.
 
 const MASK32: u32 = 4294967295;
 
 // ===========================================================================
-// AES S-Box and Inverse S-Box (shared with aes256)
+// Layouts
 // ===========================================================================
 
-transform sbox(idx: u32) -> u32 {
-    if idx == 0 { return 0x63; }
-    if idx == 1 { return 0x7C; }
-    if idx == 2 { return 0x77; }
-    if idx == 3 { return 0x7B; }
-    if idx == 4 { return 0xF2; }
-    if idx == 5 { return 0x6B; }
-    if idx == 6 { return 0x6F; }
-    if idx == 7 { return 0xC5; }
-    if idx == 8 { return 0x30; }
-    if idx == 9 { return 0x01; }
-    if idx == 10 { return 0x67; }
-    if idx == 11 { return 0x2B; }
-    if idx == 12 { return 0xFE; }
-    if idx == 13 { return 0xD7; }
-    if idx == 14 { return 0xAB; }
-    if idx == 15 { return 0x76; }
-    if idx == 16 { return 0xCA; }
-    if idx == 17 { return 0x82; }
-    if idx == 18 { return 0xC9; }
-    if idx == 19 { return 0x7D; }
-    if idx == 20 { return 0xFA; }
-    if idx == 21 { return 0x59; }
-    if idx == 22 { return 0x47; }
-    if idx == 23 { return 0xF0; }
-    if idx == 24 { return 0xAD; }
-    if idx == 25 { return 0xD4; }
-    if idx == 26 { return 0xA2; }
-    if idx == 27 { return 0xAF; }
-    if idx == 28 { return 0x9C; }
-    if idx == 29 { return 0xA4; }
-    if idx == 30 { return 0x72; }
-    if idx == 31 { return 0xC0; }
-    if idx == 32 { return 0xB7; }
-    if idx == 33 { return 0xFD; }
-    if idx == 34 { return 0x93; }
-    if idx == 35 { return 0x26; }
-    if idx == 36 { return 0x36; }
-    if idx == 37 { return 0x3F; }
-    if idx == 38 { return 0xF7; }
-    if idx == 39 { return 0xCC; }
-    if idx == 40 { return 0x34; }
-    if idx == 41 { return 0xA5; }
-    if idx == 42 { return 0xE5; }
-    if idx == 43 { return 0xF1; }
-    if idx == 44 { return 0x71; }
-    if idx == 45 { return 0xD8; }
-    if idx == 46 { return 0x31; }
-    if idx == 47 { return 0x15; }
-    if idx == 48 { return 0x04; }
-    if idx == 49 { return 0xC7; }
-    if idx == 50 { return 0x23; }
-    if idx == 51 { return 0xC3; }
-    if idx == 52 { return 0x18; }
-    if idx == 53 { return 0x96; }
-    if idx == 54 { return 0x05; }
-    if idx == 55 { return 0x9A; }
-    if idx == 56 { return 0x07; }
-    if idx == 57 { return 0x12; }
-    if idx == 58 { return 0x80; }
-    if idx == 59 { return 0xE2; }
-    if idx == 60 { return 0xEB; }
-    if idx == 61 { return 0x27; }
-    if idx == 62 { return 0xB2; }
-    if idx == 63 { return 0x75; }
-    if idx == 64 { return 0x09; }
-    if idx == 65 { return 0x83; }
-    if idx == 66 { return 0x2C; }
-    if idx == 67 { return 0x1A; }
-    if idx == 68 { return 0x1B; }
-    if idx == 69 { return 0x6E; }
-    if idx == 70 { return 0x5A; }
-    if idx == 71 { return 0xA0; }
-    if idx == 72 { return 0x52; }
-    if idx == 73 { return 0x3B; }
-    if idx == 74 { return 0xD6; }
-    if idx == 75 { return 0xB3; }
-    if idx == 76 { return 0x29; }
-    if idx == 77 { return 0xE3; }
-    if idx == 78 { return 0x2F; }
-    if idx == 79 { return 0x84; }
-    if idx == 80 { return 0x53; }
-    if idx == 81 { return 0xD1; }
-    if idx == 82 { return 0x00; }
-    if idx == 83 { return 0xED; }
-    if idx == 84 { return 0x20; }
-    if idx == 85 { return 0xFC; }
-    if idx == 86 { return 0xB1; }
-    if idx == 87 { return 0x5B; }
-    if idx == 88 { return 0x6A; }
-    if idx == 89 { return 0xCB; }
-    if idx == 90 { return 0xBE; }
-    if idx == 91 { return 0x39; }
-    if idx == 92 { return 0x4A; }
-    if idx == 93 { return 0x4C; }
-    if idx == 94 { return 0x58; }
-    if idx == 95 { return 0xCF; }
-    if idx == 96 { return 0xD0; }
-    if idx == 97 { return 0xEF; }
-    if idx == 98 { return 0xAA; }
-    if idx == 99 { return 0xFB; }
-    if idx == 100 { return 0x43; }
-    if idx == 101 { return 0x4D; }
-    if idx == 102 { return 0x33; }
-    if idx == 103 { return 0x85; }
-    if idx == 104 { return 0x45; }
-    if idx == 105 { return 0xF9; }
-    if idx == 106 { return 0x02; }
-    if idx == 107 { return 0x7F; }
-    if idx == 108 { return 0x50; }
-    if idx == 109 { return 0x3C; }
-    if idx == 110 { return 0x9F; }
-    if idx == 111 { return 0xA8; }
-    if idx == 112 { return 0x51; }
-    if idx == 113 { return 0xA3; }
-    if idx == 114 { return 0x40; }
-    if idx == 115 { return 0x8F; }
-    if idx == 116 { return 0x92; }
-    if idx == 117 { return 0x9D; }
-    if idx == 118 { return 0x38; }
-    if idx == 119 { return 0xF5; }
-    if idx == 120 { return 0xBC; }
-    if idx == 121 { return 0xB6; }
-    if idx == 122 { return 0xDA; }
-    if idx == 123 { return 0x21; }
-    if idx == 124 { return 0x10; }
-    if idx == 125 { return 0xFF; }
-    if idx == 126 { return 0xF3; }
-    if idx == 127 { return 0xD2; }
-    if idx == 128 { return 0xCD; }
-    if idx == 129 { return 0x0C; }
-    if idx == 130 { return 0x13; }
-    if idx == 131 { return 0xEC; }
-    if idx == 132 { return 0x5F; }
-    if idx == 133 { return 0x97; }
-    if idx == 134 { return 0x44; }
-    if idx == 135 { return 0x17; }
-    if idx == 136 { return 0xC4; }
-    if idx == 137 { return 0xA7; }
-    if idx == 138 { return 0x7E; }
-    if idx == 139 { return 0x3D; }
-    if idx == 140 { return 0x64; }
-    if idx == 141 { return 0x5D; }
-    if idx == 142 { return 0x19; }
-    if idx == 143 { return 0x73; }
-    if idx == 144 { return 0x60; }
-    if idx == 145 { return 0x81; }
-    if idx == 146 { return 0x4F; }
-    if idx == 147 { return 0xDC; }
-    if idx == 148 { return 0x22; }
-    if idx == 149 { return 0x2A; }
-    if idx == 150 { return 0x90; }
-    if idx == 151 { return 0x88; }
-    if idx == 152 { return 0x46; }
-    if idx == 153 { return 0xEE; }
-    if idx == 154 { return 0xB8; }
-    if idx == 155 { return 0x14; }
-    if idx == 156 { return 0xDE; }
-    if idx == 157 { return 0x5E; }
-    if idx == 158 { return 0x0B; }
-    if idx == 159 { return 0xDB; }
-    if idx == 160 { return 0xE0; }
-    if idx == 161 { return 0x32; }
-    if idx == 162 { return 0x3A; }
-    if idx == 163 { return 0x0A; }
-    if idx == 164 { return 0x49; }
-    if idx == 165 { return 0x06; }
-    if idx == 166 { return 0x24; }
-    if idx == 167 { return 0x5C; }
-    if idx == 168 { return 0xC2; }
-    if idx == 169 { return 0xD3; }
-    if idx == 170 { return 0xAC; }
-    if idx == 171 { return 0x62; }
-    if idx == 172 { return 0x91; }
-    if idx == 173 { return 0x95; }
-    if idx == 174 { return 0xE4; }
-    if idx == 175 { return 0x79; }
-    if idx == 176 { return 0xE7; }
-    if idx == 177 { return 0xC8; }
-    if idx == 178 { return 0x37; }
-    if idx == 179 { return 0x6D; }
-    if idx == 180 { return 0x8D; }
-    if idx == 181 { return 0xD5; }
-    if idx == 182 { return 0x4E; }
-    if idx == 183 { return 0xA9; }
-    if idx == 184 { return 0x6C; }
-    if idx == 185 { return 0x56; }
-    if idx == 186 { return 0xF4; }
-    if idx == 187 { return 0xEA; }
-    if idx == 188 { return 0x65; }
-    if idx == 189 { return 0x7A; }
-    if idx == 190 { return 0xAE; }
-    if idx == 191 { return 0x08; }
-    if idx == 192 { return 0xBA; }
-    if idx == 193 { return 0x78; }
-    if idx == 194 { return 0x25; }
-    if idx == 195 { return 0x2E; }
-    if idx == 196 { return 0x1C; }
-    if idx == 197 { return 0xA6; }
-    if idx == 198 { return 0xB4; }
-    if idx == 199 { return 0xC6; }
-    if idx == 200 { return 0xE8; }
-    if idx == 201 { return 0xDD; }
-    if idx == 202 { return 0x74; }
-    if idx == 203 { return 0x1F; }
-    if idx == 204 { return 0x4B; }
-    if idx == 205 { return 0xBD; }
-    if idx == 206 { return 0x8B; }
-    if idx == 207 { return 0x8A; }
-    if idx == 208 { return 0x70; }
-    if idx == 209 { return 0x3E; }
-    if idx == 210 { return 0xB5; }
-    if idx == 211 { return 0x66; }
-    if idx == 212 { return 0x48; }
-    if idx == 213 { return 0x03; }
-    if idx == 214 { return 0xF6; }
-    if idx == 215 { return 0x0E; }
-    if idx == 216 { return 0x61; }
-    if idx == 217 { return 0x35; }
-    if idx == 218 { return 0x57; }
-    if idx == 219 { return 0xB9; }
-    if idx == 220 { return 0x86; }
-    if idx == 221 { return 0xC1; }
-    if idx == 222 { return 0x1D; }
-    if idx == 223 { return 0x9E; }
-    if idx == 224 { return 0xE1; }
-    if idx == 225 { return 0xF8; }
-    if idx == 226 { return 0x98; }
-    if idx == 227 { return 0x11; }
-    if idx == 228 { return 0x69; }
-    if idx == 229 { return 0xD9; }
-    if idx == 230 { return 0x8E; }
-    if idx == 231 { return 0x94; }
-    if idx == 232 { return 0x9B; }
-    if idx == 233 { return 0x1E; }
-    if idx == 234 { return 0x87; }
-    if idx == 235 { return 0xE9; }
-    if idx == 236 { return 0xCE; }
-    if idx == 237 { return 0x55; }
-    if idx == 238 { return 0x28; }
-    if idx == 239 { return 0xDF; }
-    if idx == 240 { return 0x8C; }
-    if idx == 241 { return 0xA1; }
-    if idx == 242 { return 0x89; }
-    if idx == 243 { return 0x0D; }
-    if idx == 244 { return 0xBF; }
-    if idx == 245 { return 0xE6; }
-    if idx == 246 { return 0x42; }
-    if idx == 247 { return 0x68; }
-    if idx == 248 { return 0x41; }
-    if idx == 249 { return 0x99; }
-    if idx == 250 { return 0x2D; }
-    if idx == 251 { return 0x0F; }
-    if idx == 252 { return 0xB0; }
-    if idx == 253 { return 0x54; }
-    if idx == 254 { return 0xBB; }
-    return 0x16;
+// AES context: round-key schedule (max 240 bytes for AES-256), round count,
+// and the 256-byte S-box + inverse S-box tables embedded directly (avoids
+// passing a separate tables state to every round function — compiler-bug
+// workaround #3: store parameters as fields in the context layout).
+layout AesCtx = {
+    round_keys: [u8; 240],
+    rounds: u32,
+    sbox: [u8; 256],
+    inv_sbox: [u8; 256],
 }
 
-// Inverse S-Box
-transform inv_sbox(idx: u32) -> u32 {
-    if idx == 0 { return 0x52; }
-    if idx == 1 { return 0x09; }
-    if idx == 2 { return 0x6A; }
-    if idx == 3 { return 0xD5; }
-    if idx == 4 { return 0x30; }
-    if idx == 5 { return 0x36; }
-    if idx == 6 { return 0xA5; }
-    if idx == 7 { return 0x38; }
-    if idx == 8 { return 0xBF; }
-    if idx == 9 { return 0x40; }
-    if idx == 10 { return 0xA3; }
-    if idx == 11 { return 0x9E; }
-    if idx == 12 { return 0x81; }
-    if idx == 13 { return 0xF3; }
-    if idx == 14 { return 0xD7; }
-    if idx == 15 { return 0xFB; }
-    if idx == 16 { return 0x7C; }
-    if idx == 17 { return 0xE3; }
-    if idx == 18 { return 0x39; }
-    if idx == 19 { return 0x82; }
-    if idx == 20 { return 0x9B; }
-    if idx == 21 { return 0x2F; }
-    if idx == 22 { return 0xFF; }
-    if idx == 23 { return 0x87; }
-    if idx == 24 { return 0x34; }
-    if idx == 25 { return 0x8E; }
-    if idx == 26 { return 0x43; }
-    if idx == 27 { return 0x44; }
-    if idx == 28 { return 0xC4; }
-    if idx == 29 { return 0xDE; }
-    if idx == 30 { return 0xE9; }
-    if idx == 31 { return 0xCB; }
-    if idx == 32 { return 0x54; }
-    if idx == 33 { return 0x7B; }
-    if idx == 34 { return 0x94; }
-    if idx == 35 { return 0x32; }
-    if idx == 36 { return 0xA6; }
-    if idx == 37 { return 0xC2; }
-    if idx == 38 { return 0x23; }
-    if idx == 39 { return 0x3D; }
-    if idx == 40 { return 0xEE; }
-    if idx == 41 { return 0x4C; }
-    if idx == 42 { return 0x95; }
-    if idx == 43 { return 0x0B; }
-    if idx == 44 { return 0x42; }
-    if idx == 45 { return 0xFA; }
-    if idx == 46 { return 0xC3; }
-    if idx == 47 { return 0x4E; }
-    if idx == 48 { return 0x08; }
-    if idx == 49 { return 0x2E; }
-    if idx == 50 { return 0xA1; }
-    if idx == 51 { return 0x66; }
-    if idx == 52 { return 0x28; }
-    if idx == 53 { return 0xD9; }
-    if idx == 54 { return 0x24; }
-    if idx == 55 { return 0xB2; }
-    if idx == 56 { return 0x76; }
-    if idx == 57 { return 0x5B; }
-    if idx == 58 { return 0xA2; }
-    if idx == 59 { return 0x49; }
-    if idx == 60 { return 0x6D; }
-    if idx == 61 { return 0x8B; }
-    if idx == 62 { return 0xD1; }
-    if idx == 63 { return 0x25; }
-    if idx == 64 { return 0x72; }
-    if idx == 65 { return 0xF8; }
-    if idx == 66 { return 0xF6; }
-    if idx == 67 { return 0x64; }
-    if idx == 68 { return 0x86; }
-    if idx == 69 { return 0x68; }
-    if idx == 70 { return 0x98; }
-    if idx == 71 { return 0x16; }
-    if idx == 72 { return 0xD4; }
-    if idx == 73 { return 0xA4; }
-    if idx == 74 { return 0x5C; }
-    if idx == 75 { return 0xCC; }
-    if idx == 76 { return 0x5D; }
-    if idx == 77 { return 0x65; }
-    if idx == 78 { return 0xB6; }
-    if idx == 79 { return 0x92; }
-    if idx == 80 { return 0x6C; }
-    if idx == 81 { return 0x70; }
-    if idx == 82 { return 0x48; }
-    if idx == 83 { return 0x50; }
-    if idx == 84 { return 0xFD; }
-    if idx == 85 { return 0xED; }
-    if idx == 86 { return 0xB9; }
-    if idx == 87 { return 0xDA; }
-    if idx == 88 { return 0x5E; }
-    if idx == 89 { return 0x15; }
-    if idx == 90 { return 0x46; }
-    if idx == 91 { return 0x57; }
-    if idx == 92 { return 0xA7; }
-    if idx == 93 { return 0x8D; }
-    if idx == 94 { return 0x9D; }
-    if idx == 95 { return 0x84; }
-    if idx == 96 { return 0x90; }
-    if idx == 97 { return 0xD8; }
-    if idx == 98 { return 0xAB; }
-    if idx == 99 { return 0x00; }
-    if idx == 100 { return 0x8C; }
-    if idx == 101 { return 0xBC; }
-    if idx == 102 { return 0xD3; }
-    if idx == 103 { return 0x0A; }
-    if idx == 104 { return 0xF7; }
-    if idx == 105 { return 0xE4; }
-    if idx == 106 { return 0x58; }
-    if idx == 107 { return 0x05; }
-    if idx == 108 { return 0xB8; }
-    if idx == 109 { return 0xB3; }
-    if idx == 110 { return 0x45; }
-    if idx == 111 { return 0x06; }
-    if idx == 112 { return 0xD0; }
-    if idx == 113 { return 0x2C; }
-    if idx == 114 { return 0x1E; }
-    if idx == 115 { return 0x8F; }
-    if idx == 116 { return 0xCA; }
-    if idx == 117 { return 0x3F; }
-    if idx == 118 { return 0x0F; }
-    if idx == 119 { return 0x02; }
-    if idx == 120 { return 0xC1; }
-    if idx == 121 { return 0xAF; }
-    if idx == 122 { return 0xBD; }
-    if idx == 123 { return 0x03; }
-    if idx == 124 { return 0x01; }
-    if idx == 125 { return 0x13; }
-    if idx == 126 { return 0x8A; }
-    if idx == 127 { return 0x6B; }
-    if idx == 128 { return 0x3A; }
-    if idx == 129 { return 0x91; }
-    if idx == 130 { return 0x11; }
-    if idx == 131 { return 0x41; }
-    if idx == 132 { return 0x4F; }
-    if idx == 133 { return 0x67; }
-    if idx == 134 { return 0xDC; }
-    if idx == 135 { return 0xEA; }
-    if idx == 136 { return 0x97; }
-    if idx == 137 { return 0xF2; }
-    if idx == 138 { return 0xCF; }
-    if idx == 139 { return 0xCE; }
-    if idx == 140 { return 0xF0; }
-    if idx == 141 { return 0xB4; }
-    if idx == 142 { return 0xE6; }
-    if idx == 143 { return 0x73; }
-    if idx == 144 { return 0x96; }
-    if idx == 145 { return 0xAC; }
-    if idx == 146 { return 0x74; }
-    if idx == 147 { return 0x22; }
-    if idx == 148 { return 0xE7; }
-    if idx == 149 { return 0xAD; }
-    if idx == 150 { return 0x35; }
-    if idx == 151 { return 0x85; }
-    if idx == 152 { return 0xE2; }
-    if idx == 153 { return 0xF9; }
-    if idx == 154 { return 0x37; }
-    if idx == 155 { return 0xE8; }
-    if idx == 156 { return 0x1C; }
-    if idx == 157 { return 0x75; }
-    if idx == 158 { return 0xDF; }
-    if idx == 159 { return 0x6E; }
-    if idx == 160 { return 0x47; }
-    if idx == 161 { return 0xF1; }
-    if idx == 162 { return 0x1A; }
-    if idx == 163 { return 0x71; }
-    if idx == 164 { return 0x1D; }
-    if idx == 165 { return 0x29; }
-    if idx == 166 { return 0xC5; }
-    if idx == 167 { return 0x89; }
-    if idx == 168 { return 0x6F; }
-    if idx == 169 { return 0xB7; }
-    if idx == 170 { return 0x62; }
-    if idx == 171 { return 0x0E; }
-    if idx == 172 { return 0xAA; }
-    if idx == 173 { return 0x18; }
-    if idx == 174 { return 0xBE; }
-    if idx == 175 { return 0x1B; }
-    if idx == 176 { return 0xFC; }
-    if idx == 177 { return 0x56; }
-    if idx == 178 { return 0x3E; }
-    if idx == 179 { return 0x4B; }
-    if idx == 180 { return 0xC6; }
-    if idx == 181 { return 0xD2; }
-    if idx == 182 { return 0x79; }
-    if idx == 183 { return 0x20; }
-    if idx == 184 { return 0x9A; }
-    if idx == 185 { return 0xDB; }
-    if idx == 186 { return 0xC0; }
-    if idx == 187 { return 0xFE; }
-    if idx == 188 { return 0x78; }
-    if idx == 189 { return 0xCD; }
-    if idx == 190 { return 0x5A; }
-    if idx == 191 { return 0xF4; }
-    if idx == 192 { return 0x1F; }
-    if idx == 193 { return 0xDD; }
-    if idx == 194 { return 0xA8; }
-    if idx == 195 { return 0x33; }
-    if idx == 196 { return 0x88; }
-    if idx == 197 { return 0x07; }
-    if idx == 198 { return 0xC7; }
-    if idx == 199 { return 0x31; }
-    if idx == 200 { return 0xB1; }
-    if idx == 201 { return 0x12; }
-    if idx == 202 { return 0x10; }
-    if idx == 203 { return 0x59; }
-    if idx == 204 { return 0x27; }
-    if idx == 205 { return 0x80; }
-    if idx == 206 { return 0xEC; }
-    if idx == 207 { return 0x5F; }
-    if idx == 208 { return 0x60; }
-    if idx == 209 { return 0x51; }
-    if idx == 210 { return 0x7F; }
-    if idx == 211 { return 0xA9; }
-    if idx == 212 { return 0x19; }
-    if idx == 213 { return 0xB5; }
-    if idx == 214 { return 0x4A; }
-    if idx == 215 { return 0x0D; }
-    if idx == 216 { return 0x2D; }
-    if idx == 217 { return 0xE5; }
-    if idx == 218 { return 0x7A; }
-    if idx == 219 { return 0x9F; }
-    if idx == 220 { return 0x93; }
-    if idx == 221 { return 0xC9; }
-    if idx == 222 { return 0x9C; }
-    if idx == 223 { return 0xEF; }
-    if idx == 224 { return 0xA0; }
-    if idx == 225 { return 0xE0; }
-    if idx == 226 { return 0x3B; }
-    if idx == 227 { return 0x4D; }
-    if idx == 228 { return 0xAE; }
-    if idx == 229 { return 0x2A; }
-    if idx == 230 { return 0xF5; }
-    if idx == 231 { return 0xB0; }
-    if idx == 232 { return 0xC8; }
-    if idx == 233 { return 0xEB; }
-    if idx == 234 { return 0xBB; }
-    if idx == 235 { return 0x3C; }
-    if idx == 236 { return 0x83; }
-    if idx == 237 { return 0x53; }
-    if idx == 238 { return 0x99; }
-    if idx == 239 { return 0x61; }
-    if idx == 240 { return 0x17; }
-    if idx == 241 { return 0x2B; }
-    if idx == 242 { return 0x04; }
-    if idx == 243 { return 0x7E; }
-    if idx == 244 { return 0xBA; }
-    if idx == 245 { return 0x77; }
-    if idx == 246 { return 0xD6; }
-    if idx == 247 { return 0x26; }
-    if idx == 248 { return 0xE1; }
-    if idx == 249 { return 0x69; }
-    if idx == 250 { return 0x14; }
-    if idx == 251 { return 0x63; }
-    if idx == 252 { return 0x55; }
-    if idx == 253 { return 0x21; }
-    if idx == 254 { return 0x0C; }
-    return 0x7D;
+// AES block (16 bytes = 128 bits — the AES block size for all key sizes).
+layout AesBlock = { data: [u8; 16] }
+
+// AES key (max 32 bytes for AES-256; AES-128 uses [0..15], AES-192 [0..23]).
+layout AesKey = { data: [u8; 32] }
+
+// ===========================================================================
+// S-box loader (FIPS 197 Figure 7 — 256 entries, decimal values)
+// ===========================================================================
+transform aes128_load_sbox(ctx: State<AesCtx>) {
+    ctx.sbox[0] = 99; ctx.sbox[1] = 124; ctx.sbox[2] = 119; ctx.sbox[3] = 123; ctx.sbox[4] = 242; ctx.sbox[5] = 107; ctx.sbox[6] = 111; ctx.sbox[7] = 197; ctx.sbox[8] = 48; ctx.sbox[9] = 1; ctx.sbox[10] = 103; ctx.sbox[11] = 43; ctx.sbox[12] = 254; ctx.sbox[13] = 215; ctx.sbox[14] = 171; ctx.sbox[15] = 118;
+    ctx.sbox[16] = 202; ctx.sbox[17] = 130; ctx.sbox[18] = 201; ctx.sbox[19] = 125; ctx.sbox[20] = 250; ctx.sbox[21] = 89; ctx.sbox[22] = 71; ctx.sbox[23] = 240; ctx.sbox[24] = 173; ctx.sbox[25] = 212; ctx.sbox[26] = 162; ctx.sbox[27] = 175; ctx.sbox[28] = 156; ctx.sbox[29] = 164; ctx.sbox[30] = 114; ctx.sbox[31] = 192;
+    ctx.sbox[32] = 183; ctx.sbox[33] = 253; ctx.sbox[34] = 147; ctx.sbox[35] = 38; ctx.sbox[36] = 54; ctx.sbox[37] = 63; ctx.sbox[38] = 247; ctx.sbox[39] = 204; ctx.sbox[40] = 52; ctx.sbox[41] = 165; ctx.sbox[42] = 229; ctx.sbox[43] = 241; ctx.sbox[44] = 113; ctx.sbox[45] = 216; ctx.sbox[46] = 49; ctx.sbox[47] = 21;
+    ctx.sbox[48] = 4; ctx.sbox[49] = 199; ctx.sbox[50] = 35; ctx.sbox[51] = 195; ctx.sbox[52] = 24; ctx.sbox[53] = 150; ctx.sbox[54] = 5; ctx.sbox[55] = 154; ctx.sbox[56] = 7; ctx.sbox[57] = 18; ctx.sbox[58] = 128; ctx.sbox[59] = 226; ctx.sbox[60] = 235; ctx.sbox[61] = 39; ctx.sbox[62] = 178; ctx.sbox[63] = 117;
+    ctx.sbox[64] = 9; ctx.sbox[65] = 131; ctx.sbox[66] = 44; ctx.sbox[67] = 26; ctx.sbox[68] = 27; ctx.sbox[69] = 110; ctx.sbox[70] = 90; ctx.sbox[71] = 160; ctx.sbox[72] = 82; ctx.sbox[73] = 59; ctx.sbox[74] = 214; ctx.sbox[75] = 179; ctx.sbox[76] = 41; ctx.sbox[77] = 227; ctx.sbox[78] = 47; ctx.sbox[79] = 132;
+    ctx.sbox[80] = 83; ctx.sbox[81] = 209; ctx.sbox[82] = 0; ctx.sbox[83] = 237; ctx.sbox[84] = 32; ctx.sbox[85] = 252; ctx.sbox[86] = 177; ctx.sbox[87] = 91; ctx.sbox[88] = 106; ctx.sbox[89] = 203; ctx.sbox[90] = 190; ctx.sbox[91] = 57; ctx.sbox[92] = 74; ctx.sbox[93] = 76; ctx.sbox[94] = 88; ctx.sbox[95] = 207;
+    ctx.sbox[96] = 208; ctx.sbox[97] = 239; ctx.sbox[98] = 170; ctx.sbox[99] = 251; ctx.sbox[100] = 67; ctx.sbox[101] = 77; ctx.sbox[102] = 51; ctx.sbox[103] = 133; ctx.sbox[104] = 69; ctx.sbox[105] = 249; ctx.sbox[106] = 2; ctx.sbox[107] = 127; ctx.sbox[108] = 80; ctx.sbox[109] = 60; ctx.sbox[110] = 159; ctx.sbox[111] = 168;
+    ctx.sbox[112] = 81; ctx.sbox[113] = 163; ctx.sbox[114] = 64; ctx.sbox[115] = 143; ctx.sbox[116] = 146; ctx.sbox[117] = 157; ctx.sbox[118] = 56; ctx.sbox[119] = 245; ctx.sbox[120] = 188; ctx.sbox[121] = 182; ctx.sbox[122] = 218; ctx.sbox[123] = 33; ctx.sbox[124] = 16; ctx.sbox[125] = 255; ctx.sbox[126] = 243; ctx.sbox[127] = 210;
+    ctx.sbox[128] = 205; ctx.sbox[129] = 12; ctx.sbox[130] = 19; ctx.sbox[131] = 236; ctx.sbox[132] = 95; ctx.sbox[133] = 151; ctx.sbox[134] = 68; ctx.sbox[135] = 23; ctx.sbox[136] = 196; ctx.sbox[137] = 167; ctx.sbox[138] = 126; ctx.sbox[139] = 61; ctx.sbox[140] = 100; ctx.sbox[141] = 93; ctx.sbox[142] = 25; ctx.sbox[143] = 115;
+    ctx.sbox[144] = 96; ctx.sbox[145] = 129; ctx.sbox[146] = 79; ctx.sbox[147] = 220; ctx.sbox[148] = 34; ctx.sbox[149] = 42; ctx.sbox[150] = 144; ctx.sbox[151] = 136; ctx.sbox[152] = 70; ctx.sbox[153] = 238; ctx.sbox[154] = 184; ctx.sbox[155] = 20; ctx.sbox[156] = 222; ctx.sbox[157] = 94; ctx.sbox[158] = 11; ctx.sbox[159] = 219;
+    ctx.sbox[160] = 224; ctx.sbox[161] = 50; ctx.sbox[162] = 58; ctx.sbox[163] = 10; ctx.sbox[164] = 73; ctx.sbox[165] = 6; ctx.sbox[166] = 36; ctx.sbox[167] = 92; ctx.sbox[168] = 194; ctx.sbox[169] = 211; ctx.sbox[170] = 172; ctx.sbox[171] = 98; ctx.sbox[172] = 145; ctx.sbox[173] = 149; ctx.sbox[174] = 228; ctx.sbox[175] = 121;
+    ctx.sbox[176] = 231; ctx.sbox[177] = 200; ctx.sbox[178] = 55; ctx.sbox[179] = 109; ctx.sbox[180] = 141; ctx.sbox[181] = 213; ctx.sbox[182] = 78; ctx.sbox[183] = 169; ctx.sbox[184] = 108; ctx.sbox[185] = 86; ctx.sbox[186] = 244; ctx.sbox[187] = 234; ctx.sbox[188] = 101; ctx.sbox[189] = 122; ctx.sbox[190] = 174; ctx.sbox[191] = 8;
+    ctx.sbox[192] = 186; ctx.sbox[193] = 120; ctx.sbox[194] = 37; ctx.sbox[195] = 46; ctx.sbox[196] = 28; ctx.sbox[197] = 166; ctx.sbox[198] = 180; ctx.sbox[199] = 198; ctx.sbox[200] = 232; ctx.sbox[201] = 221; ctx.sbox[202] = 116; ctx.sbox[203] = 31; ctx.sbox[204] = 75; ctx.sbox[205] = 189; ctx.sbox[206] = 139; ctx.sbox[207] = 138;
+    ctx.sbox[208] = 112; ctx.sbox[209] = 62; ctx.sbox[210] = 181; ctx.sbox[211] = 102; ctx.sbox[212] = 72; ctx.sbox[213] = 3; ctx.sbox[214] = 246; ctx.sbox[215] = 14; ctx.sbox[216] = 97; ctx.sbox[217] = 53; ctx.sbox[218] = 87; ctx.sbox[219] = 185; ctx.sbox[220] = 134; ctx.sbox[221] = 193; ctx.sbox[222] = 29; ctx.sbox[223] = 158;
+    ctx.sbox[224] = 225; ctx.sbox[225] = 248; ctx.sbox[226] = 152; ctx.sbox[227] = 17; ctx.sbox[228] = 105; ctx.sbox[229] = 217; ctx.sbox[230] = 142; ctx.sbox[231] = 148; ctx.sbox[232] = 155; ctx.sbox[233] = 30; ctx.sbox[234] = 135; ctx.sbox[235] = 233; ctx.sbox[236] = 206; ctx.sbox[237] = 85; ctx.sbox[238] = 40; ctx.sbox[239] = 223;
+    ctx.sbox[240] = 140; ctx.sbox[241] = 161; ctx.sbox[242] = 137; ctx.sbox[243] = 13; ctx.sbox[244] = 191; ctx.sbox[245] = 230; ctx.sbox[246] = 66; ctx.sbox[247] = 104; ctx.sbox[248] = 65; ctx.sbox[249] = 153; ctx.sbox[250] = 45; ctx.sbox[251] = 15; ctx.sbox[252] = 176; ctx.sbox[253] = 84; ctx.sbox[254] = 187; ctx.sbox[255] = 22;
 }
 
-transform rcon(idx: u32) -> u32 {
-    if idx == 1 { return 1; }
-    if idx == 2 { return 2; }
-    if idx == 3 { return 4; }
-    if idx == 4 { return 8; }
-    if idx == 5 { return 16; }
-    if idx == 6 { return 32; }
-    if idx == 7 { return 64; }
-    if idx == 8 { return 128; }
-    if idx == 9 { return 27; }
-    if idx == 10 { return 54; }
-    return 0;
+// ===========================================================================
+// Inverse S-box loader (FIPS 197 Figure 7 — 256 entries, decimal values)
+// ===========================================================================
+transform aes128_load_inv_sbox(ctx: State<AesCtx>) {
+    ctx.inv_sbox[0] = 82; ctx.inv_sbox[1] = 9; ctx.inv_sbox[2] = 106; ctx.inv_sbox[3] = 213; ctx.inv_sbox[4] = 48; ctx.inv_sbox[5] = 54; ctx.inv_sbox[6] = 165; ctx.inv_sbox[7] = 56; ctx.inv_sbox[8] = 191; ctx.inv_sbox[9] = 64; ctx.inv_sbox[10] = 163; ctx.inv_sbox[11] = 158; ctx.inv_sbox[12] = 129; ctx.inv_sbox[13] = 243; ctx.inv_sbox[14] = 215; ctx.inv_sbox[15] = 251;
+    ctx.inv_sbox[16] = 124; ctx.inv_sbox[17] = 227; ctx.inv_sbox[18] = 57; ctx.inv_sbox[19] = 130; ctx.inv_sbox[20] = 155; ctx.inv_sbox[21] = 47; ctx.inv_sbox[22] = 255; ctx.inv_sbox[23] = 135; ctx.inv_sbox[24] = 52; ctx.inv_sbox[25] = 142; ctx.inv_sbox[26] = 67; ctx.inv_sbox[27] = 68; ctx.inv_sbox[28] = 196; ctx.inv_sbox[29] = 222; ctx.inv_sbox[30] = 233; ctx.inv_sbox[31] = 203;
+    ctx.inv_sbox[32] = 84; ctx.inv_sbox[33] = 123; ctx.inv_sbox[34] = 148; ctx.inv_sbox[35] = 50; ctx.inv_sbox[36] = 166; ctx.inv_sbox[37] = 194; ctx.inv_sbox[38] = 35; ctx.inv_sbox[39] = 61; ctx.inv_sbox[40] = 238; ctx.inv_sbox[41] = 76; ctx.inv_sbox[42] = 149; ctx.inv_sbox[43] = 11; ctx.inv_sbox[44] = 66; ctx.inv_sbox[45] = 250; ctx.inv_sbox[46] = 195; ctx.inv_sbox[47] = 78;
+    ctx.inv_sbox[48] = 8; ctx.inv_sbox[49] = 46; ctx.inv_sbox[50] = 161; ctx.inv_sbox[51] = 102; ctx.inv_sbox[52] = 40; ctx.inv_sbox[53] = 217; ctx.inv_sbox[54] = 36; ctx.inv_sbox[55] = 178; ctx.inv_sbox[56] = 118; ctx.inv_sbox[57] = 91; ctx.inv_sbox[58] = 162; ctx.inv_sbox[59] = 73; ctx.inv_sbox[60] = 109; ctx.inv_sbox[61] = 139; ctx.inv_sbox[62] = 209; ctx.inv_sbox[63] = 37;
+    ctx.inv_sbox[64] = 114; ctx.inv_sbox[65] = 248; ctx.inv_sbox[66] = 246; ctx.inv_sbox[67] = 100; ctx.inv_sbox[68] = 134; ctx.inv_sbox[69] = 104; ctx.inv_sbox[70] = 152; ctx.inv_sbox[71] = 22; ctx.inv_sbox[72] = 212; ctx.inv_sbox[73] = 164; ctx.inv_sbox[74] = 92; ctx.inv_sbox[75] = 204; ctx.inv_sbox[76] = 93; ctx.inv_sbox[77] = 101; ctx.inv_sbox[78] = 182; ctx.inv_sbox[79] = 146;
+    ctx.inv_sbox[80] = 108; ctx.inv_sbox[81] = 112; ctx.inv_sbox[82] = 72; ctx.inv_sbox[83] = 80; ctx.inv_sbox[84] = 253; ctx.inv_sbox[85] = 237; ctx.inv_sbox[86] = 185; ctx.inv_sbox[87] = 218; ctx.inv_sbox[88] = 94; ctx.inv_sbox[89] = 21; ctx.inv_sbox[90] = 70; ctx.inv_sbox[91] = 87; ctx.inv_sbox[92] = 167; ctx.inv_sbox[93] = 141; ctx.inv_sbox[94] = 157; ctx.inv_sbox[95] = 132;
+    ctx.inv_sbox[96] = 144; ctx.inv_sbox[97] = 216; ctx.inv_sbox[98] = 171; ctx.inv_sbox[99] = 0; ctx.inv_sbox[100] = 140; ctx.inv_sbox[101] = 188; ctx.inv_sbox[102] = 211; ctx.inv_sbox[103] = 10; ctx.inv_sbox[104] = 247; ctx.inv_sbox[105] = 228; ctx.inv_sbox[106] = 88; ctx.inv_sbox[107] = 5; ctx.inv_sbox[108] = 184; ctx.inv_sbox[109] = 179; ctx.inv_sbox[110] = 69; ctx.inv_sbox[111] = 6;
+    ctx.inv_sbox[112] = 208; ctx.inv_sbox[113] = 44; ctx.inv_sbox[114] = 30; ctx.inv_sbox[115] = 143; ctx.inv_sbox[116] = 202; ctx.inv_sbox[117] = 63; ctx.inv_sbox[118] = 15; ctx.inv_sbox[119] = 2; ctx.inv_sbox[120] = 193; ctx.inv_sbox[121] = 175; ctx.inv_sbox[122] = 189; ctx.inv_sbox[123] = 3; ctx.inv_sbox[124] = 1; ctx.inv_sbox[125] = 19; ctx.inv_sbox[126] = 138; ctx.inv_sbox[127] = 107;
+    ctx.inv_sbox[128] = 58; ctx.inv_sbox[129] = 145; ctx.inv_sbox[130] = 17; ctx.inv_sbox[131] = 65; ctx.inv_sbox[132] = 79; ctx.inv_sbox[133] = 103; ctx.inv_sbox[134] = 220; ctx.inv_sbox[135] = 234; ctx.inv_sbox[136] = 151; ctx.inv_sbox[137] = 242; ctx.inv_sbox[138] = 207; ctx.inv_sbox[139] = 206; ctx.inv_sbox[140] = 240; ctx.inv_sbox[141] = 180; ctx.inv_sbox[142] = 230; ctx.inv_sbox[143] = 115;
+    ctx.inv_sbox[144] = 150; ctx.inv_sbox[145] = 172; ctx.inv_sbox[146] = 116; ctx.inv_sbox[147] = 34; ctx.inv_sbox[148] = 231; ctx.inv_sbox[149] = 173; ctx.inv_sbox[150] = 53; ctx.inv_sbox[151] = 133; ctx.inv_sbox[152] = 226; ctx.inv_sbox[153] = 249; ctx.inv_sbox[154] = 55; ctx.inv_sbox[155] = 232; ctx.inv_sbox[156] = 28; ctx.inv_sbox[157] = 117; ctx.inv_sbox[158] = 223; ctx.inv_sbox[159] = 110;
+    ctx.inv_sbox[160] = 71; ctx.inv_sbox[161] = 241; ctx.inv_sbox[162] = 26; ctx.inv_sbox[163] = 113; ctx.inv_sbox[164] = 29; ctx.inv_sbox[165] = 41; ctx.inv_sbox[166] = 197; ctx.inv_sbox[167] = 137; ctx.inv_sbox[168] = 111; ctx.inv_sbox[169] = 183; ctx.inv_sbox[170] = 98; ctx.inv_sbox[171] = 14; ctx.inv_sbox[172] = 170; ctx.inv_sbox[173] = 24; ctx.inv_sbox[174] = 190; ctx.inv_sbox[175] = 27;
+    ctx.inv_sbox[176] = 252; ctx.inv_sbox[177] = 86; ctx.inv_sbox[178] = 62; ctx.inv_sbox[179] = 75; ctx.inv_sbox[180] = 198; ctx.inv_sbox[181] = 210; ctx.inv_sbox[182] = 121; ctx.inv_sbox[183] = 32; ctx.inv_sbox[184] = 154; ctx.inv_sbox[185] = 219; ctx.inv_sbox[186] = 192; ctx.inv_sbox[187] = 254; ctx.inv_sbox[188] = 120; ctx.inv_sbox[189] = 205; ctx.inv_sbox[190] = 90; ctx.inv_sbox[191] = 244;
+    ctx.inv_sbox[192] = 31; ctx.inv_sbox[193] = 221; ctx.inv_sbox[194] = 168; ctx.inv_sbox[195] = 51; ctx.inv_sbox[196] = 136; ctx.inv_sbox[197] = 7; ctx.inv_sbox[198] = 199; ctx.inv_sbox[199] = 49; ctx.inv_sbox[200] = 177; ctx.inv_sbox[201] = 18; ctx.inv_sbox[202] = 16; ctx.inv_sbox[203] = 89; ctx.inv_sbox[204] = 39; ctx.inv_sbox[205] = 128; ctx.inv_sbox[206] = 236; ctx.inv_sbox[207] = 95;
+    ctx.inv_sbox[208] = 96; ctx.inv_sbox[209] = 81; ctx.inv_sbox[210] = 127; ctx.inv_sbox[211] = 169; ctx.inv_sbox[212] = 25; ctx.inv_sbox[213] = 181; ctx.inv_sbox[214] = 74; ctx.inv_sbox[215] = 13; ctx.inv_sbox[216] = 45; ctx.inv_sbox[217] = 229; ctx.inv_sbox[218] = 122; ctx.inv_sbox[219] = 159; ctx.inv_sbox[220] = 147; ctx.inv_sbox[221] = 201; ctx.inv_sbox[222] = 156; ctx.inv_sbox[223] = 239;
+    ctx.inv_sbox[224] = 160; ctx.inv_sbox[225] = 224; ctx.inv_sbox[226] = 59; ctx.inv_sbox[227] = 77; ctx.inv_sbox[228] = 174; ctx.inv_sbox[229] = 42; ctx.inv_sbox[230] = 245; ctx.inv_sbox[231] = 176; ctx.inv_sbox[232] = 200; ctx.inv_sbox[233] = 235; ctx.inv_sbox[234] = 187; ctx.inv_sbox[235] = 60; ctx.inv_sbox[236] = 131; ctx.inv_sbox[237] = 83; ctx.inv_sbox[238] = 153; ctx.inv_sbox[239] = 97;
+    ctx.inv_sbox[240] = 23; ctx.inv_sbox[241] = 43; ctx.inv_sbox[242] = 4; ctx.inv_sbox[243] = 126; ctx.inv_sbox[244] = 186; ctx.inv_sbox[245] = 119; ctx.inv_sbox[246] = 214; ctx.inv_sbox[247] = 38; ctx.inv_sbox[248] = 225; ctx.inv_sbox[249] = 105; ctx.inv_sbox[250] = 20; ctx.inv_sbox[251] = 99; ctx.inv_sbox[252] = 85; ctx.inv_sbox[253] = 33; ctx.inv_sbox[254] = 12; ctx.inv_sbox[255] = 125;
 }
 
-transform xtime(a: u32) -> u32 {
-    hi: u32 = (a >> 7) & 1;
-    result: u32 = (a << 1) & 255;
+// ===========================================================================
+// GF(2^8) arithmetic helpers (FIPS 197 §4.2 — xtime = multiply by 2)
+// ===========================================================================
+
+// xtime(a) = a * 2 in GF(2^8), with the AES reduction polynomial x^8+x^4+x^3+x+1.
+transform aes_xtime(a: u32) -> u32 {
+    let hi = (a >> 7) & 1;
+    let result = (a << 1) & 255;
     if hi == 1 { result = result ^ 27; }
     return result;
 }
 
-transform gmul(a: u32, b: u32) -> u32 {
-    result: u32 = 0;
-    x: u32 = a;
-    y: u32 = b;
-    i: u32 = 0;
-    while i < 8 {
-        if (y & 1) == 1 { result = result ^ x; }
-        x = xtime(x);
-        y = y >> 1;
-        i = i + 1;
-    }
-    return result & 255;
+// Precomputed GF(2^8) multipliers for MixColumns / InvMixColumns.
+// Each is a separate transform (no literal multiplier parameter) to avoid
+// the shared-function-with-literal-args codegen bug (workaround #3).
+transform aes_gmul2(x: u32) -> u32 {
+    return aes_xtime(x) & 255;
+}
+transform aes_gmul3(x: u32) -> u32 {
+    return (aes_xtime(x) ^ x) & 255;
+}
+transform aes_gmul9(x: u32) -> u32 {
+    let x2 = aes_xtime(x);
+    let x4 = aes_xtime(x2);
+    let x8 = aes_xtime(x4);
+    return (x8 ^ x) & 255;
+}
+transform aes_gmul11(x: u32) -> u32 {
+    let x2 = aes_xtime(x);
+    let x4 = aes_xtime(x2);
+    let x8 = aes_xtime(x4);
+    return (x8 ^ x2 ^ x) & 255;
+}
+transform aes_gmul13(x: u32) -> u32 {
+    let x2 = aes_xtime(x);
+    let x4 = aes_xtime(x2);
+    let x8 = aes_xtime(x4);
+    return (x8 ^ x4 ^ x) & 255;
+}
+transform aes_gmul14(x: u32) -> u32 {
+    let x2 = aes_xtime(x);
+    let x4 = aes_xtime(x2);
+    let x8 = aes_xtime(x4);
+    return (x8 ^ x4 ^ x2) & 255;
 }
 
 // ===========================================================================
-// AES-128 Key Expansion (Nk=4, Nr=10, 176 bytes)
+// AES round functions (FIPS 197 §5.1.1 — operate on the 16-byte state)
 // ===========================================================================
 
-transform aes128_key_expansion(key: Address, roundkeys: Address) {
-    i: u32 = 0;
-    while i < 16 { *(roundkeys + i) = *(key + i); i = i + 1; }
+// SubBytes: replace each state byte with its S-box entry.
+transform aes_sub_bytes(ctx: State<AesCtx>, state: State<AesBlock>) {
+    let i: u32 = 0;
+    while i < 16 {
+        let idx = state.data[i] as u32;
+        state.data[i] = ctx.sbox[idx];
+        i = i + 1;
+    }
+}
 
+// InvSubBytes: replace each state byte with its inverse S-box entry.
+transform aes_inv_sub_bytes(ctx: State<AesCtx>, state: State<AesBlock>) {
+    let i: u32 = 0;
+    while i < 16 {
+        let idx = state.data[i] as u32;
+        state.data[i] = ctx.inv_sbox[idx];
+        i = i + 1;
+    }
+}
+
+// ShiftRows: cyclic left-shift of each row by its row index.
+// State is column-major: byte[r + 4*c] where r=row, c=col.
+//   Row 0: no shift. Row 1: shift left 1. Row 2: shift left 2. Row 3: shift left 3.
+transform aes_shift_rows(state: State<AesBlock>) {
+    // Row 1: [1,5,9,13] -> [5,9,13,1]
+    let t1: u32 = state.data[1] as u32;
+    state.data[1] = state.data[5];
+    state.data[5] = state.data[9];
+    state.data[9] = state.data[13];
+    state.data[13] = t1 as u8;
+    // Row 2: [2,6,10,14] -> [10,14,2,6]
+    let t2: u32 = state.data[2] as u32;
+    state.data[2] = state.data[10];
+    state.data[10] = t2 as u8;
+    let t6: u32 = state.data[6] as u32;
+    state.data[6] = state.data[14];
+    state.data[14] = t6 as u8;
+    // Row 3: [3,7,11,15] -> [15,3,7,11]
+    let t15: u32 = state.data[15] as u32;
+    state.data[15] = state.data[11];
+    state.data[11] = state.data[7];
+    state.data[7] = state.data[3];
+    state.data[3] = t15 as u8;
+}
+
+// InvShiftRows: cyclic right-shift of each row by its row index.
+transform aes_inv_shift_rows(state: State<AesBlock>) {
+    // Row 1: [1,5,9,13] -> [13,1,5,9]
+    let t13: u32 = state.data[13] as u32;
+    state.data[13] = state.data[9];
+    state.data[9] = state.data[5];
+    state.data[5] = state.data[1];
+    state.data[1] = t13 as u8;
+    // Row 2: [2,6,10,14] -> [10,14,2,6]
+    let t2: u32 = state.data[2] as u32;
+    state.data[2] = state.data[10];
+    state.data[10] = t2 as u8;
+    let t6: u32 = state.data[6] as u32;
+    state.data[6] = state.data[14];
+    state.data[14] = t6 as u8;
+    // Row 3: [3,7,11,15] -> [7,11,15,3]
+    let t3: u32 = state.data[3] as u32;
+    state.data[3] = state.data[7];
+    state.data[7] = state.data[11];
+    state.data[11] = state.data[15];
+    state.data[15] = t3 as u8;
+}
+
+// MixColumns: transform each column via the GF(2^8) matrix {02,03,01,01}.
+// Uses the optimized xtime formula: s'_i = s_i ^ t ^ xtime(s_i ^ s_{i+1})
+// where t = s0 ^ s1 ^ s2 ^ s3 (column XOR).
+transform aes_mix_columns(state: State<AesBlock>) {
+    let c: u32 = 0;
+    while c < 4 {
+        let off = c * 4;
+        let s0 = state.data[off] as u32;
+        let s1 = state.data[off + 1] as u32;
+        let s2 = state.data[off + 2] as u32;
+        let s3 = state.data[off + 3] as u32;
+        let t = (s0 ^ s1 ^ s2 ^ s3) & 255;
+        state.data[off]     = ((s0 ^ t ^ aes_xtime(s0 ^ s1)) & 255) as u8;
+        state.data[off + 1] = ((s1 ^ t ^ aes_xtime(s1 ^ s2)) & 255) as u8;
+        state.data[off + 2] = ((s2 ^ t ^ aes_xtime(s2 ^ s3)) & 255) as u8;
+        state.data[off + 3] = ((s3 ^ t ^ aes_xtime(s3 ^ s0)) & 255) as u8;
+        c = c + 1;
+    }
+}
+
+// InvMixColumns: transform each column via the GF(2^8) matrix {0e,0b,0d,09}.
+transform aes_inv_mix_columns(state: State<AesBlock>) {
+    let c: u32 = 0;
+    while c < 4 {
+        let off = c * 4;
+        let s0 = state.data[off] as u32;
+        let s1 = state.data[off + 1] as u32;
+        let s2 = state.data[off + 2] as u32;
+        let s3 = state.data[off + 3] as u32;
+        state.data[off]     = ((aes_gmul14(s0) ^ aes_gmul11(s1) ^ aes_gmul13(s2) ^ aes_gmul9(s3)) & 255) as u8;
+        state.data[off + 1] = ((aes_gmul9(s0)  ^ aes_gmul14(s1) ^ aes_gmul11(s2) ^ aes_gmul13(s3)) & 255) as u8;
+        state.data[off + 2] = ((aes_gmul13(s0) ^ aes_gmul9(s1)  ^ aes_gmul14(s2) ^ aes_gmul11(s3)) & 255) as u8;
+        state.data[off + 3] = ((aes_gmul11(s0) ^ aes_gmul13(s1) ^ aes_gmul9(s2)  ^ aes_gmul14(s3)) & 255) as u8;
+        c = c + 1;
+    }
+}
+
+// ===========================================================================
+// AES-128 Key Expansion (FIPS 197 §5.2 — Nk=4, Nr=10, 44 words = 176 bytes)
+// Copy 4 key words; for i=4..43: temp = w[i-1]; if i%4==0:
+//   temp = SubWord(RotWord(temp)) XOR Rcon[i/4]; w[i] = w[i-4] XOR temp.
+// Rcon is computed iteratively via xtime (avoids a lookup transform).
+// ===========================================================================
+transform aes128_init(ctx: State<AesCtx>, key: State<AesKey>) {
+    aes128_load_sbox(ctx);
+    aes128_load_inv_sbox(ctx);
+    ctx.rounds = 10;
+
+    // Copy the 16-byte (4-word) key into the first 4 round-key words.
+    let i: u32 = 0;
+    while i < 16 {
+        ctx.round_keys[i] = key.data[i];
+        i = i + 1;
+    }
+
+    // Expand words 4 .. 43 (40 more words = 160 bytes).
+    let rcon: u32 = 1;
     i = 4;
     while i < 44 {
-        t0: u32 = *(roundkeys + (i - 1) * 4);
-        t1: u32 = *(roundkeys + (i - 1) * 4 + 1);
-        t2: u32 = *(roundkeys + (i - 1) * 4 + 2);
-        t3: u32 = *(roundkeys + (i - 1) * 4 + 3);
+        let prev_off = (i - 1) * 4;
+        let t0 = ctx.round_keys[prev_off] as u32;
+        let t1 = ctx.round_keys[prev_off + 1] as u32;
+        let t2 = ctx.round_keys[prev_off + 2] as u32;
+        let t3 = ctx.round_keys[prev_off + 3] as u32;
 
         if i % 4 == 0 {
-            // RotWord
-            tmp: u32 = t0;
-            t0 = t1; t1 = t2; t2 = t3; t3 = tmp;
-            // SubWord
-            t0 = sbox(t0); t1 = sbox(t1); t2 = sbox(t2); t3 = sbox(t3);
-            t0 = t0 ^ rcon(i / 4);
+            // RotWord: rotate left by one byte.
+            let tmp = t0;
+            let nt0 = t1;
+            let nt1 = t2;
+            let nt2 = t3;
+            let nt3 = tmp;
+            // SubWord: apply S-box to each byte.
+            let st0 = ctx.sbox[nt0] as u32;
+            let st1 = ctx.sbox[nt1] as u32;
+            let st2 = ctx.sbox[nt2] as u32;
+            let st3 = ctx.sbox[nt3] as u32;
+            // XOR round constant into the leading byte.
+            t0 = st0 ^ rcon;
+            t1 = st1;
+            t2 = st2;
+            t3 = st3;
+            rcon = aes_xtime(rcon);
         }
 
-        w0: u32 = *(roundkeys + (i - 4) * 4);
-        w1: u32 = *(roundkeys + (i - 4) * 4 + 1);
-        w2: u32 = *(roundkeys + (i - 4) * 4 + 2);
-        w3: u32 = *(roundkeys + (i - 4) * 4 + 3);
+        let woff = (i - 4) * 4;
+        let w0 = ctx.round_keys[woff] as u32;
+        let w1 = ctx.round_keys[woff + 1] as u32;
+        let w2 = ctx.round_keys[woff + 2] as u32;
+        let w3 = ctx.round_keys[woff + 3] as u32;
 
-        *(roundkeys + i * 4) = w0 ^ t0;
-        *(roundkeys + i * 4 + 1) = w1 ^ t1;
-        *(roundkeys + i * 4 + 2) = w2 ^ t2;
-        *(roundkeys + i * 4 + 3) = w3 ^ t3;
+        let doff = i * 4;
+        ctx.round_keys[doff]     = ((w0 ^ t0) & 255) as u8;
+        ctx.round_keys[doff + 1] = ((w1 ^ t1) & 255) as u8;
+        ctx.round_keys[doff + 2] = ((w2 ^ t2) & 255) as u8;
+        ctx.round_keys[doff + 3] = ((w3 ^ t3) & 255) as u8;
 
         i = i + 1;
     }
 }
 
 // ===========================================================================
-// AES-128 forward operations
+// AES encrypt one 16-byte block (FIPS 197 §5.1, §7.1)
+// AddRoundKey(0); for round 1..Nr-1: SubBytes, ShiftRows, MixColumns, AddRoundKey;
+// final: SubBytes, ShiftRows, AddRoundKey(Nr).
+//
+// AddRoundKey is inlined (not a separate transform) to avoid passing `round`
+// as a function parameter — the index-offset-as-param codegen bug (see
+// md5.vuma's workaround note).
 // ===========================================================================
-
-transform add_round_key(state: Address, roundkeys: Address, round: u32) {
-    offset: u32 = round * 16;
-    i: u32 = 0;
+transform aes_encrypt_block(ctx: State<AesCtx>, pt: State<AesBlock>, ct: State<AesBlock>) {
+    // Copy plaintext to working state (ct doubles as the working buffer).
+    let i: u32 = 0;
     while i < 16 {
-        *(state + i) = (*(state + i) ^ *(roundkeys + offset + i)) & 255;
+        ct.data[i] = pt.data[i];
         i = i + 1;
     }
-}
 
-transform sub_bytes(state: Address) {
-    i: u32 = 0;
-    while i < 16 { *(state + i) = sbox(*(state + i)); i = i + 1; }
-}
-
-transform inv_sub_bytes(state: Address) {
-    i: u32 = 0;
-    while i < 16 { *(state + i) = inv_sbox(*(state + i)); i = i + 1; }
-}
-
-transform shift_rows(state: Address) {
-    t: u32 = *(state + 1);
-    *(state + 1) = *(state + 5); *(state + 5) = *(state + 9);
-    *(state + 9) = *(state + 13); *(state + 13) = t;
-    t = *(state + 2); *(state + 2) = *(state + 10); *(state + 10) = t;
-    t = *(state + 6); *(state + 6) = *(state + 14); *(state + 14) = t;
-    t = *(state + 15); *(state + 15) = *(state + 11); *(state + 11) = *(state + 7);
-    *(state + 7) = *(state + 3); *(state + 3) = t;
-}
-
-transform inv_shift_rows(state: Address) {
-    t: u32 = *(state + 13);
-    *(state + 13) = *(state + 9); *(state + 9) = *(state + 5);
-    *(state + 5) = *(state + 1); *(state + 1) = t;
-    t = *(state + 2); *(state + 2) = *(state + 10); *(state + 10) = t;
-    t = *(state + 6); *(state + 6) = *(state + 14); *(state + 14) = t;
-    t = *(state + 3);
-    *(state + 3) = *(state + 7); *(state + 7) = *(state + 11);
-    *(state + 11) = *(state + 15); *(state + 15) = t;
-}
-
-transform mix_columns(state: Address) {
-    c: u32 = 0;
-    while c < 4 {
-        s0: u32 = *(state + 4 * c); s1: u32 = *(state + 4 * c + 1);
-        s2: u32 = *(state + 4 * c + 2); s3: u32 = *(state + 4 * c + 3);
-        *(state + 4 * c) = gmul(s0, 2) ^ gmul(s1, 3) ^ gmul(s2, 1) ^ gmul(s3, 1);
-        *(state + 4 * c + 1) = gmul(s0, 1) ^ gmul(s1, 2) ^ gmul(s2, 3) ^ gmul(s3, 1);
-        *(state + 4 * c + 2) = gmul(s0, 1) ^ gmul(s1, 1) ^ gmul(s2, 2) ^ gmul(s3, 3);
-        *(state + 4 * c + 3) = gmul(s0, 3) ^ gmul(s1, 1) ^ gmul(s2, 1) ^ gmul(s3, 2);
-        c = c + 1;
+    // AddRoundKey(0) — inlined.
+    let j: u32 = 0;
+    while j < 16 {
+        let sj = ct.data[j] as u32;
+        let rj = ctx.round_keys[j] as u32;
+        ct.data[j] = ((sj ^ rj) & 255) as u8;
+        j = j + 1;
     }
-}
 
-transform inv_mix_columns(state: Address) {
-    c: u32 = 0;
-    while c < 4 {
-        s0: u32 = *(state + 4 * c); s1: u32 = *(state + 4 * c + 1);
-        s2: u32 = *(state + 4 * c + 2); s3: u32 = *(state + 4 * c + 3);
-        *(state + 4 * c) = gmul(s0, 14) ^ gmul(s1, 11) ^ gmul(s2, 13) ^ gmul(s3, 9);
-        *(state + 4 * c + 1) = gmul(s0, 9) ^ gmul(s1, 14) ^ gmul(s2, 11) ^ gmul(s3, 13);
-        *(state + 4 * c + 2) = gmul(s0, 13) ^ gmul(s1, 9) ^ gmul(s2, 14) ^ gmul(s3, 11);
-        *(state + 4 * c + 3) = gmul(s0, 11) ^ gmul(s1, 13) ^ gmul(s2, 9) ^ gmul(s3, 14);
-        c = c + 1;
-    }
-}
-
-// ===========================================================================
-// AES-128 Encrypt block
-// ===========================================================================
-
-transform aes128_encrypt_block(plaintext: Address, key: Address, ciphertext: Address) {
-    roundkeys = allocate(176);
-    aes128_key_expansion(key, roundkeys);
-
-    state = allocate(16);
-    i: u32 = 0;
-    while i < 16 { *(state + i) = *(plaintext + i); i = i + 1; }
-
-    add_round_key(state, roundkeys, 0);
-
-    round: u32 = 1;
-    while round < 10 {
-        sub_bytes(state);
-        shift_rows(state);
-        mix_columns(state);
-        add_round_key(state, roundkeys, round);
+    // Rounds 1 .. Nr-1.
+    let round: u32 = 1;
+    while round < ctx.rounds {
+        aes_sub_bytes(ctx, ct);
+        aes_shift_rows(ct);
+        aes_mix_columns(ct);
+        // AddRoundKey(round) — inlined.
+        let off = round * 16;
+        let k: u32 = 0;
+        while k < 16 {
+            let sk = ct.data[k] as u32;
+            let rk = ctx.round_keys[off + k] as u32;
+            ct.data[k] = ((sk ^ rk) & 255) as u8;
+            k = k + 1;
+        }
         round = round + 1;
     }
 
-    sub_bytes(state);
-    shift_rows(state);
-    add_round_key(state, roundkeys, 10);
-
-    i = 0;
-    while i < 16 { *(ciphertext + i) = *(state + i); i = i + 1; }
-
-    free(roundkeys); free(state);
+    // Final round (no MixColumns).
+    aes_sub_bytes(ctx, ct);
+    aes_shift_rows(ct);
+    // AddRoundKey(Nr) — inlined.
+    let final_off = ctx.rounds * 16;
+    let m: u32 = 0;
+    while m < 16 {
+        let sm = ct.data[m] as u32;
+        let rm = ctx.round_keys[final_off + m] as u32;
+        ct.data[m] = ((sm ^ rm) & 255) as u8;
+        m = m + 1;
+    }
 }
 
 // ===========================================================================
-// AES-128 Decrypt block (inverse cipher)
+// AES decrypt one 16-byte block (FIPS 197 §5.3, §7.2 — inverse cipher)
+// AddRoundKey(Nr); for round Nr-1..1: InvShiftRows, InvSubBytes, AddRoundKey,
+// InvMixColumns; final: InvShiftRows, InvSubBytes, AddRoundKey(0).
 // ===========================================================================
+transform aes_decrypt_block(ctx: State<AesCtx>, ct: State<AesBlock>, pt: State<AesBlock>) {
+    // Copy ciphertext to working state (pt doubles as the working buffer).
+    let i: u32 = 0;
+    while i < 16 {
+        pt.data[i] = ct.data[i];
+        i = i + 1;
+    }
 
-transform aes128_decrypt_block(ciphertext: Address, key: Address, plaintext: Address) {
-    roundkeys = allocate(176);
-    aes128_key_expansion(key, roundkeys);
+    // AddRoundKey(Nr) — inlined.
+    let init_off = ctx.rounds * 16;
+    let j: u32 = 0;
+    while j < 16 {
+        let sj = pt.data[j] as u32;
+        let rj = ctx.round_keys[init_off + j] as u32;
+        pt.data[j] = ((sj ^ rj) & 255) as u8;
+        j = j + 1;
+    }
 
-    state = allocate(16);
-    i: u32 = 0;
-    while i < 16 { *(state + i) = *(ciphertext + i); i = i + 1; }
-
-    // Initial round key (last round key)
-    add_round_key(state, roundkeys, 10);
-
-    // Rounds 9 down to 1
-    round: u32 = 9;
-    while round >= 1 {
-        inv_shift_rows(state);
-        inv_sub_bytes(state);
-        add_round_key(state, roundkeys, round);
-        inv_mix_columns(state);
+    // Rounds Nr-1 .. 1.
+    let round: u32 = ctx.rounds - 1;
+    while round > 0 {
+        aes_inv_shift_rows(pt);
+        aes_inv_sub_bytes(ctx, pt);
+        // AddRoundKey(round) — inlined.
+        let off = round * 16;
+        let k: u32 = 0;
+        while k < 16 {
+            let sk = pt.data[k] as u32;
+            let rk = ctx.round_keys[off + k] as u32;
+            pt.data[k] = ((sk ^ rk) & 255) as u8;
+            k = k + 1;
+        }
+        aes_inv_mix_columns(pt);
         round = round - 1;
     }
 
-    // Final round (no InvMixColumns)
-    inv_shift_rows(state);
-    inv_sub_bytes(state);
-    add_round_key(state, roundkeys, 0);
-
-    i = 0;
-    while i < 16 { *(plaintext + i) = *(state + i); i = i + 1; }
-
-    free(roundkeys); free(state);
-}
-
-// ===========================================================================
-// AES-128-CBC encrypt/decrypt with PKCS#7 padding
-// ===========================================================================
-
-transform aes128_cbc_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
-    pad_byte: u32 = 16 - (pt_len % 16);
-    if pad_byte == 0 { pad_byte = 16; }
-    padded_len: u32 = pt_len + pad_byte;
-
-    padded = allocate(padded_len);
-    i: u32 = 0;
-    while i < pt_len { *(padded + i) = *(plaintext + i); i = i + 1; }
-    while i < padded_len { *(padded + i) = pad_byte & 255; i = i + 1; }
-
-    prev = allocate(16);
-    i = 0;
-    while i < 16 { *(prev + i) = *(iv + i); i = i + 1; }
-
-    block_idx: u32 = 0;
-    while block_idx < padded_len {
-        xored = allocate(16);
-        i = 0;
-        while i < 16 {
-            *(xored + i) = (*(padded + block_idx + i) ^ *(prev + i)) & 255;
-            i = i + 1;
-        }
-        ct_block = allocate(16);
-        aes128_encrypt_block(xored, key, ct_block);
-        i = 0;
-        while i < 16 {
-            *(ciphertext + block_idx + i) = *(ct_block + i);
-            *(prev + i) = *(ct_block + i);
-            i = i + 1;
-        }
-        free(xored); free(ct_block);
-        block_idx = block_idx + 16;
+    // Final round (no InvMixColumns).
+    aes_inv_shift_rows(pt);
+    aes_inv_sub_bytes(ctx, pt);
+    // AddRoundKey(0) — inlined.
+    let m: u32 = 0;
+    while m < 16 {
+        let sm = pt.data[m] as u32;
+        let rm = ctx.round_keys[m] as u32;
+        pt.data[m] = ((sm ^ rm) & 255) as u8;
+        m = m + 1;
     }
-
-    free(padded); free(prev);
-    return padded_len;
-}
-
-transform aes128_cbc_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
-    prev = allocate(16);
-    i: u32 = 0;
-    while i < 16 { *(prev + i) = *(iv + i); i = i + 1; }
-
-    block_idx: u32 = 0;
-    while block_idx < ct_len {
-        pt_block = allocate(16);
-        aes128_decrypt_block(ciphertext + block_idx, key, pt_block);
-        i = 0;
-        while i < 16 {
-            *(plaintext + block_idx + i) = (*(pt_block + i) ^ *(prev + i)) & 255;
-            i = i + 1;
-        }
-        i = 0;
-        while i < 16 { *(prev + i) = *(ciphertext + block_idx + i); i = i + 1; }
-        free(pt_block);
-        block_idx = block_idx + 16;
-    }
-
-    // Remove PKCS#7 padding
-    pad: u32 = *(plaintext + ct_len - 1);
-    if pad > 0 {
-        if pad <= 16 {
-            free(prev);
-            return ct_len - pad;
-        }
-    }
-
-    free(prev);
-    return ct_len;
-}
-
-// ===========================================================================
-// AES-128-CTR (encrypt = decrypt)
-// ===========================================================================
-
-transform aes128_ctr_crypt(data: Address, data_len: u32, key: Address, nonce: Address, output: Address) -> u32 {
-    counter_block = allocate(16);
-    i: u32 = 0;
-    while i < 12 { *(counter_block + i) = *(nonce + i); i = i + 1; }
-    *(counter_block + 12) = 0; *(counter_block + 13) = 0;
-    *(counter_block + 14) = 0; *(counter_block + 15) = 0;
-
-    pos: u32 = 0;
-    while pos < data_len {
-        keystream = allocate(16);
-        aes128_encrypt_block(counter_block, key, keystream);
-
-        block_remaining: u32 = data_len - pos;
-        to_xor: u32 = 16;
-        if block_remaining < 16 { to_xor = block_remaining; }
-
-        i = 0;
-        while i < to_xor {
-            *(output + pos + i) = (*(data + pos + i) ^ *(keystream + i)) & 255;
-            i = i + 1;
-        }
-        free(keystream);
-
-        // Increment counter
-        *(counter_block + 15) = (*(counter_block + 15) + 1) & 255;
-        if *(counter_block + 15) == 0 {
-            *(counter_block + 14) = (*(counter_block + 14) + 1) & 255;
-        }
-
-        pos = pos + to_xor;
-    }
-
-    free(counter_block);
-    return data_len;
 }
