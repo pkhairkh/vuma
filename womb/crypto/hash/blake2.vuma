@@ -1,15 +1,52 @@
-// womb/crypto/blake2.vuma — BLAKE2b (RFC 7693)
-// 12-round hash over 128-byte blocks, variable-length output up to 64 bytes.
-// Streaming API: blake2b_init / blake2b_update / blake2b_final / blake2b_oneshot.
-// Also provides blake2b_256 for the common 32-byte digest case.
-// No main() — importable library module.
-
+// womb/crypto/hash/blake2.vuma — BLAKE2b + BLAKE2s (RFC 7693)
+// PMT-native, spec-compliant, self-contained library module (no main()).
+//
+// BLAKE2b: 12-round hash over 128-byte blocks, 64-bit words, 1..64 byte
+// output (default 64). Streaming API: blake2b_init / blake2b_update /
+// blake2b_final / blake2b_oneshot (64-byte output) / blake2b_256 (32-byte
+// output).
+//
+// BLAKE2s: 10-round hash over 64-byte blocks, 32-bit words, 1..32 byte
+// output (default 32). Streaming API: blake2s_init / blake2s_update /
+// blake2s_final / blake2s_oneshot.
+//
+// ── PMT patterns ────────────────────────────────────────────────────────────
+//   - `state_new(Layout)` for all allocations (NEVER `allocate()`)
+//   - `State<T>` for transform parameters (NEVER `Address` / `*ptr`)
+//   - `[u8; N]` byte arrays with literal indices for state load/store
+//   - `[u64; N]` / `[u32; N]` typed arrays for the work vector (V),
+//     message words (M), and SIGMA table — typed-array index scaling
+//     reads/writes the u64/u32 word at slot i
+//   - Loop-variable-derived indices precomputed into local vars before
+//     array access (e.g. `let off = i * 8; ctx.buf[off]`)
+//   - The G primitive is specialized into 8 transforms (one per (a,b,c,d)
+//     tuple used in the column + diagonal rounds). Each specialization
+//     uses LITERAL indices into V.v[0..15] — never parameter-derived
+//     indices — to avoid v0.2.0-alpha.15's BUG-1 (array index arithmetic
+//     on parameters fails silently).
+//
+// ── State layout ────────────────────────────────────────────────────────────
+//   The 8 chain-value words are stored LITTLE-ENDIAN in ctx.state —
+//   byte 0 is the least-significant byte of h[0], byte 7 is the most-
+//   significant byte of h[0], byte 8 is the LSB of h[1], etc. This
+//   matches the BLAKE2 digest serialization order (RFC 7693 §2.5),
+//   so blake2b_final / blake2s_final copies the first `digest_len`
+//   state bytes directly to the digest output without conversion.
+//
 // VUMA's parser rejects integer literals >= 2^63 for u64. Constants at or
-// above that threshold are written as (1 << 63) | lower_63_bits.
+// above that threshold are written as (1 << 63) | lower_63_bits, which the
+// parser evaluates to the correct unsigned u64 value.
+
 const MASK64: u64 = (1 << 63) | ((1 << 63) - 1);
 const MASK32: u32 = 4294967295;
 
+// ===========================================================================
 // BLAKE2b IV (RFC 7693 Section 2.4): same as SHA-512 initial hash values.
+// H0=0x6a09e667f3bcc908 H1=0xbb67ae8584caa73b H2=0x3c6ef372fe94f82b
+// H3=0xa54ff53a5f1d36f1 H4=0x510e527fade682d1 H5=0x9b05688c2b3e6c1f
+// H6=0x1f83d9abfb41bd6b H7=0x5be0cd19137e2179
+// ===========================================================================
+
 const B2B_IV0: u64 = 7640891576956012808;
 const B2B_IV1: u64 = (1 << 63) | 4280581859320702779;
 const B2B_IV2: u64 = 4354685564936845355;
@@ -19,57 +56,165 @@ const B2B_IV5: u64 = (1 << 63) | 1947077365137828895;
 const B2B_IV6: u64 = 2270897969802886507;
 const B2B_IV7: u64 = 6620516959819538809;
 
-// BLAKE2b SIGMA table: 10 permutations of 16 message-word indices
-// (RFC 7693 Section 2.6). The 12 rounds index rows 0..9, then 0..1 again.
+// ===========================================================================
+// BLAKE2s IV (RFC 7693 Section 2.4): same as SHA-256 initial hash values.
+// H0=0x6a09e667 H1=0xbb67ae85 H2=0x3c6ef372 H3=0xa54ff53a
+// H4=0x510e527f H5=0x9b05688c H6=0x1f83d9ab H7=0x5be0cd19
+// ===========================================================================
+
+const B2S_IV0: u32 = 1779033703;
+const B2S_IV1: u32 = 3144134277;
+const B2S_IV2: u32 = 1013904242;
+const B2S_IV3: u32 = 2773480762;
+const B2S_IV4: u32 = 1359893119;
+const B2S_IV5: u32 = 2600822924;
+const B2S_IV6: u32 = 528734635;
+const B2S_IV7: u32 = 1541459225;
+
+// ===========================================================================
+// Layouts — BLAKE2b
+// ===========================================================================
+
+// BLAKE2b context (216 bytes):
+//   [  0.. 63] state[64]    8 × 8-byte LE chain value (h[0..7])
+//   [ 64..191] buf[128]     partial block accumulator (1024-bit block)
+//   [192..195] len          bytes in buffer (u32)
+//   [196..203] t_lo         low 64 bits of 128-bit byte counter (u64)
+//   [204..207] t_hi         high 64 bits of 128-bit byte counter (u32, 0 in practice)
+//   [208..211] digest_len   output length in bytes (1..64)
+layout Blake2bCtx = {
+    state: [u8; 64],
+    buf: [u8; 128],
+    len: u32,
+    t_lo: u64,
+    t_hi: u32,
+    digest_len: u32,
+}
+
+layout Blake2bData = { data: [u8; 128] }
+layout Blake2bDigest = { data: [u8; 64] }
+
+// 16-word u64 work vector (128 bytes) used by blake2b_compress.
+layout Blake2bV = { v: [u64; 16] }
+
+// 16-word u64 message schedule (no expansion in BLAKE2 — just the 16 LE
+// loads of the 128-byte block). Held as [u64; 16] for typed-array scaling.
+layout Blake2bM = { m: [u64; 16] }
+
+// SIGMA message-word permutation table (RFC 7693 Section 2.6):
+// 10 rows × 16 entries = 160 bytes. The 12 BLAKE2b rounds index rows
+// 0..9, then 0..1 again (i.e. round r uses row r%10). Held as [u8; 160]
+// since each entry is a 4-bit message-word index (0..15).
+layout Blake2bSigma = { s: [u8; 160] }
+
+// ===========================================================================
+// Layouts — BLAKE2s
+// ===========================================================================
+
+// BLAKE2s context (112 bytes):
+//   [  0.. 31] state[32]    8 × 4-byte LE chain value (h[0..7])
+//   [ 32.. 95] buf[64]      partial block accumulator (512-bit block)
+//   [ 96.. 99] len          bytes in buffer (u32)
+//   [100..103] t_lo         low 32 bits of 64-bit byte counter (u32)
+//   [104..107] t_hi         high 32 bits of 64-bit byte counter (u32, 0 in practice)
+//   [108..111] digest_len   output length in bytes (1..32)
+layout Blake2sCtx = {
+    state: [u8; 32],
+    buf: [u8; 64],
+    len: u32,
+    t_lo: u32,
+    t_hi: u32,
+    digest_len: u32,
+}
+
+layout Blake2sData = { data: [u8; 64] }
+layout Blake2sDigest = { data: [u8; 32] }
+layout Blake2sV = { v: [u32; 16] }
+layout Blake2sM = { m: [u32; 16] }
+layout Blake2sSigma = { s: [u8; 160] }
+
+// ===========================================================================
+// Shared helpers — right-rotate
+// ===========================================================================
 
 transform rotr64(x: u64, n: u64) -> u64 {
     if n == 0 { return x; }
     return (x >> n) | (x << (64 - n));
 }
 
-transform load_u64_le(ptr: Address, off: u32) -> u64 {
-    b0: u64 = *(ptr + off); b1: u64 = *(ptr + off + 1);
-    b2: u64 = *(ptr + off + 2); b3: u64 = *(ptr + off + 3);
-    b4: u64 = *(ptr + off + 4); b5: u64 = *(ptr + off + 5);
-    b6: u64 = *(ptr + off + 6); b7: u64 = *(ptr + off + 7);
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
-         | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+transform rotr32(x: u32, n: u32) -> u32 {
+    if n == 0 { return x; }
+    return ((x >> n) | (x << (32 - n))) & MASK32;
 }
 
-transform store_u64_le(ptr: Address, off: u32, val: u64) {
-    *(ptr + off)     = val & 255;
-    *(ptr + off + 1) = (val >> 8) & 255;
-    *(ptr + off + 2) = (val >> 16) & 255;
-    *(ptr + off + 3) = (val >> 24) & 255;
-    *(ptr + off + 4) = (val >> 32) & 255;
-    *(ptr + off + 5) = (val >> 40) & 255;
-    *(ptr + off + 6) = (val >> 48) & 255;
-    *(ptr + off + 7) = (val >> 56) & 255;
+// ===========================================================================
+// BLAKE2b SIGMA table loader (RFC 7693 Section 2.6).
+// ===========================================================================
+transform blake2b_load_sigma(S: State<Blake2bSigma>) {
+    // Row 0:  0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15
+    S.s[  0] =  0; S.s[  1] =  1; S.s[  2] =  2; S.s[  3] =  3;
+    S.s[  4] =  4; S.s[  5] =  5; S.s[  6] =  6; S.s[  7] =  7;
+    S.s[  8] =  8; S.s[  9] =  9; S.s[ 10] = 10; S.s[ 11] = 11;
+    S.s[ 12] = 12; S.s[ 13] = 13; S.s[ 14] = 14; S.s[ 15] = 15;
+    // Row 1: 14, 10,  4,  8,  9, 15, 13,  6,  1, 12,  0,  2, 11,  7,  5,  3
+    S.s[ 16] = 14; S.s[ 17] = 10; S.s[ 18] =  4; S.s[ 19] =  8;
+    S.s[ 20] =  9; S.s[ 21] = 15; S.s[ 22] = 13; S.s[ 23] =  6;
+    S.s[ 24] =  1; S.s[ 25] = 12; S.s[ 26] =  0; S.s[ 27] =  2;
+    S.s[ 28] = 11; S.s[ 29] =  7; S.s[ 30] =  5; S.s[ 31] =  3;
+    // Row 2: 11,  8, 12,  0,  5,  2, 15, 13, 10, 14,  3,  6,  7,  1,  9,  4
+    S.s[ 32] = 11; S.s[ 33] =  8; S.s[ 34] = 12; S.s[ 35] =  0;
+    S.s[ 36] =  5; S.s[ 37] =  2; S.s[ 38] = 15; S.s[ 39] = 13;
+    S.s[ 40] = 10; S.s[ 41] = 14; S.s[ 42] =  3; S.s[ 43] =  6;
+    S.s[ 44] =  7; S.s[ 45] =  1; S.s[ 46] =  9; S.s[ 47] =  4;
+    // Row 3:  7,  9,  3,  1, 13, 12, 11, 14,  2,  6,  5, 10,  4,  0, 15,  8
+    S.s[ 48] =  7; S.s[ 49] =  9; S.s[ 50] =  3; S.s[ 51] =  1;
+    S.s[ 52] = 13; S.s[ 53] = 12; S.s[ 54] = 11; S.s[ 55] = 14;
+    S.s[ 56] =  2; S.s[ 57] =  6; S.s[ 58] =  5; S.s[ 59] = 10;
+    S.s[ 60] =  4; S.s[ 61] =  0; S.s[ 62] = 15; S.s[ 63] =  8;
+    // Row 4:  9,  0,  5,  7,  2,  4, 10, 15, 14,  1, 11, 12,  6,  8,  3, 13
+    S.s[ 64] =  9; S.s[ 65] =  0; S.s[ 66] =  5; S.s[ 67] =  7;
+    S.s[ 68] =  2; S.s[ 69] =  4; S.s[ 70] = 10; S.s[ 71] = 15;
+    S.s[ 72] = 14; S.s[ 73] =  1; S.s[ 74] = 11; S.s[ 75] = 12;
+    S.s[ 76] =  6; S.s[ 77] =  8; S.s[ 78] =  3; S.s[ 79] = 13;
+    // Row 5:  2, 12,  6, 10,  0, 11,  8,  3,  4, 13,  7,  5, 15, 14,  1,  9
+    S.s[ 80] =  2; S.s[ 81] = 12; S.s[ 82] =  6; S.s[ 83] = 10;
+    S.s[ 84] =  0; S.s[ 85] = 11; S.s[ 86] =  8; S.s[ 87] =  3;
+    S.s[ 88] =  4; S.s[ 89] = 13; S.s[ 90] =  7; S.s[ 91] =  5;
+    S.s[ 92] = 15; S.s[ 93] = 14; S.s[ 94] =  1; S.s[ 95] =  9;
+    // Row 6: 12,  5,  1, 15, 14, 13,  4, 10,  0,  7,  6,  3,  9,  2,  8, 11
+    S.s[ 96] = 12; S.s[ 97] =  5; S.s[ 98] =  1; S.s[ 99] = 15;
+    S.s[100] = 14; S.s[101] = 13; S.s[102] =  4; S.s[103] = 10;
+    S.s[104] =  0; S.s[105] =  7; S.s[106] =  6; S.s[107] =  3;
+    S.s[108] =  9; S.s[109] =  2; S.s[110] =  8; S.s[111] = 11;
+    // Row 7: 13, 11,  7, 14, 12,  1,  3,  9,  5,  0, 15,  4,  8,  6,  2, 10
+    S.s[112] = 13; S.s[113] = 11; S.s[114] =  7; S.s[115] = 14;
+    S.s[116] = 12; S.s[117] =  1; S.s[118] =  3; S.s[119] =  9;
+    S.s[120] =  5; S.s[121] =  0; S.s[122] = 15; S.s[123] =  4;
+    S.s[124] =  8; S.s[125] =  6; S.s[126] =  2; S.s[127] = 10;
+    // Row 8:  6, 15, 14,  9, 11,  3,  0,  8, 12,  2, 13,  7,  1,  4, 10,  5
+    S.s[128] =  6; S.s[129] = 15; S.s[130] = 14; S.s[131] =  9;
+    S.s[132] = 11; S.s[133] =  3; S.s[134] =  0; S.s[135] =  8;
+    S.s[136] = 12; S.s[137] =  2; S.s[138] = 13; S.s[139] =  7;
+    S.s[140] =  1; S.s[141] =  4; S.s[142] = 10; S.s[143] =  5;
+    // Row 9: 10,  2,  8,  4,  7,  6,  1,  5, 15, 11,  9, 14,  3, 12, 13,  0
+    S.s[144] = 10; S.s[145] =  2; S.s[146] =  8; S.s[147] =  4;
+    S.s[148] =  7; S.s[149] =  6; S.s[150] =  1; S.s[151] =  5;
+    S.s[152] = 15; S.s[153] = 11; S.s[154] =  9; S.s[155] = 14;
+    S.s[156] =  3; S.s[157] = 12; S.s[158] = 13; S.s[159] =  0;
 }
 
-transform store_u32_le(ptr: Address, off: u32, val: u32) {
-    *(ptr + off)     = val & 255;
-    *(ptr + off + 1) = (val >> 8) & 255;
-    *(ptr + off + 2) = (val >> 16) & 255;
-    *(ptr + off + 3) = (val >> 24) & 255;
-}
+// ===========================================================================
+// BLAKE2b G primitive — 8 specializations (one per (a,b,c,d) tuple).
+// RFC 7693 Section 3.1: G(v, a, b, c, d, x, y) mixes four work-vector
+// words with two message words. Operates in place on V.v[a/b/c/d].
+// Rotations: 32, 24, 16, 63 (BLAKE2b).
+// ===========================================================================
 
-transform load_u32_le(ptr: Address, off: u32) -> u32 {
-    b0: u32 = *(ptr + off);
-    b1: u32 = *(ptr + off + 1);
-    b2: u32 = *(ptr + off + 2);
-    b3: u32 = *(ptr + off + 3);
-    return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & MASK32;
-}
-
-// G primitive (RFC 7693 Section 3.1): mixes four work-vector words with two
-// message words. Operates in place on the work vector.
-transform blake2b_g(v: Address, a: u32, b: u32, c: u32, d: u32, x: u64, y: u64) {
-    va: u64 = load_u64_le(v, a * 8);
-    vb: u64 = load_u64_le(v, b * 8);
-    vc: u64 = load_u64_le(v, c * 8);
-    vd: u64 = load_u64_le(v, d * 8);
-
+transform blake2b_g_0_4_8_12(V: State<Blake2bV>, x: u64, y: u64) {
+    let va = V.v[0];
+    let vb = V.v[4];
+    let vc = V.v[8];
+    let vd = V.v[12];
     va = (va + vb + x) & MASK64;
     vd = rotr64(vd ^ va, 32);
     vc = (vc + vd) & MASK64;
@@ -78,211 +223,995 @@ transform blake2b_g(v: Address, a: u32, b: u32, c: u32, d: u32, x: u64, y: u64) 
     vd = rotr64(vd ^ va, 16);
     vc = (vc + vd) & MASK64;
     vb = rotr64(vb ^ vc, 63);
-
-    store_u64_le(v, a * 8, va);
-    store_u64_le(v, b * 8, vb);
-    store_u64_le(v, c * 8, vc);
-    store_u64_le(v, d * 8, vd);
+    V.v[0] = va;
+    V.v[4] = vb;
+    V.v[8] = vc;
+    V.v[12] = vd;
 }
 
-// BLAKE2b compression function F(h, m, t, f) per RFC 7693 Section 3.2.
-//   h:      8 x u64 chain value (64 bytes)
-//   block:  128-byte message block
-//   t_lo:   low 64 bits of the byte counter (incremented per 128-byte block)
-//   t_hi:   high 64 bits of the byte counter
-//   last:   1 if this is the final block (sets f[0])
-transform blake2b_compress(h: Address, block: Address, t_lo: u64, t_hi: u64, last: u32) {
-    v = allocate(128);  // 16 x u64 work vector
+transform blake2b_g_1_5_9_13(V: State<Blake2bV>, x: u64, y: u64) {
+    let va = V.v[1];
+    let vb = V.v[5];
+    let vc = V.v[9];
+    let vd = V.v[13];
+    va = (va + vb + x) & MASK64;
+    vd = rotr64(vd ^ va, 32);
+    vc = (vc + vd) & MASK64;
+    vb = rotr64(vb ^ vc, 24);
+    va = (va + vb + y) & MASK64;
+    vd = rotr64(vd ^ va, 16);
+    vc = (vc + vd) & MASK64;
+    vb = rotr64(vb ^ vc, 63);
+    V.v[1] = va;
+    V.v[5] = vb;
+    V.v[9] = vc;
+    V.v[13] = vd;
+}
 
-    // v[0..7] = h[0..7]
-    i: u32 = 0;
-    while i < 8 {
-        store_u64_le(v, i * 8, load_u64_le(h, i * 8));
-        i = i + 1;
+transform blake2b_g_2_6_10_14(V: State<Blake2bV>, x: u64, y: u64) {
+    let va = V.v[2];
+    let vb = V.v[6];
+    let vc = V.v[10];
+    let vd = V.v[14];
+    va = (va + vb + x) & MASK64;
+    vd = rotr64(vd ^ va, 32);
+    vc = (vc + vd) & MASK64;
+    vb = rotr64(vb ^ vc, 24);
+    va = (va + vb + y) & MASK64;
+    vd = rotr64(vd ^ va, 16);
+    vc = (vc + vd) & MASK64;
+    vb = rotr64(vb ^ vc, 63);
+    V.v[2] = va;
+    V.v[6] = vb;
+    V.v[10] = vc;
+    V.v[14] = vd;
+}
+
+transform blake2b_g_3_7_11_15(V: State<Blake2bV>, x: u64, y: u64) {
+    let va = V.v[3];
+    let vb = V.v[7];
+    let vc = V.v[11];
+    let vd = V.v[15];
+    va = (va + vb + x) & MASK64;
+    vd = rotr64(vd ^ va, 32);
+    vc = (vc + vd) & MASK64;
+    vb = rotr64(vb ^ vc, 24);
+    va = (va + vb + y) & MASK64;
+    vd = rotr64(vd ^ va, 16);
+    vc = (vc + vd) & MASK64;
+    vb = rotr64(vb ^ vc, 63);
+    V.v[3] = va;
+    V.v[7] = vb;
+    V.v[11] = vc;
+    V.v[15] = vd;
+}
+
+transform blake2b_g_0_5_10_15(V: State<Blake2bV>, x: u64, y: u64) {
+    let va = V.v[0];
+    let vb = V.v[5];
+    let vc = V.v[10];
+    let vd = V.v[15];
+    va = (va + vb + x) & MASK64;
+    vd = rotr64(vd ^ va, 32);
+    vc = (vc + vd) & MASK64;
+    vb = rotr64(vb ^ vc, 24);
+    va = (va + vb + y) & MASK64;
+    vd = rotr64(vd ^ va, 16);
+    vc = (vc + vd) & MASK64;
+    vb = rotr64(vb ^ vc, 63);
+    V.v[0] = va;
+    V.v[5] = vb;
+    V.v[10] = vc;
+    V.v[15] = vd;
+}
+
+transform blake2b_g_1_6_11_12(V: State<Blake2bV>, x: u64, y: u64) {
+    let va = V.v[1];
+    let vb = V.v[6];
+    let vc = V.v[11];
+    let vd = V.v[12];
+    va = (va + vb + x) & MASK64;
+    vd = rotr64(vd ^ va, 32);
+    vc = (vc + vd) & MASK64;
+    vb = rotr64(vb ^ vc, 24);
+    va = (va + vb + y) & MASK64;
+    vd = rotr64(vd ^ va, 16);
+    vc = (vc + vd) & MASK64;
+    vb = rotr64(vb ^ vc, 63);
+    V.v[1] = va;
+    V.v[6] = vb;
+    V.v[11] = vc;
+    V.v[12] = vd;
+}
+
+transform blake2b_g_2_7_8_13(V: State<Blake2bV>, x: u64, y: u64) {
+    let va = V.v[2];
+    let vb = V.v[7];
+    let vc = V.v[8];
+    let vd = V.v[13];
+    va = (va + vb + x) & MASK64;
+    vd = rotr64(vd ^ va, 32);
+    vc = (vc + vd) & MASK64;
+    vb = rotr64(vb ^ vc, 24);
+    va = (va + vb + y) & MASK64;
+    vd = rotr64(vd ^ va, 16);
+    vc = (vc + vd) & MASK64;
+    vb = rotr64(vb ^ vc, 63);
+    V.v[2] = va;
+    V.v[7] = vb;
+    V.v[8] = vc;
+    V.v[13] = vd;
+}
+
+transform blake2b_g_3_4_9_14(V: State<Blake2bV>, x: u64, y: u64) {
+    let va = V.v[3];
+    let vb = V.v[4];
+    let vc = V.v[9];
+    let vd = V.v[14];
+    va = (va + vb + x) & MASK64;
+    vd = rotr64(vd ^ va, 32);
+    vc = (vc + vd) & MASK64;
+    vb = rotr64(vb ^ vc, 24);
+    va = (va + vb + y) & MASK64;
+    vd = rotr64(vd ^ va, 16);
+    vc = (vc + vd) & MASK64;
+    vb = rotr64(vb ^ vc, 63);
+    V.v[3] = va;
+    V.v[4] = vb;
+    V.v[9] = vc;
+    V.v[14] = vd;
+}
+
+// ===========================================================================
+// BLAKE2b API
+// ===========================================================================
+
+// blake2b_init: seed the BLAKE2b initial hash state into ctx.
+// Reads ctx.digest_len (NOT a parameter) to avoid the VUMA parameter-
+// binding bug where multiple callers passing different literals to the
+// same shared function would all use the first caller's literal.
+// Callers must set ctx.digest_len BEFORE calling blake2b_init — use the
+// variant-specific wrappers blake2b_init_64 / blake2b_init_32 instead.
+transform blake2b_init(ctx: State<Blake2bCtx>) {
+    let digest_len = ctx.digest_len;
+    // h[0] = IV[0] ^ (digest_len | (key_len<<8) | (fanout<<16) | (depth<<24))
+    // with key_len=0, fanout=1, depth=1.
+    let param: u64 = (digest_len as u64) | ((1 as u64) << 16) | ((1 as u64) << 24);
+    let h0 = B2B_IV0 ^ param;
+    ctx.state[0] = (h0 & 255) as u8;
+    ctx.state[1] = ((h0 >> 8) & 255) as u8;
+    ctx.state[2] = ((h0 >> 16) & 255) as u8;
+    ctx.state[3] = ((h0 >> 24) & 255) as u8;
+    ctx.state[4] = ((h0 >> 32) & 255) as u8;
+    ctx.state[5] = ((h0 >> 40) & 255) as u8;
+    ctx.state[6] = ((h0 >> 48) & 255) as u8;
+    ctx.state[7] = ((h0 >> 56) & 255) as u8;
+    // h[1] = IV[1]
+    ctx.state[ 8] = (B2B_IV1 & 255) as u8;
+    ctx.state[ 9] = ((B2B_IV1 >> 8) & 255) as u8;
+    ctx.state[10] = ((B2B_IV1 >> 16) & 255) as u8;
+    ctx.state[11] = ((B2B_IV1 >> 24) & 255) as u8;
+    ctx.state[12] = ((B2B_IV1 >> 32) & 255) as u8;
+    ctx.state[13] = ((B2B_IV1 >> 40) & 255) as u8;
+    ctx.state[14] = ((B2B_IV1 >> 48) & 255) as u8;
+    ctx.state[15] = ((B2B_IV1 >> 56) & 255) as u8;
+    // h[2] = IV[2]
+    ctx.state[16] = (B2B_IV2 & 255) as u8;
+    ctx.state[17] = ((B2B_IV2 >> 8) & 255) as u8;
+    ctx.state[18] = ((B2B_IV2 >> 16) & 255) as u8;
+    ctx.state[19] = ((B2B_IV2 >> 24) & 255) as u8;
+    ctx.state[20] = ((B2B_IV2 >> 32) & 255) as u8;
+    ctx.state[21] = ((B2B_IV2 >> 40) & 255) as u8;
+    ctx.state[22] = ((B2B_IV2 >> 48) & 255) as u8;
+    ctx.state[23] = ((B2B_IV2 >> 56) & 255) as u8;
+    // h[3] = IV[3]
+    ctx.state[24] = (B2B_IV3 & 255) as u8;
+    ctx.state[25] = ((B2B_IV3 >> 8) & 255) as u8;
+    ctx.state[26] = ((B2B_IV3 >> 16) & 255) as u8;
+    ctx.state[27] = ((B2B_IV3 >> 24) & 255) as u8;
+    ctx.state[28] = ((B2B_IV3 >> 32) & 255) as u8;
+    ctx.state[29] = ((B2B_IV3 >> 40) & 255) as u8;
+    ctx.state[30] = ((B2B_IV3 >> 48) & 255) as u8;
+    ctx.state[31] = ((B2B_IV3 >> 56) & 255) as u8;
+    // h[4] = IV[4]
+    ctx.state[32] = (B2B_IV4 & 255) as u8;
+    ctx.state[33] = ((B2B_IV4 >> 8) & 255) as u8;
+    ctx.state[34] = ((B2B_IV4 >> 16) & 255) as u8;
+    ctx.state[35] = ((B2B_IV4 >> 24) & 255) as u8;
+    ctx.state[36] = ((B2B_IV4 >> 32) & 255) as u8;
+    ctx.state[37] = ((B2B_IV4 >> 40) & 255) as u8;
+    ctx.state[38] = ((B2B_IV4 >> 48) & 255) as u8;
+    ctx.state[39] = ((B2B_IV4 >> 56) & 255) as u8;
+    // h[5] = IV[5]
+    ctx.state[40] = (B2B_IV5 & 255) as u8;
+    ctx.state[41] = ((B2B_IV5 >> 8) & 255) as u8;
+    ctx.state[42] = ((B2B_IV5 >> 16) & 255) as u8;
+    ctx.state[43] = ((B2B_IV5 >> 24) & 255) as u8;
+    ctx.state[44] = ((B2B_IV5 >> 32) & 255) as u8;
+    ctx.state[45] = ((B2B_IV5 >> 40) & 255) as u8;
+    ctx.state[46] = ((B2B_IV5 >> 48) & 255) as u8;
+    ctx.state[47] = ((B2B_IV5 >> 56) & 255) as u8;
+    // h[6] = IV[6]
+    ctx.state[48] = (B2B_IV6 & 255) as u8;
+    ctx.state[49] = ((B2B_IV6 >> 8) & 255) as u8;
+    ctx.state[50] = ((B2B_IV6 >> 16) & 255) as u8;
+    ctx.state[51] = ((B2B_IV6 >> 24) & 255) as u8;
+    ctx.state[52] = ((B2B_IV6 >> 32) & 255) as u8;
+    ctx.state[53] = ((B2B_IV6 >> 40) & 255) as u8;
+    ctx.state[54] = ((B2B_IV6 >> 48) & 255) as u8;
+    ctx.state[55] = ((B2B_IV6 >> 56) & 255) as u8;
+    // h[7] = IV[7]
+    ctx.state[56] = (B2B_IV7 & 255) as u8;
+    ctx.state[57] = ((B2B_IV7 >> 8) & 255) as u8;
+    ctx.state[58] = ((B2B_IV7 >> 16) & 255) as u8;
+    ctx.state[59] = ((B2B_IV7 >> 24) & 255) as u8;
+    ctx.state[60] = ((B2B_IV7 >> 32) & 255) as u8;
+    ctx.state[61] = ((B2B_IV7 >> 40) & 255) as u8;
+    ctx.state[62] = ((B2B_IV7 >> 48) & 255) as u8;
+    ctx.state[63] = ((B2B_IV7 >> 56) & 255) as u8;
+    ctx.len = 0;
+    ctx.t_lo = 0;
+    ctx.t_hi = 0;
+}
+
+// blake2b_init_64: init for default 64-byte output. Sets ctx.digest_len
+// directly (literal assignment, no shared-function call with literal arg)
+// to avoid the VUMA parameter-binding bug.
+transform blake2b_init_64(ctx: State<Blake2bCtx>) {
+    ctx.digest_len = 64;
+    blake2b_init(ctx);
+}
+
+// blake2b_init_32: init for 32-byte output (BLAKE2b-256).
+transform blake2b_init_32(ctx: State<Blake2bCtx>) {
+    ctx.digest_len = 32;
+    blake2b_init(ctx);
+}
+
+// Increment the 128-bit byte counter by `n` bytes, carrying into t_hi
+// when the low 64-bit limb wraps mod 2^64. (In practice t_hi stays 0
+// for any input under 2^61 bytes — far beyond the test vector sizes.)
+transform blake2b_add_bytes(ctx: State<Blake2bCtx>, n: u64) {
+    let lo = ctx.t_lo;
+    let hi = ctx.t_hi;
+    let new_lo = lo + n;
+    if new_lo < lo {
+        ctx.t_hi = hi + 1;
     }
-    // v[8..15] = IV[0..7]
-    store_u64_le(v, 64, B2B_IV0);
-    store_u64_le(v, 72, B2B_IV1);
-    store_u64_le(v, 80, B2B_IV2);
-    store_u64_le(v, 88, B2B_IV3);
-    store_u64_le(v, 96, B2B_IV4);
-    store_u64_le(v, 104, B2B_IV5);
-    store_u64_le(v, 112, B2B_IV6);
-    store_u64_le(v, 120, B2B_IV7);
+    ctx.t_lo = new_lo;
+}
 
-    // v[12] ^= t_lo (low 64 bits of byte counter)
-    v12: u64 = load_u64_le(v, 96);
-    store_u64_le(v, 96, v12 ^ t_lo);
-    // v[13] ^= t_hi (high 64 bits of byte counter)
-    v13: u64 = load_u64_le(v, 104);
-    store_u64_le(v, 104, v13 ^ t_hi);
+// blake2b_compress: BLAKE2b compression function F(h, m, t, f) per
+// RFC 7693 Section 3.2. Folds one 128-byte block (ctx.buf) into ctx.state.
+//
+//   ctx:   caller-allocated Blake2bCtx (modified in place). ctx.buf must
+//          hold the 128-byte block; ctx.t_lo/ctx.t_hi hold the byte counter.
+//   last:  1 if this is the final block (sets f[0] = all-ones), else 0.
+transform blake2b_compress(ctx: State<Blake2bCtx>, last: u32) {
+    let V = state_new(Blake2bV);
+    let M = state_new(Blake2bM);
+    let Sigma = state_new(Blake2bSigma);
+    blake2b_load_sigma(Sigma);
 
-    // v[14] ^= f (finalization flag, all-ones if last block)
+    // v[0..7] = h[0..7] (LE load of ctx.state[0..63]).
+    let v0 = (ctx.state[ 0] as u64) | ((ctx.state[ 1] as u64) << 8) | ((ctx.state[ 2] as u64) << 16) | ((ctx.state[ 3] as u64) << 24)
+           | ((ctx.state[ 4] as u64) << 32) | ((ctx.state[ 5] as u64) << 40) | ((ctx.state[ 6] as u64) << 48) | ((ctx.state[ 7] as u64) << 56);
+    let v1 = (ctx.state[ 8] as u64) | ((ctx.state[ 9] as u64) << 8) | ((ctx.state[10] as u64) << 16) | ((ctx.state[11] as u64) << 24)
+           | ((ctx.state[12] as u64) << 32) | ((ctx.state[13] as u64) << 40) | ((ctx.state[14] as u64) << 48) | ((ctx.state[15] as u64) << 56);
+    let v2 = (ctx.state[16] as u64) | ((ctx.state[17] as u64) << 8) | ((ctx.state[18] as u64) << 16) | ((ctx.state[19] as u64) << 24)
+           | ((ctx.state[20] as u64) << 32) | ((ctx.state[21] as u64) << 40) | ((ctx.state[22] as u64) << 48) | ((ctx.state[23] as u64) << 56);
+    let v3 = (ctx.state[24] as u64) | ((ctx.state[25] as u64) << 8) | ((ctx.state[26] as u64) << 16) | ((ctx.state[27] as u64) << 24)
+           | ((ctx.state[28] as u64) << 32) | ((ctx.state[29] as u64) << 40) | ((ctx.state[30] as u64) << 48) | ((ctx.state[31] as u64) << 56);
+    let v4 = (ctx.state[32] as u64) | ((ctx.state[33] as u64) << 8) | ((ctx.state[34] as u64) << 16) | ((ctx.state[35] as u64) << 24)
+           | ((ctx.state[36] as u64) << 32) | ((ctx.state[37] as u64) << 40) | ((ctx.state[38] as u64) << 48) | ((ctx.state[39] as u64) << 56);
+    let v5 = (ctx.state[40] as u64) | ((ctx.state[41] as u64) << 8) | ((ctx.state[42] as u64) << 16) | ((ctx.state[43] as u64) << 24)
+           | ((ctx.state[44] as u64) << 32) | ((ctx.state[45] as u64) << 40) | ((ctx.state[46] as u64) << 48) | ((ctx.state[47] as u64) << 56);
+    let v6 = (ctx.state[48] as u64) | ((ctx.state[49] as u64) << 8) | ((ctx.state[50] as u64) << 16) | ((ctx.state[51] as u64) << 24)
+           | ((ctx.state[52] as u64) << 32) | ((ctx.state[53] as u64) << 40) | ((ctx.state[54] as u64) << 48) | ((ctx.state[55] as u64) << 56);
+    let v7 = (ctx.state[56] as u64) | ((ctx.state[57] as u64) << 8) | ((ctx.state[58] as u64) << 16) | ((ctx.state[59] as u64) << 24)
+           | ((ctx.state[60] as u64) << 32) | ((ctx.state[61] as u64) << 40) | ((ctx.state[62] as u64) << 48) | ((ctx.state[63] as u64) << 56);
+    V.v[0] = v0; V.v[1] = v1; V.v[2] = v2; V.v[3] = v3;
+    V.v[4] = v4; V.v[5] = v5; V.v[6] = v6; V.v[7] = v7;
+
+    // v[8..15] = IV[0..7].
+    V.v[8]  = B2B_IV0;
+    V.v[9]  = B2B_IV1;
+    V.v[10] = B2B_IV2;
+    V.v[11] = B2B_IV3;
+    V.v[12] = B2B_IV4;
+    V.v[13] = B2B_IV5;
+    V.v[14] = B2B_IV6;
+    V.v[15] = B2B_IV7;
+
+    // v[12] ^= t_lo; v[13] ^= t_hi; v[14] ^= f (if last block).
+    let tlo = ctx.t_lo;
+    let thi = ctx.t_hi as u64;
+    V.v[12] = V.v[12] ^ tlo;
+    V.v[13] = V.v[13] ^ thi;
     if last == 1 {
-        v14: u64 = load_u64_le(v, 112);
-        store_u64_le(v, 112, v14 ^ MASK64);
+        V.v[14] = V.v[14] ^ MASK64;
     }
 
-    // Load message words m[0..15]
-    m = allocate(128);
-    i = 0;
+    // Load 16 LE message words from ctx.buf into M.m[0..15].
+    let i = 0;
     while i < 16 {
-        store_u64_le(m, i * 8, load_u64_le(block, i * 8));
+        let off = i * 8;
+        let b0 = ctx.buf[off] as u64;
+        let b1 = ctx.buf[off + 1] as u64;
+        let b2 = ctx.buf[off + 2] as u64;
+        let b3 = ctx.buf[off + 3] as u64;
+        let b4 = ctx.buf[off + 4] as u64;
+        let b5 = ctx.buf[off + 5] as u64;
+        let b6 = ctx.buf[off + 6] as u64;
+        let b7 = ctx.buf[off + 7] as u64;
+        M.m[i] = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+               | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
         i = i + 1;
     }
 
-    // 12 rounds; each round selects a row of SIGMA.
-    round: u32 = 0;
+    // 12 rounds; each round selects SIGMA row r%10.
+    let round = 0;
     while round < 12 {
-        s: u32 = round % 10;
-
-        // Resolve this round's 16 message-word indices from SIGMA[s].
-        m0: u32 = 0;  m1: u32 = 1;  m2: u32 = 2;  m3: u32 = 3;
-        m4: u32 = 4;  m5: u32 = 5;  m6: u32 = 6;  m7: u32 = 7;
-        m8: u32 = 8;  m9: u32 = 9;  m10: u32 = 10; m11: u32 = 11;
-        m12: u32 = 12; m13: u32 = 13; m14: u32 = 14; m15: u32 = 15;
-
-        if s == 0 { m0 = 0;  m1 = 1;  m2 = 2;  m3 = 3;  m4 = 4;  m5 = 5;  m6 = 6;  m7 = 7;  m8 = 8;  m9 = 9;  m10 = 10; m11 = 11; m12 = 12; m13 = 13; m14 = 14; m15 = 15; }
-        if s == 1 { m0 = 14; m1 = 10; m2 = 4;  m3 = 8;  m4 = 9;  m5 = 15; m6 = 13; m7 = 6;  m8 = 1;  m9 = 12; m10 = 0;  m11 = 2;  m12 = 11; m13 = 7;  m14 = 5;  m15 = 3; }
-        if s == 2 { m0 = 11; m1 = 8;  m2 = 12; m3 = 0;  m4 = 5;  m5 = 2;  m6 = 15; m7 = 13; m8 = 10; m9 = 14; m10 = 3;  m11 = 6;  m12 = 7;  m13 = 1;  m14 = 9;  m15 = 4; }
-        if s == 3 { m0 = 7;  m1 = 9;  m2 = 3;  m3 = 1;  m4 = 13; m5 = 12; m6 = 11; m7 = 14; m8 = 2;  m9 = 6;  m10 = 5;  m11 = 10; m12 = 4;  m13 = 0;  m14 = 15; m15 = 8; }
-        if s == 4 { m0 = 9;  m1 = 0;  m2 = 5;  m3 = 7;  m4 = 2;  m5 = 4;  m6 = 10; m7 = 15; m8 = 14; m9 = 1;  m10 = 11; m11 = 12; m12 = 6;  m13 = 8;  m14 = 3;  m15 = 13; }
-        if s == 5 { m0 = 2;  m1 = 12; m2 = 6;  m3 = 10; m4 = 0;  m5 = 11; m6 = 8;  m7 = 3;  m8 = 4;  m9 = 13; m10 = 7;  m11 = 5;  m12 = 15; m13 = 14; m14 = 1;  m15 = 9; }
-        if s == 6 { m0 = 12; m1 = 5;  m2 = 1;  m3 = 15; m4 = 14; m5 = 13; m6 = 4;  m7 = 10; m8 = 0;  m9 = 7;  m10 = 6;  m11 = 3;  m12 = 9;  m13 = 2;  m14 = 8;  m15 = 11; }
-        if s == 7 { m0 = 13; m1 = 11; m2 = 7;  m3 = 14; m4 = 12; m5 = 1;  m6 = 3;  m7 = 9;  m8 = 5;  m9 = 0;  m10 = 15; m11 = 4;  m12 = 8;  m13 = 6;  m14 = 2;  m15 = 10; }
-        if s == 8 { m0 = 6;  m1 = 15; m2 = 14; m3 = 9;  m4 = 11; m5 = 3;  m6 = 0;  m7 = 8;  m8 = 12; m9 = 2;  m10 = 13; m11 = 7;  m12 = 1;  m13 = 4;  m14 = 10; m15 = 5; }
-        if s == 9 { m0 = 10; m1 = 2;  m2 = 8;  m3 = 4;  m4 = 7;  m5 = 6;  m6 = 1;  m7 = 5;  m8 = 15; m9 = 11; m10 = 9;  m11 = 14; m12 = 3;  m13 = 12; m14 = 13; m15 = 0; }
-
-        // Column round
-        blake2b_g(v, 0, 4, 8,  12, load_u64_le(m, m0 * 8),  load_u64_le(m, m1 * 8));
-        blake2b_g(v, 1, 5, 9,  13, load_u64_le(m, m2 * 8),  load_u64_le(m, m3 * 8));
-        blake2b_g(v, 2, 6, 10, 14, load_u64_le(m, m4 * 8),  load_u64_le(m, m5 * 8));
-        blake2b_g(v, 3, 7, 11, 15, load_u64_le(m, m6 * 8),  load_u64_le(m, m7 * 8));
-        // Diagonal round
-        blake2b_g(v, 0, 5, 10, 15, load_u64_le(m, m8 * 8),  load_u64_le(m, m9 * 8));
-        blake2b_g(v, 1, 6, 11, 12, load_u64_le(m, m10 * 8), load_u64_le(m, m11 * 8));
-        blake2b_g(v, 2, 7, 8,  13, load_u64_le(m, m12 * 8), load_u64_le(m, m13 * 8));
-        blake2b_g(v, 3, 4, 9,  14, load_u64_le(m, m14 * 8), load_u64_le(m, m15 * 8));
-
+        let row = round % 10;
+        let s_off = row * 16;
+        // Precompute this round's 16 message-word indices from SIGMA[row].
+        let s0  = Sigma.s[s_off +  0];
+        let s1  = Sigma.s[s_off +  1];
+        let s2  = Sigma.s[s_off +  2];
+        let s3  = Sigma.s[s_off +  3];
+        let s4  = Sigma.s[s_off +  4];
+        let s5  = Sigma.s[s_off +  5];
+        let s6  = Sigma.s[s_off +  6];
+        let s7  = Sigma.s[s_off +  7];
+        let s8  = Sigma.s[s_off +  8];
+        let s9  = Sigma.s[s_off +  9];
+        let s10 = Sigma.s[s_off + 10];
+        let s11 = Sigma.s[s_off + 11];
+        let s12 = Sigma.s[s_off + 12];
+        let s13 = Sigma.s[s_off + 13];
+        let s14 = Sigma.s[s_off + 14];
+        let s15 = Sigma.s[s_off + 15];
+        // Load the permuted message words for this round.
+        let m0  = M.m[s0  as u32];
+        let m1  = M.m[s1  as u32];
+        let m2  = M.m[s2  as u32];
+        let m3  = M.m[s3  as u32];
+        let m4  = M.m[s4  as u32];
+        let m5  = M.m[s5  as u32];
+        let m6  = M.m[s6  as u32];
+        let m7  = M.m[s7  as u32];
+        let m8  = M.m[s8  as u32];
+        let m9  = M.m[s9  as u32];
+        let m10 = M.m[s10 as u32];
+        let m11 = M.m[s11 as u32];
+        let m12 = M.m[s12 as u32];
+        let m13 = M.m[s13 as u32];
+        let m14 = M.m[s14 as u32];
+        let m15 = M.m[s15 as u32];
+        // Column round (4 G calls).
+        blake2b_g_0_4_8_12(V, m0, m1);
+        blake2b_g_1_5_9_13(V, m2, m3);
+        blake2b_g_2_6_10_14(V, m4, m5);
+        blake2b_g_3_7_11_15(V, m6, m7);
+        // Diagonal round (4 G calls).
+        blake2b_g_0_5_10_15(V, m8,  m9);
+        blake2b_g_1_6_11_12(V, m10, m11);
+        blake2b_g_2_7_8_13(V, m12, m13);
+        blake2b_g_3_4_9_14(V, m14, m15);
         round = round + 1;
     }
 
-    // h[i] ^= v[i] ^ v[i + 8]
-    i = 0;
-    while i < 8 {
-        hi:  u64 = load_u64_le(h, i * 8);
-        vi:  u64 = load_u64_le(v, i * 8);
-        vi8: u64 = load_u64_le(v, (i + 8) * 8);
-        store_u64_le(h, i * 8, hi ^ vi ^ vi8);
-        i = i + 1;
+    // h[i] ^= v[i] ^ v[i + 8] for i = 0..7 (RFC 7693 Section 3.2).
+    // Load each h[i] from ctx.state (LE), XOR with v[i] ^ v[i+8], store back.
+    let j = 0;
+    while j < 8 {
+        let off = j * 8;
+        let b0 = ctx.state[off] as u64;
+        let b1 = ctx.state[off + 1] as u64;
+        let b2 = ctx.state[off + 2] as u64;
+        let b3 = ctx.state[off + 3] as u64;
+        let b4 = ctx.state[off + 4] as u64;
+        let b5 = ctx.state[off + 5] as u64;
+        let b6 = ctx.state[off + 6] as u64;
+        let b7 = ctx.state[off + 7] as u64;
+        let old_h = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+                  | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+        let new_h = old_h ^ V.v[j] ^ V.v[j + 8];
+        ctx.state[off]     = (new_h & 255) as u8;
+        ctx.state[off + 1] = ((new_h >> 8) & 255) as u8;
+        ctx.state[off + 2] = ((new_h >> 16) & 255) as u8;
+        ctx.state[off + 3] = ((new_h >> 24) & 255) as u8;
+        ctx.state[off + 4] = ((new_h >> 32) & 255) as u8;
+        ctx.state[off + 5] = ((new_h >> 40) & 255) as u8;
+        ctx.state[off + 6] = ((new_h >> 48) & 255) as u8;
+        ctx.state[off + 7] = ((new_h >> 56) & 255) as u8;
+        j = j + 1;
     }
-
-    free(v);
-    free(m);
 }
 
-// Context layout (216 bytes):
-//   [  0.. 63] h[0..7]    8 x u64 chain value (little-endian)
-//   [ 64.. 71] t_lo       low 64 bits of the byte counter (little-endian)
-//   [ 72.. 79] t_hi       high 64 bits of the byte counter (little-endian)
-//   [ 80.. 83] buf_len    bytes currently in the partial block buffer
-//   [ 84.. 87] digest_len output length in bytes (1..64)
-//   [ 88..215] buf[128]   partial block accumulator
-
-transform blake2b_init(ctx: Address, digest_len: u32) {
-    // h = IV with the first word XORed with the parameter block.
-    // Parameter block (digest_len, key_len=0, fanout=1, depth=1):
-    //   byte 0      digest_len
-    //   byte 1      key_len (0 here)
-    //   byte 2      fanout (1)
-    //   byte 3      depth (1)
-    //   bytes 4..47 reserved zeros
-    // Only the first 8 bytes of the parameter block affect h[0]:
-    //   h[0] = IV[0] ^ (digest_len | (0 << 8) | (1 << 16) | (1 << 24))
-    param: u64 = (digest_len & 255) | (0 << 8) | (1 << 16) | (1 << 24);
-    store_u64_le(ctx, 0, B2B_IV0 ^ param);
-    store_u64_le(ctx, 8,  B2B_IV1);
-    store_u64_le(ctx, 16, B2B_IV2);
-    store_u64_le(ctx, 24, B2B_IV3);
-    store_u64_le(ctx, 32, B2B_IV4);
-    store_u64_le(ctx, 40, B2B_IV5);
-    store_u64_le(ctx, 48, B2B_IV6);
-    store_u64_le(ctx, 56, B2B_IV7);
-    store_u64_le(ctx, 64, 0);  // t_lo
-    store_u64_le(ctx, 72, 0);  // t_hi
-    store_u32_le(ctx, 80, 0);  // buf_len — helper below
-    store_u32_le(ctx, 84, digest_len);
-}
-
-// Increment the 128-bit byte counter by `n`, carrying through both limbs.
-transform blake2b_add_bytes(ctx: Address, n: u64) {
-    lo: u64 = load_u64_le(ctx, 64);
-    hi: u64 = load_u64_le(ctx, 72);
-    new_lo: u64 = lo + n;
-    if new_lo < lo { hi = hi + 1; }
-    store_u64_le(ctx, 64, new_lo);
-    store_u64_le(ctx, 72, hi);
-}
-
-transform blake2b_update(ctx: Address, data: Address, len: u32) {
-    buf_len: u32 = load_u32_le(ctx, 80);
-    i: u32 = 0;
+// blake2b_update: absorb `len` bytes of data into the hash state.
+// Buffers input bytes into ctx.buf. When ctx.len reaches 128, calls
+// blake2b_compress and resets ctx.len.
+transform blake2b_update(ctx: State<Blake2bCtx>, data: State<Blake2bData>, len: u32) {
+    let i: u32 = 0;
     while i < len {
-        *(ctx + 88 + buf_len) = *(data + i);
-        buf_len = buf_len + 1;
+        let bl = ctx.len;
+        ctx.buf[bl] = data.data[i];
+        ctx.len = bl + 1;
         i = i + 1;
-        if buf_len == 128 {
+        if ctx.len == 128 {
             blake2b_add_bytes(ctx, 128);
-            t_lo: u64 = load_u64_le(ctx, 64);
-            t_hi: u64 = load_u64_le(ctx, 72);
-            blake2b_compress(ctx, ctx + 88, t_lo, t_hi, 0);
-            buf_len = 0;
+            blake2b_compress(ctx, 0);
+            ctx.len = 0;
         }
     }
-    store_u32_le(ctx, 80, buf_len);
 }
 
-// Pad the final partial block with zeros, set the finalization flag, run the
-// last compression, and emit `digest_len` bytes of the chain value.
-transform blake2b_final(ctx: Address, out: Address) {
-    buf_len: u32 = load_u32_le(ctx, 80);
-    digest_len: u32 = load_u32_le(ctx, 84);
+// blake2b_final: emit `digest_len` bytes of the chain value into `out`.
+// RFC 7693 Section 2.4: the final partial block is zero-padded to 128
+// bytes, the byte counter is incremented by the buffered byte count,
+// the finalization flag f[0] is set, the last compression runs, and the
+// first `digest_len` bytes of h[0..7] (LE) are emitted.
+transform blake2b_final(ctx: State<Blake2bCtx>, out: State<Blake2bDigest>) {
+    let buf_len: u32 = ctx.len;
+    let digest_len: u32 = ctx.digest_len;
 
-    // Account for the buffered bytes in the byte counter
-    blake2b_add_bytes(ctx, buf_len);
+    // Account for the buffered bytes in the byte counter.
+    blake2b_add_bytes(ctx, buf_len as u64);
 
-    // Zero-pad the partial block up to 128 bytes
-    i: u32 = buf_len;
-    while i < 128 {
-        *(ctx + 88 + i) = 0;
-        i = i + 1;
+    // Zero-pad the partial block up to 128 bytes.
+    let p = buf_len;
+    while p < 128 {
+        ctx.buf[p] = 0;
+        p = p + 1;
     }
-    t_lo: u64 = load_u64_le(ctx, 64);
-    t_hi: u64 = load_u64_le(ctx, 72);
-    blake2b_compress(ctx, ctx + 88, t_lo, t_hi, 1);
 
-    // Emit digest_len bytes from h[0..7] (little-endian lanes)
-    i = 0;
+    // Run the final compression with f[0] set.
+    blake2b_compress(ctx, 1);
+
+    // Emit `digest_len` bytes from h[0..7] (LE) into out.data.
+    let i = 0;
     while i < digest_len {
-        *(out + i) = *(ctx + i);
+        out.data[i] = ctx.state[i];
         i = i + 1;
     }
 }
 
-// BLAKE2b oneshot — 512-bit (64-byte) output
-transform blake2b_oneshot(data: Address, len: u32, out: Address) {
-    ctx = allocate(216);
-    blake2b_init(ctx, 64);
+// Convenience wrappers. Each uses the variant-specific init (NOT
+// blake2b_init with a literal arg) to avoid the parameter-binding bug.
+transform blake2b_oneshot(data: State<Blake2bData>, len: u32, out: State<Blake2bDigest>) {
+    let ctx = state_new(Blake2bCtx);
+    blake2b_init_64(ctx);
     blake2b_update(ctx, data, len);
     blake2b_final(ctx, out);
-    free(ctx);
 }
 
-// BLAKE2b with 256-bit (32-byte) output
-transform blake2b_256(data: Address, len: u32, out: Address) {
-    ctx = allocate(216);
-    blake2b_init(ctx, 32);
+transform blake2b_256(data: State<Blake2bData>, len: u32, out: State<Blake2bDigest>) {
+    let ctx = state_new(Blake2bCtx);
+    blake2b_init_32(ctx);
     blake2b_update(ctx, data, len);
     blake2b_final(ctx, out);
-    free(ctx);
+}
+
+// ===========================================================================
+// BLAKE2s SIGMA table loader (RFC 7693 Section 2.6).
+// ===========================================================================
+transform blake2s_load_sigma(S: State<Blake2sSigma>) {
+    // Row 0:  0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15
+    S.s[  0] =  0; S.s[  1] =  1; S.s[  2] =  2; S.s[  3] =  3;
+    S.s[  4] =  4; S.s[  5] =  5; S.s[  6] =  6; S.s[  7] =  7;
+    S.s[  8] =  8; S.s[  9] =  9; S.s[ 10] = 10; S.s[ 11] = 11;
+    S.s[ 12] = 12; S.s[ 13] = 13; S.s[ 14] = 14; S.s[ 15] = 15;
+    // Row 1: 14, 10,  4,  8,  9, 15, 13,  6,  1, 12,  0,  2, 11,  7,  5,  3
+    S.s[ 16] = 14; S.s[ 17] = 10; S.s[ 18] =  4; S.s[ 19] =  8;
+    S.s[ 20] =  9; S.s[ 21] = 15; S.s[ 22] = 13; S.s[ 23] =  6;
+    S.s[ 24] =  1; S.s[ 25] = 12; S.s[ 26] =  0; S.s[ 27] =  2;
+    S.s[ 28] = 11; S.s[ 29] =  7; S.s[ 30] =  5; S.s[ 31] =  3;
+    // Row 2: 11,  8, 12,  0,  5,  2, 15, 13, 10, 14,  3,  6,  7,  1,  9,  4
+    S.s[ 32] = 11; S.s[ 33] =  8; S.s[ 34] = 12; S.s[ 35] =  0;
+    S.s[ 36] =  5; S.s[ 37] =  2; S.s[ 38] = 15; S.s[ 39] = 13;
+    S.s[ 40] = 10; S.s[ 41] = 14; S.s[ 42] =  3; S.s[ 43] =  6;
+    S.s[ 44] =  7; S.s[ 45] =  1; S.s[ 46] =  9; S.s[ 47] =  4;
+    // Row 3:  7,  9,  3,  1, 13, 12, 11, 14,  2,  6,  5, 10,  4,  0, 15,  8
+    S.s[ 48] =  7; S.s[ 49] =  9; S.s[ 50] =  3; S.s[ 51] =  1;
+    S.s[ 52] = 13; S.s[ 53] = 12; S.s[ 54] = 11; S.s[ 55] = 14;
+    S.s[ 56] =  2; S.s[ 57] =  6; S.s[ 58] =  5; S.s[ 59] = 10;
+    S.s[ 60] =  4; S.s[ 61] =  0; S.s[ 62] = 15; S.s[ 63] =  8;
+    // Row 4:  9,  0,  5,  7,  2,  4, 10, 15, 14,  1, 11, 12,  6,  8,  3, 13
+    S.s[ 64] =  9; S.s[ 65] =  0; S.s[ 66] =  5; S.s[ 67] =  7;
+    S.s[ 68] =  2; S.s[ 69] =  4; S.s[ 70] = 10; S.s[ 71] = 15;
+    S.s[ 72] = 14; S.s[ 73] =  1; S.s[ 74] = 11; S.s[ 75] = 12;
+    S.s[ 76] =  6; S.s[ 77] =  8; S.s[ 78] =  3; S.s[ 79] = 13;
+    // Row 5:  2, 12,  6, 10,  0, 11,  8,  3,  4, 13,  7,  5, 15, 14,  1,  9
+    S.s[ 80] =  2; S.s[ 81] = 12; S.s[ 82] =  6; S.s[ 83] = 10;
+    S.s[ 84] =  0; S.s[ 85] = 11; S.s[ 86] =  8; S.s[ 87] =  3;
+    S.s[ 88] =  4; S.s[ 89] = 13; S.s[ 90] =  7; S.s[ 91] =  5;
+    S.s[ 92] = 15; S.s[ 93] = 14; S.s[ 94] =  1; S.s[ 95] =  9;
+    // Row 6: 12,  5,  1, 15, 14, 13,  4, 10,  0,  7,  6,  3,  9,  2,  8, 11
+    S.s[ 96] = 12; S.s[ 97] =  5; S.s[ 98] =  1; S.s[ 99] = 15;
+    S.s[100] = 14; S.s[101] = 13; S.s[102] =  4; S.s[103] = 10;
+    S.s[104] =  0; S.s[105] =  7; S.s[106] =  6; S.s[107] =  3;
+    S.s[108] =  9; S.s[109] =  2; S.s[110] =  8; S.s[111] = 11;
+    // Row 7: 13, 11,  7, 14, 12,  1,  3,  9,  5,  0, 15,  4,  8,  6,  2, 10
+    S.s[112] = 13; S.s[113] = 11; S.s[114] =  7; S.s[115] = 14;
+    S.s[116] = 12; S.s[117] =  1; S.s[118] =  3; S.s[119] =  9;
+    S.s[120] =  5; S.s[121] =  0; S.s[122] = 15; S.s[123] =  4;
+    S.s[124] =  8; S.s[125] =  6; S.s[126] =  2; S.s[127] = 10;
+    // Row 8:  6, 15, 14,  9, 11,  3,  0,  8, 12,  2, 13,  7,  1,  4, 10,  5
+    S.s[128] =  6; S.s[129] = 15; S.s[130] = 14; S.s[131] =  9;
+    S.s[132] = 11; S.s[133] =  3; S.s[134] =  0; S.s[135] =  8;
+    S.s[136] = 12; S.s[137] =  2; S.s[138] = 13; S.s[139] =  7;
+    S.s[140] =  1; S.s[141] =  4; S.s[142] = 10; S.s[143] =  5;
+    // Row 9: 10,  2,  8,  4,  7,  6,  1,  5, 15, 11,  9, 14,  3, 12, 13,  0
+    S.s[144] = 10; S.s[145] =  2; S.s[146] =  8; S.s[147] =  4;
+    S.s[148] =  7; S.s[149] =  6; S.s[150] =  1; S.s[151] =  5;
+    S.s[152] = 15; S.s[153] = 11; S.s[154] =  9; S.s[155] = 14;
+    S.s[156] =  3; S.s[157] = 12; S.s[158] = 13; S.s[159] =  0;
+}
+
+// ===========================================================================
+// BLAKE2s G primitive — 8 specializations (one per (a,b,c,d) tuple).
+// RFC 7693 Section 3.1: G(v, a, b, c, d, x, y) — same structure as BLAKE2b
+// but with 32-bit words. Rotations: 16, 12, 8, 7 (BLAKE2s).
+// ===========================================================================
+
+transform blake2s_g_0_4_8_12(V: State<Blake2sV>, x: u32, y: u32) {
+    let va = V.v[0];
+    let vb = V.v[4];
+    let vc = V.v[8];
+    let vd = V.v[12];
+    va = (va + vb + x) & MASK32;
+    vd = rotr32(vd ^ va, 16);
+    vc = (vc + vd) & MASK32;
+    vb = rotr32(vb ^ vc, 12);
+    va = (va + vb + y) & MASK32;
+    vd = rotr32(vd ^ va, 8);
+    vc = (vc + vd) & MASK32;
+    vb = rotr32(vb ^ vc, 7);
+    V.v[0] = va;
+    V.v[4] = vb;
+    V.v[8] = vc;
+    V.v[12] = vd;
+}
+
+transform blake2s_g_1_5_9_13(V: State<Blake2sV>, x: u32, y: u32) {
+    let va = V.v[1];
+    let vb = V.v[5];
+    let vc = V.v[9];
+    let vd = V.v[13];
+    va = (va + vb + x) & MASK32;
+    vd = rotr32(vd ^ va, 16);
+    vc = (vc + vd) & MASK32;
+    vb = rotr32(vb ^ vc, 12);
+    va = (va + vb + y) & MASK32;
+    vd = rotr32(vd ^ va, 8);
+    vc = (vc + vd) & MASK32;
+    vb = rotr32(vb ^ vc, 7);
+    V.v[1] = va;
+    V.v[5] = vb;
+    V.v[9] = vc;
+    V.v[13] = vd;
+}
+
+transform blake2s_g_2_6_10_14(V: State<Blake2sV>, x: u32, y: u32) {
+    let va = V.v[2];
+    let vb = V.v[6];
+    let vc = V.v[10];
+    let vd = V.v[14];
+    va = (va + vb + x) & MASK32;
+    vd = rotr32(vd ^ va, 16);
+    vc = (vc + vd) & MASK32;
+    vb = rotr32(vb ^ vc, 12);
+    va = (va + vb + y) & MASK32;
+    vd = rotr32(vd ^ va, 8);
+    vc = (vc + vd) & MASK32;
+    vb = rotr32(vb ^ vc, 7);
+    V.v[2] = va;
+    V.v[6] = vb;
+    V.v[10] = vc;
+    V.v[14] = vd;
+}
+
+transform blake2s_g_3_7_11_15(V: State<Blake2sV>, x: u32, y: u32) {
+    let va = V.v[3];
+    let vb = V.v[7];
+    let vc = V.v[11];
+    let vd = V.v[15];
+    va = (va + vb + x) & MASK32;
+    vd = rotr32(vd ^ va, 16);
+    vc = (vc + vd) & MASK32;
+    vb = rotr32(vb ^ vc, 12);
+    va = (va + vb + y) & MASK32;
+    vd = rotr32(vd ^ va, 8);
+    vc = (vc + vd) & MASK32;
+    vb = rotr32(vb ^ vc, 7);
+    V.v[3] = va;
+    V.v[7] = vb;
+    V.v[11] = vc;
+    V.v[15] = vd;
+}
+
+transform blake2s_g_0_5_10_15(V: State<Blake2sV>, x: u32, y: u32) {
+    let va = V.v[0];
+    let vb = V.v[5];
+    let vc = V.v[10];
+    let vd = V.v[15];
+    va = (va + vb + x) & MASK32;
+    vd = rotr32(vd ^ va, 16);
+    vc = (vc + vd) & MASK32;
+    vb = rotr32(vb ^ vc, 12);
+    va = (va + vb + y) & MASK32;
+    vd = rotr32(vd ^ va, 8);
+    vc = (vc + vd) & MASK32;
+    vb = rotr32(vb ^ vc, 7);
+    V.v[0] = va;
+    V.v[5] = vb;
+    V.v[10] = vc;
+    V.v[15] = vd;
+}
+
+transform blake2s_g_1_6_11_12(V: State<Blake2sV>, x: u32, y: u32) {
+    let va = V.v[1];
+    let vb = V.v[6];
+    let vc = V.v[11];
+    let vd = V.v[12];
+    va = (va + vb + x) & MASK32;
+    vd = rotr32(vd ^ va, 16);
+    vc = (vc + vd) & MASK32;
+    vb = rotr32(vb ^ vc, 12);
+    va = (va + vb + y) & MASK32;
+    vd = rotr32(vd ^ va, 8);
+    vc = (vc + vd) & MASK32;
+    vb = rotr32(vb ^ vc, 7);
+    V.v[1] = va;
+    V.v[6] = vb;
+    V.v[11] = vc;
+    V.v[12] = vd;
+}
+
+transform blake2s_g_2_7_8_13(V: State<Blake2sV>, x: u32, y: u32) {
+    let va = V.v[2];
+    let vb = V.v[7];
+    let vc = V.v[8];
+    let vd = V.v[13];
+    va = (va + vb + x) & MASK32;
+    vd = rotr32(vd ^ va, 16);
+    vc = (vc + vd) & MASK32;
+    vb = rotr32(vb ^ vc, 12);
+    va = (va + vb + y) & MASK32;
+    vd = rotr32(vd ^ va, 8);
+    vc = (vc + vd) & MASK32;
+    vb = rotr32(vb ^ vc, 7);
+    V.v[2] = va;
+    V.v[7] = vb;
+    V.v[8] = vc;
+    V.v[13] = vd;
+}
+
+transform blake2s_g_3_4_9_14(V: State<Blake2sV>, x: u32, y: u32) {
+    let va = V.v[3];
+    let vb = V.v[4];
+    let vc = V.v[9];
+    let vd = V.v[14];
+    va = (va + vb + x) & MASK32;
+    vd = rotr32(vd ^ va, 16);
+    vc = (vc + vd) & MASK32;
+    vb = rotr32(vb ^ vc, 12);
+    va = (va + vb + y) & MASK32;
+    vd = rotr32(vd ^ va, 8);
+    vc = (vc + vd) & MASK32;
+    vb = rotr32(vb ^ vc, 7);
+    V.v[3] = va;
+    V.v[4] = vb;
+    V.v[9] = vc;
+    V.v[14] = vd;
+}
+
+// ===========================================================================
+// BLAKE2s API
+// ===========================================================================
+
+// blake2s_init: seed the BLAKE2s initial hash state into ctx.
+// Reads ctx.digest_len (NOT a parameter) to avoid the VUMA parameter-
+// binding bug. Callers must set ctx.digest_len BEFORE calling — use
+// blake2s_init_32 instead.
+transform blake2s_init(ctx: State<Blake2sCtx>) {
+    let digest_len = ctx.digest_len;
+    // h[0] = IV[0] ^ (digest_len | (key_len<<8) | (fanout<<16) | (depth<<24))
+    let param: u32 = digest_len | ((1 as u32) << 16) | ((1 as u32) << 24);
+    let h0 = B2S_IV0 ^ param;
+    ctx.state[0] = (h0 & 255) as u8;
+    ctx.state[1] = ((h0 >> 8) & 255) as u8;
+    ctx.state[2] = ((h0 >> 16) & 255) as u8;
+    ctx.state[3] = ((h0 >> 24) & 255) as u8;
+    // h[1..7] = IV[1..7]
+    ctx.state[4]  = (B2S_IV1 & 255) as u8;
+    ctx.state[5]  = ((B2S_IV1 >> 8) & 255) as u8;
+    ctx.state[6]  = ((B2S_IV1 >> 16) & 255) as u8;
+    ctx.state[7]  = ((B2S_IV1 >> 24) & 255) as u8;
+    ctx.state[8]  = (B2S_IV2 & 255) as u8;
+    ctx.state[9]  = ((B2S_IV2 >> 8) & 255) as u8;
+    ctx.state[10] = ((B2S_IV2 >> 16) & 255) as u8;
+    ctx.state[11] = ((B2S_IV2 >> 24) & 255) as u8;
+    ctx.state[12] = (B2S_IV3 & 255) as u8;
+    ctx.state[13] = ((B2S_IV3 >> 8) & 255) as u8;
+    ctx.state[14] = ((B2S_IV3 >> 16) & 255) as u8;
+    ctx.state[15] = ((B2S_IV3 >> 24) & 255) as u8;
+    ctx.state[16] = (B2S_IV4 & 255) as u8;
+    ctx.state[17] = ((B2S_IV4 >> 8) & 255) as u8;
+    ctx.state[18] = ((B2S_IV4 >> 16) & 255) as u8;
+    ctx.state[19] = ((B2S_IV4 >> 24) & 255) as u8;
+    ctx.state[20] = (B2S_IV5 & 255) as u8;
+    ctx.state[21] = ((B2S_IV5 >> 8) & 255) as u8;
+    ctx.state[22] = ((B2S_IV5 >> 16) & 255) as u8;
+    ctx.state[23] = ((B2S_IV5 >> 24) & 255) as u8;
+    ctx.state[24] = (B2S_IV6 & 255) as u8;
+    ctx.state[25] = ((B2S_IV6 >> 8) & 255) as u8;
+    ctx.state[26] = ((B2S_IV6 >> 16) & 255) as u8;
+    ctx.state[27] = ((B2S_IV6 >> 24) & 255) as u8;
+    ctx.state[28] = (B2S_IV7 & 255) as u8;
+    ctx.state[29] = ((B2S_IV7 >> 8) & 255) as u8;
+    ctx.state[30] = ((B2S_IV7 >> 16) & 255) as u8;
+    ctx.state[31] = ((B2S_IV7 >> 24) & 255) as u8;
+    ctx.len = 0;
+    ctx.t_lo = 0;
+    ctx.t_hi = 0;
+}
+
+// blake2s_init_32: init for default 32-byte output. Sets ctx.digest_len
+// directly (literal assignment, no shared-function call with literal arg).
+transform blake2s_init_32(ctx: State<Blake2sCtx>) {
+    ctx.digest_len = 32;
+    blake2s_init(ctx);
+}
+
+// Increment the 64-bit byte counter by `n` bytes, carrying into t_hi.
+transform blake2s_add_bytes(ctx: State<Blake2sCtx>, n: u32) {
+    let lo = ctx.t_lo;
+    let hi = ctx.t_hi;
+    let new_lo = (lo + n) & MASK32;
+    if new_lo < lo {
+        ctx.t_hi = (hi + 1) & MASK32;
+    }
+    ctx.t_lo = new_lo;
+}
+
+// blake2s_compress: BLAKE2s compression function F(h, m, t, f) per
+// RFC 7693 Section 3.2. Folds one 64-byte block (ctx.buf) into ctx.state.
+transform blake2s_compress(ctx: State<Blake2sCtx>, last: u32) {
+    let V = state_new(Blake2sV);
+    let M = state_new(Blake2sM);
+    let Sigma = state_new(Blake2sSigma);
+    blake2s_load_sigma(Sigma);
+
+    // v[0..7] = h[0..7] (LE load of ctx.state[0..31]).
+    let v0 = (ctx.state[ 0] as u32) | ((ctx.state[ 1] as u32) << 8) | ((ctx.state[ 2] as u32) << 16) | ((ctx.state[ 3] as u32) << 24);
+    let v1 = (ctx.state[ 4] as u32) | ((ctx.state[ 5] as u32) << 8) | ((ctx.state[ 6] as u32) << 16) | ((ctx.state[ 7] as u32) << 24);
+    let v2 = (ctx.state[ 8] as u32) | ((ctx.state[ 9] as u32) << 8) | ((ctx.state[10] as u32) << 16) | ((ctx.state[11] as u32) << 24);
+    let v3 = (ctx.state[12] as u32) | ((ctx.state[13] as u32) << 8) | ((ctx.state[14] as u32) << 16) | ((ctx.state[15] as u32) << 24);
+    let v4 = (ctx.state[16] as u32) | ((ctx.state[17] as u32) << 8) | ((ctx.state[18] as u32) << 16) | ((ctx.state[19] as u32) << 24);
+    let v5 = (ctx.state[20] as u32) | ((ctx.state[21] as u32) << 8) | ((ctx.state[22] as u32) << 16) | ((ctx.state[23] as u32) << 24);
+    let v6 = (ctx.state[24] as u32) | ((ctx.state[25] as u32) << 8) | ((ctx.state[26] as u32) << 16) | ((ctx.state[27] as u32) << 24);
+    let v7 = (ctx.state[28] as u32) | ((ctx.state[29] as u32) << 8) | ((ctx.state[30] as u32) << 16) | ((ctx.state[31] as u32) << 24);
+    V.v[0] = v0; V.v[1] = v1; V.v[2] = v2; V.v[3] = v3;
+    V.v[4] = v4; V.v[5] = v5; V.v[6] = v6; V.v[7] = v7;
+
+    // v[8..15] = IV[0..7].
+    V.v[8]  = B2S_IV0;
+    V.v[9]  = B2S_IV1;
+    V.v[10] = B2S_IV2;
+    V.v[11] = B2S_IV3;
+    V.v[12] = B2S_IV4;
+    V.v[13] = B2S_IV5;
+    V.v[14] = B2S_IV6;
+    V.v[15] = B2S_IV7;
+
+    // v[12] ^= t_lo; v[13] ^= t_hi; v[14] ^= f (if last block).
+    let tlo = ctx.t_lo;
+    let thi = ctx.t_hi;
+    V.v[12] = V.v[12] ^ tlo;
+    V.v[13] = V.v[13] ^ thi;
+    if last == 1 {
+        V.v[14] = V.v[14] ^ MASK32;
+    }
+
+    // Load 16 LE message words from ctx.buf into M.m[0..15].
+    let i = 0;
+    while i < 16 {
+        let off = i * 4;
+        let b0 = ctx.buf[off] as u32;
+        let b1 = ctx.buf[off + 1] as u32;
+        let b2 = ctx.buf[off + 2] as u32;
+        let b3 = ctx.buf[off + 3] as u32;
+        M.m[i] = (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & MASK32;
+        i = i + 1;
+    }
+
+    // 10 rounds; each round selects SIGMA row r%10.
+    let round = 0;
+    while round < 10 {
+        let row = round % 10;
+        let s_off = row * 16;
+        // Precompute this round's 16 message-word indices from SIGMA[row].
+        let s0  = Sigma.s[s_off +  0];
+        let s1  = Sigma.s[s_off +  1];
+        let s2  = Sigma.s[s_off +  2];
+        let s3  = Sigma.s[s_off +  3];
+        let s4  = Sigma.s[s_off +  4];
+        let s5  = Sigma.s[s_off +  5];
+        let s6  = Sigma.s[s_off +  6];
+        let s7  = Sigma.s[s_off +  7];
+        let s8  = Sigma.s[s_off +  8];
+        let s9  = Sigma.s[s_off +  9];
+        let s10 = Sigma.s[s_off + 10];
+        let s11 = Sigma.s[s_off + 11];
+        let s12 = Sigma.s[s_off + 12];
+        let s13 = Sigma.s[s_off + 13];
+        let s14 = Sigma.s[s_off + 14];
+        let s15 = Sigma.s[s_off + 15];
+        // Load the permuted message words for this round.
+        let m0  = M.m[s0  as u32];
+        let m1  = M.m[s1  as u32];
+        let m2  = M.m[s2  as u32];
+        let m3  = M.m[s3  as u32];
+        let m4  = M.m[s4  as u32];
+        let m5  = M.m[s5  as u32];
+        let m6  = M.m[s6  as u32];
+        let m7  = M.m[s7  as u32];
+        let m8  = M.m[s8  as u32];
+        let m9  = M.m[s9  as u32];
+        let m10 = M.m[s10 as u32];
+        let m11 = M.m[s11 as u32];
+        let m12 = M.m[s12 as u32];
+        let m13 = M.m[s13 as u32];
+        let m14 = M.m[s14 as u32];
+        let m15 = M.m[s15 as u32];
+        // Column round (4 G calls).
+        blake2s_g_0_4_8_12(V, m0, m1);
+        blake2s_g_1_5_9_13(V, m2, m3);
+        blake2s_g_2_6_10_14(V, m4, m5);
+        blake2s_g_3_7_11_15(V, m6, m7);
+        // Diagonal round (4 G calls).
+        blake2s_g_0_5_10_15(V, m8,  m9);
+        blake2s_g_1_6_11_12(V, m10, m11);
+        blake2s_g_2_7_8_13(V, m12, m13);
+        blake2s_g_3_4_9_14(V, m14, m15);
+        round = round + 1;
+    }
+
+    // h[i] ^= v[i] ^ v[i + 8] for i = 0..7 (RFC 7693 Section 3.2).
+    let j = 0;
+    while j < 8 {
+        let off = j * 4;
+        let b0 = ctx.state[off] as u32;
+        let b1 = ctx.state[off + 1] as u32;
+        let b2 = ctx.state[off + 2] as u32;
+        let b3 = ctx.state[off + 3] as u32;
+        let old_h = (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & MASK32;
+        let new_h = old_h ^ V.v[j] ^ V.v[j + 8];
+        ctx.state[off]     = (new_h & 255) as u8;
+        ctx.state[off + 1] = ((new_h >> 8) & 255) as u8;
+        ctx.state[off + 2] = ((new_h >> 16) & 255) as u8;
+        ctx.state[off + 3] = ((new_h >> 24) & 255) as u8;
+        j = j + 1;
+    }
+}
+
+// blake2s_update: absorb `len` bytes of data into the hash state.
+transform blake2s_update(ctx: State<Blake2sCtx>, data: State<Blake2sData>, len: u32) {
+    let i: u32 = 0;
+    while i < len {
+        let bl = ctx.len;
+        ctx.buf[bl] = data.data[i];
+        ctx.len = bl + 1;
+        i = i + 1;
+        if ctx.len == 64 {
+            blake2s_add_bytes(ctx, 64);
+            blake2s_compress(ctx, 0);
+            ctx.len = 0;
+        }
+    }
+}
+
+// blake2s_final: emit `digest_len` bytes of the chain value into `out`.
+transform blake2s_final(ctx: State<Blake2sCtx>, out: State<Blake2sDigest>) {
+    let buf_len: u32 = ctx.len;
+    let digest_len: u32 = ctx.digest_len;
+
+    // Account for the buffered bytes in the byte counter.
+    blake2s_add_bytes(ctx, buf_len);
+
+    // Zero-pad the partial block up to 64 bytes.
+    let p = buf_len;
+    while p < 64 {
+        ctx.buf[p] = 0;
+        p = p + 1;
+    }
+
+    // Run the final compression with f[0] set.
+    blake2s_compress(ctx, 1);
+
+    // Emit `digest_len` bytes from h[0..7] (LE) into out.data.
+    let i = 0;
+    while i < digest_len {
+        out.data[i] = ctx.state[i];
+        i = i + 1;
+    }
+}
+
+transform blake2s_oneshot(data: State<Blake2sData>, len: u32, out: State<Blake2sDigest>) {
+    let ctx = state_new(Blake2sCtx);
+    blake2s_init_32(ctx);
+    blake2s_update(ctx, data, len);
+    blake2s_final(ctx, out);
+}
+
+// ===========================================================================
+// Self-test (main).
+// ===========================================================================
+// Verifies BLAKE2b + BLAKE2s against RFC 7693 reference vectors (Python
+// hashlib):
+//   BLAKE2b("")    = 786a02f7...9be2ce (64 bytes)
+//   BLAKE2b("abc") = ba80a53f...009923 (64 bytes)
+//   BLAKE2b-256("")= 0e5751c0...12fe3a8 (32 bytes)
+//   BLAKE2s("")    = 69217a30...1ed0eef9 (32 bytes)
+//   BLAKE2s("abc") = 508c5e8c...86675982 (32 bytes)
+//
+// Returns 0 on success, 1..10 on individual byte-check failures.
+transform main() -> i32 {
+    let ctx = state_new(Blake2bCtx);
+    let data = state_new(Blake2bData);
+    let digest = state_new(Blake2bDigest);
+    let sctx = state_new(Blake2sCtx);
+    let sdata = state_new(Blake2sData);
+    let sdigest = state_new(Blake2sDigest);
+
+    // ── Test 1: BLAKE2b("") (64-byte output) ──
+    // 786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419
+    // d25e1031afee585313896444934eb04b903a685b1448b755d56f701afe9be2ce
+    blake2b_init_64(ctx);
+    blake2b_update(ctx, data, 0);
+    blake2b_final(ctx, digest);
+    if digest.data[0] != 120 { return 1; }   // 0x78
+    if digest.data[1] != 106 { return 2; }   // 0x6a
+    if digest.data[63] != 206 { return 3; }  // 0xce
+
+    // ── Test 2: BLAKE2b("abc") (64-byte output) ──
+    // ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d1
+    // 7d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923
+    blake2b_init_64(ctx);
+    data.data[0] = 97; data.data[1] = 98; data.data[2] = 99;
+    blake2b_update(ctx, data, 3);
+    blake2b_final(ctx, digest);
+    if digest.data[0] != 186 { return 4; }   // 0xba
+    if digest.data[1] != 128 { return 5; }   // 0x80
+    if digest.data[63] != 35 { return 6; }   // 0x23
+
+    // ── Test 3: BLAKE2b-256("") (32-byte output) — exercises the ──
+    // ── multi-caller literal workaround (blake2b_init_32 after _64). ──
+    // 0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8
+    blake2b_init_32(ctx);
+    blake2b_update(ctx, data, 0);
+    blake2b_final(ctx, digest);
+    if digest.data[0] != 14 { return 7; }    // 0x0e
+    if digest.data[31] != 168 { return 8; }  // 0xa8
+
+    // ── Test 4: BLAKE2s("") (32-byte output) ──
+    // 69217a3079908094e11121d042354a7c1f55b6482ca1a51e1b250dfd1ed0eef9
+    blake2s_init_32(sctx);
+    blake2s_update(sctx, sdata, 0);
+    blake2s_final(sctx, sdigest);
+    if sdigest.data[0] != 105 { return 9; }  // 0x69
+    if sdigest.data[31] != 249 { return 10; } // 0xf9
+
+    // ── Test 5: BLAKE2s("abc") (32-byte output) ──
+    // 508c5e8c327c14e2e1a72ba34eeb452f37458b209ed63a294d999b4c86675982
+    blake2s_init_32(sctx);
+    sdata.data[0] = 97; sdata.data[1] = 98; sdata.data[2] = 99;
+    blake2s_update(sctx, sdata, 3);
+    blake2s_final(sctx, sdigest);
+    if sdigest.data[0] != 80 { return 11; }   // 0x50
+    if sdigest.data[31] != 130 { return 12; } // 0x82
+
+    return 0;
 }

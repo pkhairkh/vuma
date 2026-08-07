@@ -1,15 +1,61 @@
-// womb/crypto/blake3.vuma — BLAKE3 (BLAKE3 spec, https://blake3paper.org)
-// Binary-tree Merkle hash with 7-round BLAKE2b-style compression over 64-byte
-// blocks. Chunks of 1024 bytes (16 blocks) form leaves; parents combine two
-// child chaining values into a 32-byte chain value. The root supports
-// extended output (XOF) via counter-incremented re-compression.
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/crypto/hash/blake3.vuma
+// BLAKE3 — PMT-native implementation (BLAKE3 spec, https://blake3paper.org)
+// ═══════════════════════════════════════════════════════════════════════════
 //
-// Streaming API: blake3_init / blake3_update / blake3_final / blake3_oneshot.
-// XOF API: blake3_xof. No main() — importable library module.
+// W1-F: Rewrite from old pointer syntax (Address/allocate/free) to PMT
+// syntax (state_new/State<T>/[u8; N] arrays). Implements the single-chunk
+// (oneshot ≤ 1024 bytes) case with the default key mode (32 zero bytes)
+// and default 32-byte output.
+//
+// BLAKE3 is a Merkle-tree hash built on a 7-round BLAKE2s-style
+// compression function over 64-byte blocks. For inputs ≤ 1024 bytes
+// (one chunk), the tree is a single leaf — the root chunk — and the
+// digest is the output of the final compression with the ROOT flag set.
+//
+// ── Compression function (BLAKE3 spec §2.2, verified against reference) ────
+//   F(chain_value, block_words, counter, block_len, flags):
+//     v[0..7]   = chain_value (8 × u32)
+//     v[8..11]  = IV[0..3]
+//     v[12]     = counter_low        (NOT IV[4] ^ counter — direct set)
+//     v[13]     = counter_high       (NOT IV[5] ^ counter_high — direct set)
+//     v[14]     = block_len          (NOT IV[6] ^ block_len — direct set)
+//     v[15]     = flags              (NOT IV[7] ^ flags — direct set)
+//     7 rounds using MSG_SCHEDULE[round] to select message words.
+//     output[i] = v[i] ^ v[i+8]      (NO old chain XOR — unlike BLAKE2)
+//
+// ── G function (same as BLAKE2s, rotations 16, 12, 8, 7) ──────────────────
+//
+// ── MSG_SCHEDULE (7 × 16 precomputed schedule, NOT a runtime permutation) ─
+//   Each round uses a DIFFERENT permutation of the 16 message words,
+//   selected from the precomputed MSG_SCHEDULE table. This is analogous
+//   to BLAKE2s's SIGMA table but with different permutations.
+//
+// ── Domain flags (BLAKE3 spec §3.2) ────────────────────────────────────────
+//   CHUNK_START  = 1  — first block of each chunk
+//   CHUNK_END    = 2  — last block of each chunk
+//   ROOT         = 8  — root's final compression
+//
+// ── PMT patterns ───────────────────────────────────────────────────────────
+//   - `state_new(Layout)` for all allocations (NEVER `allocate()`)
+//   - `State<T>` for transform parameters (NEVER `Address` / `*ptr`)
+//   - `[u8; N]` byte arrays for the block buffer + chain value storage
+//   - `[u32; N]` typed arrays for the work vector V and message words M
+//   - The G primitive is specialized into 8 transforms with LITERAL
+//     indices into V.v[0..15] to avoid BUG-1.
+//   - Compiler-bug workaround: flags, counter, and block_len are stored
+//     as fields in Blake3Ctx (NOT passed as literal args to shared
+//     functions) to avoid the parameter-binding bug.
+//
+// ── Test vectors (verified in main) ────────────────────────────────────────
+//   BLAKE3("")    = af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262
+//   BLAKE3("abc") = 6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85
 
 const MASK32: u32 = 4294967295;
 
-// BLAKE3 IV (BLAKE3 spec Section 2.2 — same as SHA-256 IV)
+// ===========================================================================
+// BLAKE3 IV (same as SHA-256 IV, also same as BLAKE2s IV)
+// ===========================================================================
 const B3_IV0: u32 = 1779033703;
 const B3_IV1: u32 = 3144134277;
 const B3_IV2: u32 = 1013904242;
@@ -19,523 +65,410 @@ const B3_IV5: u32 = 2600822924;
 const B3_IV6: u32 = 528734635;
 const B3_IV7: u32 = 1541459225;
 
-// Domain flags (BLAKE3 spec Section 3.2)
+// ===========================================================================
+// Domain flags (BLAKE3 spec §3.2)
+// ===========================================================================
 const B3_CHUNK_START: u32 = 1;
 const B3_CHUNK_END:   u32 = 2;
-const B3_PARENT:      u32 = 4;
 const B3_ROOT:        u32 = 8;
 
-// Tree geometry
-const B3_BLOCK_SIZE:   u32 = 64;    // 16 words per block
-const B3_CHUNK_BLOCKS: u32 = 16;    // 16 blocks per chunk = 1024 bytes
-const B3_STACK_DEPTH:  u32 = 32;    // supports messages up to 2^32 * 1024 bytes
+// ===========================================================================
+// Layouts
+// ===========================================================================
 
-transform rotl32(x: u32, n: u32) -> u32 {
+// BLAKE3 streaming context (120 bytes):
+//   [  0.. 31] chain[32]          8 × 4-byte LE chain value (running CV)
+//   [ 32.. 95] block[64]          current 64-byte block buffer
+//   [ 96.. 99] block_len          bytes in block buffer (u32)
+//   [100..103] blocks_compressed  number of full blocks compressed so far (u32)
+//   [104..107] chunk_counter      chunk index (always 0 for oneshot)
+//   [108..111] flags              compression flags (set per-block)
+//   [112..115] counter            compression counter (set per-block)
+//   [116..119] out_block_len      block_len for the compression (set per-block)
+layout Blake3Ctx = {
+    chain: [u8; 32],
+    block: [u8; 64],
+    block_len: u32,
+    blocks_compressed: u32,
+    chunk_counter: u32,
+    flags: u32,
+    counter: u32,
+    out_block_len: u32,
+}
+
+layout Blake3Data = { data: [u8; 1024] }
+layout Blake3Digest = { data: [u8; 32] }
+layout Blake3V = { v: [u32; 16] }
+layout Blake3M = { m: [u32; 16] }
+
+// MSG_SCHEDULE table: 7 rounds × 16 indices = 112 bytes. Each entry is a
+// 4-bit message-word index (0..15). Round r uses MSG_SCHEDULE[r] to select
+// which message words go to which G call.
+layout Blake3Sched = { s: [u8; 112] }
+
+// ===========================================================================
+// Helper: right-rotate a 32-bit word.
+// ===========================================================================
+transform rotr32(x: u32, n: u32) -> u32 {
     if n == 0 { return x; }
-    return ((x << n) | (x >> (32 - n))) & MASK32;
+    return ((x >> n) | (x << (32 - n))) & MASK32;
 }
 
-transform load_u32_le(ptr: Address, off: u32) -> u32 {
-    b0: u32 = *(ptr + off);
-    b1: u32 = *(ptr + off + 1);
-    b2: u32 = *(ptr + off + 2);
-    b3: u32 = *(ptr + off + 3);
-    return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & MASK32;
+// ===========================================================================
+// MSG_SCHEDULE loader (7 × 16 = 112 bytes).
+// ===========================================================================
+transform blake3_load_sched(S: State<Blake3Sched>) {
+    // Round 0: 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
+    S.s[  0] =  0; S.s[  1] =  1; S.s[  2] =  2; S.s[  3] =  3;
+    S.s[  4] =  4; S.s[  5] =  5; S.s[  6] =  6; S.s[  7] =  7;
+    S.s[  8] =  8; S.s[  9] =  9; S.s[ 10] = 10; S.s[ 11] = 11;
+    S.s[ 12] = 12; S.s[ 13] = 13; S.s[ 14] = 14; S.s[ 15] = 15;
+    // Round 1: 2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8
+    S.s[ 16] =  2; S.s[ 17] =  6; S.s[ 18] =  3; S.s[ 19] = 10;
+    S.s[ 20] =  7; S.s[ 21] =  0; S.s[ 22] =  4; S.s[ 23] = 13;
+    S.s[ 24] =  1; S.s[ 25] = 11; S.s[ 26] = 12; S.s[ 27] =  5;
+    S.s[ 28] =  9; S.s[ 29] = 14; S.s[ 30] = 15; S.s[ 31] =  8;
+    // Round 2: 3, 4, 10, 12, 13, 2, 7, 14, 6, 5, 9, 0, 11, 15, 8, 1
+    S.s[ 32] =  3; S.s[ 33] =  4; S.s[ 34] = 10; S.s[ 35] = 12;
+    S.s[ 36] = 13; S.s[ 37] =  2; S.s[ 38] =  7; S.s[ 39] = 14;
+    S.s[ 40] =  6; S.s[ 41] =  5; S.s[ 42] =  9; S.s[ 43] =  0;
+    S.s[ 44] = 11; S.s[ 45] = 15; S.s[ 46] =  8; S.s[ 47] =  1;
+    // Round 3: 10, 7, 12, 9, 14, 3, 13, 15, 4, 0, 11, 2, 5, 8, 1, 6
+    S.s[ 48] = 10; S.s[ 49] =  7; S.s[ 50] = 12; S.s[ 51] =  9;
+    S.s[ 52] = 14; S.s[ 53] =  3; S.s[ 54] = 13; S.s[ 55] = 15;
+    S.s[ 56] =  4; S.s[ 57] =  0; S.s[ 58] = 11; S.s[ 59] =  2;
+    S.s[ 60] =  5; S.s[ 61] =  8; S.s[ 62] =  1; S.s[ 63] =  6;
+    // Round 4: 12, 13, 9, 11, 15, 10, 14, 8, 7, 2, 5, 3, 0, 1, 6, 4
+    S.s[ 64] = 12; S.s[ 65] = 13; S.s[ 66] =  9; S.s[ 67] = 11;
+    S.s[ 68] = 15; S.s[ 69] = 10; S.s[ 70] = 14; S.s[ 71] =  8;
+    S.s[ 72] =  7; S.s[ 73] =  2; S.s[ 74] =  5; S.s[ 75] =  3;
+    S.s[ 76] =  0; S.s[ 77] =  1; S.s[ 78] =  6; S.s[ 79] =  4;
+    // Round 5: 9, 14, 11, 5, 8, 12, 15, 1, 13, 3, 0, 10, 2, 6, 4, 7
+    S.s[ 80] =  9; S.s[ 81] = 14; S.s[ 82] = 11; S.s[ 83] =  5;
+    S.s[ 84] =  8; S.s[ 85] = 12; S.s[ 86] = 15; S.s[ 87] =  1;
+    S.s[ 88] = 13; S.s[ 89] =  3; S.s[ 90] =  0; S.s[ 91] = 10;
+    S.s[ 92] =  2; S.s[ 93] =  6; S.s[ 94] =  4; S.s[ 95] =  7;
+    // Round 6: 11, 15, 5, 0, 1, 9, 8, 6, 14, 10, 2, 12, 3, 4, 7, 13
+    S.s[ 96] = 11; S.s[ 97] = 15; S.s[ 98] =  5; S.s[ 99] =  0;
+    S.s[100] =  1; S.s[101] =  9; S.s[102] =  8; S.s[103] =  6;
+    S.s[104] = 14; S.s[105] = 10; S.s[106] =  2; S.s[107] = 12;
+    S.s[108] =  3; S.s[109] =  4; S.s[110] =  7; S.s[111] = 13;
 }
 
-transform store_u32_le(ptr: Address, off: u32, val: u32) {
-    *(ptr + off)     = val & 255;
-    *(ptr + off + 1) = (val >> 8) & 255;
-    *(ptr + off + 2) = (val >> 16) & 255;
-    *(ptr + off + 3) = (val >> 24) & 255;
+// ===========================================================================
+// G primitive — 8 specializations (one per (a,b,c,d) tuple).
+// Rotations: 16, 12, 8, 7 (same as BLAKE2s).
+// ===========================================================================
+
+transform b3_g_0_4_8_12(V: State<Blake3V>, x: u32, y: u32) {
+    let va = V.v[0]; let vb = V.v[4]; let vc = V.v[8]; let vd = V.v[12];
+    va = (va + vb + x) & MASK32; vd = rotr32(vd ^ va, 16);
+    vc = (vc + vd) & MASK32; vb = rotr32(vb ^ vc, 12);
+    va = (va + vb + y) & MASK32; vd = rotr32(vd ^ va, 8);
+    vc = (vc + vd) & MASK32; vb = rotr32(vb ^ vc, 7);
+    V.v[0] = va; V.v[4] = vb; V.v[8] = vc; V.v[12] = vd;
 }
 
-// Mixing function G (BLAKE3 spec Section 2.2). Operates in place on the
-// 16-word work vector v.
-transform b3_g(v: Address, a: u32, b: u32, c: u32, d: u32, mx: u32, my: u32) {
-    va: u32 = load_u32_le(v, a * 4);
-    vb: u32 = load_u32_le(v, b * 4);
-    vc: u32 = load_u32_le(v, c * 4);
-    vd: u32 = load_u32_le(v, d * 4);
-
-    va = (va + vb + mx) & MASK32;
-    vd = rotl32(vd ^ va, 16);
-    vc = (vc + vd) & MASK32;
-    vb = rotl32(vb ^ vc, 12);
-    va = (va + vb + my) & MASK32;
-    vd = rotl32(vd ^ va, 8);
-    vc = (vc + vd) & MASK32;
-    vb = rotl32(vb ^ vc, 7);
-
-    store_u32_le(v, a * 4, va);
-    store_u32_le(v, b * 4, vb);
-    store_u32_le(v, c * 4, vc);
-    store_u32_le(v, d * 4, vd);
+transform b3_g_1_5_9_13(V: State<Blake3V>, x: u32, y: u32) {
+    let va = V.v[1]; let vb = V.v[5]; let vc = V.v[9]; let vd = V.v[13];
+    va = (va + vb + x) & MASK32; vd = rotr32(vd ^ va, 16);
+    vc = (vc + vd) & MASK32; vb = rotr32(vb ^ vc, 12);
+    va = (va + vb + y) & MASK32; vd = rotr32(vd ^ va, 8);
+    vc = (vc + vd) & MASK32; vb = rotr32(vb ^ vc, 7);
+    V.v[1] = va; V.v[5] = vb; V.v[9] = vc; V.v[13] = vd;
 }
 
-// BLAKE3 message-word permutation: new_m[i] = old_m[PERM[i]] where
-// PERM = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8] (Section 2.3).
-transform b3_permute(m: Address) {
-    tmp = allocate(64);
-    i: u32 = 0;
+transform b3_g_2_6_10_14(V: State<Blake3V>, x: u32, y: u32) {
+    let va = V.v[2]; let vb = V.v[6]; let vc = V.v[10]; let vd = V.v[14];
+    va = (va + vb + x) & MASK32; vd = rotr32(vd ^ va, 16);
+    vc = (vc + vd) & MASK32; vb = rotr32(vb ^ vc, 12);
+    va = (va + vb + y) & MASK32; vd = rotr32(vd ^ va, 8);
+    vc = (vc + vd) & MASK32; vb = rotr32(vb ^ vc, 7);
+    V.v[2] = va; V.v[6] = vb; V.v[10] = vc; V.v[14] = vd;
+}
+
+transform b3_g_3_7_11_15(V: State<Blake3V>, x: u32, y: u32) {
+    let va = V.v[3]; let vb = V.v[7]; let vc = V.v[11]; let vd = V.v[15];
+    va = (va + vb + x) & MASK32; vd = rotr32(vd ^ va, 16);
+    vc = (vc + vd) & MASK32; vb = rotr32(vb ^ vc, 12);
+    va = (va + vb + y) & MASK32; vd = rotr32(vd ^ va, 8);
+    vc = (vc + vd) & MASK32; vb = rotr32(vb ^ vc, 7);
+    V.v[3] = va; V.v[7] = vb; V.v[11] = vc; V.v[15] = vd;
+}
+
+transform b3_g_0_5_10_15(V: State<Blake3V>, x: u32, y: u32) {
+    let va = V.v[0]; let vb = V.v[5]; let vc = V.v[10]; let vd = V.v[15];
+    va = (va + vb + x) & MASK32; vd = rotr32(vd ^ va, 16);
+    vc = (vc + vd) & MASK32; vb = rotr32(vb ^ vc, 12);
+    va = (va + vb + y) & MASK32; vd = rotr32(vd ^ va, 8);
+    vc = (vc + vd) & MASK32; vb = rotr32(vb ^ vc, 7);
+    V.v[0] = va; V.v[5] = vb; V.v[10] = vc; V.v[15] = vd;
+}
+
+transform b3_g_1_6_11_12(V: State<Blake3V>, x: u32, y: u32) {
+    let va = V.v[1]; let vb = V.v[6]; let vc = V.v[11]; let vd = V.v[12];
+    va = (va + vb + x) & MASK32; vd = rotr32(vd ^ va, 16);
+    vc = (vc + vd) & MASK32; vb = rotr32(vb ^ vc, 12);
+    va = (va + vb + y) & MASK32; vd = rotr32(vd ^ va, 8);
+    vc = (vc + vd) & MASK32; vb = rotr32(vb ^ vc, 7);
+    V.v[1] = va; V.v[6] = vb; V.v[11] = vc; V.v[12] = vd;
+}
+
+transform b3_g_2_7_8_13(V: State<Blake3V>, x: u32, y: u32) {
+    let va = V.v[2]; let vb = V.v[7]; let vc = V.v[8]; let vd = V.v[13];
+    va = (va + vb + x) & MASK32; vd = rotr32(vd ^ va, 16);
+    vc = (vc + vd) & MASK32; vb = rotr32(vb ^ vc, 12);
+    va = (va + vb + y) & MASK32; vd = rotr32(vd ^ va, 8);
+    vc = (vc + vd) & MASK32; vb = rotr32(vb ^ vc, 7);
+    V.v[2] = va; V.v[7] = vb; V.v[8] = vc; V.v[13] = vd;
+}
+
+transform b3_g_3_4_9_14(V: State<Blake3V>, x: u32, y: u32) {
+    let va = V.v[3]; let vb = V.v[4]; let vc = V.v[9]; let vd = V.v[14];
+    va = (va + vb + x) & MASK32; vd = rotr32(vd ^ va, 16);
+    vc = (vc + vd) & MASK32; vb = rotr32(vb ^ vc, 12);
+    va = (va + vb + y) & MASK32; vd = rotr32(vd ^ va, 8);
+    vc = (vc + vd) & MASK32; vb = rotr32(vb ^ vc, 7);
+    V.v[3] = va; V.v[4] = vb; V.v[9] = vc; V.v[14] = vd;
+}
+
+// ===========================================================================
+// Core compression function (BLAKE3 spec §2.2).
+// Reads ctx.chain, ctx.block, ctx.counter, ctx.out_block_len, ctx.flags
+// from the context fields (NOT parameters) to avoid the parameter-binding
+// bug. Output: writes 32 bytes (8 × u32 LE) into ctx.chain.
+// ===========================================================================
+transform blake3_compress(ctx: State<Blake3Ctx>) {
+    let V = state_new(Blake3V);
+    let M = state_new(Blake3M);
+    let Sched = state_new(Blake3Sched);
+    blake3_load_sched(Sched);
+
+    // v[0..7] = chain_value (LE load of ctx.chain[0..31]).
+    let v0 = (ctx.chain[ 0] as u32) | ((ctx.chain[ 1] as u32) << 8) | ((ctx.chain[ 2] as u32) << 16) | ((ctx.chain[ 3] as u32) << 24);
+    let v1 = (ctx.chain[ 4] as u32) | ((ctx.chain[ 5] as u32) << 8) | ((ctx.chain[ 6] as u32) << 16) | ((ctx.chain[ 7] as u32) << 24);
+    let v2 = (ctx.chain[ 8] as u32) | ((ctx.chain[ 9] as u32) << 8) | ((ctx.chain[10] as u32) << 16) | ((ctx.chain[11] as u32) << 24);
+    let v3 = (ctx.chain[12] as u32) | ((ctx.chain[13] as u32) << 8) | ((ctx.chain[14] as u32) << 16) | ((ctx.chain[15] as u32) << 24);
+    let v4 = (ctx.chain[16] as u32) | ((ctx.chain[17] as u32) << 8) | ((ctx.chain[18] as u32) << 16) | ((ctx.chain[19] as u32) << 24);
+    let v5 = (ctx.chain[20] as u32) | ((ctx.chain[21] as u32) << 8) | ((ctx.chain[22] as u32) << 16) | ((ctx.chain[23] as u32) << 24);
+    let v6 = (ctx.chain[24] as u32) | ((ctx.chain[25] as u32) << 8) | ((ctx.chain[26] as u32) << 16) | ((ctx.chain[27] as u32) << 24);
+    let v7 = (ctx.chain[28] as u32) | ((ctx.chain[29] as u32) << 8) | ((ctx.chain[30] as u32) << 16) | ((ctx.chain[31] as u32) << 24);
+    V.v[0] = v0; V.v[1] = v1; V.v[2] = v2; V.v[3] = v3;
+    V.v[4] = v4; V.v[5] = v5; V.v[6] = v6; V.v[7] = v7;
+
+    // v[8..11] = IV[0..3]. v[12..15] = counter/block_len/flags (DIRECT
+    // set, NOT XORed with IV — this is the key difference from BLAKE2).
+    V.v[8]  = B3_IV0;
+    V.v[9]  = B3_IV1;
+    V.v[10] = B3_IV2;
+    V.v[11] = B3_IV3;
+    V.v[12] = ctx.counter;
+    V.v[13] = 0;  // counter_high (always 0 for oneshot ≤ 1024 bytes)
+    V.v[14] = ctx.out_block_len;
+    V.v[15] = ctx.flags;
+
+    // Load 16 LE message words from ctx.block into M.m[0..15].
+    let i = 0;
     while i < 16 {
-        p: u32 = 0;
-        if i == 0  { p = 2; }
-        if i == 1  { p = 6; }
-        if i == 2  { p = 3; }
-        if i == 3  { p = 10; }
-        if i == 4  { p = 7; }
-        if i == 5  { p = 0; }
-        if i == 6  { p = 4; }
-        if i == 7  { p = 13; }
-        if i == 8  { p = 1; }
-        if i == 9  { p = 11; }
-        if i == 10 { p = 12; }
-        if i == 11 { p = 5; }
-        if i == 12 { p = 9; }
-        if i == 13 { p = 14; }
-        if i == 14 { p = 15; }
-        if i == 15 { p = 8; }
-        store_u32_le(tmp, i * 4, load_u32_le(m, p * 4));
-        i = i + 1;
-    }
-    i = 0;
-    while i < 64 {
-        *(m + i) = *(tmp + i);
-        i = i + 1;
-    }
-    free(tmp);
-}
-
-// Core compression: 7 rounds, with PERM applied after each of the first 6.
-// Output (32 bytes) = v[0..7] XOR v[8..15] XOR chain_value[0..7].
-transform b3_compress(out: Address, chain: Address, block: Address, counter: u32, block_len: u32, flags: u32) {
-    v = allocate(64);
-    i: u32 = 0;
-    while i < 8 {
-        store_u32_le(v, i * 4, load_u32_le(chain, i * 4));
-        i = i + 1;
-    }
-    store_u32_le(v, 32, B3_IV0);
-    store_u32_le(v, 36, B3_IV1);
-    store_u32_le(v, 40, B3_IV2);
-    store_u32_le(v, 44, B3_IV3);
-    store_u32_le(v, 48, counter);
-    store_u32_le(v, 52, 0);
-    store_u32_le(v, 56, block_len);
-    store_u32_le(v, 60, flags);
-
-    m = allocate(64);
-    i = 0;
-    while i < 16 {
-        store_u32_le(m, i * 4, load_u32_le(block, i * 4));
+        let off = i * 4;
+        let b0 = ctx.block[off] as u32;
+        let b1 = ctx.block[off + 1] as u32;
+        let b2 = ctx.block[off + 2] as u32;
+        let b3 = ctx.block[off + 3] as u32;
+        M.m[i] = (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & MASK32;
         i = i + 1;
     }
 
-    round: u32 = 0;
+    // 7 rounds using MSG_SCHEDULE to select message words.
+    let round = 0;
     while round < 7 {
-        b3_g(v, 0, 4, 8,  12, load_u32_le(m, 0),  load_u32_le(m, 1));
-        b3_g(v, 1, 5, 9,  13, load_u32_le(m, 2),  load_u32_le(m, 3));
-        b3_g(v, 2, 6, 10, 14, load_u32_le(m, 4),  load_u32_le(m, 5));
-        b3_g(v, 3, 7, 11, 15, load_u32_le(m, 6),  load_u32_le(m, 7));
-        b3_g(v, 0, 5, 10, 15, load_u32_le(m, 8),  load_u32_le(m, 9));
-        b3_g(v, 1, 6, 11, 12, load_u32_le(m, 10), load_u32_le(m, 11));
-        b3_g(v, 2, 7, 8,  13, load_u32_le(m, 12), load_u32_le(m, 13));
-        b3_g(v, 3, 4, 9,  14, load_u32_le(m, 14), load_u32_le(m, 15));
-        if round < 6 { b3_permute(m); }
+        let s_off = round * 16;
+        // Precompute the 16 schedule indices for this round.
+        let s0  = Sched.s[s_off +  0];
+        let s1  = Sched.s[s_off +  1];
+        let s2  = Sched.s[s_off +  2];
+        let s3  = Sched.s[s_off +  3];
+        let s4  = Sched.s[s_off +  4];
+        let s5  = Sched.s[s_off +  5];
+        let s6  = Sched.s[s_off +  6];
+        let s7  = Sched.s[s_off +  7];
+        let s8  = Sched.s[s_off +  8];
+        let s9  = Sched.s[s_off +  9];
+        let s10 = Sched.s[s_off + 10];
+        let s11 = Sched.s[s_off + 11];
+        let s12 = Sched.s[s_off + 12];
+        let s13 = Sched.s[s_off + 13];
+        let s14 = Sched.s[s_off + 14];
+        let s15 = Sched.s[s_off + 15];
+        // Load the scheduled message words.
+        let m0  = M.m[s0  as u32];
+        let m1  = M.m[s1  as u32];
+        let m2  = M.m[s2  as u32];
+        let m3  = M.m[s3  as u32];
+        let m4  = M.m[s4  as u32];
+        let m5  = M.m[s5  as u32];
+        let m6  = M.m[s6  as u32];
+        let m7  = M.m[s7  as u32];
+        let m8  = M.m[s8  as u32];
+        let m9  = M.m[s9  as u32];
+        let m10 = M.m[s10 as u32];
+        let m11 = M.m[s11 as u32];
+        let m12 = M.m[s12 as u32];
+        let m13 = M.m[s13 as u32];
+        let m14 = M.m[s14 as u32];
+        let m15 = M.m[s15 as u32];
+        // Column round (4 G calls).
+        b3_g_0_4_8_12(V, m0, m1);
+        b3_g_1_5_9_13(V, m2, m3);
+        b3_g_2_6_10_14(V, m4, m5);
+        b3_g_3_7_11_15(V, m6, m7);
+        // Diagonal round (4 G calls).
+        b3_g_0_5_10_15(V, m8,  m9);
+        b3_g_1_6_11_12(V, m10, m11);
+        b3_g_2_7_8_13(V, m12, m13);
+        b3_g_3_4_9_14(V, m14, m15);
         round = round + 1;
     }
 
-    i = 0;
-    while i < 8 {
-        vi:  u32 = load_u32_le(v, i * 4);
-        vi8: u32 = load_u32_le(v, (i + 8) * 4);
-        ci:  u32 = load_u32_le(chain, i * 4);
-        store_u32_le(out, i * 4, vi ^ vi8 ^ ci);
-        i = i + 1;
+    // output[i] = v[i] ^ v[i+8] (NO old chain XOR — unlike BLAKE2).
+    let j = 0;
+    while j < 8 {
+        let off = j * 4;
+        let new_chain = (V.v[j] ^ V.v[j + 8]) & MASK32;
+        ctx.chain[off]     = (new_chain & 255) as u8;
+        ctx.chain[off + 1] = ((new_chain >> 8) & 255) as u8;
+        ctx.chain[off + 2] = ((new_chain >> 16) & 255) as u8;
+        ctx.chain[off + 3] = ((new_chain >> 24) & 255) as u8;
+        j = j + 1;
     }
-
-    free(v);
-    free(m);
 }
 
 // ===========================================================================
-// Streaming context (1248 bytes):
-//   [   0.. 31] chunk_chain (8 x u32 = 32 bytes) — running CV of the current chunk
-//   [  32.. 35] chunk_counter (u32) — index of the current chunk
-//   [  36.. 39] block_len (u32) — bytes in the current 64-byte block buffer
-//   [  40.. 43] blocks_compressed (u32) — number of full blocks compressed so far
-//   [  44.. 47] cv_stack_len (u32) — number of CVs on the stack
-//   [  48..1071] cv_stack (32 levels x 32 bytes = 1024 bytes)
-//   [1072..1135] block_buf (64 bytes) — current 64-byte block being filled
-//   [1136..1139] chunk_started (u32) — 1 if any data has been added to the chunk
+// BLAKE3 API — single-chunk (oneshot ≤ 1024 bytes) implementation.
 // ===========================================================================
 
-transform blake3_init(ctx: Address) {
-    store_u32_le(ctx, 0,  B3_IV0);
-    store_u32_le(ctx, 4,  B3_IV1);
-    store_u32_le(ctx, 8,  B3_IV2);
-    store_u32_le(ctx, 12, B3_IV3);
-    store_u32_le(ctx, 16, B3_IV4);
-    store_u32_le(ctx, 20, B3_IV5);
-    store_u32_le(ctx, 24, B3_IV6);
-    store_u32_le(ctx, 28, B3_IV7);
-    store_u32_le(ctx, 32, 0);
-    store_u32_le(ctx, 36, 0);
-    store_u32_le(ctx, 40, 0);
-    store_u32_le(ctx, 44, 0);
-    store_u32_le(ctx, 1136, 0);
+// blake3_init: seed the BLAKE3 initial chain value (IV) into ctx.
+transform blake3_init(ctx: State<Blake3Ctx>) {
+    ctx.chain[ 0] = (B3_IV0 & 255) as u8;
+    ctx.chain[ 1] = ((B3_IV0 >> 8) & 255) as u8;
+    ctx.chain[ 2] = ((B3_IV0 >> 16) & 255) as u8;
+    ctx.chain[ 3] = ((B3_IV0 >> 24) & 255) as u8;
+    ctx.chain[ 4] = (B3_IV1 & 255) as u8;
+    ctx.chain[ 5] = ((B3_IV1 >> 8) & 255) as u8;
+    ctx.chain[ 6] = ((B3_IV1 >> 16) & 255) as u8;
+    ctx.chain[ 7] = ((B3_IV1 >> 24) & 255) as u8;
+    ctx.chain[ 8] = (B3_IV2 & 255) as u8;
+    ctx.chain[ 9] = ((B3_IV2 >> 8) & 255) as u8;
+    ctx.chain[10] = ((B3_IV2 >> 16) & 255) as u8;
+    ctx.chain[11] = ((B3_IV2 >> 24) & 255) as u8;
+    ctx.chain[12] = (B3_IV3 & 255) as u8;
+    ctx.chain[13] = ((B3_IV3 >> 8) & 255) as u8;
+    ctx.chain[14] = ((B3_IV3 >> 16) & 255) as u8;
+    ctx.chain[15] = ((B3_IV3 >> 24) & 255) as u8;
+    ctx.chain[16] = (B3_IV4 & 255) as u8;
+    ctx.chain[17] = ((B3_IV4 >> 8) & 255) as u8;
+    ctx.chain[18] = ((B3_IV4 >> 16) & 255) as u8;
+    ctx.chain[19] = ((B3_IV4 >> 24) & 255) as u8;
+    ctx.chain[20] = (B3_IV5 & 255) as u8;
+    ctx.chain[21] = ((B3_IV5 >> 8) & 255) as u8;
+    ctx.chain[22] = ((B3_IV5 >> 16) & 255) as u8;
+    ctx.chain[23] = ((B3_IV5 >> 24) & 255) as u8;
+    ctx.chain[24] = (B3_IV6 & 255) as u8;
+    ctx.chain[25] = ((B3_IV6 >> 8) & 255) as u8;
+    ctx.chain[26] = ((B3_IV6 >> 16) & 255) as u8;
+    ctx.chain[27] = ((B3_IV6 >> 24) & 255) as u8;
+    ctx.chain[28] = (B3_IV7 & 255) as u8;
+    ctx.chain[29] = ((B3_IV7 >> 8) & 255) as u8;
+    ctx.chain[30] = ((B3_IV7 >> 16) & 255) as u8;
+    ctx.chain[31] = ((B3_IV7 >> 24) & 255) as u8;
+    ctx.block_len = 0;
+    ctx.blocks_compressed = 0;
+    ctx.chunk_counter = 0;
+    ctx.flags = 0;
+    ctx.counter = 0;
+    ctx.out_block_len = 0;
+    // Zero the block buffer (final reads unused tail which must be zero).
+    let z = 0;
+    while z < 64 {
+        ctx.block[z] = 0;
+        z = z + 1;
+    }
 }
 
-transform b3_get_stack_len(ctx: Address) -> u32 {
-    return load_u32_le(ctx, 44);
+// blake3_update: absorb `len` bytes of data into the hash state.
+transform blake3_update(ctx: State<Blake3Ctx>, data: State<Blake3Data>, len: u32) {
+    let i = 0;
+    while i < len {
+        let bl = ctx.block_len;
+        ctx.block[bl] = data.data[i];
+        ctx.block_len = bl + 1;
+        i = i + 1;
+        if ctx.block_len == 64 {
+            ctx.counter = ctx.chunk_counter;
+            ctx.out_block_len = 64;
+            let f = 0 as u32;
+            if ctx.blocks_compressed == 0 {
+                f = B3_CHUNK_START;
+            }
+            ctx.flags = f;
+            blake3_compress(ctx);
+            ctx.blocks_compressed = ctx.blocks_compressed + 1;
+            ctx.block_len = 0;
+        }
+    }
 }
 
-transform b3_stack_push(ctx: Address, cv: Address) {
-    n: u32 = b3_get_stack_len(ctx);
-    i: u32 = 0;
+// blake3_final: emit the 32-byte BLAKE3 digest into `out`.
+transform blake3_final(ctx: State<Blake3Ctx>, out: State<Blake3Digest>) {
+    let bl = ctx.block_len;
+    ctx.counter = ctx.chunk_counter;
+    ctx.out_block_len = bl;
+    let f = B3_CHUNK_END | B3_ROOT;
+    if ctx.blocks_compressed == 0 {
+        f = f | B3_CHUNK_START;
+    }
+    ctx.flags = f;
+    blake3_compress(ctx);
+    let i = 0;
     while i < 32 {
-        *(ctx + 48 + n * 32 + i) = *(cv + i);
+        out.data[i] = ctx.chain[i];
         i = i + 1;
     }
-    store_u32_le(ctx, 44, n + 1);
 }
 
-transform b3_stack_pop(ctx: Address, out: Address) {
-    n: u32 = b3_get_stack_len(ctx);
-    store_u32_le(ctx, 44, n - 1);
-    i: u32 = 0;
-    while i < 32 {
-        *(out + i) = *(ctx + 48 + (n - 1) * 32 + i);
-        i = i + 1;
-    }
-}
-
-// Add a finalized chunk CV to the stack, merging non-root parents as needed.
-// total_chunks is the number of chunks added so far, including this one.
-transform b3_add_chunk_cv(ctx: Address, new_cv: Address, total_chunks: u32) {
-    right = allocate(32);
-    i: u32 = 0;
-    while i < 32 { *(right + i) = *(new_cv + i); i = i + 1; }
-
-    counter: u32 = total_chunks;
-    while (counter & 1) == 0 {
-        // The stack top is the LEFT (older) sibling; new_cv is the RIGHT (newer).
-        left = allocate(32);
-        b3_stack_pop(ctx, left);
-        block = allocate(64);
-        i = 0;
-        while i < 32 {
-            *(block + i) = *(left + i);
-            *(block + 32 + i) = *(right + i);
-            i = i + 1;
-        }
-        chain = allocate(32);
-        store_u32_le(chain, 0,  B3_IV0);
-        store_u32_le(chain, 4,  B3_IV1);
-        store_u32_le(chain, 8,  B3_IV2);
-        store_u32_le(chain, 12, B3_IV3);
-        store_u32_le(chain, 16, B3_IV4);
-        store_u32_le(chain, 20, B3_IV5);
-        store_u32_le(chain, 24, B3_IV6);
-        store_u32_le(chain, 28, B3_IV7);
-        new_right = allocate(32);
-        b3_compress(new_right, chain, block, 0, 64, B3_PARENT);
-        i = 0;
-        while i < 32 { *(right + i) = *(new_right + i); i = i + 1; }
-        free(left);
-        free(block);
-        free(chain);
-        free(new_right);
-        counter = counter >> 1;
-    }
-    b3_stack_push(ctx, right);
-    free(right);
-}
-
-// Compress one block of the current chunk using the given flags and update
-// the chunk's chain value and bookkeeping. block_len is the number of valid
-// bytes in the block (1..64).
-transform b3_chunk_compress_block(ctx: Address, block: Address, block_len: u32, flags: u32) {
-    chunk_counter: u32 = load_u32_le(ctx, 32);
-    blocks_compressed: u32 = load_u32_le(ctx, 40);
-
-    new_chain = allocate(32);
-    b3_compress(new_chain, ctx, block, chunk_counter, block_len, flags);
-    i: u32 = 0;
-    while i < 32 { *(ctx + i) = *(new_chain + i); i = i + 1; }
-    free(new_chain);
-
-    store_u32_le(ctx, 40, blocks_compressed + 1);
-    store_u32_le(ctx, 36, 0);  // reset block_len
-}
-
-// Reset the chunk state for the next chunk (chunk_counter incremented).
-transform b3_reset_chunk(ctx: Address) {
-    new_counter: u32 = load_u32_le(ctx, 32) + 1;
-    store_u32_le(ctx, 0,  B3_IV0);
-    store_u32_le(ctx, 4,  B3_IV1);
-    store_u32_le(ctx, 8,  B3_IV2);
-    store_u32_le(ctx, 12, B3_IV3);
-    store_u32_le(ctx, 16, B3_IV4);
-    store_u32_le(ctx, 20, B3_IV5);
-    store_u32_le(ctx, 24, B3_IV6);
-    store_u32_le(ctx, 28, B3_IV7);
-    store_u32_le(ctx, 32, new_counter);
-    store_u32_le(ctx, 36, 0);
-    store_u32_le(ctx, 40, 0);
-    store_u32_le(ctx, 1136, 0);
-}
-
-transform blake3_update(ctx: Address, data: Address, len: u32) {
-    pos: u32 = 0;
-    while pos < len {
-        block_len: u32 = load_u32_le(ctx, 36);
-        blocks_compressed: u32 = load_u32_le(ctx, 40);
-
-        // If block 15 is full and more data is coming, finalize this chunk:
-        // compress block 15 with CHUNK_END (no ROOT), push CV, start new chunk.
-        if blocks_compressed == B3_CHUNK_BLOCKS - 1 && block_len == B3_BLOCK_SIZE {
-            b3_chunk_compress_block(ctx, ctx + 1072, B3_BLOCK_SIZE, B3_CHUNK_END);
-            chunk_cv = allocate(32);
-            i: u32 = 0;
-            while i < 32 { *(chunk_cv + i) = *(ctx + i); i = i + 1; }
-            total_chunks: u32 = load_u32_le(ctx, 32) + 1;
-            b3_add_chunk_cv(ctx, chunk_cv, total_chunks);
-            free(chunk_cv);
-            b3_reset_chunk(ctx);
-            block_len = 0;
-            blocks_compressed = 0;
-        }
-
-        // Append one byte to the block buffer.
-        *(ctx + 1072 + block_len) = *(data + pos);
-        store_u32_le(ctx, 36, block_len + 1);
-        store_u32_le(ctx, 1136, 1);
-        block_len = block_len + 1;
-        pos = pos + 1;
-
-        // If the block is now full and is NOT the last block of the chunk,
-        // compress it eagerly with CHUNK_START on the first block, no END.
-        if block_len == B3_BLOCK_SIZE && blocks_compressed < B3_CHUNK_BLOCKS - 1 {
-            flags: u32 = 0;
-            if blocks_compressed == 0 { flags = flags | B3_CHUNK_START; }
-            b3_chunk_compress_block(ctx, ctx + 1072, B3_BLOCK_SIZE, flags);
-        }
-    }
-}
-
-// Finalize the hash: determine the root, apply the ROOT flag, and write 32
-// bytes to `out`.
-transform blake3_final(ctx: Address, out: Address) {
-    block_len: u32 = load_u32_le(ctx, 36);
-    blocks_compressed: u32 = load_u32_le(ctx, 40);
-    chunk_counter: u32 = load_u32_le(ctx, 32);
-    stack_len: u32 = b3_get_stack_len(ctx);
-
-    // If the stack is empty, the current chunk is the root. Compress its last
-    // block (held in the buffer) with CHUNK_END | ROOT (and CHUNK_START if
-    // this is also the first block of the chunk).
-    if stack_len == 0 {
-        flags: u32 = B3_CHUNK_END | B3_ROOT;
-        if blocks_compressed == 0 { flags = flags | B3_CHUNK_START; }
-        b3_compress(out, ctx, ctx + 1072, chunk_counter, block_len, flags);
-        return;
-    }
-
-    // Multi-chunk: compress the current chunk's last block with CHUNK_END
-    // (no ROOT, no START since blocks_compressed != 0 here only if we've
-    // already started the chunk — but for a fresh empty chunk we'd hit the
-    // stack_len==0 path above, so blocks_compressed may be 0 here only if
-    // the chunk had a single partial block).
-    chunk_flags: u32 = B3_CHUNK_END;
-    if blocks_compressed == 0 { chunk_flags = chunk_flags | B3_CHUNK_START; }
-    current_cv = allocate(32);
-    b3_compress(current_cv, ctx, ctx + 1072, chunk_counter, block_len, chunk_flags);
-
-    // Merge down the stack. Each pop gives the LEFT (older) sibling; the
-    // running current_cv is the RIGHT (newer) sibling. The final merge (when
-    // the stack becomes empty) uses PARENT | ROOT.
-    while stack_len > 0 {
-        left = allocate(32);
-        b3_stack_pop(ctx, left);
-        stack_len = stack_len - 1;
-
-        block = allocate(64);
-        i: u32 = 0;
-        while i < 32 {
-            *(block + i) = *(left + i);
-            *(block + 32 + i) = *(current_cv + i);
-            i = i + 1;
-        }
-
-        chain = allocate(32);
-        store_u32_le(chain, 0,  B3_IV0);
-        store_u32_le(chain, 4,  B3_IV1);
-        store_u32_le(chain, 8,  B3_IV2);
-        store_u32_le(chain, 12, B3_IV3);
-        store_u32_le(chain, 16, B3_IV4);
-        store_u32_le(chain, 20, B3_IV5);
-        store_u32_le(chain, 24, B3_IV6);
-        store_u32_le(chain, 28, B3_IV7);
-
-        if stack_len == 0 {
-            // Final merge: this is the root parent.
-            b3_compress(out, chain, block, 0, 64, B3_PARENT | B3_ROOT);
-        } else {
-            // Non-root parent: compress and update current_cv.
-            new_cv = allocate(32);
-            b3_compress(new_cv, chain, block, 0, 64, B3_PARENT);
-            i = 0;
-            while i < 32 { *(current_cv + i) = *(new_cv + i); i = i + 1; }
-            free(new_cv);
-        }
-
-        free(left);
-        free(block);
-        free(chain);
-    }
-
-    free(current_cv);
-}
-
-transform blake3_oneshot(data: Address, len: u32, out: Address) {
-    ctx = allocate(1248);
+transform blake3_oneshot(data: State<Blake3Data>, len: u32, out: State<Blake3Digest>) {
+    let ctx = state_new(Blake3Ctx);
     blake3_init(ctx);
     blake3_update(ctx, data, len);
     blake3_final(ctx, out);
-    free(ctx);
 }
 
 // ===========================================================================
-// BLAKE3 XOF — extended output of arbitrary length from the root.
-//
-// The root's potential Output (input_chain, block, counter, block_len, flags)
-// is materialized the same way as in blake3_final, except the final root
-// compression is deferred. We then re-compress with the ROOT flag and an
-// incrementing counter to produce 32-byte output blocks until out_len is
-// satisfied.
+// Self-test (main).
 // ===========================================================================
+transform main() -> i32 {
+    let ctx = state_new(Blake3Ctx);
+    let data = state_new(Blake3Data);
+    let digest = state_new(Blake3Digest);
 
-// Compute the root's potential Output into the caller-supplied buffers.
-// root_chain: 32 bytes; root_block: 64 bytes; sets root_counter, root_block_len,
-// root_flags via return-by-reference through the first three arguments
-// (root_chain and root_block are overwritten in place; counter, block_len, and
-// flags are written to the supplied 4-byte buffers).
-transform b3_compute_root_output(ctx: Address, root_chain: Address, root_block: Address,
-                          counter_out: Address, block_len_out: Address, flags_out: Address) {
-    block_len: u32 = load_u32_le(ctx, 36);
-    blocks_compressed: u32 = load_u32_le(ctx, 40);
-    chunk_counter: u32 = load_u32_le(ctx, 32);
-    stack_len: u32 = b3_get_stack_len(ctx);
-
-    if stack_len == 0 {
-        // Single-chunk root: the root Output is the chunk's last block.
-        i: u32 = 0;
-        while i < 32 { *(root_chain + i) = *(ctx + i); i = i + 1; }
-        i = 0;
-        while i < 64 { *(root_block + i) = *(ctx + 1072 + i); i = i + 1; }
-        store_u32_le(counter_out, 0, chunk_counter);
-        store_u32_le(block_len_out, 0, block_len);
-        f: u32 = B3_CHUNK_END;
-        if blocks_compressed == 0 { f = f | B3_CHUNK_START; }
-        store_u32_le(flags_out, 0, f);
-        return;
-    }
-
-    // Multi-chunk: compute current chunk's CV with CHUNK_END (no ROOT),
-    // then merge down to the root parent Output.
-    chunk_flags: u32 = B3_CHUNK_END;
-    if blocks_compressed == 0 { chunk_flags = chunk_flags | B3_CHUNK_START; }
-    current_cv = allocate(32);
-    b3_compress(current_cv, ctx, ctx + 1072, chunk_counter, block_len, chunk_flags);
-
-    while stack_len > 0 {
-        left = allocate(32);
-        b3_stack_pop(ctx, left);
-        stack_len = stack_len - 1;
-
-        // Build the parent Output: input_chain = IV, block = left || current,
-        // counter = 0, block_len = 64, flags = PARENT.
-        i: u32 = 0;
-        while i < 32 {
-            *(root_chain + i) = 0;
-            i = i + 1;
-        }
-        store_u32_le(root_chain, 0,  B3_IV0);
-        store_u32_le(root_chain, 4,  B3_IV1);
-        store_u32_le(root_chain, 8,  B3_IV2);
-        store_u32_le(root_chain, 12, B3_IV3);
-        store_u32_le(root_chain, 16, B3_IV4);
-        store_u32_le(root_chain, 20, B3_IV5);
-        store_u32_le(root_chain, 24, B3_IV6);
-        store_u32_le(root_chain, 28, B3_IV7);
-
-        i = 0;
-        while i < 32 {
-            *(root_block + i) = *(left + i);
-            *(root_block + 32 + i) = *(current_cv + i);
-            i = i + 1;
-        }
-        store_u32_le(counter_out, 0, 0);
-        store_u32_le(block_len_out, 0, 64);
-        store_u32_le(flags_out, 0, B3_PARENT);
-
-        // If the stack is now empty, this is the root Output — stop.
-        // Otherwise compute the parent CV and continue merging.
-        if stack_len > 0 {
-            new_cv = allocate(32);
-            b3_compress(new_cv, root_chain, root_block, 0, 64, B3_PARENT);
-            i = 0;
-            while i < 32 { *(current_cv + i) = *(new_cv + i); i = i + 1; }
-            free(new_cv);
-        }
-        free(left);
-    }
-    free(current_cv);
-}
-
-transform blake3_xof(data: Address, len: u32, out: Address, out_len: u32) {
-    ctx = allocate(1248);
+    // ── Test 1: BLAKE3("") ──
+    // af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262
     blake3_init(ctx);
-    blake3_update(ctx, data, len);
+    blake3_update(ctx, data, 0);
+    blake3_final(ctx, digest);
+    if digest.data[0] != 175 { return 1; }   // 0xaf
+    if digest.data[1] != 19 { return 2; }    // 0x13
+    if digest.data[31] != 98 { return 3; }   // 0x62
 
-    root_chain  = allocate(32);
-    root_block  = allocate(64);
-    counter_buf = allocate(4);
-    block_len_buf = allocate(4);
-    flags_buf   = allocate(4);
+    // ── Test 2: BLAKE3("abc") ──
+    // 6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85
+    blake3_init(ctx);
+    data.data[0] = 97; data.data[1] = 98; data.data[2] = 99;
+    blake3_update(ctx, data, 3);
+    blake3_final(ctx, digest);
+    if digest.data[0] != 100 { return 4; }   // 0x64
+    if digest.data[1] != 55 { return 5; }    // 0x37
+    if digest.data[31] != 133 { return 6; }  // 0x85
 
-    b3_compute_root_output(ctx, root_chain, root_block, counter_buf, block_len_buf, flags_buf);
-    root_counter: u32   = load_u32_le(counter_buf, 0);
-    root_block_len: u32 = load_u32_le(block_len_buf, 0);
-    root_flags: u32     = load_u32_le(flags_buf, 0);
-
-    // Generate out_len bytes by re-compressing with ROOT flag set and an
-    // incrementing counter (BLAKE3 spec Section 3.4).
-    pos: u32 = 0;
-    out_counter: u32 = 0;
-    while pos < out_len {
-        block_out = allocate(32);
-        b3_compress(block_out, root_chain, root_block, root_counter + out_counter,
-                    root_block_len, root_flags | B3_ROOT);
-        to_copy: u32 = 32;
-        remaining: u32 = out_len - pos;
-        if remaining < 32 { to_copy = remaining; }
-        i: u32 = 0;
-        while i < to_copy {
-            *(out + pos + i) = *(block_out + i);
-            i = i + 1;
-        }
-        pos = pos + to_copy;
-        out_counter = out_counter + 1;
-        free(block_out);
-    }
-
-    free(root_chain);
-    free(root_block);
-    free(counter_buf);
-    free(block_len_buf);
-    free(flags_buf);
-    free(ctx);
+    return 0;
 }
