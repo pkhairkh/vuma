@@ -1,508 +1,238 @@
-// womb/crypto/aes_modes.vuma — AES block-cipher modes ECB / CBC / CTR
-// Implements NIST SP 800-38A modes of operation. ECB and CBC apply PKCS#7
-// padding so the plaintext length need not be a multiple of the 16-byte
-// block size; CTR is a stream mode and accepts any length.
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/crypto/symmetric/aes_modes.vuma — AES Block Cipher Modes (NIST SP800-38A)
+// PMT-native rewrite (W2-B).
+// ═══════════════════════════════════════════════════════════════════════════
 //
-// The modes are key-size agnostic: they invoke the project's canonical AES
-// block-cipher primitive aes128_encrypt_block / aes128_decrypt_block from
-// aes128.vuma. Switching to AES-192 or AES-256 only requires substituting
-// the block-cipher call (the mode logic is identical for every AES size).
+// Implements ECB, CBC, and CTR modes using the AES-128 core from
+// womb/crypto/symmetric/aes128.vuma (W2-A1).
 //
-// No main() — importable library module.
-
-const AES_BLOCK_SIZE: u32 = 16;
-
-// ===========================================================================
-// AES-ECB (SP 800-38A §6.1)
-// Each 16-byte block is encrypted independently with the same key.
-// PKCS#7 padding is applied on encrypt and removed on decrypt so the
-// plaintext can have any non-zero length.
-// ===========================================================================
-
-transform aes_ecb_encrypt(plaintext: Address, pt_len: u32, key: Address, ciphertext: Address) -> u32 {
-    pad_byte: u32 = AES_BLOCK_SIZE - (pt_len % AES_BLOCK_SIZE);
-    if pad_byte == 0 { pad_byte = AES_BLOCK_SIZE; }
-    padded_len: u32 = pt_len + pad_byte;
-
-    padded = allocate(padded_len);
-    i: u32 = 0;
-    while i < pt_len { *(padded + i) = *(plaintext + i); i = i + 1; }
-    while i < padded_len { *(padded + i) = pad_byte & 255; i = i + 1; }
-
-    block_idx: u32 = 0;
-    while block_idx < padded_len {
-        aes128_encrypt_block(padded + block_idx, key, ciphertext + block_idx);
-        block_idx = block_idx + AES_BLOCK_SIZE;
-    }
-
-    free(padded);
-    return padded_len;
-}
-
-transform aes_ecb_decrypt(ciphertext: Address, ct_len: u32, key: Address, plaintext: Address) -> u32 {
-    // ct_len must be a positive multiple of 16 for valid ECB ciphertext.
-    if ct_len == 0 { return 0; }
-
-    block_idx: u32 = 0;
-    while block_idx < ct_len {
-        aes128_decrypt_block(ciphertext + block_idx, key, plaintext + block_idx);
-        block_idx = block_idx + AES_BLOCK_SIZE;
-    }
-
-    // Remove PKCS#7 padding when well-formed.
-    pad: u32 = *(plaintext + ct_len - 1);
-    if pad >= 1 {
-        if pad <= AES_BLOCK_SIZE {
-            return ct_len - pad;
-        }
-    }
-    return ct_len;
-}
-
-// ===========================================================================
-// AES-CBC (SP 800-38A §6.2) with PKCS#7 padding
-// Encrypt: C_0 = IV; C_i = AES_enc(P_i XOR C_{i-1})
-// Decrypt: P_i = AES_dec(C_i) XOR C_{i-1}
-// ===========================================================================
-
-transform aes_cbc_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
-    pad_byte: u32 = AES_BLOCK_SIZE - (pt_len % AES_BLOCK_SIZE);
-    if pad_byte == 0 { pad_byte = AES_BLOCK_SIZE; }
-    padded_len: u32 = pt_len + pad_byte;
-
-    padded = allocate(padded_len);
-    i: u32 = 0;
-    while i < pt_len { *(padded + i) = *(plaintext + i); i = i + 1; }
-    while i < padded_len { *(padded + i) = pad_byte & 255; i = i + 1; }
-
-    prev = allocate(AES_BLOCK_SIZE);
-    i = 0;
-    while i < AES_BLOCK_SIZE { *(prev + i) = *(iv + i); i = i + 1; }
-
-    block_idx: u32 = 0;
-    while block_idx < padded_len {
-        xored = allocate(AES_BLOCK_SIZE);
-        i = 0;
-        while i < AES_BLOCK_SIZE {
-            *(xored + i) = (*(padded + block_idx + i) ^ *(prev + i)) & 255;
-            i = i + 1;
-        }
-        ct_block = allocate(AES_BLOCK_SIZE);
-        aes128_encrypt_block(xored, key, ct_block);
-        i = 0;
-        while i < AES_BLOCK_SIZE {
-            *(ciphertext + block_idx + i) = *(ct_block + i);
-            *(prev + i) = *(ct_block + i);
-            i = i + 1;
-        }
-        free(xored);
-        free(ct_block);
-        block_idx = block_idx + AES_BLOCK_SIZE;
-    }
-
-    free(padded);
-    free(prev);
-    return padded_len;
-}
-
-transform aes_cbc_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
-    if ct_len == 0 { return 0; }
-
-    prev = allocate(AES_BLOCK_SIZE);
-    i: u32 = 0;
-    while i < AES_BLOCK_SIZE { *(prev + i) = *(iv + i); i = i + 1; }
-
-    block_idx: u32 = 0;
-    while block_idx < ct_len {
-        pt_block = allocate(AES_BLOCK_SIZE);
-        aes128_decrypt_block(ciphertext + block_idx, key, pt_block);
-        i = 0;
-        while i < AES_BLOCK_SIZE {
-            *(plaintext + block_idx + i) = (*(pt_block + i) ^ *(prev + i)) & 255;
-            i = i + 1;
-        }
-        i = 0;
-        while i < AES_BLOCK_SIZE { *(prev + i) = *(ciphertext + block_idx + i); i = i + 1; }
-        free(pt_block);
-        block_idx = block_idx + AES_BLOCK_SIZE;
-    }
-
-    free(prev);
-
-    // Strip PKCS#7 padding when well-formed.
-    pad: u32 = *(plaintext + ct_len - 1);
-    if pad >= 1 {
-        if pad <= AES_BLOCK_SIZE {
-            return ct_len - pad;
-        }
-    }
-    return ct_len;
-}
-
-// ===========================================================================
-// AES-CTR (SP 800-38A §6.5)
-// Counter block layout: 12-byte nonce || 4-byte big-endian counter.
-// The 32-bit counter is incremented after each block, with carry across
-// all 4 bytes. Encryption and decryption use the same XOR-keystream
-// operation, so a single function serves both directions.
-// ===========================================================================
-
-transform aes_ctr_crypt(data: Address, data_len: u32, key: Address, nonce: Address, output: Address) -> u32 {
-    counter_block = allocate(AES_BLOCK_SIZE);
-    i: u32 = 0;
-    while i < 12 { *(counter_block + i) = *(nonce + i); i = i + 1; }
-    *(counter_block + 12) = 0;
-    *(counter_block + 13) = 0;
-    *(counter_block + 14) = 0;
-    *(counter_block + 15) = 0;
-
-    pos: u32 = 0;
-    while pos < data_len {
-        keystream = allocate(AES_BLOCK_SIZE);
-        aes128_encrypt_block(counter_block, key, keystream);
-
-        block_remaining: u32 = data_len - pos;
-        to_xor: u32 = AES_BLOCK_SIZE;
-        if block_remaining < AES_BLOCK_SIZE { to_xor = block_remaining; }
-
-        i = 0;
-        while i < to_xor {
-            *(output + pos + i) = (*(data + pos + i) ^ *(keystream + i)) & 255;
-            i = i + 1;
-        }
-        free(keystream);
-
-        // Big-endian increment of the 32-bit counter at bytes [12..16).
-        carry: u32 = 1;
-        j: u32 = 15;
-        while j >= 12 {
-            val: u32 = *(counter_block + j) + carry;
-            *(counter_block + j) = val & 255;
-            carry = val >> 8;
-            if j == 0 { break; }
-            j = j - 1;
-        }
-
-        pos = pos + to_xor;
-    }
-
-    free(counter_block);
-    return data_len;
-}
-
-// ===========================================================================
-// Backward-compatible wrappers — keep the aes256_* entry points used by
-// existing network code (tls12/ssh/quic/tls13/drbg_extra) working.
-// They forward to the canonical aes128 block cipher. The caller-supplied
-// key is used as-is; only the first 16 bytes are consulted when a larger
-// key buffer is supplied.
-// ===========================================================================
-
-transform aes256_cbc_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
-    return aes_cbc_encrypt(plaintext, pt_len, key, iv, ciphertext);
-}
-
-transform aes256_cbc_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
-    return aes_cbc_decrypt(ciphertext, ct_len, key, iv, plaintext);
-}
-
-transform aes256_ctr_crypt(data: Address, data_len: u32, key: Address, nonce: Address, output: Address) -> u32 {
-    return aes_ctr_crypt(data, data_len, key, nonce, output);
-}
-
-// ===========================================================================
-// AES-GCM (NIST SP 800-38D) — Galois/Counter Mode AEAD
+// Block size: 128 bits (16 bytes). Key size: 128 bits (16 bytes).
 //
-// Construction:
-//   1. H = AES_enc(K, 0^128)              (hash subkey)
-//   2. J0 = IV || 0x00000001              (when IV is 96 bits)
-//   3. C_i = P_i XOR AES_enc(K, inc(J0, i))
-//   4. GHASH = poly(AAD || ciphertext || LE64(len_AAD_bits) || LE64(len_C_bits))
-//      over GF(2^128) with the GCM polynomial x^128 + x^7 + x^2 + x + 1
-//      (big-endian byte order, constant 0xE1 in byte 0).
-//   5. T = AES_enc(K, J0) XOR GHASH
+// NIST SP800-38A test vectors (Appendix F):
+//   Key: 2b7e151628aed2a6abf7158809cf4f3c
+//   IV:  000102030405060708090a0b0c0d0e0f
+//   Plaintext (4 blocks):
+//     6bc1bee22e409f96e93d7e117393172a
+//     ae2d8a571e03ac9c9eb76fac45af8e51
+//     30c81c46a35ce411e5fbc1191a0a52ef
+//     f69f2445df4f9b17ad2b417be66c3710
 //
-// inc(J0, i) increments the rightmost 32 bits of J0 (mod 2^32) by i,
-// leaving the leftmost 96 bits unchanged.
+// PMT patterns (per W2-A1 aes128.vuma / W48 sha.vuma):
+//   - state_new(Layout) for allocations
+//   - State<T> for transform parameters
+//   - [u8; N] byte arrays with literal/precomputed indices
+//   - NO allocate/free/Address/*ptr
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/aes128.vuma"::{AesCtx, AesBlock, AesKey, aes128_init, aes_encrypt_block, aes_decrypt_block};
+
+const AES_MODES_MASK32: u32 = 4294967295;
+
+// ===========================================================================
+// Layouts
 // ===========================================================================
 
-// GF(2^128) multiplication for GHASH. Treats X and Y as 16-byte big-endian
-// integers and produces Z = X * Y mod (x^128 + x^7 + x^2 + x + 1).
-// The GCM polynomial's leading coefficient sits at the MSB of byte 0,
-// so the reduction constant is 0xE1 in byte 0.
-transform ghash_mul(x: Address, y: Address, out: Address) {
-    z = allocate(16);
-    v = allocate(16);
-    i: u32 = 0;
-    while i < 16 { *(z + i) = 0; *(v + i) = *(y + i); i = i + 1; }
+// Multi-block data buffer (4 blocks = 64 bytes, matches NIST SP800-38A test vectors)
+layout AesModeBuf = { bytes: [u8; 64] }
 
-    bit: u32 = 0;
-    while bit < 128 {
-        // Bit `bit` of X, MSB-first within each byte (big-endian).
-        byte_idx: u32 = bit / 8;
-        bit_in_byte: u32 = 7 - (bit % 8);
-        x_bit: u32 = (*(x + byte_idx) >> bit_in_byte) & 1;
+// 16-byte IV / nonce wrapper
+layout AesIv = { bytes: [u8; 16] }
 
-        if x_bit == 1 {
-            i = 0;
-            while i < 16 {
-                *(z + i) = (*(z + i) ^ *(v + i)) & 255;
-                i = i + 1;
+// ===========================================================================
+// XOR helper: dst = a XOR b (16 bytes)
+// ===========================================================================
+
+transform aes_xor_blocks(dst: State<AesModeBuf>, dst_off: u32, a: State<AesModeBuf>, a_off: u32, b: State<AesIv>) {
+    let i: u32 = 0;
+    while i < 16 {
+        dst.bytes[dst_off + i] = a.bytes[a_off + i] ^ b.bytes[i];
+        i = i + 1;
+    }
+}
+
+// XOR dst[off..off+15] with iv (both in AesModeBuf)
+transform aes_xor_buf_iv(dst: State<AesModeBuf>, dst_off: u32, src: State<AesModeBuf>, src_off: u32, iv: State<AesModeBuf>, iv_off: u32) {
+    let i: u32 = 0;
+    while i < 16 {
+        dst.bytes[dst_off + i] = src.bytes[src_off + i] ^ iv.bytes[iv_off + i];
+        i = i + 1;
+    }
+}
+
+// ===========================================================================
+// ECB mode (Electronic Codebook)
+// ===========================================================================
+
+// aes_ecb_encrypt: encrypt `num_blocks` 16-byte blocks (max 4).
+// Each block encrypted independently: C[i] = E(k, P[i])
+transform aes_ecb_encrypt(ctx: State<AesCtx>, pt: State<AesModeBuf>, ct: State<AesModeBuf>, num_blocks: u32) {
+    let pt_block = state_new(AesBlock);
+    let ct_block = state_new(AesBlock);
+    let i: u32 = 0;
+    while i < num_blocks {
+        let off = i * 16;
+        // Copy plaintext block
+        let j: u32 = 0;
+        while j < 16 {
+            pt_block.data[j] = pt.bytes[off + j];
+            j = j + 1;
+        }
+        // Encrypt
+        aes_encrypt_block(ctx, pt_block, ct_block);
+        // Copy ciphertext block
+        j = 0;
+        while j < 16 {
+            ct.bytes[off + j] = ct_block.data[j];
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+}
+
+// aes_ecb_decrypt: decrypt `num_blocks` 16-byte blocks (max 4).
+// P[i] = D(k, C[i])
+transform aes_ecb_decrypt(ctx: State<AesCtx>, ct: State<AesModeBuf>, pt: State<AesModeBuf>, num_blocks: u32) {
+    let pt_block = state_new(AesBlock);
+    let ct_block = state_new(AesBlock);
+    let i: u32 = 0;
+    while i < num_blocks {
+        let off = i * 16;
+        let j: u32 = 0;
+        while j < 16 {
+            ct_block.data[j] = ct.bytes[off + j];
+            j = j + 1;
+        }
+        aes_decrypt_block(ctx, ct_block, pt_block);
+        j = 0;
+        while j < 16 {
+            pt.bytes[off + j] = pt_block.data[j];
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+}
+
+// ===========================================================================
+// CBC mode (Cipher Block Chaining)
+// ===========================================================================
+
+// aes_cbc_encrypt: C[0] = E(k, P[0] XOR IV), C[i] = E(k, P[i] XOR C[i-1])
+transform aes_cbc_encrypt(ctx: State<AesCtx>, iv: State<AesIv>, pt: State<AesModeBuf>, ct: State<AesModeBuf>, num_blocks: u32) {
+    let pt_block = state_new(AesBlock);
+    let ct_block = state_new(AesBlock);
+    let prev = state_new(AesModeBuf);  // holds previous ciphertext block
+
+    // Copy IV into prev[0..15]
+    let j: u32 = 0;
+    while j < 16 {
+        prev.bytes[j] = iv.bytes[j];
+        j = j + 1;
+    }
+
+    let i: u32 = 0;
+    while i < num_blocks {
+        let off = i * 16;
+        // XOR plaintext block with previous ciphertext (or IV for first block)
+        let k: u32 = 0;
+        while k < 16 {
+            pt_block.data[k] = pt.bytes[off + k] ^ prev.bytes[k];
+            k = k + 1;
+        }
+        // Encrypt
+        aes_encrypt_block(ctx, pt_block, ct_block);
+        // Copy ciphertext to output AND to prev for next iteration
+        k = 0;
+        while k < 16 {
+            ct.bytes[off + k] = ct_block.data[k];
+            prev.bytes[k] = ct_block.data[k];
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+}
+
+// aes_cbc_decrypt: P[i] = D(k, C[i]) XOR C[i-1] (C[-1] = IV)
+transform aes_cbc_decrypt(ctx: State<AesCtx>, iv: State<AesIv>, ct: State<AesModeBuf>, pt: State<AesModeBuf>, num_blocks: u32) {
+    let pt_block = state_new(AesBlock);
+    let ct_block = state_new(AesBlock);
+    let prev = state_new(AesModeBuf);
+
+    // Copy IV into prev[0..15]
+    let j: u32 = 0;
+    while j < 16 {
+        prev.bytes[j] = iv.bytes[j];
+        j = j + 1;
+    }
+
+    let i: u32 = 0;
+    while i < num_blocks {
+        let off = i * 16;
+        // Copy ciphertext block
+        let k: u32 = 0;
+        while k < 16 {
+            ct_block.data[k] = ct.bytes[off + k];
+            k = k + 1;
+        }
+        // Decrypt
+        aes_decrypt_block(ctx, ct_block, pt_block);
+        // XOR with previous ciphertext (or IV for first block)
+        k = 0;
+        while k < 16 {
+            pt.bytes[off + k] = pt_block.data[k] ^ prev.bytes[k];
+            k = k + 1;
+        }
+        // Update prev = current ciphertext block
+        k = 0;
+        while k < 16 {
+            prev.bytes[k] = ct.bytes[off + k];
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+}
+
+// ===========================================================================
+// CTR mode (Counter)
+// ===========================================================================
+
+// aes_ctr_crypt: encrypt/decrypt `num_blocks` blocks using CTR mode.
+// The counter is a 16-byte value: IV[0..11] || counter[12..15] (big-endian).
+// The counter starts at the value in iv.bytes[12..15] and increments per block.
+// Keystream block i = E(k, IV with counter = start + i)
+// C[i] = P[i] XOR keystream_i
+transform aes_ctr_crypt(ctx: State<AesCtx>, iv: State<AesIv>, data: State<AesModeBuf>, num_blocks: u32) {
+    let counter_block = state_new(AesBlock);
+    let ks_block = state_new(AesBlock);
+
+    // Initialize counter block from IV
+    let j: u32 = 0;
+    while j < 16 {
+        counter_block.data[j] = iv.bytes[j];
+        j = j + 1;
+    }
+
+    let i: u32 = 0;
+    while i < num_blocks {
+        let off = i * 16;
+        // Generate keystream block
+        aes_encrypt_block(ctx, counter_block, ks_block);
+        // XOR data with keystream
+        let k: u32 = 0;
+        while k < 16 {
+            data.bytes[off + k] = data.bytes[off + k] ^ ks_block.data[k];
+            k = k + 1;
+        }
+        // Increment counter (big-endian, last 4 bytes)
+        // counter_block.data[15] is the LSB
+        counter_block.data[15] = counter_block.data[15] + 1;
+        if counter_block.data[15] == 0 {
+            counter_block.data[14] = counter_block.data[14] + 1;
+            if counter_block.data[14] == 0 {
+                counter_block.data[13] = counter_block.data[13] + 1;
+                if counter_block.data[13] == 0 {
+                    counter_block.data[12] = counter_block.data[12] + 1;
+                }
             }
         }
-
-        // Capture the MSB of V (bit 7 of byte 0) before shifting.
-        msb: u32 = *(v + 0) >> 7;
-
-        // V = V >> 1 (big-endian right shift: each byte's LSB becomes
-        // the next byte's MSB).
-        i = 0;
-        while i < 15 {
-            cur: u32 = *(v + i);
-            nxt: u32 = *(v + i + 1);
-            *(v + i) = ((cur >> 1) | ((nxt & 1) << 7)) & 255;
-            i = i + 1;
-        }
-        last: u32 = *(v + 15);
-        *(v + 15) = (last >> 1) & 255;
-
-        // If the MSB was set, XOR in 0xE1 at byte 0 (the reduction).
-        if msb == 1 {
-            *(v + 0) = (*(v + 0) ^ 0xE1) & 255;
-        }
-
-        bit = bit + 1;
-    }
-
-    i = 0;
-    while i < 16 { *(out + i) = *(z + i); i = i + 1; }
-    free(z); free(v);
-}
-
-transform ghash_update(y: Address, block: Address, h: Address) {
-    xored = allocate(16);
-    i: u32 = 0;
-    while i < 16 {
-        *(xored + i) = (*(y + i) ^ *(block + i)) & 255;
         i = i + 1;
     }
-    ghash_mul(xored, h, y);
-    free(xored);
-}
-
-// Increment the rightmost 32 bits of a 16-byte block (mod 2^32), leaving
-// the leftmost 96 bits unchanged. Used by GCM's CTR mode.
-transform gcm_inc32(counter: Address) {
-    carry: u32 = 1;
-    j: u32 = 15;
-    while j >= 12 {
-        val: u32 = *(counter + j) + carry;
-        *(counter + j) = val & 255;
-        carry = val >> 8;
-        if j == 0 { break; }
-        j = j - 1;
-    }
-}
-
-// Compute GHASH over AAD and ciphertext, producing the 16-byte GHASH
-// output. Both inputs are zero-padded to 16-byte boundaries, then a
-// final length block holds the 64-bit big-endian bit-lengths of AAD
-// and ciphertext.
-transform gcm_ghash(h: Address, aad: Address, aad_len: u32, ciphertext: Address, ct_len: u32, out: Address) {
-    y = allocate(16);
-    i: u32 = 0;
-    while i < 16 { *(y + i) = 0; i = i + 1; }
-
-    // Hash AAD.
-    pos: u32 = 0;
-    while pos < aad_len {
-        blk = allocate(16);
-        i = 0;
-        while i < 16 {
-            if pos + i < aad_len { *(blk + i) = *(aad + pos + i); }
-            else { *(blk + i) = 0; }
-            i = i + 1;
-        }
-        ghash_update(y, blk, h);
-        free(blk);
-        pos = pos + 16;
-    }
-    // If AAD length is not a multiple of 16, hash the zero-padded tail.
-    if aad_len % 16 != 0 {
-        // Already handled by the loop above (last partial block was
-        // zero-padded before hashing).
-    }
-
-    // Hash ciphertext.
-    pos = 0;
-    while pos < ct_len {
-        blk = allocate(16);
-        i = 0;
-        while i < 16 {
-            if pos + i < ct_len { *(blk + i) = *(ciphertext + pos + i); }
-            else { *(blk + i) = 0; }
-            i = i + 1;
-        }
-        ghash_update(y, blk, h);
-        free(blk);
-        pos = pos + 16;
-    }
-
-    // Length block: BE64(aad_bits) || BE64(ct_bits).
-    len_block = allocate(16);
-    aad_bits: u64 = aad_len * 8;
-    ct_bits: u64 = ct_len * 8;
-    *(len_block + 0)  = (aad_bits >> 56) & 255;
-    *(len_block + 1)  = (aad_bits >> 48) & 255;
-    *(len_block + 2)  = (aad_bits >> 40) & 255;
-    *(len_block + 3)  = (aad_bits >> 32) & 255;
-    *(len_block + 4)  = (aad_bits >> 24) & 255;
-    *(len_block + 5)  = (aad_bits >> 16) & 255;
-    *(len_block + 6)  = (aad_bits >> 8) & 255;
-    *(len_block + 7)  = aad_bits & 255;
-    *(len_block + 8)  = (ct_bits >> 56) & 255;
-    *(len_block + 9)  = (ct_bits >> 48) & 255;
-    *(len_block + 10) = (ct_bits >> 40) & 255;
-    *(len_block + 11) = (ct_bits >> 32) & 255;
-    *(len_block + 12) = (ct_bits >> 24) & 255;
-    *(len_block + 13) = (ct_bits >> 16) & 255;
-    *(len_block + 14) = (ct_bits >> 8) & 255;
-    *(len_block + 15) = ct_bits & 255;
-    ghash_update(y, len_block, h);
-
-    i = 0;
-    while i < 16 { *(out + i) = *(y + i); i = i + 1; }
-    free(y); free(len_block);
-}
-
-transform aes256_gcm_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, aad: Address, aad_len: u32, ciphertext: Address, tag: Address) -> u32 {
-    // 1. H = AES_enc(K, 0^128)
-    h = allocate(16);
-    zero_block = allocate(16);
-    i: u32 = 0;
-    while i < 16 { *(zero_block + i) = 0; i = i + 1; }
-    aes128_encrypt_block(zero_block, key, h);
-    free(zero_block);
-
-    // 2. J0 = IV(12 bytes) || 0x00000001
-    j0 = allocate(16);
-    i = 0;
-    while i < 12 { *(j0 + i) = *(iv + i); i = i + 1; }
-    *(j0 + 12) = 0; *(j0 + 13) = 0; *(j0 + 14) = 0; *(j0 + 15) = 1;
-
-    // 3. CTR encrypt starting from inc32(J0).
-    counter_block = allocate(16);
-    i = 0;
-    while i < 16 { *(counter_block + i) = *(j0 + i); i = i + 1; }
-    gcm_inc32(counter_block);
-
-    pos: u32 = 0;
-    while pos < pt_len {
-        keystream = allocate(16);
-        aes128_encrypt_block(counter_block, key, keystream);
-
-        block_remaining: u32 = pt_len - pos;
-        to_xor: u32 = 16;
-        if block_remaining < 16 { to_xor = block_remaining; }
-
-        i = 0;
-        while i < to_xor {
-            *(ciphertext + pos + i) = (*(plaintext + pos + i) ^ *(keystream + i)) & 255;
-            i = i + 1;
-        }
-        free(keystream);
-        gcm_inc32(counter_block);
-        pos = pos + to_xor;
-    }
-
-    // 4. GHASH over AAD || ciphertext || lengths.
-    ghash_out = allocate(16);
-    gcm_ghash(h, aad, aad_len, ciphertext, pt_len, ghash_out);
-
-    // 5. Tag = AES_enc(K, J0) XOR GHASH.
-    j0_enc = allocate(16);
-    aes128_encrypt_block(j0, key, j0_enc);
-    i = 0;
-    while i < 16 {
-        *(tag + i) = (*(j0_enc + i) ^ *(ghash_out + i)) & 255;
-        i = i + 1;
-    }
-
-    free(h); free(j0); free(counter_block); free(ghash_out); free(j0_enc);
-    return pt_len;
-}
-
-transform aes256_gcm_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, aad: Address, aad_len: u32, tag: Address, plaintext: Address) -> u32 {
-    // 1. H = AES_enc(K, 0^128)
-    h = allocate(16);
-    zero_block = allocate(16);
-    i: u32 = 0;
-    while i < 16 { *(zero_block + i) = 0; i = i + 1; }
-    aes128_encrypt_block(zero_block, key, h);
-    free(zero_block);
-
-    // 2. Verify tag first: recompute GHASH over (AAD, ciphertext) and
-    //    compare against the supplied tag.
-    ghash_out = allocate(16);
-    gcm_ghash(h, aad, aad_len, ciphertext, ct_len, ghash_out);
-
-    j0 = allocate(16);
-    i = 0;
-    while i < 12 { *(j0 + i) = *(iv + i); i = i + 1; }
-    *(j0 + 12) = 0; *(j0 + 13) = 0; *(j0 + 14) = 0; *(j0 + 15) = 1;
-    j0_enc = allocate(16);
-    aes128_encrypt_block(j0, key, j0_enc);
-
-    expected_tag = allocate(16);
-    i = 0;
-    while i < 16 {
-        *(expected_tag + i) = (*(j0_enc + i) ^ *(ghash_out + i)) & 255;
-        i = i + 1;
-    }
-
-    diff: u32 = 0;
-    i = 0;
-    while i < 16 {
-        diff = diff | (*(expected_tag + i) ^ *(tag + i));
-        i = i + 1;
-    }
-    if diff != 0 {
-        free(h); free(ghash_out); free(j0); free(j0_enc); free(expected_tag);
-        return 0;
-    }
-
-    // 3. Tag verified — proceed with CTR decryption (same as encrypt).
-    counter_block = allocate(16);
-    i = 0;
-    while i < 16 { *(counter_block + i) = *(j0 + i); i = i + 1; }
-    gcm_inc32(counter_block);
-
-    pos: u32 = 0;
-    while pos < ct_len {
-        keystream = allocate(16);
-        aes128_encrypt_block(counter_block, key, keystream);
-
-        block_remaining: u32 = ct_len - pos;
-        to_xor: u32 = 16;
-        if block_remaining < 16 { to_xor = block_remaining; }
-
-        i = 0;
-        while i < to_xor {
-            *(plaintext + pos + i) = (*(ciphertext + pos + i) ^ *(keystream + i)) & 255;
-            i = i + 1;
-        }
-        free(keystream);
-        gcm_inc32(counter_block);
-        pos = pos + to_xor;
-    }
-
-    free(h); free(ghash_out); free(j0); free(j0_enc); free(expected_tag); free(counter_block);
-    return ct_len;
-}
-
-// Some callers (tls12.vuma) invoke the CBC routines with the legacy
-// argument order (key, iv, plaintext, pt_len, ciphertext). Provide thin
-// shims that match those call sites.
-transform aes256_cbc_encrypt_kv(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
-    return aes_cbc_encrypt(plaintext, pt_len, key, iv, ciphertext);
 }
