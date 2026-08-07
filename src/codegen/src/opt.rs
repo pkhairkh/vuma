@@ -956,6 +956,18 @@ pub fn constant_fold(mut func: IRFunction) -> IRFunction {
                 let fold_ty = match &instr {
                     IRInstr::BinOp { ty, .. } => ty.clone(),
                     IRInstr::Cmp { ty, .. } => ty.clone(),
+                    // For Cast{ZExt/SExt}: preserve the TARGET type (to_ty)
+                    // so the folded Add uses I64, not the source I32.
+                    // Without this, a u32→u64 cast folded into Add{rhs:0}
+                    // would get ty=None (or ty=Some(U32) from a prior fold),
+                    // causing wasm32/aarch64 backends to use 32-bit operations
+                    // on what should be a 64-bit value.
+                    IRInstr::Cast { to_ty, kind, .. } => {
+                        match kind {
+                            CastKind::ZExt | CastKind::SExt => to_ty.clone(),
+                            _ => None,
+                        }
+                    }
                     _ => None,
                 };
                 if let Some(ty) = fold_ty {

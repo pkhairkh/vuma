@@ -9506,6 +9506,12 @@ pub fn bridge_stmt_to_scg(stmt: &vuma_parser::ast::Stmt, ctx: &mut BridgeCtx) ->
             if let Some(ScgStatement::Call(call_node)) = stmts.last_mut() {
                 call_node.reassigns = Some(let_stmt.name.clone());
             }
+            // If the last statement is a Cast (from `expr as Type`),
+            // register the let-binding's name with the Cast's target type
+            // in var_types so subsequent operations use the correct width.
+            if let Some(ScgStatement::Cast(cast_node)) = stmts.last() {
+                ctx.var_types.insert(let_stmt.name.clone(), cast_node.to_ty.clone());
+            }
             match &result {
                 ScgExpr::Var(name) if name == &let_stmt.name => {}
                 _ => {

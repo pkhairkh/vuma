@@ -2142,18 +2142,47 @@ impl LoweringContext {
     /// plus the I32<->F64 two-instruction chain).  See `push_value` for why
     /// these bitcasts are required.
     fn pop_to_vreg(&mut self, vreg_id: u32, ty: WasmType) {
-        if !self.vreg_to_local.contains_key(&vreg_id) {
-            self.alloc_local(vreg_id, ty);
-        }
+        // If the vreg was already allocated as a different type (e.g. I32
+        // from a prior push_value default, but now we're storing I64 from
+        // a ZExt cast), reallocate as a NEW local of the correct type.
+        // Wasm locals are immutable in type once allocated, so we must
+        // create a new local and update the vreg→local mapping.
+        let existing_ty = self.vreg_types.get(&vreg_id).copied();
         if let Some(local_idx) = self.get_local(vreg_id) {
-            let local_ty = self
-                .vreg_types
-                .get(&vreg_id)
-                .copied()
-                .unwrap_or(WasmType::I32);
+            let local_ty = existing_ty.unwrap_or(WasmType::I32);
+            // If the types match, just store.
+            if local_ty == ty {
+                self.emit(WasmInstr::LocalSet(local_idx));
+                self.stack_depth -= 1;
+                return;
+            }
+            // Types differ: if the existing local is I32 and we're storing I64,
+            // we need to WRAP (I32WrapI64) to fit into the I32 local.
+            // But if vreg_types says I64 (from a Cast), the value should stay I64.
+            // The problem: the local was pre-allocated as I32 by push_value.
+            // Solution: allocate a NEW I64 local and remap the vreg.
+            if ty == WasmType::I64 && local_ty == WasmType::I32 {
+                // Allocate new I64 local
+                self.alloc_local(vreg_id, WasmType::I64);
+                self.vreg_types.insert(vreg_id, WasmType::I64);
+                if let Some(new_idx) = self.get_local(vreg_id) {
+                    self.emit(WasmInstr::LocalSet(new_idx));
+                    self.stack_depth -= 1;
+                    return;
+                }
+            }
+            // Fallback: convert and store
             emit_type_conversion(self, ty, local_ty);
             self.emit(WasmInstr::LocalSet(local_idx));
             self.stack_depth -= 1;
+        } else {
+            // Not yet allocated — allocate with the correct type
+            self.alloc_local(vreg_id, ty);
+            self.vreg_types.insert(vreg_id, ty);
+            if let Some(local_idx) = self.get_local(vreg_id) {
+                self.emit(WasmInstr::LocalSet(local_idx));
+                self.stack_depth -= 1;
+            }
         }
     }
 }
@@ -2234,7 +2263,23 @@ fn wasm_type_for_dedicated_arith(
         Some(IRType::I64) | Some(IRType::U64) => return WasmType::I64,
         _ => {}
     }
-    // ty is None or an integer type narrower than I64: infer from operands.
+    // ty is None or U32/U16/U8: check if the lhs register was widened
+    // to I64 via a Cast (vreg_types records the cast's target type).
+    // This handles the case where a ZExt cast was constant-folded into
+    // Add{rhs:0, ty:Some(U32)} — the Add's ty says U32 but the vreg
+    // is actually I64. Without this, subsequent I64 operations on the
+    // result would use I32 wasm ops, causing type mismatches.
+    if let IRValue::Register(id) = lhs {
+        if let Some(WasmType::I64) = vreg_types.get(id) {
+            return WasmType::I64;
+        }
+    }
+    if let IRValue::Register(id) = rhs {
+        if let Some(WasmType::I64) = vreg_types.get(id) {
+            return WasmType::I64;
+        }
+    }
+    // Fall back to inference from operands.
     infer_wasm_type_from_operands(lhs, rhs, vreg_types)
 }
 
@@ -2317,15 +2362,27 @@ fn wasm_type_for_binop(
 ) -> WasmType {
     // If the IR provides a type, use it.
     if let Some(ty) = ir_ty {
-        return match ty {
-            IRType::F32 => WasmType::F32,
-            IRType::F64 => WasmType::F64,
-            IRType::I64 | IRType::U64 => WasmType::I64,
-            _ => WasmType::I32,
-        };
+        match ty {
+            IRType::F32 => return WasmType::F32,
+            IRType::F64 => return WasmType::F64,
+            IRType::I64 | IRType::U64 => return WasmType::I64,
+            _ => {} // U32/U16/U8: fall through to vreg_types check
+        }
     }
-    // If ty is None, infer from operands (handles make_copy phi copies whose
-    // src is a typed f64/i64 vreg, and constant-folded f64 bit patterns).
+    // Check if operands were widened to I64 via a Cast (vreg_types records
+    // the cast's target type). This handles folded ZExt casts where the
+    // BinOp's ty is Some(U32) but the vreg is actually I64.
+    if let IRValue::Register(id) = lhs {
+        if let Some(WasmType::I64) = vreg_types.get(id) {
+            return WasmType::I64;
+        }
+    }
+    if let IRValue::Register(id) = rhs {
+        if let Some(WasmType::I64) = vreg_types.get(id) {
+            return WasmType::I64;
+        }
+    }
+    // Fall back to inference from operands.
     infer_wasm_type_from_operands(lhs, rhs, vreg_types)
 }
 
@@ -3833,6 +3890,16 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
             };
             ctx.emit(wasm_op);
             if let IRValue::Register(id) = dst {
+                // For ZExt/SExt casts to I64, ensure the local is allocated
+                // as I64 (not the default I32). Without this, pop_to_vreg
+                // stores an I64 value into an I32 local, and subsequent
+                // reads produce type mismatches in wasmtime validation.
+                if result_ty == WasmType::I64 {
+                    ctx.vreg_types.insert(*id, WasmType::I64);
+                    if !ctx.vreg_to_local.contains_key(id) {
+                        ctx.alloc_local(*id, WasmType::I64);
+                    }
+                }
                 ctx.pop_to_vreg(*id, result_ty);
             } else {
                 ctx.emit(WasmInstr::Drop);
