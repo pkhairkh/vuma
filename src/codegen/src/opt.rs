@@ -970,17 +970,19 @@ pub fn constant_fold(mut func: IRFunction) -> IRFunction {
                     }
                     _ => None,
                 };
-                // W3-blake2: ALWAYS set ty: Some(U64) for folded constants.
-                // Previously, fold_ty was None for small values that fit in 32 bits.
-                // This caused 32-bit backends to store only the low 32 bits. When
-                // a subsequent 64-bit BinOp (e.g. Or, Xor) loaded the value using
-                // ss_load_value_64, the high 32 bits were garbage, corrupting the
-                // result. This affected blake2b_init's param computation:
-                //   let p1: u64 = 64         → Add{Imm(64), ty: None} (stored as 32-bit)
-                //   let o: u64 = p1 | 65536  → BinOp{Or, ty: Some(U64)} (loads 64-bit)
-                // The Or loaded garbage in the high word, producing wrong results.
-                // Fix: always use BinOp{Add, ty: Some(U64)} so backends store 64 bits.
-                let fold_ty = fold_ty.or(Some(IRType::U64));
+                // W3-blake2: If fold_ty is None but the result doesn't fit
+                // in i32 (high 32 bits non-zero when unsigned), use ty: Some(U64)
+                // so 32-bit backends store the full 64-bit value. Without this,
+                // `let a: u64 = 0x6A09E667BB67AE85` is constant-folded to
+                // Add{lhs: imm, rhs: 0, ty: None}, and riscv32/m68k/hppa store
+                // only the low 32 bits, corrupting subsequent 64-bit operations.
+                let fold_ty = fold_ty.or_else(|| {
+                    if (result as u64) > 0xFFFFFFFF {
+                        Some(IRType::U64)
+                    } else {
+                        None
+                    }
+                });
                 if let Some(ty) = fold_ty {
                     new_instrs.push(IRInstr::BinOp {
                         op: crate::ir::BinOpKind::Add,
