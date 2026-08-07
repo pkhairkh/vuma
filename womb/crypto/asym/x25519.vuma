@@ -68,22 +68,84 @@ transform fe_to_bytes(fe: State<Fe>, bytes: State<X25519Bytes>) {
     // Actually p = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFED
     // So limbs[0] = 0xFFFFFFED, limbs[1..7] = 0xFFFFFFFF, and the top bit of limb[7] is 0.
 
-    // Step 1: Carry propagation to ensure each limb < 2^32
-    // (The field operations may leave carries in the high bits)
-    let carry: u32 = 0;
-    // We'll do a simpler approach: just output the bytes directly.
-    // The caller is responsible for ensuring the value is in [0, p).
-    // For X25519 output, RFC 7748 says to just mask the high bit and output.
+    // Final reduction ("freeze"): ensure the value is in [0, p).
+    // The field operations (fe_add, fe_mul) use "loose" reduction — they
+    // fold bits 256+ back via 2^256 ≡ 38, but don't fully reduce to [0, p).
+    // A value can be up to ~2^256 (about 2*p). We need to conditionally
+    // subtract p to get canonical form.
+    //
+    // p = 2^255 - 19. If bit 255 is set (limb[7] & 0x80000000), the value
+    // is >= 2^255 > p, so subtract p. We may need to subtract p twice
+    // (if the value is >= 2*p), but a single subtraction suffices for
+    // values < 2^256 (which is guaranteed by the loose reduction).
 
-    let i: u32 = 0;
-    while i < 8 {
-        let off = i * 4;
-        let v = fe.limbs[i];
-        bytes.data[off]     = (v & 255) as u8;
-        bytes.data[off + 1] = ((v >> 8) & 255) as u8;
-        bytes.data[off + 2] = ((v >> 16) & 255) as u8;
-        bytes.data[off + 3] = ((v >> 24) & 255) as u8;
-        i = i + 1;
+    // Try subtracting p: p = 2^255 - 19 = {0xFFFFFFED, 0xFFFFFFFF, ..., 0x7FFFFFFF}
+    // Subtract: r = fe - p. If fe >= p, this succeeds (no borrow).
+    // If fe < p, this underflows (borrow = 1), and we keep the original.
+    let borrow: u32 = 0;
+    let p_limbs: [u32; 8] = [0; 8];  // placeholder — can't initialize arrays this way in VUMA
+    // We'll do it inline:
+    // p = {0xFFFFFFED, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x7FFFFFFF}
+
+    let t0 = state_new(Fe);
+    // Subtract p from fe, storing in t0
+    let b0: u64 = (fe.limbs[0] as u64) + 4294967296 - 4294967277;  // 0xFFFFFFED = 2^32 - 19 = 4294967277
+    t0.limbs[0] = (b0 & 4294967295) as u32;
+    if b0 < 4294967296 { borrow = 1; } else { borrow = 0; }
+
+    let b1: u64 = (fe.limbs[1] as u64) + 4294967296 - 4294967295 - (borrow as u64);
+    t0.limbs[1] = (b1 & 4294967295) as u32;
+    if b1 < 4294967296 { borrow = 1; } else { borrow = 0; }
+
+    let b2: u64 = (fe.limbs[2] as u64) + 4294967296 - 4294967295 - (borrow as u64);
+    t0.limbs[2] = (b2 & 4294967295) as u32;
+    if b2 < 4294967296 { borrow = 1; } else { borrow = 0; }
+
+    let b3: u64 = (fe.limbs[3] as u64) + 4294967296 - 4294967295 - (borrow as u64);
+    t0.limbs[3] = (b3 & 4294967295) as u32;
+    if b3 < 4294967296 { borrow = 1; } else { borrow = 0; }
+
+    let b4: u64 = (fe.limbs[4] as u64) + 4294967296 - 4294967295 - (borrow as u64);
+    t0.limbs[4] = (b4 & 4294967295) as u32;
+    if b4 < 4294967296 { borrow = 1; } else { borrow = 0; }
+
+    let b5: u64 = (fe.limbs[5] as u64) + 4294967296 - 4294967295 - (borrow as u64);
+    t0.limbs[5] = (b5 & 4294967295) as u32;
+    if b5 < 4294967296 { borrow = 1; } else { borrow = 0; }
+
+    let b6: u64 = (fe.limbs[6] as u64) + 4294967296 - 4294967295 - (borrow as u64);
+    t0.limbs[6] = (b6 & 4294967295) as u32;
+    if b6 < 4294967296 { borrow = 1; } else { borrow = 0; }
+
+    let b7: u64 = (fe.limbs[7] as u64) + 4294967296 - 2147483647 - (borrow as u64);  // 0x7FFFFFFF = 2147483647
+    t0.limbs[7] = (b7 & 4294967295) as u32;
+    if b7 < 4294967296 { borrow = 1; } else { borrow = 0; }
+
+    // If no borrow (fe >= p), use the reduced value. Otherwise keep original.
+    if borrow == 0 {
+        // fe was >= p, use t0 (reduced)
+        let i: u32 = 0;
+        while i < 8 {
+            let off = i * 4;
+            let v = t0.limbs[i];
+            bytes.data[off]     = (v & 255) as u8;
+            bytes.data[off + 1] = ((v >> 8) & 255) as u8;
+            bytes.data[off + 2] = ((v >> 16) & 255) as u8;
+            bytes.data[off + 3] = ((v >> 24) & 255) as u8;
+            i = i + 1;
+        }
+    } else {
+        // fe was < p, use original
+        let i: u32 = 0;
+        while i < 8 {
+            let off = i * 4;
+            let v = fe.limbs[i];
+            bytes.data[off]     = (v & 255) as u8;
+            bytes.data[off + 1] = ((v >> 8) & 255) as u8;
+            bytes.data[off + 2] = ((v >> 16) & 255) as u8;
+            bytes.data[off + 3] = ((v >> 24) & 255) as u8;
+            i = i + 1;
+        }
     }
     // Clear the high bit (bit 255) per RFC 7748
     bytes.data[31] = bytes.data[31] & 127;
@@ -134,8 +196,9 @@ transform fe_add(r: State<Fe>, a: State<Fe>, b: State<Fe>) {
         i = i + 1;
     }
     // carry now holds the overflow (0 or 1)
-    // Reduce: add carry * 19 to r[0] and propagate
-    let overflow: u64 = carry * 19;
+    // Reduce: add carry * 38 to r[0] and propagate
+    // (2^256 ≡ 38 mod p, so overflow from bit 256 = carry * 38)
+    let overflow: u64 = carry * 38;
     let i2: u32 = 0;
     let c2: u64 = overflow;
     while i2 < 8 {
@@ -174,14 +237,10 @@ transform fe_sub(r: State<Fe>, a: State<Fe>, b: State<Fe>) {
         }
         i = i + 1;
     }
-    // If borrow, add p = 2^255 - 19
-    // Adding 2^255 - 19: add 19 to limb 0 (with carry propagation),
-    // then set bit 255 (limb[7] |= 0x80000000)
-    // Actually, since we borrowed, we need to add p back.
-    // p in limb form: limb[0] = 0xFFFFFFED, limbs[1..7] = 0xFFFFFFFF
-    // But it's easier to add 19 to limb[0] and set the top bit.
+    // If borrow, the unsigned wrap added 2^256, which ≡ 38 (mod p).
+    // So add 38 to compensate (NOT 19 + bit 255 — that adds p+38, too much).
     if borrow == 1 {
-        let carry2: u64 = 19;
+        let carry2: u64 = 38;
         let i2: u32 = 0;
         while i2 < 8 {
             let sum: u64 = (r.limbs[i2] as u64) + carry2;
@@ -189,8 +248,6 @@ transform fe_sub(r: State<Fe>, a: State<Fe>, b: State<Fe>) {
             carry2 = sum >> 32;
             i2 = i2 + 1;
         }
-        // Set bit 255 (add 2^255)
-        r.limbs[7] = r.limbs[7] | 2147483648;  // 0x80000000
     }
 }
 
@@ -206,57 +263,63 @@ transform fe_mul(r: State<Fe>, a: State<Fe>, b: State<Fe>) {
         i = i + 1;
     }
 
-    // Schoolbook multiplication: prod[i+j] += a[i] * b[j]
+    // Schoolbook multiplication: row-by-row approach
+    // For each a[i], multiply by all b[j] and accumulate into prod with carry
     let ai: u32 = 0;
     while ai < 8 {
+        let carry: u64 = 0;
         let bj: u32 = 0;
         while bj < 8 {
             let idx = ai + bj;
             let av: u64 = a.limbs[ai] as u64;
             let bv: u64 = b.limbs[bj] as u64;
             let product: u64 = av * bv;
-            // Add product to prod.limbs[idx..idx+1] with carry
-            let cur: u64 = (prod.limbs[idx] as u64) + (product & 4294967295);
-            prod.limbs[idx] = (cur & 4294967295) as u32;
-            let carry: u64 = (product >> 32) + (cur >> 32);
-            // Propagate carry to next limb
-            let next: u64 = (prod.limbs[idx + 1] as u64) + carry;
-            prod.limbs[idx + 1] = (next & 4294967295) as u32;
-            // If there's still carry, propagate further (rare but possible)
-            let carry2: u64 = next >> 32;
-            if carry2 > 0 {
-                let k: u32 = idx + 2;
-                while k < 16 {
-                    let nv: u64 = (prod.limbs[k] as u64) + carry2;
-                    prod.limbs[k] = (nv & 4294967295) as u32;
-                    if (nv >> 32) == 0 {
-                        k = 16;
-                    }
+            let sum: u64 = (prod.limbs[idx] as u64) + (product & 4294967295) + carry;
+            prod.limbs[idx] = (sum & 4294967295) as u32;
+            carry = (product >> 32) + (sum >> 32);
+            bj = bj + 1;
+        }
+        // Add final carry to prod[ai+8]
+        let hi_idx = ai + 8;
+        if hi_idx < 16 {
+            let sum: u64 = (prod.limbs[hi_idx] as u64) + carry;
+            prod.limbs[hi_idx] = (sum & 4294967295) as u32;
+            // If carry propagates further, handle it
+            let c2: u64 = sum >> 32;
+            let k: u32 = hi_idx + 1;
+            while k < 16 {
+                if c2 == 0 {
+                    k = 16;
+                }
+                if c2 > 0 {
+                    let s2: u64 = (prod.limbs[k] as u64) + c2;
+                    prod.limbs[k] = (s2 & 4294967295) as u32;
+                    c2 = s2 >> 32;  // FIX: update carry
                     k = k + 1;
                 }
             }
-            bj = bj + 1;
         }
         ai = ai + 1;
     }
 
-    // Reduction: prod has 16 limbs (512 bits). Since 2^255 ≡ 19 (mod p),
-    // limbs[8..15] represent bits 256..511, which equal 19 * (bits 0..255).
-    // So: r = prod[0..7] + 19 * prod[8..15] (mod p)
-    // We need to be careful with the 19* and carry propagation.
+    // Reduction: prod has 16 limbs (512 bits). The split is at the limb
+    // boundary (bit 256), NOT at bit 255. Since p = 2^255 - 19:
+    //   2^255 ≡ 19 (mod p)
+    //   2^256 = 2 * 2^255 ≡ 38 (mod p)
+    // So: r = prod[0..7] + 38 * prod[8..15] (mod p)
 
     let carry: u64 = 0;
     let i2: u32 = 0;
     while i2 < 8 {
         let hi_idx = i2 + 8;
-        let val: u64 = (prod.limbs[i2] as u64) + (19 * (prod.limbs[hi_idx] as u64)) + carry;
+        let val: u64 = (prod.limbs[i2] as u64) + (38 * (prod.limbs[hi_idx] as u64)) + carry;
         r.limbs[i2] = (val & 4294967295) as u32;
         carry = val >> 32;
         i2 = i2 + 1;
     }
-    // carry now holds the final overflow (0..18)
-    // Add carry * 19 to r[0] and propagate
-    let carry2: u64 = carry * 19;
+    // carry now holds the final overflow (0..38)
+    // Add carry * 38 to r[0] and propagate
+    let carry2: u64 = carry * 38;
     let i3: u32 = 0;
     let c3: u64 = carry2;
     while i3 < 8 {
@@ -301,8 +364,8 @@ transform fe_mul121666(r: State<Fe>, a: State<Fe>) {
         carry = val >> 32;
         i = i + 1;
     }
-    // Reduce carry * 19
-    let c2: u64 = carry * 19;
+    // Reduce carry * 38
+    let c2: u64 = carry * 38;
     let i2: u32 = 0;
     let c3: u64 = c2;
     while i2 < 8 {
