@@ -1,281 +1,414 @@
-// womb/crypto/aes192.vuma — AES-192 (NIST FIPS 197)
-// 192-bit key (24 bytes), Nk=6, Nr=12 rounds, 52-word = 208-byte round key schedule.
-// Includes encrypt AND decrypt (inverse cipher) plus CBC and CTR modes.
+// womb/crypto/symmetric/aes192.vuma — AES-192 (NIST FIPS 197)
+// 192-bit key (24 bytes, Nk=6), 12 rounds, 208-byte round key schedule.
+// PMT-native rewrite (W2-A2). Includes encrypt AND decrypt (inverse cipher).
 //
-// Block-level AES primitives (S-box, inverse S-box, Rcon, xtime, gmul,
-// add_round_key, sub_bytes, inv_sub_bytes, shift_rows, inv_shift_rows,
-// mix_columns, inv_mix_columns) are shared with aes128.vuma — these
-// operate on the 16-byte AES state and are independent of key size.
-// Only the key-expansion word count and the round count differ between
-// AES-128 / AES-192 / AES-256.
+// PMT patterns (per W48 sha.vuma / W1-A md5.vuma):
+//   - state_new(Layout) for allocations (NEVER allocate/free/Address/*ptr)
+//   - State<T> for transform parameters that take pointers
+//   - [u8; N] byte arrays with LITERAL indices for state load/store
+//   - Precompute loop-variable indices into local vars (let off = i * 4;)
+//     before array access (avoids v0.2.0-alpha.15 param-index codegen bug)
+//   - S-box / inverse S-box stored as [u8; 256] fields in AesCtx
+//   - add_round_key inlined into encrypt/decrypt (avoids passing round as
+//     a function parameter — the index-offset-as-param codegen bug)
+//   - Separate gmul2/gmul3/gmul9/gmul11/gmul13/gmul14 transforms (avoids
+//     the shared-function-with-literal-args codegen bug)
+//   - Decimal literals for all S-box values
 //
 // No main() — importable library module.
 
-const AES192_NK: u32 = 6;
-const AES192_NR: u32 = 12;
-const AES192_ROUND_KEYS_BYTES: u32 = 208;   // 4 * (Nr+1) * 4 = 13*16
+const MASK32: u32 = 4294967295;
 
 // ===========================================================================
-// AES-192 Key Expansion (FIPS 197 §5.2)
-// Nk=6, generates Nb*(Nr+1) = 4*13 = 52 32-bit words = 208 bytes.
-// For i in [Nk .. 4*(Nr+1)):
-//   temp = w[i-1]
-//   if i mod Nk == 0:
-//       temp = SubWord(RotWord(temp)) XOR Rcon[i/Nk]
-//   w[i] = w[i-Nk] XOR temp
+// Layouts
 // ===========================================================================
 
-transform aes192_key_expansion(key: Address, roundkeys: Address) {
-    // Copy the 24-byte (6-word) input key as the first 6 words.
-    i: u32 = 0;
+// AES context: round-key schedule (max 240 bytes for AES-256), round count,
+// and the 256-byte S-box + inverse S-box tables embedded directly (avoids
+// passing a separate tables state to every round function — compiler-bug
+// workaround #3: store parameters as fields in the context layout).
+layout AesCtx = {
+    round_keys: [u8; 240],
+    rounds: u32,
+    sbox: [u8; 256],
+    inv_sbox: [u8; 256],
+}
+
+// AES block (16 bytes = 128 bits — the AES block size for all key sizes).
+layout AesBlock = { data: [u8; 16] }
+
+// AES key (max 32 bytes for AES-256; AES-128 uses [0..15], AES-192 [0..23]).
+layout AesKey = { data: [u8; 32] }
+
+// ===========================================================================
+// S-box loader (FIPS 197 Figure 7 — 256 entries, decimal values)
+// ===========================================================================
+transform aes192_load_sbox(ctx: State<AesCtx>) {
+    ctx.sbox[0] = 99; ctx.sbox[1] = 124; ctx.sbox[2] = 119; ctx.sbox[3] = 123; ctx.sbox[4] = 242; ctx.sbox[5] = 107; ctx.sbox[6] = 111; ctx.sbox[7] = 197; ctx.sbox[8] = 48; ctx.sbox[9] = 1; ctx.sbox[10] = 103; ctx.sbox[11] = 43; ctx.sbox[12] = 254; ctx.sbox[13] = 215; ctx.sbox[14] = 171; ctx.sbox[15] = 118;
+    ctx.sbox[16] = 202; ctx.sbox[17] = 130; ctx.sbox[18] = 201; ctx.sbox[19] = 125; ctx.sbox[20] = 250; ctx.sbox[21] = 89; ctx.sbox[22] = 71; ctx.sbox[23] = 240; ctx.sbox[24] = 173; ctx.sbox[25] = 212; ctx.sbox[26] = 162; ctx.sbox[27] = 175; ctx.sbox[28] = 156; ctx.sbox[29] = 164; ctx.sbox[30] = 114; ctx.sbox[31] = 192;
+    ctx.sbox[32] = 183; ctx.sbox[33] = 253; ctx.sbox[34] = 147; ctx.sbox[35] = 38; ctx.sbox[36] = 54; ctx.sbox[37] = 63; ctx.sbox[38] = 247; ctx.sbox[39] = 204; ctx.sbox[40] = 52; ctx.sbox[41] = 165; ctx.sbox[42] = 229; ctx.sbox[43] = 241; ctx.sbox[44] = 113; ctx.sbox[45] = 216; ctx.sbox[46] = 49; ctx.sbox[47] = 21;
+    ctx.sbox[48] = 4; ctx.sbox[49] = 199; ctx.sbox[50] = 35; ctx.sbox[51] = 195; ctx.sbox[52] = 24; ctx.sbox[53] = 150; ctx.sbox[54] = 5; ctx.sbox[55] = 154; ctx.sbox[56] = 7; ctx.sbox[57] = 18; ctx.sbox[58] = 128; ctx.sbox[59] = 226; ctx.sbox[60] = 235; ctx.sbox[61] = 39; ctx.sbox[62] = 178; ctx.sbox[63] = 117;
+    ctx.sbox[64] = 9; ctx.sbox[65] = 131; ctx.sbox[66] = 44; ctx.sbox[67] = 26; ctx.sbox[68] = 27; ctx.sbox[69] = 110; ctx.sbox[70] = 90; ctx.sbox[71] = 160; ctx.sbox[72] = 82; ctx.sbox[73] = 59; ctx.sbox[74] = 214; ctx.sbox[75] = 179; ctx.sbox[76] = 41; ctx.sbox[77] = 227; ctx.sbox[78] = 47; ctx.sbox[79] = 132;
+    ctx.sbox[80] = 83; ctx.sbox[81] = 209; ctx.sbox[82] = 0; ctx.sbox[83] = 237; ctx.sbox[84] = 32; ctx.sbox[85] = 252; ctx.sbox[86] = 177; ctx.sbox[87] = 91; ctx.sbox[88] = 106; ctx.sbox[89] = 203; ctx.sbox[90] = 190; ctx.sbox[91] = 57; ctx.sbox[92] = 74; ctx.sbox[93] = 76; ctx.sbox[94] = 88; ctx.sbox[95] = 207;
+    ctx.sbox[96] = 208; ctx.sbox[97] = 239; ctx.sbox[98] = 170; ctx.sbox[99] = 251; ctx.sbox[100] = 67; ctx.sbox[101] = 77; ctx.sbox[102] = 51; ctx.sbox[103] = 133; ctx.sbox[104] = 69; ctx.sbox[105] = 249; ctx.sbox[106] = 2; ctx.sbox[107] = 127; ctx.sbox[108] = 80; ctx.sbox[109] = 60; ctx.sbox[110] = 159; ctx.sbox[111] = 168;
+    ctx.sbox[112] = 81; ctx.sbox[113] = 163; ctx.sbox[114] = 64; ctx.sbox[115] = 143; ctx.sbox[116] = 146; ctx.sbox[117] = 157; ctx.sbox[118] = 56; ctx.sbox[119] = 245; ctx.sbox[120] = 188; ctx.sbox[121] = 182; ctx.sbox[122] = 218; ctx.sbox[123] = 33; ctx.sbox[124] = 16; ctx.sbox[125] = 255; ctx.sbox[126] = 243; ctx.sbox[127] = 210;
+    ctx.sbox[128] = 205; ctx.sbox[129] = 12; ctx.sbox[130] = 19; ctx.sbox[131] = 236; ctx.sbox[132] = 95; ctx.sbox[133] = 151; ctx.sbox[134] = 68; ctx.sbox[135] = 23; ctx.sbox[136] = 196; ctx.sbox[137] = 167; ctx.sbox[138] = 126; ctx.sbox[139] = 61; ctx.sbox[140] = 100; ctx.sbox[141] = 93; ctx.sbox[142] = 25; ctx.sbox[143] = 115;
+    ctx.sbox[144] = 96; ctx.sbox[145] = 129; ctx.sbox[146] = 79; ctx.sbox[147] = 220; ctx.sbox[148] = 34; ctx.sbox[149] = 42; ctx.sbox[150] = 144; ctx.sbox[151] = 136; ctx.sbox[152] = 70; ctx.sbox[153] = 238; ctx.sbox[154] = 184; ctx.sbox[155] = 20; ctx.sbox[156] = 222; ctx.sbox[157] = 94; ctx.sbox[158] = 11; ctx.sbox[159] = 219;
+    ctx.sbox[160] = 224; ctx.sbox[161] = 50; ctx.sbox[162] = 58; ctx.sbox[163] = 10; ctx.sbox[164] = 73; ctx.sbox[165] = 6; ctx.sbox[166] = 36; ctx.sbox[167] = 92; ctx.sbox[168] = 194; ctx.sbox[169] = 211; ctx.sbox[170] = 172; ctx.sbox[171] = 98; ctx.sbox[172] = 145; ctx.sbox[173] = 149; ctx.sbox[174] = 228; ctx.sbox[175] = 121;
+    ctx.sbox[176] = 231; ctx.sbox[177] = 200; ctx.sbox[178] = 55; ctx.sbox[179] = 109; ctx.sbox[180] = 141; ctx.sbox[181] = 213; ctx.sbox[182] = 78; ctx.sbox[183] = 169; ctx.sbox[184] = 108; ctx.sbox[185] = 86; ctx.sbox[186] = 244; ctx.sbox[187] = 234; ctx.sbox[188] = 101; ctx.sbox[189] = 122; ctx.sbox[190] = 174; ctx.sbox[191] = 8;
+    ctx.sbox[192] = 186; ctx.sbox[193] = 120; ctx.sbox[194] = 37; ctx.sbox[195] = 46; ctx.sbox[196] = 28; ctx.sbox[197] = 166; ctx.sbox[198] = 180; ctx.sbox[199] = 198; ctx.sbox[200] = 232; ctx.sbox[201] = 221; ctx.sbox[202] = 116; ctx.sbox[203] = 31; ctx.sbox[204] = 75; ctx.sbox[205] = 189; ctx.sbox[206] = 139; ctx.sbox[207] = 138;
+    ctx.sbox[208] = 112; ctx.sbox[209] = 62; ctx.sbox[210] = 181; ctx.sbox[211] = 102; ctx.sbox[212] = 72; ctx.sbox[213] = 3; ctx.sbox[214] = 246; ctx.sbox[215] = 14; ctx.sbox[216] = 97; ctx.sbox[217] = 53; ctx.sbox[218] = 87; ctx.sbox[219] = 185; ctx.sbox[220] = 134; ctx.sbox[221] = 193; ctx.sbox[222] = 29; ctx.sbox[223] = 158;
+    ctx.sbox[224] = 225; ctx.sbox[225] = 248; ctx.sbox[226] = 152; ctx.sbox[227] = 17; ctx.sbox[228] = 105; ctx.sbox[229] = 217; ctx.sbox[230] = 142; ctx.sbox[231] = 148; ctx.sbox[232] = 155; ctx.sbox[233] = 30; ctx.sbox[234] = 135; ctx.sbox[235] = 233; ctx.sbox[236] = 206; ctx.sbox[237] = 85; ctx.sbox[238] = 40; ctx.sbox[239] = 223;
+    ctx.sbox[240] = 140; ctx.sbox[241] = 161; ctx.sbox[242] = 137; ctx.sbox[243] = 13; ctx.sbox[244] = 191; ctx.sbox[245] = 230; ctx.sbox[246] = 66; ctx.sbox[247] = 104; ctx.sbox[248] = 65; ctx.sbox[249] = 153; ctx.sbox[250] = 45; ctx.sbox[251] = 15; ctx.sbox[252] = 176; ctx.sbox[253] = 84; ctx.sbox[254] = 187; ctx.sbox[255] = 22;
+}
+
+// ===========================================================================
+// Inverse S-box loader (FIPS 197 Figure 7 — 256 entries, decimal values)
+// ===========================================================================
+transform aes192_load_inv_sbox(ctx: State<AesCtx>) {
+    ctx.inv_sbox[0] = 82; ctx.inv_sbox[1] = 9; ctx.inv_sbox[2] = 106; ctx.inv_sbox[3] = 213; ctx.inv_sbox[4] = 48; ctx.inv_sbox[5] = 54; ctx.inv_sbox[6] = 165; ctx.inv_sbox[7] = 56; ctx.inv_sbox[8] = 191; ctx.inv_sbox[9] = 64; ctx.inv_sbox[10] = 163; ctx.inv_sbox[11] = 158; ctx.inv_sbox[12] = 129; ctx.inv_sbox[13] = 243; ctx.inv_sbox[14] = 215; ctx.inv_sbox[15] = 251;
+    ctx.inv_sbox[16] = 124; ctx.inv_sbox[17] = 227; ctx.inv_sbox[18] = 57; ctx.inv_sbox[19] = 130; ctx.inv_sbox[20] = 155; ctx.inv_sbox[21] = 47; ctx.inv_sbox[22] = 255; ctx.inv_sbox[23] = 135; ctx.inv_sbox[24] = 52; ctx.inv_sbox[25] = 142; ctx.inv_sbox[26] = 67; ctx.inv_sbox[27] = 68; ctx.inv_sbox[28] = 196; ctx.inv_sbox[29] = 222; ctx.inv_sbox[30] = 233; ctx.inv_sbox[31] = 203;
+    ctx.inv_sbox[32] = 84; ctx.inv_sbox[33] = 123; ctx.inv_sbox[34] = 148; ctx.inv_sbox[35] = 50; ctx.inv_sbox[36] = 166; ctx.inv_sbox[37] = 194; ctx.inv_sbox[38] = 35; ctx.inv_sbox[39] = 61; ctx.inv_sbox[40] = 238; ctx.inv_sbox[41] = 76; ctx.inv_sbox[42] = 149; ctx.inv_sbox[43] = 11; ctx.inv_sbox[44] = 66; ctx.inv_sbox[45] = 250; ctx.inv_sbox[46] = 195; ctx.inv_sbox[47] = 78;
+    ctx.inv_sbox[48] = 8; ctx.inv_sbox[49] = 46; ctx.inv_sbox[50] = 161; ctx.inv_sbox[51] = 102; ctx.inv_sbox[52] = 40; ctx.inv_sbox[53] = 217; ctx.inv_sbox[54] = 36; ctx.inv_sbox[55] = 178; ctx.inv_sbox[56] = 118; ctx.inv_sbox[57] = 91; ctx.inv_sbox[58] = 162; ctx.inv_sbox[59] = 73; ctx.inv_sbox[60] = 109; ctx.inv_sbox[61] = 139; ctx.inv_sbox[62] = 209; ctx.inv_sbox[63] = 37;
+    ctx.inv_sbox[64] = 114; ctx.inv_sbox[65] = 248; ctx.inv_sbox[66] = 246; ctx.inv_sbox[67] = 100; ctx.inv_sbox[68] = 134; ctx.inv_sbox[69] = 104; ctx.inv_sbox[70] = 152; ctx.inv_sbox[71] = 22; ctx.inv_sbox[72] = 212; ctx.inv_sbox[73] = 164; ctx.inv_sbox[74] = 92; ctx.inv_sbox[75] = 204; ctx.inv_sbox[76] = 93; ctx.inv_sbox[77] = 101; ctx.inv_sbox[78] = 182; ctx.inv_sbox[79] = 146;
+    ctx.inv_sbox[80] = 108; ctx.inv_sbox[81] = 112; ctx.inv_sbox[82] = 72; ctx.inv_sbox[83] = 80; ctx.inv_sbox[84] = 253; ctx.inv_sbox[85] = 237; ctx.inv_sbox[86] = 185; ctx.inv_sbox[87] = 218; ctx.inv_sbox[88] = 94; ctx.inv_sbox[89] = 21; ctx.inv_sbox[90] = 70; ctx.inv_sbox[91] = 87; ctx.inv_sbox[92] = 167; ctx.inv_sbox[93] = 141; ctx.inv_sbox[94] = 157; ctx.inv_sbox[95] = 132;
+    ctx.inv_sbox[96] = 144; ctx.inv_sbox[97] = 216; ctx.inv_sbox[98] = 171; ctx.inv_sbox[99] = 0; ctx.inv_sbox[100] = 140; ctx.inv_sbox[101] = 188; ctx.inv_sbox[102] = 211; ctx.inv_sbox[103] = 10; ctx.inv_sbox[104] = 247; ctx.inv_sbox[105] = 228; ctx.inv_sbox[106] = 88; ctx.inv_sbox[107] = 5; ctx.inv_sbox[108] = 184; ctx.inv_sbox[109] = 179; ctx.inv_sbox[110] = 69; ctx.inv_sbox[111] = 6;
+    ctx.inv_sbox[112] = 208; ctx.inv_sbox[113] = 44; ctx.inv_sbox[114] = 30; ctx.inv_sbox[115] = 143; ctx.inv_sbox[116] = 202; ctx.inv_sbox[117] = 63; ctx.inv_sbox[118] = 15; ctx.inv_sbox[119] = 2; ctx.inv_sbox[120] = 193; ctx.inv_sbox[121] = 175; ctx.inv_sbox[122] = 189; ctx.inv_sbox[123] = 3; ctx.inv_sbox[124] = 1; ctx.inv_sbox[125] = 19; ctx.inv_sbox[126] = 138; ctx.inv_sbox[127] = 107;
+    ctx.inv_sbox[128] = 58; ctx.inv_sbox[129] = 145; ctx.inv_sbox[130] = 17; ctx.inv_sbox[131] = 65; ctx.inv_sbox[132] = 79; ctx.inv_sbox[133] = 103; ctx.inv_sbox[134] = 220; ctx.inv_sbox[135] = 234; ctx.inv_sbox[136] = 151; ctx.inv_sbox[137] = 242; ctx.inv_sbox[138] = 207; ctx.inv_sbox[139] = 206; ctx.inv_sbox[140] = 240; ctx.inv_sbox[141] = 180; ctx.inv_sbox[142] = 230; ctx.inv_sbox[143] = 115;
+    ctx.inv_sbox[144] = 150; ctx.inv_sbox[145] = 172; ctx.inv_sbox[146] = 116; ctx.inv_sbox[147] = 34; ctx.inv_sbox[148] = 231; ctx.inv_sbox[149] = 173; ctx.inv_sbox[150] = 53; ctx.inv_sbox[151] = 133; ctx.inv_sbox[152] = 226; ctx.inv_sbox[153] = 249; ctx.inv_sbox[154] = 55; ctx.inv_sbox[155] = 232; ctx.inv_sbox[156] = 28; ctx.inv_sbox[157] = 117; ctx.inv_sbox[158] = 223; ctx.inv_sbox[159] = 110;
+    ctx.inv_sbox[160] = 71; ctx.inv_sbox[161] = 241; ctx.inv_sbox[162] = 26; ctx.inv_sbox[163] = 113; ctx.inv_sbox[164] = 29; ctx.inv_sbox[165] = 41; ctx.inv_sbox[166] = 197; ctx.inv_sbox[167] = 137; ctx.inv_sbox[168] = 111; ctx.inv_sbox[169] = 183; ctx.inv_sbox[170] = 98; ctx.inv_sbox[171] = 14; ctx.inv_sbox[172] = 170; ctx.inv_sbox[173] = 24; ctx.inv_sbox[174] = 190; ctx.inv_sbox[175] = 27;
+    ctx.inv_sbox[176] = 252; ctx.inv_sbox[177] = 86; ctx.inv_sbox[178] = 62; ctx.inv_sbox[179] = 75; ctx.inv_sbox[180] = 198; ctx.inv_sbox[181] = 210; ctx.inv_sbox[182] = 121; ctx.inv_sbox[183] = 32; ctx.inv_sbox[184] = 154; ctx.inv_sbox[185] = 219; ctx.inv_sbox[186] = 192; ctx.inv_sbox[187] = 254; ctx.inv_sbox[188] = 120; ctx.inv_sbox[189] = 205; ctx.inv_sbox[190] = 90; ctx.inv_sbox[191] = 244;
+    ctx.inv_sbox[192] = 31; ctx.inv_sbox[193] = 221; ctx.inv_sbox[194] = 168; ctx.inv_sbox[195] = 51; ctx.inv_sbox[196] = 136; ctx.inv_sbox[197] = 7; ctx.inv_sbox[198] = 199; ctx.inv_sbox[199] = 49; ctx.inv_sbox[200] = 177; ctx.inv_sbox[201] = 18; ctx.inv_sbox[202] = 16; ctx.inv_sbox[203] = 89; ctx.inv_sbox[204] = 39; ctx.inv_sbox[205] = 128; ctx.inv_sbox[206] = 236; ctx.inv_sbox[207] = 95;
+    ctx.inv_sbox[208] = 96; ctx.inv_sbox[209] = 81; ctx.inv_sbox[210] = 127; ctx.inv_sbox[211] = 169; ctx.inv_sbox[212] = 25; ctx.inv_sbox[213] = 181; ctx.inv_sbox[214] = 74; ctx.inv_sbox[215] = 13; ctx.inv_sbox[216] = 45; ctx.inv_sbox[217] = 229; ctx.inv_sbox[218] = 122; ctx.inv_sbox[219] = 159; ctx.inv_sbox[220] = 147; ctx.inv_sbox[221] = 201; ctx.inv_sbox[222] = 156; ctx.inv_sbox[223] = 239;
+    ctx.inv_sbox[224] = 160; ctx.inv_sbox[225] = 224; ctx.inv_sbox[226] = 59; ctx.inv_sbox[227] = 77; ctx.inv_sbox[228] = 174; ctx.inv_sbox[229] = 42; ctx.inv_sbox[230] = 245; ctx.inv_sbox[231] = 176; ctx.inv_sbox[232] = 200; ctx.inv_sbox[233] = 235; ctx.inv_sbox[234] = 187; ctx.inv_sbox[235] = 60; ctx.inv_sbox[236] = 131; ctx.inv_sbox[237] = 83; ctx.inv_sbox[238] = 153; ctx.inv_sbox[239] = 97;
+    ctx.inv_sbox[240] = 23; ctx.inv_sbox[241] = 43; ctx.inv_sbox[242] = 4; ctx.inv_sbox[243] = 126; ctx.inv_sbox[244] = 186; ctx.inv_sbox[245] = 119; ctx.inv_sbox[246] = 214; ctx.inv_sbox[247] = 38; ctx.inv_sbox[248] = 225; ctx.inv_sbox[249] = 105; ctx.inv_sbox[250] = 20; ctx.inv_sbox[251] = 99; ctx.inv_sbox[252] = 85; ctx.inv_sbox[253] = 33; ctx.inv_sbox[254] = 12; ctx.inv_sbox[255] = 125;
+}
+
+// ===========================================================================
+// GF(2^8) arithmetic helpers (FIPS 197 §4.2 — xtime = multiply by 2)
+// ===========================================================================
+
+// xtime(a) = a * 2 in GF(2^8), with the AES reduction polynomial x^8+x^4+x^3+x+1.
+transform aes_xtime(a: u32) -> u32 {
+    let hi = (a >> 7) & 1;
+    let result = (a << 1) & 255;
+    if hi == 1 { result = result ^ 27; }
+    return result;
+}
+
+// Precomputed GF(2^8) multipliers for MixColumns / InvMixColumns.
+// Each is a separate transform (no literal multiplier parameter) to avoid
+// the shared-function-with-literal-args codegen bug (workaround #3).
+transform aes_gmul2(x: u32) -> u32 {
+    return aes_xtime(x) & 255;
+}
+transform aes_gmul3(x: u32) -> u32 {
+    return (aes_xtime(x) ^ x) & 255;
+}
+transform aes_gmul9(x: u32) -> u32 {
+    let x2 = aes_xtime(x);
+    let x4 = aes_xtime(x2);
+    let x8 = aes_xtime(x4);
+    return (x8 ^ x) & 255;
+}
+transform aes_gmul11(x: u32) -> u32 {
+    let x2 = aes_xtime(x);
+    let x4 = aes_xtime(x2);
+    let x8 = aes_xtime(x4);
+    return (x8 ^ x2 ^ x) & 255;
+}
+transform aes_gmul13(x: u32) -> u32 {
+    let x2 = aes_xtime(x);
+    let x4 = aes_xtime(x2);
+    let x8 = aes_xtime(x4);
+    return (x8 ^ x4 ^ x) & 255;
+}
+transform aes_gmul14(x: u32) -> u32 {
+    let x2 = aes_xtime(x);
+    let x4 = aes_xtime(x2);
+    let x8 = aes_xtime(x4);
+    return (x8 ^ x4 ^ x2) & 255;
+}
+
+// ===========================================================================
+// AES round functions (FIPS 197 §5.1.1 — operate on the 16-byte state)
+// ===========================================================================
+
+// SubBytes: replace each state byte with its S-box entry.
+transform aes_sub_bytes(ctx: State<AesCtx>, state: State<AesBlock>) {
+    let i: u32 = 0;
+    while i < 16 {
+        let idx = state.data[i] as u32;
+        state.data[i] = ctx.sbox[idx];
+        i = i + 1;
+    }
+}
+
+// InvSubBytes: replace each state byte with its inverse S-box entry.
+transform aes_inv_sub_bytes(ctx: State<AesCtx>, state: State<AesBlock>) {
+    let i: u32 = 0;
+    while i < 16 {
+        let idx = state.data[i] as u32;
+        state.data[i] = ctx.inv_sbox[idx];
+        i = i + 1;
+    }
+}
+
+// ShiftRows: cyclic left-shift of each row by its row index.
+// State is column-major: byte[r + 4*c] where r=row, c=col.
+//   Row 0: no shift. Row 1: shift left 1. Row 2: shift left 2. Row 3: shift left 3.
+transform aes_shift_rows(state: State<AesBlock>) {
+    // Row 1: [1,5,9,13] -> [5,9,13,1]
+    let t1: u32 = state.data[1] as u32;
+    state.data[1] = state.data[5];
+    state.data[5] = state.data[9];
+    state.data[9] = state.data[13];
+    state.data[13] = t1 as u8;
+    // Row 2: [2,6,10,14] -> [10,14,2,6]
+    let t2: u32 = state.data[2] as u32;
+    state.data[2] = state.data[10];
+    state.data[10] = t2 as u8;
+    let t6: u32 = state.data[6] as u32;
+    state.data[6] = state.data[14];
+    state.data[14] = t6 as u8;
+    // Row 3: [3,7,11,15] -> [15,3,7,11]
+    let t15: u32 = state.data[15] as u32;
+    state.data[15] = state.data[11];
+    state.data[11] = state.data[7];
+    state.data[7] = state.data[3];
+    state.data[3] = t15 as u8;
+}
+
+// InvShiftRows: cyclic right-shift of each row by its row index.
+transform aes_inv_shift_rows(state: State<AesBlock>) {
+    // Row 1: [1,5,9,13] -> [13,1,5,9]
+    let t13: u32 = state.data[13] as u32;
+    state.data[13] = state.data[9];
+    state.data[9] = state.data[5];
+    state.data[5] = state.data[1];
+    state.data[1] = t13 as u8;
+    // Row 2: [2,6,10,14] -> [10,14,2,6]
+    let t2: u32 = state.data[2] as u32;
+    state.data[2] = state.data[10];
+    state.data[10] = t2 as u8;
+    let t6: u32 = state.data[6] as u32;
+    state.data[6] = state.data[14];
+    state.data[14] = t6 as u8;
+    // Row 3: [3,7,11,15] -> [7,11,15,3]
+    let t3: u32 = state.data[3] as u32;
+    state.data[3] = state.data[7];
+    state.data[7] = state.data[11];
+    state.data[11] = state.data[15];
+    state.data[15] = t3 as u8;
+}
+
+// MixColumns: transform each column via the GF(2^8) matrix {02,03,01,01}.
+// Uses the optimized xtime formula: s'_i = s_i ^ t ^ xtime(s_i ^ s_{i+1})
+// where t = s0 ^ s1 ^ s2 ^ s3 (column XOR).
+transform aes_mix_columns(state: State<AesBlock>) {
+    let c: u32 = 0;
+    while c < 4 {
+        let off = c * 4;
+        let s0 = state.data[off] as u32;
+        let s1 = state.data[off + 1] as u32;
+        let s2 = state.data[off + 2] as u32;
+        let s3 = state.data[off + 3] as u32;
+        let t = (s0 ^ s1 ^ s2 ^ s3) & 255;
+        state.data[off]     = ((s0 ^ t ^ aes_xtime(s0 ^ s1)) & 255) as u8;
+        state.data[off + 1] = ((s1 ^ t ^ aes_xtime(s1 ^ s2)) & 255) as u8;
+        state.data[off + 2] = ((s2 ^ t ^ aes_xtime(s2 ^ s3)) & 255) as u8;
+        state.data[off + 3] = ((s3 ^ t ^ aes_xtime(s3 ^ s0)) & 255) as u8;
+        c = c + 1;
+    }
+}
+
+// InvMixColumns: transform each column via the GF(2^8) matrix {0e,0b,0d,09}.
+transform aes_inv_mix_columns(state: State<AesBlock>) {
+    let c: u32 = 0;
+    while c < 4 {
+        let off = c * 4;
+        let s0 = state.data[off] as u32;
+        let s1 = state.data[off + 1] as u32;
+        let s2 = state.data[off + 2] as u32;
+        let s3 = state.data[off + 3] as u32;
+        state.data[off]     = ((aes_gmul14(s0) ^ aes_gmul11(s1) ^ aes_gmul13(s2) ^ aes_gmul9(s3)) & 255) as u8;
+        state.data[off + 1] = ((aes_gmul9(s0)  ^ aes_gmul14(s1) ^ aes_gmul11(s2) ^ aes_gmul13(s3)) & 255) as u8;
+        state.data[off + 2] = ((aes_gmul13(s0) ^ aes_gmul9(s1)  ^ aes_gmul14(s2) ^ aes_gmul11(s3)) & 255) as u8;
+        state.data[off + 3] = ((aes_gmul11(s0) ^ aes_gmul13(s1) ^ aes_gmul9(s2)  ^ aes_gmul14(s3)) & 255) as u8;
+        c = c + 1;
+    }
+}
+
+// ===========================================================================
+// AES-192 Key Expansion (FIPS 197 §5.2 — Nk=6, Nr=12, 52 words = 208 bytes)
+// Copy 6 key words; for i=6..51: temp = w[i-1]; if i%6==0:
+//   temp = SubWord(RotWord(temp)) XOR Rcon[i/6]; w[i] = w[i-6] XOR temp.
+// ===========================================================================
+transform aes192_init(ctx: State<AesCtx>, key: State<AesKey>) {
+    aes192_load_sbox(ctx);
+    aes192_load_inv_sbox(ctx);
+    ctx.rounds = 12;
+
+    // Copy the 24-byte (6-word) key into the first 6 round-key words.
+    let i: u32 = 0;
     while i < 24 {
-        *(roundkeys + i) = *(key + i);
+        ctx.round_keys[i] = key.data[i];
         i = i + 1;
     }
 
-    // Expand words [6 .. 52)
-    i = AES192_NK;
+    // Expand words 6 .. 51 (46 more words = 184 bytes).
+    let rcon: u32 = 1;
+    i = 6;
     while i < 52 {
-        t0: u32 = *(roundkeys + (i - 1) * 4);
-        t1: u32 = *(roundkeys + (i - 1) * 4 + 1);
-        t2: u32 = *(roundkeys + (i - 1) * 4 + 2);
-        t3: u32 = *(roundkeys + (i - 1) * 4 + 3);
+        let prev_off = (i - 1) * 4;
+        let t0 = ctx.round_keys[prev_off] as u32;
+        let t1 = ctx.round_keys[prev_off + 1] as u32;
+        let t2 = ctx.round_keys[prev_off + 2] as u32;
+        let t3 = ctx.round_keys[prev_off + 3] as u32;
 
-        if i % AES192_NK == 0 {
-            // RotWord: rotate the 4-byte word left by one byte.
-            tmp: u32 = t0;
-            t0 = t1; t1 = t2; t2 = t3; t3 = tmp;
+        if i % 6 == 0 {
+            // RotWord: rotate left by one byte.
+            let tmp = t0;
+            let nt0 = t1;
+            let nt1 = t2;
+            let nt2 = t3;
+            let nt3 = tmp;
             // SubWord: apply S-box to each byte.
-            t0 = sbox(t0);
-            t1 = sbox(t1);
-            t2 = sbox(t2);
-            t3 = sbox(t3);
-            // XOR the round constant into the leading byte.
-            t0 = t0 ^ rcon(i / AES192_NK);
+            let st0 = ctx.sbox[nt0] as u32;
+            let st1 = ctx.sbox[nt1] as u32;
+            let st2 = ctx.sbox[nt2] as u32;
+            let st3 = ctx.sbox[nt3] as u32;
+            t0 = st0 ^ rcon;
+            t1 = st1;
+            t2 = st2;
+            t3 = st3;
+            rcon = aes_xtime(rcon);
         }
 
-        w0: u32 = *(roundkeys + (i - AES192_NK) * 4);
-        w1: u32 = *(roundkeys + (i - AES192_NK) * 4 + 1);
-        w2: u32 = *(roundkeys + (i - AES192_NK) * 4 + 2);
-        w3: u32 = *(roundkeys + (i - AES192_NK) * 4 + 3);
+        let woff = (i - 6) * 4;
+        let w0 = ctx.round_keys[woff] as u32;
+        let w1 = ctx.round_keys[woff + 1] as u32;
+        let w2 = ctx.round_keys[woff + 2] as u32;
+        let w3 = ctx.round_keys[woff + 3] as u32;
 
-        *(roundkeys + i * 4)     = w0 ^ t0;
-        *(roundkeys + i * 4 + 1) = w1 ^ t1;
-        *(roundkeys + i * 4 + 2) = w2 ^ t2;
-        *(roundkeys + i * 4 + 3) = w3 ^ t3;
+        let doff = i * 4;
+        ctx.round_keys[doff]     = ((w0 ^ t0) & 255) as u8;
+        ctx.round_keys[doff + 1] = ((w1 ^ t1) & 255) as u8;
+        ctx.round_keys[doff + 2] = ((w2 ^ t2) & 255) as u8;
+        ctx.round_keys[doff + 3] = ((w3 ^ t3) & 255) as u8;
 
         i = i + 1;
     }
 }
 
 // ===========================================================================
-// AES-192 encrypt one 16-byte block (FIPS 197 §5.1, 7.1)
-// State := in
-// AddRoundKey(state, w[0..3])
-// for round in 1..Nr-1:
-//     SubBytes / ShiftRows / MixColumns / AddRoundKey
-// SubBytes / ShiftRows / AddRoundKey(w[Nr*4..])
-// out := state
+// AES encrypt one 16-byte block (FIPS 197 §5.1, §7.1)
+// AddRoundKey(0); for round 1..Nr-1: SubBytes, ShiftRows, MixColumns, AddRoundKey;
+// final: SubBytes, ShiftRows, AddRoundKey(Nr).
+//
+// AddRoundKey is inlined (not a separate transform) to avoid passing `round`
+// as a function parameter — the index-offset-as-param codegen bug (see
+// md5.vuma's workaround note).
 // ===========================================================================
+transform aes_encrypt_block(ctx: State<AesCtx>, pt: State<AesBlock>, ct: State<AesBlock>) {
+    // Copy plaintext to working state (ct doubles as the working buffer).
+    let i: u32 = 0;
+    while i < 16 {
+        ct.data[i] = pt.data[i];
+        i = i + 1;
+    }
 
-transform aes192_encrypt_block(plaintext: Address, key: Address, ciphertext: Address) {
-    roundkeys = allocate(AES192_ROUND_KEYS_BYTES);
-    aes192_key_expansion(key, roundkeys);
+    // AddRoundKey(0) — inlined.
+    let j: u32 = 0;
+    while j < 16 {
+        let sj = ct.data[j] as u32;
+        let rj = ctx.round_keys[j] as u32;
+        ct.data[j] = ((sj ^ rj) & 255) as u8;
+        j = j + 1;
+    }
 
-    state = allocate(16);
-    i: u32 = 0;
-    while i < 16 { *(state + i) = *(plaintext + i); i = i + 1; }
-
-    add_round_key(state, roundkeys, 0);
-
-    round: u32 = 1;
-    while round < AES192_NR {
-        sub_bytes(state);
-        shift_rows(state);
-        mix_columns(state);
-        add_round_key(state, roundkeys, round);
+    // Rounds 1 .. Nr-1.
+    let round: u32 = 1;
+    while round < ctx.rounds {
+        aes_sub_bytes(ctx, ct);
+        aes_shift_rows(ct);
+        aes_mix_columns(ct);
+        // AddRoundKey(round) — inlined.
+        let off = round * 16;
+        let k: u32 = 0;
+        while k < 16 {
+            let sk = ct.data[k] as u32;
+            let rk = ctx.round_keys[off + k] as u32;
+            ct.data[k] = ((sk ^ rk) & 255) as u8;
+            k = k + 1;
+        }
         round = round + 1;
     }
 
-    // Final round: no MixColumns.
-    sub_bytes(state);
-    shift_rows(state);
-    add_round_key(state, roundkeys, AES192_NR);
-
-    i = 0;
-    while i < 16 { *(ciphertext + i) = *(state + i); i = i + 1; }
-
-    free(roundkeys);
-    free(state);
+    // Final round (no MixColumns).
+    aes_sub_bytes(ctx, ct);
+    aes_shift_rows(ct);
+    // AddRoundKey(Nr) — inlined.
+    let final_off = ctx.rounds * 16;
+    let m: u32 = 0;
+    while m < 16 {
+        let sm = ct.data[m] as u32;
+        let rm = ctx.round_keys[final_off + m] as u32;
+        ct.data[m] = ((sm ^ rm) & 255) as u8;
+        m = m + 1;
+    }
 }
 
 // ===========================================================================
-// AES-192 decrypt one 16-byte block (FIPS 197 §5.3, 7.2 — inverse cipher)
-// State := in
-// AddRoundKey(state, w[Nr*4..])
-// for round in Nr-1 .. 1:
-//     InvShiftRows / InvSubBytes / AddRoundKey / InvMixColumns
-// InvShiftRows / InvSubBytes / AddRoundKey(w[0..3])
-// out := state
+// AES decrypt one 16-byte block (FIPS 197 §5.3, §7.2 — inverse cipher)
+// AddRoundKey(Nr); for round Nr-1..1: InvShiftRows, InvSubBytes, AddRoundKey,
+// InvMixColumns; final: InvShiftRows, InvSubBytes, AddRoundKey(0).
 // ===========================================================================
+transform aes_decrypt_block(ctx: State<AesCtx>, ct: State<AesBlock>, pt: State<AesBlock>) {
+    // Copy ciphertext to working state (pt doubles as the working buffer).
+    let i: u32 = 0;
+    while i < 16 {
+        pt.data[i] = ct.data[i];
+        i = i + 1;
+    }
 
-transform aes192_decrypt_block(ciphertext: Address, key: Address, plaintext: Address) {
-    roundkeys = allocate(AES192_ROUND_KEYS_BYTES);
-    aes192_key_expansion(key, roundkeys);
+    // AddRoundKey(Nr) — inlined.
+    let init_off = ctx.rounds * 16;
+    let j: u32 = 0;
+    while j < 16 {
+        let sj = pt.data[j] as u32;
+        let rj = ctx.round_keys[init_off + j] as u32;
+        pt.data[j] = ((sj ^ rj) & 255) as u8;
+        j = j + 1;
+    }
 
-    state = allocate(16);
-    i: u32 = 0;
-    while i < 16 { *(state + i) = *(ciphertext + i); i = i + 1; }
-
-    add_round_key(state, roundkeys, AES192_NR);
-
-    round: u32 = AES192_NR - 1;
-    while round >= 1 {
-        inv_shift_rows(state);
-        inv_sub_bytes(state);
-        add_round_key(state, roundkeys, round);
-        inv_mix_columns(state);
+    // Rounds Nr-1 .. 1.
+    let round: u32 = ctx.rounds - 1;
+    while round > 0 {
+        aes_inv_shift_rows(pt);
+        aes_inv_sub_bytes(ctx, pt);
+        // AddRoundKey(round) — inlined.
+        let off = round * 16;
+        let k: u32 = 0;
+        while k < 16 {
+            let sk = pt.data[k] as u32;
+            let rk = ctx.round_keys[off + k] as u32;
+            pt.data[k] = ((sk ^ rk) & 255) as u8;
+            k = k + 1;
+        }
+        aes_inv_mix_columns(pt);
         round = round - 1;
     }
 
-    inv_shift_rows(state);
-    inv_sub_bytes(state);
-    add_round_key(state, roundkeys, 0);
-
-    i = 0;
-    while i < 16 { *(plaintext + i) = *(state + i); i = i + 1; }
-
-    free(roundkeys);
-    free(state);
-}
-
-// ===========================================================================
-// AES-192-CBC (SP 800-38A §6.2) with PKCS#7 padding
-// Encrypt: C_0 = IV; for each block i: C_i = AES_enc(P_i XOR C_{i-1})
-// Decrypt: P_i = AES_dec(C_i) XOR C_{i-1}
-// ===========================================================================
-
-transform aes192_cbc_encrypt(plaintext: Address, pt_len: u32, key: Address, iv: Address, ciphertext: Address) -> u32 {
-    // PKCS#7 pad to a multiple of 16; always append 1..16 bytes.
-    pad_byte: u32 = 16 - (pt_len % 16);
-    if pad_byte == 0 { pad_byte = 16; }
-    padded_len: u32 = pt_len + pad_byte;
-
-    padded = allocate(padded_len);
-    i: u32 = 0;
-    while i < pt_len { *(padded + i) = *(plaintext + i); i = i + 1; }
-    while i < padded_len { *(padded + i) = pad_byte & 255; i = i + 1; }
-
-    prev = allocate(16);
-    i = 0;
-    while i < 16 { *(prev + i) = *(iv + i); i = i + 1; }
-
-    block_idx: u32 = 0;
-    while block_idx < padded_len {
-        xored = allocate(16);
-        i = 0;
-        while i < 16 {
-            *(xored + i) = (*(padded + block_idx + i) ^ *(prev + i)) & 255;
-            i = i + 1;
-        }
-        ct_block = allocate(16);
-        aes192_encrypt_block(xored, key, ct_block);
-        i = 0;
-        while i < 16 {
-            *(ciphertext + block_idx + i) = *(ct_block + i);
-            *(prev + i) = *(ct_block + i);
-            i = i + 1;
-        }
-        free(xored);
-        free(ct_block);
-        block_idx = block_idx + 16;
+    // Final round (no InvMixColumns).
+    aes_inv_shift_rows(pt);
+    aes_inv_sub_bytes(ctx, pt);
+    // AddRoundKey(0) — inlined.
+    let m: u32 = 0;
+    while m < 16 {
+        let sm = pt.data[m] as u32;
+        let rm = ctx.round_keys[m] as u32;
+        pt.data[m] = ((sm ^ rm) & 255) as u8;
+        m = m + 1;
     }
-
-    free(padded);
-    free(prev);
-    return padded_len;
-}
-
-transform aes192_cbc_decrypt(ciphertext: Address, ct_len: u32, key: Address, iv: Address, plaintext: Address) -> u32 {
-    prev = allocate(16);
-    i: u32 = 0;
-    while i < 16 { *(prev + i) = *(iv + i); i = i + 1; }
-
-    block_idx: u32 = 0;
-    while block_idx < ct_len {
-        pt_block = allocate(16);
-        aes192_decrypt_block(ciphertext + block_idx, key, pt_block);
-        i = 0;
-        while i < 16 {
-            *(plaintext + block_idx + i) = (*(pt_block + i) ^ *(prev + i)) & 255;
-            i = i + 1;
-        }
-        i = 0;
-        while i < 16 { *(prev + i) = *(ciphertext + block_idx + i); i = i + 1; }
-        free(pt_block);
-        block_idx = block_idx + 16;
-    }
-
-    // Strip PKCS#7 padding if it is well-formed; otherwise return ct_len
-    // (caller sees the raw decrypted bytes — matches NIST CBC decrypt
-    // behaviour when padding validation is deferred to the caller).
-    pad: u32 = *(plaintext + ct_len - 1);
-    if pad >= 1 {
-        if pad <= 16 {
-            free(prev);
-            return ct_len - pad;
-        }
-    }
-    free(prev);
-    return ct_len;
-}
-
-// ===========================================================================
-// AES-192-CTR (SP 800-38A §6.5)
-// Layout of the 16-byte counter block: 12-byte nonce || 4-byte big-endian
-// counter. Encrypt = decrypt (XOR keystream). Trailing short block is
-// XORed against the leading bytes of the keystream.
-// ===========================================================================
-
-transform aes192_ctr_crypt(data: Address, data_len: u32, key: Address, nonce: Address, output: Address) -> u32 {
-    counter_block = allocate(16);
-    i: u32 = 0;
-    while i < 12 { *(counter_block + i) = *(nonce + i); i = i + 1; }
-    *(counter_block + 12) = 0;
-    *(counter_block + 13) = 0;
-    *(counter_block + 14) = 0;
-    *(counter_block + 15) = 0;
-
-    pos: u32 = 0;
-    while pos < data_len {
-        keystream = allocate(16);
-        aes192_encrypt_block(counter_block, key, keystream);
-
-        block_remaining: u32 = data_len - pos;
-        to_xor: u32 = 16;
-        if block_remaining < 16 { to_xor = block_remaining; }
-
-        i = 0;
-        while i < to_xor {
-            *(output + pos + i) = (*(data + pos + i) ^ *(keystream + i)) & 255;
-            i = i + 1;
-        }
-        free(keystream);
-
-        // Big-endian increment of the 32-bit counter in bytes [12..16].
-        carry: u32 = 1;
-        j: u32 = 15;
-        while j >= 12 {
-            val: u32 = *(counter_block + j) + carry;
-            *(counter_block + j) = val & 255;
-            carry = val >> 8;
-            if j == 0 { break; }
-            j = j - 1;
-        }
-
-        pos = pos + to_xor;
-    }
-
-    free(counter_block);
-    return data_len;
 }
