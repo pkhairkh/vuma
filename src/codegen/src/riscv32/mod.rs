@@ -6755,6 +6755,59 @@ impl Backend for RiscV32Backend {
                                         _ => unreachable!(),
                                     }
                                     code.extend(ss_store_64(Gpr::T0, Gpr::T2, dst_offset));
+                                } else if is_64bit && matches!(op, BinOpKind::Shl | BinOpKind::ShrL | BinOpKind::ShrA)
+                                    && matches!(rhs, IRValue::Register(_)) {
+                                    // W4-blake2: 64-bit shift with VARIABLE shift amount (Register).
+                                    // riscv32 has no 64-bit shift instruction. Use a shift-by-1 loop.
+                                    // T0 = lhs_lo, T2 = lhs_hi, T1 = shift_count
+                                    code.extend(ss_load_value_64(Gpr::T0, Gpr::T2, lhs, &vreg_stack_slots));
+                                    code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
+                                    let loop_label = code.len();
+                                    // Placeholder beq — patch offset after emitting loop body
+                                    let beq_offset_pos = code.len();
+                                    code.extend(Instruction::Beq { rs1: Gpr::T1, rs2: Gpr::Zero, offset: 0 }.encode());
+                                    match op {
+                                        BinOpKind::ShrL | BinOpKind::ShrA => {
+                                            // T3 = T2 & 1 (cross bit from hi to lo)
+                                            code.extend(Instruction::Andi { rd: Gpr::T3, rs1: Gpr::T2, imm: 1 }.encode());
+                                            // T0 = T0 >> 1
+                                            code.extend(Instruction::Srli { rd: Gpr::T0, rs1: Gpr::T0, shamt: 1 }.encode());
+                                            // T0 |= T3 << 31
+                                            code.extend(Instruction::Slli { rd: Gpr::T3, rs1: Gpr::T3, shamt: 31 }.encode());
+                                            code.extend(Instruction::Or { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T3 }.encode());
+                                            // T2 = T2 >> 1
+                                            if matches!(op, BinOpKind::ShrA) {
+                                                code.extend(Instruction::Srai { rd: Gpr::T2, rs1: Gpr::T2, shamt: 1 }.encode());
+                                            } else {
+                                                code.extend(Instruction::Srli { rd: Gpr::T2, rs1: Gpr::T2, shamt: 1 }.encode());
+                                            }
+                                        }
+                                        BinOpKind::Shl => {
+                                            // T3 = T0 >> 31 (cross bit from lo to hi)
+                                            code.extend(Instruction::Srli { rd: Gpr::T3, rs1: Gpr::T0, shamt: 31 }.encode());
+                                            // T0 = T0 << 1
+                                            code.extend(Instruction::Slli { rd: Gpr::T0, rs1: Gpr::T0, shamt: 1 }.encode());
+                                            // T2 = (T2 << 1) | T3
+                                            code.extend(Instruction::Slli { rd: Gpr::T2, rs1: Gpr::T2, shamt: 1 }.encode());
+                                            code.extend(Instruction::Or { rd: Gpr::T2, rs1: Gpr::T2, rs2: Gpr::T3 }.encode());
+                                        }
+                                        _ => unreachable!(),
+                                    }
+                                    // T1--
+                                    code.extend(Instruction::Addi { rd: Gpr::T1, rs1: Gpr::T1, imm: -1 }.encode());
+                                    // Backward branch to loop_label (beq zero, zero, disp)
+                                    let back_disp = loop_label as i64 - code.len() as i64;
+                                    code.extend(Instruction::Beq { rs1: Gpr::Zero, rs2: Gpr::Zero, offset: back_disp as i32 }.encode());
+                                    // Patch the forward beq to skip to here (past the backward branch)
+                                    let forward_skip = (code.len() - beq_offset_pos) as i32;
+                                    let beq_word = u32::from_le_bytes([
+                                        code[beq_offset_pos], code[beq_offset_pos + 1],
+                                        code[beq_offset_pos + 2], code[beq_offset_pos + 3],
+                                    ]);
+                                    // Re-encode beq with the correct offset
+                                    let patched = Instruction::Beq { rs1: Gpr::T1, rs2: Gpr::Zero, offset: forward_skip }.encode();
+                                    code[beq_offset_pos..beq_offset_pos + 4].copy_from_slice(&patched);
+                                    code.extend(ss_store_64(Gpr::T0, Gpr::T2, dst_offset));
                                 } else if is_64bit && matches!(op, BinOpKind::Mul) {
                                     // [ext] I64 Mul: 64-bit multiply on RV32.
                                     // 64-bit result = a_lo * b_lo + (a_lo * b_hi + a_hi * b_lo) << 32
