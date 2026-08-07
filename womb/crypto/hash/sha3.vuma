@@ -1,14 +1,77 @@
-// womb/crypto/sha3.vuma — SHA-3 / Keccak / SHAKE (NIST FIPS 202)
-// Implements Keccak-f[1600] (24-round permutation over a 1600-bit state),
-// SHA-3-256, SHA-3-512, SHAKE128, and SHAKE256.
-// State is 25 lanes of u64 = 200 bytes, stored little-endian per FIPS 202.
-// No main() — importable library module.
-
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/crypto/hash/sha3.vuma
+// SHA-3 / Keccak / SHAKE — NIST FIPS 202 PMT-native implementation (W1-E).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Implements the Keccak-f[1600] permutation (24 rounds of θ, ρ, π, χ, ι
+// over a 5×5 matrix of 64-bit lanes) and the sponge construction:
+//   - SHA3-224 (rate=144, output=28, ds=0x06)
+//   - SHA3-256 (rate=136, output=32, ds=0x06)
+//   - SHA3-384 (rate=104, output=48, ds=0x06)
+//   - SHA3-512 (rate=72,  output=64, ds=0x06)
+//   - SHAKE128 (rate=168, variable output, ds=0x1F)
+//   - SHAKE256 (rate=136, variable output, ds=0x1F)
+//
+// The 1600-bit state is stored as 200 bytes (25 lanes × 8 bytes, each lane
+// little-endian per FIPS 202 §3). Lane (x, y) resides at byte offset
+// (x + 5*y) * 8.
+//
+// ── PMT patterns ────────────────────────────────────────────────────────────
+//   - `state_new(Layout)` for all allocations (NEVER `allocate()`)
+//   - `State<T>` for transform parameters (NEVER `Address` / `*ptr`)
+//   - `[u8; 200]` byte array for the Keccak state (byte-granular absorb /
+//     squeeze / pad) with `keccak_load_lane` / `keccak_store_lane` helpers
+//     for LE u64 access during the permutation
+//   - `[u64; 25]` typed array for the rho+pi scratch buffer B (typed-array
+//     index scaling reads/writes the u64 lane at slot i)
+//   - `[u64; 24]` typed array for the round constants table RC
+//   - Loop-variable-derived indices precomputed into local vars before
+//     array access (e.g. `let toff = (tx + ty5) * 8;`)
+//
+// ── VUMA compiler workaround (W1-E) ─────────────────────────────────────────
+// VUMA 2.0 has a parameter-binding bug: when multiple transforms call the
+// same shared function with DIFFERENT literal arguments (e.g.
+// `keccak_init(ctx, 144, 28)` vs `keccak_init(ctx, 136, 32)`), the
+// compiled code uses the FIRST caller's literals for ALL subsequent
+// callers. This was confirmed by observing that `sha3_256_init` produced
+// the SHA3-224 digest (rate=144) when `sha3_224_init` was defined earlier
+// in the same file.
+//
+// Workaround: avoid passing variant-specific literals (rate, output_len,
+// domain_sep) as parameters to shared functions. Instead, store them as
+// fields in KeccakCtx and set them directly in each variant's init
+// function. The shared keccak_pad and keccak_squeeze functions read
+// ctx.domain_sep and ctx.output_len from the context — no literal
+// parameters, no interference.
+//
+// ── VUMA u64 literal rule ───────────────────────────────────────────────────
 // VUMA's parser rejects integer literals >= 2^63 for u64. Constants at or
-// above that threshold are written as (1 << 63) | lower_63_bits.
+// above that threshold are written as (1 << 63) | lower_63_bits, which the
+// parser evaluates to the correct unsigned u64 value.
+//
+// ── Test vectors (verified in main) ─────────────────────────────────────────
+//   SHA3-256("")   = a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a
+//   SHA3-256("abc")= 3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532
+//   SHA3-512("")   = a69f73cca23a9ac5c8b567dc185a756e97c982164fe25859e0d1dcc1475c80a6
+//                    15b2123af1f5f94c11e3e9402c3ac558f500199d95b6d3e301758586281dcd26
+//   SHA3-512("abc")= b751850b1a57168a5693cd924b6b096e08f621827444f70d884f5d0240d2712e
+//                    10e116e9192af3c91a7ec57647e3934057340b4cf408d5a56592f8274eec53f0
+//   SHA3-224("")   = 6b4e03423667dbb73b6e15454f0eb1abd4597f9a1b078e3f5b5a6bc7
+//   SHA3-224("abc")= e642824c3f8cf24ad09234ee7d3c766fc9a3a5168d0c94ad73b46fdf
+//   SHA3-384("")   = 0c63a75b845e4f7d01107d852e4c2485c51a50aaaa94fc61995e71bbee983a2a
+//                    c3713831264adb47fb6bd1e058d5f004
+//   SHA3-384("abc")= ec01498288516fc926459f58e2c6ad8df9b473cb0fc08c2596da7cf0e49be4b2
+//                    98d88cea927ac7f539f1edf228376d25
+
+// 64-bit mask: all bits set. Used for NOT(x) = x ^ MASK64 (VUMA has no
+// unary NOT on u64). Composed as (1<<63) | ((1<<63)-1) to avoid a literal
+// >= 2^63.
 const MASK64: u64 = (1 << 63) | ((1 << 63) - 1);
 
-// Keccak-f[1600] round constants RC[0..23] (FIPS 202 Section 3.1.2 / Algorithm 5)
+// ===========================================================================
+// Keccak-f[1600] round constants RC[0..23] (FIPS 202 §3.1.2 / Algorithm 5).
+// 24 constants, one per round. Values >= 2^63 use the (1 << 63) | lower form.
+// ===========================================================================
 const RC00: u64 = 1;
 const RC01: u64 = 32898;
 const RC02: u64 = (1 << 63) | 32906;
@@ -34,87 +97,178 @@ const RC21: u64 = (1 << 63) | 32896;
 const RC22: u64 = 2147483649;
 const RC23: u64 = (1 << 63) | 2147516424;
 
-transform load_u64_le(ptr: Address, off: u32) -> u64 {
-    b0: u64 = *(ptr + off); b1: u64 = *(ptr + off + 1);
-    b2: u64 = *(ptr + off + 2); b3: u64 = *(ptr + off + 3);
-    b4: u64 = *(ptr + off + 4); b5: u64 = *(ptr + off + 5);
-    b6: u64 = *(ptr + off + 6); b7: u64 = *(ptr + off + 7);
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
-         | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+// ===========================================================================
+// Layouts
+// ===========================================================================
+
+// Keccak sponge context (416 bytes):
+//   [  0..199] state[200]    25 × 8-byte little-endian lanes (1600-bit state)
+//   [200..399] buf[200]      partial-input accumulator (large enough for the
+//                             largest rate = 168 bytes for SHAKE128)
+//   [400..403] len           bytes currently in the buffer (u32)
+//   [404..407] rate          sponge rate in bytes (72..168)
+//   [408..411] output_len    digest length in bytes (28..64 for SHA-3; 0 for
+//                            SHAKE until squeeze sets it)
+//   [412..415] domain_sep    padding domain separator (0x06 for SHA-3,
+//                            0x1F for SHAKE)
+//
+// rate, output_len, and domain_sep are stored as fields (not passed as
+// parameters to shared functions) to work around VUMA's parameter-binding
+// bug — see the header comment above.
+layout KeccakCtx = {
+    state: [u8; 200],
+    buf: [u8; 200],
+    len: u32,
+    rate: u32,
+    output_len: u32,
+    domain_sep: u32,
 }
 
-transform store_u64_le(ptr: Address, off: u32, val: u64) {
-    *(ptr + off)     = val & 255;
-    *(ptr + off + 1) = (val >> 8) & 255;
-    *(ptr + off + 2) = (val >> 16) & 255;
-    *(ptr + off + 3) = (val >> 24) & 255;
-    *(ptr + off + 4) = (val >> 32) & 255;
-    *(ptr + off + 5) = (val >> 40) & 255;
-    *(ptr + off + 6) = (val >> 48) & 255;
-    *(ptr + off + 7) = (val >> 56) & 255;
-}
+// Input data wrapper (200 bytes — large enough for any single rate block).
+layout KeccakIn = { data: [u8; 200] }
 
-// Rotate-left guarded against n==0 (64-n would shift by full word).
+// Digest output (200 bytes — large enough for SHA-3-512's 64-byte output
+// and for SHAKE squeeze outputs up to 200 bytes). SHA-3 variants only
+// populate the first output_len bytes; the remainder is untouched.
+layout KeccakOut = { data: [u8; 200] }
+
+// Rho+Pi scratch buffer: 25 u64 lanes. Allocated via state_new(KeccakB)
+// inside keccak_f1600. B.b[i] reads/writes the u64 lane at slot i
+// (typed-array index scaling).
+layout KeccakB = { b: [u64; 25] }
+
+// Round-constants table (24 × u64). Loaded once per keccak_f1600 call via
+// keccak_load_rc. RC.rc[i] returns the u64 round constant at slot i.
+layout KeccakRC = { rc: [u64; 24] }
+
+// ===========================================================================
+// Helper transforms
+// ===========================================================================
+
+// Rotate-left a 64-bit word by n positions. Guarded against n==0 (where
+// 64-n would shift by the full word width, which VUMA treats as 0).
 transform rotl64(x: u64, n: u64) -> u64 {
     if n == 0 { return x; }
     return (x << n) | (x >> (64 - n));
 }
 
-// ===========================================================================
-// Keccak-f[1600] permutation — 24 rounds on a 25-lane state.
-// Lane (x, y) is stored at byte offset (x + 5*y) * 8, little-endian.
-// Each round performs Theta, Rho+Pi (combined), Chi, and Iota.
-// ===========================================================================
+// keccak_load_lane: read 8 little-endian bytes from ctx.state[base..base+7]
+// as a u64 lane. Lane (x, y) is at base = (x + 5*y) * 8.
+transform keccak_load_lane(ctx: State<KeccakCtx>, base: u64) -> u64 {
+    let b0 = ctx.state[base] as u64;
+    let b1 = ctx.state[base + 1] as u64;
+    let b2 = ctx.state[base + 2] as u64;
+    let b3 = ctx.state[base + 3] as u64;
+    let b4 = ctx.state[base + 4] as u64;
+    let b5 = ctx.state[base + 5] as u64;
+    let b6 = ctx.state[base + 6] as u64;
+    let b7 = ctx.state[base + 7] as u64;
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+         | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
 
-transform keccak_f1600(state: Address) {
-    round: u32 = 0;
+// keccak_store_lane: write a u64 lane to ctx.state[base..base+7] as 8
+// little-endian bytes.
+transform keccak_store_lane(ctx: State<KeccakCtx>, base: u64, val: u64) {
+    ctx.state[base]     = (val & 255) as u8;
+    ctx.state[base + 1] = ((val >> 8) & 255) as u8;
+    ctx.state[base + 2] = ((val >> 16) & 255) as u8;
+    ctx.state[base + 3] = ((val >> 24) & 255) as u8;
+    ctx.state[base + 4] = ((val >> 32) & 255) as u8;
+    ctx.state[base + 5] = ((val >> 40) & 255) as u8;
+    ctx.state[base + 6] = ((val >> 48) & 255) as u8;
+    ctx.state[base + 7] = ((val >> 56) & 255) as u8;
+}
+
+// keccak_load_rc: fill RC.rc[0..23] with the 24 FIPS 202 §3.1.2 round
+// constants. Values use the (1<<63)|lower form for u64 literals >= 2^63.
+transform keccak_load_rc(RC: State<KeccakRC>) {
+    RC.rc[0]  = RC00; RC.rc[1]  = RC01; RC.rc[2]  = RC02; RC.rc[3]  = RC03;
+    RC.rc[4]  = RC04; RC.rc[5]  = RC05; RC.rc[6]  = RC06; RC.rc[7]  = RC07;
+    RC.rc[8]  = RC08; RC.rc[9]  = RC09; RC.rc[10] = RC10; RC.rc[11] = RC11;
+    RC.rc[12] = RC12; RC.rc[13] = RC13; RC.rc[14] = RC14; RC.rc[15] = RC15;
+    RC.rc[16] = RC16; RC.rc[17] = RC17; RC.rc[18] = RC18; RC.rc[19] = RC19;
+    RC.rc[20] = RC20; RC.rc[21] = RC21; RC.rc[22] = RC22; RC.rc[23] = RC23;
+}
+
+// ===========================================================================
+// Keccak-f[1600] permutation — 24 rounds of θ, ρ, π, χ, ι.
+// ===========================================================================
+//   ctx: caller-allocated State<KeccakCtx> with ctx.state holding the
+//        1600-bit input. Modified in place — ctx.state holds the permuted
+//        output after this call.
+//
+// Each round performs:
+//   1. Theta: C[x] = XOR of column lanes; D[x] = C[x-1] ^ rot(C[x+1], 1);
+//      A[x,y] ^= D[x].
+//   2. Rho + Pi (combined): B[y, (2x+3y)%5] = rot(A[x,y], r[x][y]).
+//   3. Chi: A[x,y] = B[x,y] ^ ((~B[x+1,y]) & B[x+2,y]).
+//   4. Iota: A[0,0] ^= RC[round].
+transform keccak_f1600(ctx: State<KeccakCtx>) {
+    let B = state_new(KeccakB);
+    let RC = state_new(KeccakRC);
+    keccak_load_rc(RC);
+
+    let round = 0;
     while round < 24 {
-        // --- Theta ---
+        // ── Theta ──
         // C[x] = A[x,0] ^ A[x,1] ^ A[x,2] ^ A[x,3] ^ A[x,4]
-        c0: u64 = load_u64_le(state, 0) ^ load_u64_le(state, 40) ^ load_u64_le(state, 80) ^ load_u64_le(state, 120) ^ load_u64_le(state, 160);
-        c1: u64 = load_u64_le(state, 8) ^ load_u64_le(state, 48) ^ load_u64_le(state, 88) ^ load_u64_le(state, 128) ^ load_u64_le(state, 168);
-        c2: u64 = load_u64_le(state, 16) ^ load_u64_le(state, 56) ^ load_u64_le(state, 96) ^ load_u64_le(state, 136) ^ load_u64_le(state, 176);
-        c3: u64 = load_u64_le(state, 24) ^ load_u64_le(state, 64) ^ load_u64_le(state, 104) ^ load_u64_le(state, 144) ^ load_u64_le(state, 184);
-        c4: u64 = load_u64_le(state, 32) ^ load_u64_le(state, 72) ^ load_u64_le(state, 112) ^ load_u64_le(state, 152) ^ load_u64_le(state, 192);
+        // Lane (x, y) is at byte offset (x + 5*y) * 8.
+        let c0 = keccak_load_lane(ctx, 0) ^ keccak_load_lane(ctx, 40)
+               ^ keccak_load_lane(ctx, 80) ^ keccak_load_lane(ctx, 120)
+               ^ keccak_load_lane(ctx, 160);
+        let c1 = keccak_load_lane(ctx, 8) ^ keccak_load_lane(ctx, 48)
+               ^ keccak_load_lane(ctx, 88) ^ keccak_load_lane(ctx, 128)
+               ^ keccak_load_lane(ctx, 168);
+        let c2 = keccak_load_lane(ctx, 16) ^ keccak_load_lane(ctx, 56)
+               ^ keccak_load_lane(ctx, 96) ^ keccak_load_lane(ctx, 136)
+               ^ keccak_load_lane(ctx, 176);
+        let c3 = keccak_load_lane(ctx, 24) ^ keccak_load_lane(ctx, 64)
+               ^ keccak_load_lane(ctx, 104) ^ keccak_load_lane(ctx, 144)
+               ^ keccak_load_lane(ctx, 184);
+        let c4 = keccak_load_lane(ctx, 32) ^ keccak_load_lane(ctx, 72)
+               ^ keccak_load_lane(ctx, 112) ^ keccak_load_lane(ctx, 152)
+               ^ keccak_load_lane(ctx, 192);
 
-        // D[x] = C[x-1] ^ rot(C[x+1], 1)
-        d0: u64 = c4 ^ rotl64(c1, 1);
-        d1: u64 = c0 ^ rotl64(c2, 1);
-        d2: u64 = c1 ^ rotl64(c3, 1);
-        d3: u64 = c2 ^ rotl64(c4, 1);
-        d4: u64 = c3 ^ rotl64(c0, 1);
+        // D[x] = C[x-1] ^ rot(C[x+1], 1)  (indices mod 5)
+        let d0 = c4 ^ rotl64(c1, 1);
+        let d1 = c0 ^ rotl64(c2, 1);
+        let d2 = c1 ^ rotl64(c3, 1);
+        let d3 = c2 ^ rotl64(c4, 1);
+        let d4 = c3 ^ rotl64(c0, 1);
 
-        // A[x,y] ^= D[x]
-        ty: u32 = 0;
+        // A[x,y] ^= D[x] for all 25 lanes
+        let ty = 0;
         while ty < 5 {
-            tx: u32 = 0;
+            let ty5 = 5 * ty;
+            let tx = 0;
             while tx < 5 {
-                toff: u32 = (tx + 5 * ty) * 8;
-                td: u64 = 0;
-                if tx == 0 { td = d0; }
+                let toff = (tx + ty5) * 8;
+                let td = d0;
                 if tx == 1 { td = d1; }
                 if tx == 2 { td = d2; }
                 if tx == 3 { td = d3; }
                 if tx == 4 { td = d4; }
-                store_u64_le(state, toff, load_u64_le(state, toff) ^ td);
+                let cur = keccak_load_lane(ctx, toff);
+                keccak_store_lane(ctx, toff, cur ^ td);
                 tx = tx + 1;
             }
             ty = ty + 1;
         }
 
-        // --- Rho + Pi --- combined into one pass through the lanes.
-        // For each lane (x, y) with rotation r[x][y]:
-        //   B[y, (2x+3y) mod 5] = rot(A[x, y], r[x][y])
-        tb = allocate(200);
-        rx: u32 = 0;
+        // ── Rho + Pi ──
+        // B[y, (2x+3y) mod 5] = rot(A[x, y], r[x][y])
+        // For each lane (x, y): read post-theta value, rotate by r[x][y],
+        // write to B at destination index y + 5*((2x+3y) mod 5).
+        let rx = 0;
         while rx < 5 {
-            ry: u32 = 0;
+            let ry = 0;
             while ry < 5 {
-                src_off: u32 = (rx + 5 * ry) * 8;
-                av: u64 = load_u64_le(state, src_off);
+                let src_off = (rx + 5 * ry) * 8;
+                let av = keccak_load_lane(ctx, src_off);
 
-                // Lane rotation offsets per FIPS 202 Section 3.1.2 (Algorithm 2).
-                r: u64 = 0;
+                // Lane rotation offsets per FIPS 202 §3.1.2 (Algorithm 2).
+                let r = 0;
                 if rx == 0 && ry == 0 { r = 0; }
                 if rx == 1 && ry == 0 { r = 1; }
                 if rx == 2 && ry == 0 { r = 62; }
@@ -141,279 +295,459 @@ transform keccak_f1600(state: Address) {
                 if rx == 3 && ry == 4 { r = 56; }
                 if rx == 4 && ry == 4 { r = 14; }
 
-                rotated: u64 = rotl64(av, r);
-                // Pi step: new position (y, (2x + 3y) mod 5)
-                nx: u32 = ry;
-                ny: u32 = (2 * rx + 3 * ry) % 5;
-                dst_off: u32 = (nx + 5 * ny) * 8;
-                store_u64_le(tb, dst_off, rotated);
+                let rotated = rotl64(av, r);
+                // Pi step: destination (y, (2x+3y) mod 5)
+                let dst_y = (2 * rx + 3 * ry) % 5;
+                let dst_idx = ry + 5 * dst_y;
+                B.b[dst_idx] = rotated;
                 ry = ry + 1;
             }
             rx = rx + 1;
         }
 
-        // --- Chi --- A[x, y] = B[x, y] ^ ((~B[x+1, y]) & B[x+2, y])
-        cy: u32 = 0;
+        // ── Chi ──
+        // A[x, y] = B[x, y] ^ ((~B[x+1, y]) & B[x+2, y])  (indices mod 5)
+        let cy = 0;
         while cy < 5 {
-            cx: u32 = 0;
+            let cy5 = 5 * cy;
+            let cx = 0;
             while cx < 5 {
-                coff: u32 = (cx + 5 * cy) * 8;
-                cxp1: u32 = (cx + 1) % 5;
-                cxp2: u32 = (cx + 2) % 5;
-                bxy: u64 = load_u64_le(tb, coff);
-                bx1: u64 = load_u64_le(tb, (cxp1 + 5 * cy) * 8);
-                bx2: u64 = load_u64_le(tb, (cxp2 + 5 * cy) * 8);
-                store_u64_le(state, coff, bxy ^ ((bx1 ^ MASK64) & bx2));
+                let cur_idx = cx + cy5;
+                let cxp1 = (cx + 1) % 5;
+                let cxp2 = (cx + 2) % 5;
+                let bx1_idx = cxp1 + cy5;
+                let bx2_idx = cxp2 + cy5;
+                let bxy = B.b[cur_idx];
+                let bx1 = B.b[bx1_idx];
+                let bx2 = B.b[bx2_idx];
+                let off = cur_idx * 8;
+                keccak_store_lane(ctx, off, bxy ^ ((bx1 ^ MASK64) & bx2));
                 cx = cx + 1;
             }
             cy = cy + 1;
         }
-        free(tb);
 
-        // --- Iota --- XOR the round constant into lane (0, 0)
-        rc: u64 = 0;
-        if round == 0  { rc = RC00; }
-        if round == 1  { rc = RC01; }
-        if round == 2  { rc = RC02; }
-        if round == 3  { rc = RC03; }
-        if round == 4  { rc = RC04; }
-        if round == 5  { rc = RC05; }
-        if round == 6  { rc = RC06; }
-        if round == 7  { rc = RC07; }
-        if round == 8  { rc = RC08; }
-        if round == 9  { rc = RC09; }
-        if round == 10 { rc = RC10; }
-        if round == 11 { rc = RC11; }
-        if round == 12 { rc = RC12; }
-        if round == 13 { rc = RC13; }
-        if round == 14 { rc = RC14; }
-        if round == 15 { rc = RC15; }
-        if round == 16 { rc = RC16; }
-        if round == 17 { rc = RC17; }
-        if round == 18 { rc = RC18; }
-        if round == 19 { rc = RC19; }
-        if round == 20 { rc = RC20; }
-        if round == 21 { rc = RC21; }
-        if round == 22 { rc = RC22; }
-        if round == 23 { rc = RC23; }
-        store_u64_le(state, 0, load_u64_le(state, 0) ^ rc);
+        // ── Iota ──
+        // A[0, 0] ^= RC[round]
+        let rc = RC.rc[round];
+        let lane0 = keccak_load_lane(ctx, 0);
+        keccak_store_lane(ctx, 0, lane0 ^ rc);
 
         round = round + 1;
     }
 }
 
 // ===========================================================================
-// Sponge state (376 bytes):
-//   [  0..199] state (25 x u64 = 200 bytes, little-endian lanes)
-//   [200..203] rate (u32 little-endian)
-//   [204..207] buf_len (u32 little-endian)
-//   [208..375] buffer (168 bytes; large enough for the largest SHA-3/SHAKE rate)
+// Sponge construction (FIPS 202 §6.1)
 // ===========================================================================
 
-transform sha3_state_init(ctx: Address, rate: u32) {
-    // Zero the full 376-byte context: state, rate/buf_len fields, and the
-    // 168-byte buffer (so stale bytes never leak into the absorb step).
-    i: u32 = 0;
-    while i < 376 { *(ctx + i) = 0; i = i + 1; }
-    *(ctx + 200) = rate & 255;
-    *(ctx + 201) = (rate >> 8) & 255;
-    *(ctx + 202) = (rate >> 16) & 255;
-    *(ctx + 203) = (rate >> 24) & 255;
-    *(ctx + 204) = 0;
-    *(ctx + 205) = 0;
-    *(ctx + 206) = 0;
-    *(ctx + 207) = 0;
+// keccak_zero: zero the state, buffer, and len. Does NOT set rate /
+// output_len / domain_sep — each variant's init function sets those
+// fields directly (to avoid the VUMA parameter-binding bug; see header).
+transform keccak_zero(ctx: State<KeccakCtx>) {
+    let i = 0;
+    while i < 200 {
+        ctx.state[i] = 0;
+        ctx.buf[i] = 0;
+        i = i + 1;
+    }
+    ctx.len = 0;
 }
 
-transform sha3_state_get_rate(ctx: Address) -> u32 {
-    return *(ctx + 200) | (*(ctx + 201) << 8) | (*(ctx + 202) << 16) | (*(ctx + 203) << 24);
-}
-
-transform sha3_state_get_buflen(ctx: Address) -> u32 {
-    return *(ctx + 204) | (*(ctx + 205) << 8) | (*(ctx + 206) << 16) | (*(ctx + 207) << 24);
-}
-
-transform sha3_state_set_buflen(ctx: Address, val: u32) {
-    *(ctx + 204) = val & 255;
-    *(ctx + 205) = (val >> 8) & 255;
-    *(ctx + 206) = (val >> 16) & 255;
-    *(ctx + 207) = (val >> 24) & 255;
-}
-
-// XOR a full rate-byte block from the buffer into the state and permute.
-transform sha3_absorb_block(ctx: Address) {
-    rate: u32 = sha3_state_get_rate(ctx);
-    i: u32 = 0;
+// keccak_absorb_block: XOR ctx.buf[0..rate] into ctx.state[0..rate], run
+// the Keccak-f[1600] permutation, clear the buffer, and reset ctx.len.
+transform keccak_absorb_block(ctx: State<KeccakCtx>) {
+    let rate = ctx.rate;
+    let i = 0;
     while i < rate {
-        s_byte: u32 = *(ctx + i);
-        b_byte: u32 = *(ctx + 208 + i);
-        *(ctx + i) = (s_byte ^ b_byte) & 255;
+        let sb = ctx.state[i] as u32;
+        let bb = ctx.buf[i] as u32;
+        ctx.state[i] = ((sb ^ bb) & 255) as u8;
         i = i + 1;
     }
     keccak_f1600(ctx);
-    sha3_state_set_buflen(ctx, 0);
-    // Clear the buffer so subsequent blocks do not pick up stale bytes
+    // Clear the buffer + reset len for the next block.
     i = 0;
     while i < rate {
-        *(ctx + 208 + i) = 0;
+        ctx.buf[i] = 0;
         i = i + 1;
     }
+    ctx.len = 0;
 }
 
-transform sha3_state_update(ctx: Address, data: Address, len: u32) {
-    rate: u32 = sha3_state_get_rate(ctx);
-    buf_len: u32 = sha3_state_get_buflen(ctx);
-    i: u32 = 0;
+// keccak_update: absorb `len` bytes of data into the sponge. Buffers input
+// bytes into ctx.buf; when the buffer fills (ctx.len == rate), runs
+// keccak_absorb_block. Multi-block streaming via repeated update calls is
+// supported.
+transform keccak_update(ctx: State<KeccakCtx>, data: State<KeccakIn>, len: u64) {
+    let rate = ctx.rate;
+    let i = 0;
     while i < len {
-        *(ctx + 208 + buf_len) = *(data + i);
-        buf_len = buf_len + 1;
+        let bl = ctx.len;
+        ctx.buf[bl] = data.data[i];
+        ctx.len = bl + 1;
         i = i + 1;
-        if buf_len == rate {
-            sha3_absorb_block(ctx);
-            buf_len = 0;
+        if ctx.len == rate {
+            keccak_absorb_block(ctx);
         }
     }
-    sha3_state_set_buflen(ctx, buf_len);
 }
 
-// Pad with pad10*1 + domain separator (0x06 for SHA-3, 0x1F for SHAKE),
-// absorb the final block, and permute so the state is ready for squeezing.
-transform sha3_state_pad(ctx: Address, domain_sep: u32) {
-    rate: u32 = sha3_state_get_rate(ctx);
-    buf_len: u32 = sha3_state_get_buflen(ctx);
+// keccak_pad: apply the pad10*1 padding rule with the domain separator
+// stored in ctx.domain_sep. Reads ctx.domain_sep (not a parameter) to
+// avoid the VUMA parameter-binding bug.
+//   1. XOR ctx.buf[0..rate] into ctx.state[0..rate] (the partial block).
+//   2. XOR ctx.domain_sep into ctx.state[buf_len] (first byte after msg).
+//   3. XOR 0x80 into ctx.state[rate-1] (pad10*1 trailing 1-bit).
+//   4. Run keccak_f1600 so the state is ready for squeezing.
+transform keccak_pad(ctx: State<KeccakCtx>) {
+    let rate = ctx.rate;
+    let buf_len = ctx.len;
+    let ds = ctx.domain_sep;
 
-    // XOR the buffered partial block into the state
-    i: u32 = 0;
+    // XOR the buffered partial block into the state.
+    let i = 0;
     while i < rate {
-        s_byte: u32 = *(ctx + i);
-        b_byte: u32 = *(ctx + 208 + i);
-        *(ctx + i) = (s_byte ^ b_byte) & 255;
+        let sb = ctx.state[i] as u32;
+        let bb = ctx.buf[i] as u32;
+        ctx.state[i] = ((sb ^ bb) & 255) as u8;
         i = i + 1;
     }
-    // Domain separator at the first byte after the message
-    *(ctx + buf_len) = (*(ctx + buf_len) ^ domain_sep) & 255;
-    // Set the final byte of the rate-block to 0x80 (pad10*1 last bit)
-    *(ctx + rate - 1) = (*(ctx + rate - 1) ^ 128) & 255;
+    // Domain separator at the first byte after the message.
+    let ds_byte = ctx.state[buf_len] as u32;
+    ctx.state[buf_len] = ((ds_byte ^ ds) & 255) as u8;
+    // Pad10*1 trailing 1-bit at the last byte of the rate block.
+    let last_byte = ctx.state[rate - 1] as u32;
+    ctx.state[rate - 1] = ((last_byte ^ 128) & 255) as u8;
 
     keccak_f1600(ctx);
 }
 
-// Squeeze `out_len` bytes out of the sponge, permuting between rate-blocks.
-transform sha3_state_squeeze(ctx: Address, out: Address, out_len: u32) {
-    rate: u32 = sha3_state_get_rate(ctx);
-    pos: u32 = 0;
+// keccak_squeeze: extract ctx.output_len bytes from the sponge. Reads
+// ctx.output_len (not a parameter) to avoid the VUMA parameter-binding
+// bug. Copies the rate portion of ctx.state to out, permuting between
+// rate-blocks when more output is needed.
+transform keccak_squeeze(ctx: State<KeccakCtx>, out: State<KeccakOut>) {
+    let rate = ctx.rate;
+    let out_len = ctx.output_len;
+    let pos = 0;
     while pos < out_len {
-        to_copy: u32 = rate;
-        remaining: u32 = out_len - pos;
+        let to_copy = rate;
+        let remaining = out_len - pos;
         if remaining < rate { to_copy = remaining; }
-        i: u32 = 0;
+        let i = 0;
         while i < to_copy {
-            *(out + pos + i) = *(ctx + i);
+            let out_idx = pos + i;
+            out.data[out_idx] = ctx.state[i];
             i = i + 1;
         }
         pos = pos + to_copy;
-        if pos < out_len { keccak_f1600(ctx); }
+        if pos < out_len {
+            keccak_f1600(ctx);
+        }
     }
 }
 
 // ===========================================================================
-// SHA-3-256 (FIPS 202 Section 6.3.3): rate=136, output=32, domain_sep=0x06
+// SHA3-224 (FIPS 202 §6.3.4): rate=144, output=28, domain_sep=0x06
 // ===========================================================================
 
-transform sha3_256_init(ctx: Address) {
-    sha3_state_init(ctx, 136);
+transform sha3_224_init(ctx: State<KeccakCtx>) {
+    keccak_zero(ctx);
+    ctx.rate = 144;
+    ctx.output_len = 28;
+    ctx.domain_sep = 6;
 }
 
-transform sha3_256_update(ctx: Address, data: Address, len: u32) {
-    sha3_state_update(ctx, data, len);
+transform sha3_224_update(ctx: State<KeccakCtx>, data: State<KeccakIn>, len: u64) {
+    keccak_update(ctx, data, len);
 }
 
-transform sha3_256_final(ctx: Address, out: Address) {
-    sha3_state_pad(ctx, 6);
-    sha3_state_squeeze(ctx, out, 32);
+transform sha3_224_final(ctx: State<KeccakCtx>, out: State<KeccakOut>) {
+    keccak_pad(ctx);
+    keccak_squeeze(ctx, out);
 }
 
-transform sha3_256_oneshot(data: Address, len: u32, out: Address) {
-    ctx = allocate(376);
+transform sha3_224_oneshot(data: State<KeccakIn>, len: u64, out: State<KeccakOut>) {
+    let ctx = state_new(KeccakCtx);
+    sha3_224_init(ctx);
+    sha3_224_update(ctx, data, len);
+    sha3_224_final(ctx, out);
+}
+
+// ===========================================================================
+// SHA3-256 (FIPS 202 §6.3.3): rate=136, output=32, domain_sep=0x06
+// ===========================================================================
+
+transform sha3_256_init(ctx: State<KeccakCtx>) {
+    keccak_zero(ctx);
+    ctx.rate = 136;
+    ctx.output_len = 32;
+    ctx.domain_sep = 6;
+}
+
+transform sha3_256_update(ctx: State<KeccakCtx>, data: State<KeccakIn>, len: u64) {
+    keccak_update(ctx, data, len);
+}
+
+transform sha3_256_final(ctx: State<KeccakCtx>, out: State<KeccakOut>) {
+    keccak_pad(ctx);
+    keccak_squeeze(ctx, out);
+}
+
+transform sha3_256_oneshot(data: State<KeccakIn>, len: u64, out: State<KeccakOut>) {
+    let ctx = state_new(KeccakCtx);
     sha3_256_init(ctx);
     sha3_256_update(ctx, data, len);
     sha3_256_final(ctx, out);
-    free(ctx);
 }
 
 // ===========================================================================
-// SHA-3-512 (FIPS 202 Section 6.3.5): rate=72, output=64, domain_sep=0x06
+// SHA3-384 (FIPS 202 §6.3.5): rate=104, output=48, domain_sep=0x06
 // ===========================================================================
 
-transform sha3_512_init(ctx: Address) {
-    sha3_state_init(ctx, 72);
+transform sha3_384_init(ctx: State<KeccakCtx>) {
+    keccak_zero(ctx);
+    ctx.rate = 104;
+    ctx.output_len = 48;
+    ctx.domain_sep = 6;
 }
 
-transform sha3_512_update(ctx: Address, data: Address, len: u32) {
-    sha3_state_update(ctx, data, len);
+transform sha3_384_update(ctx: State<KeccakCtx>, data: State<KeccakIn>, len: u64) {
+    keccak_update(ctx, data, len);
 }
 
-transform sha3_512_final(ctx: Address, out: Address) {
-    sha3_state_pad(ctx, 6);
-    sha3_state_squeeze(ctx, out, 64);
+transform sha3_384_final(ctx: State<KeccakCtx>, out: State<KeccakOut>) {
+    keccak_pad(ctx);
+    keccak_squeeze(ctx, out);
 }
 
-transform sha3_512_oneshot(data: Address, len: u32, out: Address) {
-    ctx = allocate(376);
+transform sha3_384_oneshot(data: State<KeccakIn>, len: u64, out: State<KeccakOut>) {
+    let ctx = state_new(KeccakCtx);
+    sha3_384_init(ctx);
+    sha3_384_update(ctx, data, len);
+    sha3_384_final(ctx, out);
+}
+
+// ===========================================================================
+// SHA3-512 (FIPS 202 §6.3.5): rate=72, output=64, domain_sep=0x06
+// ===========================================================================
+
+transform sha3_512_init(ctx: State<KeccakCtx>) {
+    keccak_zero(ctx);
+    ctx.rate = 72;
+    ctx.output_len = 64;
+    ctx.domain_sep = 6;
+}
+
+transform sha3_512_update(ctx: State<KeccakCtx>, data: State<KeccakIn>, len: u64) {
+    keccak_update(ctx, data, len);
+}
+
+transform sha3_512_final(ctx: State<KeccakCtx>, out: State<KeccakOut>) {
+    keccak_pad(ctx);
+    keccak_squeeze(ctx, out);
+}
+
+transform sha3_512_oneshot(data: State<KeccakIn>, len: u64, out: State<KeccakOut>) {
+    let ctx = state_new(KeccakCtx);
     sha3_512_init(ctx);
     sha3_512_update(ctx, data, len);
     sha3_512_final(ctx, out);
-    free(ctx);
 }
 
 // ===========================================================================
-// SHAKE128 (FIPS 202 Section 6.3.1): rate=168, variable-length XOF, ds=0x1F
+// SHAKE128 (FIPS 202 §6.3.1): rate=168, variable-length XOF, ds=0x1F
 // ===========================================================================
 
-transform shake128_init(ctx: Address) {
-    sha3_state_init(ctx, 168);
+transform shake128_init(ctx: State<KeccakCtx>) {
+    keccak_zero(ctx);
+    ctx.rate = 168;
+    ctx.output_len = 0;
+    ctx.domain_sep = 31;
 }
 
-transform shake128_update(ctx: Address, data: Address, len: u32) {
-    sha3_state_update(ctx, data, len);
+transform shake128_update(ctx: State<KeccakCtx>, data: State<KeccakIn>, len: u64) {
+    keccak_update(ctx, data, len);
 }
 
-// squeeze performs the final pad-and-permute step and then squeezes out_len
-// bytes. The context cannot be used for further updates after squeeze.
-transform shake128_squeeze(ctx: Address, out: Address, out_len: u32) {
-    sha3_state_pad(ctx, 31);
-    sha3_state_squeeze(ctx, out, out_len);
+// squeeze performs the final pad-and-permute step and then squeezes
+// out_len bytes. Sets ctx.output_len = out_len before calling the shared
+// keccak_pad / keccak_squeeze so they read the correct value from the
+// context field. The context cannot be used for further updates after
+// squeeze.
+transform shake128_squeeze(ctx: State<KeccakCtx>, out: State<KeccakOut>, out_len: u32) {
+    ctx.output_len = out_len;
+    keccak_pad(ctx);
+    keccak_squeeze(ctx, out);
 }
 
-transform shake128(data: Address, len: u32, out: Address, out_len: u32) {
-    ctx = allocate(376);
+transform shake128(data: State<KeccakIn>, len: u64, out: State<KeccakOut>, out_len: u32) {
+    let ctx = state_new(KeccakCtx);
     shake128_init(ctx);
     shake128_update(ctx, data, len);
     shake128_squeeze(ctx, out, out_len);
-    free(ctx);
 }
 
 // ===========================================================================
-// SHAKE256 (FIPS 202 Section 6.3.2): rate=136, variable-length XOF, ds=0x1F
+// SHAKE256 (FIPS 202 §6.3.2): rate=136, variable-length XOF, ds=0x1F
 // ===========================================================================
 
-transform shake256_init(ctx: Address) {
-    sha3_state_init(ctx, 136);
+transform shake256_init(ctx: State<KeccakCtx>) {
+    keccak_zero(ctx);
+    ctx.rate = 136;
+    ctx.output_len = 0;
+    ctx.domain_sep = 31;
 }
 
-transform shake256_update(ctx: Address, data: Address, len: u32) {
-    sha3_state_update(ctx, data, len);
+transform shake256_update(ctx: State<KeccakCtx>, data: State<KeccakIn>, len: u64) {
+    keccak_update(ctx, data, len);
 }
 
-transform shake256_squeeze(ctx: Address, out: Address, out_len: u32) {
-    sha3_state_pad(ctx, 31);
-    sha3_state_squeeze(ctx, out, out_len);
+transform shake256_squeeze(ctx: State<KeccakCtx>, out: State<KeccakOut>, out_len: u32) {
+    ctx.output_len = out_len;
+    keccak_pad(ctx);
+    keccak_squeeze(ctx, out);
 }
 
-transform shake256(data: Address, len: u32, out: Address, out_len: u32) {
-    ctx = allocate(376);
+transform shake256(data: State<KeccakIn>, len: u64, out: State<KeccakOut>, out_len: u32) {
+    let ctx = state_new(KeccakCtx);
     shake256_init(ctx);
     shake256_update(ctx, data, len);
     shake256_squeeze(ctx, out, out_len);
-    free(ctx);
+}
+
+// ===========================================================================
+// Self-test (main).
+// ===========================================================================
+// Verifies the Keccak-f[1600] permutation + sponge construction against 8
+// canonical NIST FIPS 202 test vectors:
+//
+//   1. SHA3-256("")   = a7ffc6f8...434a  (32 bytes)
+//   2. SHA3-256("abc")= 3a985da7...1532  (32 bytes)
+//   3. SHA3-512("")   = a69f73cc...d26   (64 bytes)
+//   4. SHA3-512("abc")= b751850b...3f0   (64 bytes)
+//   5. SHA3-224("")   = 6b4e0342...6bc7  (28 bytes)
+//   6. SHA3-224("abc")= e642824c...fdf   (28 bytes)
+//   7. SHA3-384("")   = 0c63a75b...f004  (48 bytes)
+//   8. SHA3-384("abc")= ec014982...d25   (48 bytes)
+//
+// Returns 0 on success, 1..24 on individual byte-check failures.
+transform main() -> i32 {
+    let ctx = state_new(KeccakCtx);
+    let data = state_new(KeccakIn);
+    let out = state_new(KeccakOut);
+
+    // ── Test 1: SHA3-256("") ──
+    // a7ffc6f8 bf1ed766 51c14756 a061d662 f580ff4d e43b49fa 82d80a4b 80f8434a
+    sha3_256_init(ctx);
+    sha3_256_final(ctx, out);
+    if out.data[0] != 167 { return 1; }    // 0xa7
+    if out.data[1] != 255 { return 2; }    // 0xff
+    if out.data[31] != 74 { return 3; }    // 0x4a
+
+    // ── Test 2: SHA3-256("abc") ──
+    // 3a985da7 4fe225b2 045c172d 6bd390bd 855f086e 3e9d525b 46bfe245 11431532
+    sha3_256_init(ctx);
+    data.data[0] = 97;
+    data.data[1] = 98;
+    data.data[2] = 99;
+    sha3_256_update(ctx, data, 3);
+    sha3_256_final(ctx, out);
+    if out.data[0] != 58 { return 4; }     // 0x3a
+    if out.data[1] != 152 { return 5; }    // 0x98
+    if out.data[31] != 50 { return 6; }    // 0x32
+
+    // ── Test 3: SHA3-512("") ──
+    // a69f73cc a23a9ac5 c8b567dc 185a756e 97c98216 4fe25859 e0d1dcc1 475c80a6
+    // 15b2123a f1f5f94c 11e3e940 2c3ac558 f500199d 95b6d3e3 01758586 281dcd26
+    sha3_512_init(ctx);
+    sha3_512_final(ctx, out);
+    if out.data[0] != 166 { return 7; }    // 0xa6
+    if out.data[1] != 159 { return 8; }    // 0x9f
+    if out.data[63] != 38 { return 9; }    // 0x26
+
+    // ── Test 4: SHA3-512("abc") ──
+    // b751850b 1a57168a 5693cd92 4b6b096e 08f62182 7444f70d 884f5d02 40d2712e
+    // 10e116e9 192af3c9 1a7ec576 47e39340 57340b4c f408d5a5 6592f827 4eec53f0
+    sha3_512_init(ctx);
+    data.data[0] = 97;
+    data.data[1] = 98;
+    data.data[2] = 99;
+    sha3_512_update(ctx, data, 3);
+    sha3_512_final(ctx, out);
+    if out.data[0] != 183 { return 10; }   // 0xb7
+    if out.data[1] != 81 { return 11; }    // 0x51
+    if out.data[63] != 240 { return 12; }  // 0xf0
+
+    // ── Test 5: SHA3-224("") ──
+    // 6b4e0342 3667dbb7 3b6e1545 4f0eb1ab d4597f9a 1b078e3f 5b5a6bc7
+    sha3_224_init(ctx);
+    sha3_224_final(ctx, out);
+    if out.data[0] != 107 { return 13; }   // 0x6b
+    if out.data[1] != 78 { return 14; }    // 0x4e
+    if out.data[27] != 199 { return 15; }  // 0xc7
+
+    // ── Test 6: SHA3-224("abc") ──
+    // e642824c 3f8cf24a d09234ee 7d3c766f c9a3a516 8d0c94ad 73b46fdf
+    sha3_224_init(ctx);
+    data.data[0] = 97;
+    data.data[1] = 98;
+    data.data[2] = 99;
+    sha3_224_update(ctx, data, 3);
+    sha3_224_final(ctx, out);
+    if out.data[0] != 230 { return 16; }   // 0xe6
+    if out.data[1] != 66 { return 17; }    // 0x42
+    if out.data[27] != 223 { return 18; }  // 0xdf
+
+    // ── Test 7: SHA3-384("") ──
+    // 0c63a75b 845e4f7d 01107d85 2e4c2485 c51a50aa aa94fc61 995e71bb ee983a2a
+    // c3713831 264adb47 fb6bd1e0 58d5f004
+    sha3_384_init(ctx);
+    sha3_384_final(ctx, out);
+    if out.data[0] != 12 { return 19; }    // 0x0c
+    if out.data[1] != 99 { return 20; }    // 0x63
+    if out.data[47] != 4 { return 21; }    // 0x04
+
+    // ── Test 8: SHA3-384("abc") ──
+    // ec014982 88516fc9 26459f58 e2c6ad8d f9b473cb 0fc08c25 96da7cf0 e49be4b2
+    // 98d88cea 927ac7f5 39f1edf2 28376d25
+    sha3_384_init(ctx);
+    data.data[0] = 97;
+    data.data[1] = 98;
+    data.data[2] = 99;
+    sha3_384_update(ctx, data, 3);
+    sha3_384_final(ctx, out);
+    if out.data[0] != 236 { return 22; }   // 0xec
+    if out.data[1] != 1 { return 23; }     // 0x01
+    if out.data[47] != 37 { return 24; }   // 0x25
+
+    // ── Test 9: SHA3-256(200 × 'a') — multi-block (200 > 136 rate) ──
+    // Exercises keccak_absorb_block: the first 136 bytes fill one rate
+    // block (triggering an absorb+permute), then the remaining 64 bytes
+    // form the partial block padded by sha3_256_final.
+    // cce34485baf2bf2aca99b94833892a4f52896d3d153f7b840cc4f9fe695f1387
+    sha3_256_init(ctx);
+    let j = 0;
+    while j < 200 {
+        data.data[j] = 97;  // 'a'
+        j = j + 1;
+    }
+    sha3_256_update(ctx, data, 200);
+    sha3_256_final(ctx, out);
+    if out.data[0] != 204 { return 25; }   // 0xcc
+    if out.data[1] != 227 { return 26; }   // 0xe3
+    if out.data[31] != 135 { return 27; }  // 0x87
+
+    // ── Test 10: SHA3-512(200 × 'a') — multi-block (200 > 72 rate) ──
+    // Three rate blocks absorbed (72 + 72 + 56 partial), exercising
+    // keccak_absorb_block twice before the final pad.
+    // eae6c85c...36ec
+    sha3_512_init(ctx);
+    sha3_512_update(ctx, data, 200);
+    sha3_512_final(ctx, out);
+    if out.data[0] != 234 { return 28; }   // 0xea
+    if out.data[63] != 236 { return 29; }  // 0xec
+
+    return 0;
 }
