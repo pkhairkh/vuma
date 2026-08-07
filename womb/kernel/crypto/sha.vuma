@@ -461,8 +461,15 @@ transform sha256_final(ctx: State<Sha256Ctx>, out: State<ShaDigest>) {
     ctx.buf[ctx.len] = 128;
     let pos = ctx.len + 1;
 
-    // Step 2: zero-pad to offset 56 (mod 64).
-    if pos < 56 {
+    // Step 2: zero-pad to offset 56 (mod 64). Single-block when pos <= 56
+    // (the 0x80 lands at offset <= 55, leaving exactly 8 bytes 56..63 for
+    // the bit-count suffix — possibly with zero zero-pad bytes, as when
+    // ctx.len == 55 → pos == 56). Two-block when pos > 56 (the 0x80 lands
+    // at offset >= 56, leaving < 8 bytes for the suffix in this block).
+    // W1-C FIX: the original `pos < 56` test was an off-by-one that
+    // incorrectly routed the pos == 56 case (55-byte input) through the
+    // two-block path, producing a wrong digest for exactly that length.
+    if pos <= 56 {
         // Single-block padding: zero bytes pos..55, then bit count at
         // 56..63 — all in the current block.
         let p = pos;
