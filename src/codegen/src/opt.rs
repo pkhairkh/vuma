@@ -970,6 +970,19 @@ pub fn constant_fold(mut func: IRFunction) -> IRFunction {
                     }
                     _ => None,
                 };
+                // W3-blake2: If fold_ty is None but the result doesn't fit
+                // in i32 (high 32 bits non-zero when unsigned), use ty: Some(U64)
+                // so 32-bit backends store the full 64-bit value. Without this,
+                // `let a: u64 = 0x6A09E667BB67AE85` is constant-folded to
+                // Add{lhs: imm, rhs: 0, ty: None}, and riscv32/m68k/hppa store
+                // only the low 32 bits, corrupting subsequent 64-bit operations.
+                let fold_ty = fold_ty.or_else(|| {
+                    if (result as u64) > 0xFFFFFFFF {
+                        Some(IRType::U64)
+                    } else {
+                        None
+                    }
+                });
                 if let Some(ty) = fold_ty {
                     new_instrs.push(IRInstr::BinOp {
                         op: crate::ir::BinOpKind::Add,

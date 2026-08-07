@@ -6716,6 +6716,45 @@ impl Backend for RiscV32Backend {
                                         code.extend(Instruction::Sub { rd: Gpr::T2, rs1: Gpr::T2, rs2: Gpr::T4 }.encode());
                                     }
                                     code.extend(ss_store_64(Gpr::T0, Gpr::T2, dst_offset));
+                                } else if is_64bit && matches!(op, BinOpKind::Shl | BinOpKind::ShrL | BinOpKind::ShrA)
+                                    && matches!(rhs, IRValue::Immediate(n) if *n > 0 && *n < 32) {
+                                    // W3-blake2: 64-bit shift by 1-31 (cross-word boundary).
+                                    // For ShrL: result_low = (lhs_low >> n) | (lhs_high << (32-n))
+                                    //           result_high = lhs_high >> n
+                                    // For Shl:  result_low = lhs_low << n
+                                    //           result_high = (lhs_high << n) | (lhs_low >> (32-n))
+                                    // For ShrA: same as ShrL but high uses Sra (arithmetic)
+                                    let n = if let IRValue::Immediate(n) = rhs { *n as u32 } else { 0 };
+                                    code.extend(ss_load_value_64(Gpr::T0, Gpr::T2, lhs, &vreg_stack_slots));
+                                    match op {
+                                        BinOpKind::ShrL => {
+                                            // T4 = lhs_high << (32-n)
+                                            code.extend(Instruction::Slli { rd: Gpr::T4, rs1: Gpr::T2, shamt: 32 - n }.encode());
+                                            // T0 = (lhs_low >> n) | T4
+                                            code.extend(Instruction::Srli { rd: Gpr::T0, rs1: Gpr::T0, shamt: n }.encode());
+                                            code.extend(Instruction::Or { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T4 }.encode());
+                                            // T2 = lhs_high >> n
+                                            code.extend(Instruction::Srli { rd: Gpr::T2, rs1: Gpr::T2, shamt: n }.encode());
+                                        }
+                                        BinOpKind::Shl => {
+                                            // T4 = lhs_low >> (32-n)
+                                            code.extend(Instruction::Srli { rd: Gpr::T4, rs1: Gpr::T0, shamt: 32 - n }.encode());
+                                            // T2 = (lhs_high << n) | T4
+                                            code.extend(Instruction::Slli { rd: Gpr::T2, rs1: Gpr::T2, shamt: n }.encode());
+                                            code.extend(Instruction::Or { rd: Gpr::T2, rs1: Gpr::T2, rs2: Gpr::T4 }.encode());
+                                            // T0 = lhs_low << n
+                                            code.extend(Instruction::Slli { rd: Gpr::T0, rs1: Gpr::T0, shamt: n }.encode());
+                                        }
+                                        BinOpKind::ShrA => {
+                                            // Same as ShrL but high uses Srai
+                                            code.extend(Instruction::Slli { rd: Gpr::T4, rs1: Gpr::T2, shamt: 32 - n }.encode());
+                                            code.extend(Instruction::Srli { rd: Gpr::T0, rs1: Gpr::T0, shamt: n }.encode());
+                                            code.extend(Instruction::Or { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T4 }.encode());
+                                            code.extend(Instruction::Srai { rd: Gpr::T2, rs1: Gpr::T2, shamt: n }.encode());
+                                        }
+                                        _ => unreachable!(),
+                                    }
+                                    code.extend(ss_store_64(Gpr::T0, Gpr::T2, dst_offset));
                                 } else if is_64bit && matches!(op, BinOpKind::Mul) {
                                     // [ext] I64 Mul: 64-bit multiply on RV32.
                                     // 64-bit result = a_lo * b_lo + (a_lo * b_hi + a_hi * b_lo) << 32
@@ -6817,17 +6856,55 @@ impl Backend for RiscV32Backend {
                         code.extend(ss_store_to_slot_typed(Gpr::T0, Gpr::T1, dst_offset, ty));
                         code
                     }
-                    IRInstr::Mul { dst, lhs, rhs, .. } => {
+                    IRInstr::Mul { dst, lhs, rhs, ty } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                        let ty = vreg_types.get(&dst_id);
                         let mut code = Vec::new();
-                        code.extend(ss_load_value_typed(
-                            Gpr::T0, Gpr::T1, lhs, &vreg_stack_slots, ty,
-                        ));
-                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T2));
-                        code.extend(Instruction::Mul { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T2 }.encode());
-                        code.extend(ss_store_to_slot_typed(Gpr::T0, Gpr::T1, dst_offset, ty));
+                        // [W2-riscv32-mul] 64-bit multiply on RV32.
+                        // The previous handler ignored `ty` and always emitted
+                        // a 32-bit `mul`, discarding the high 32 bits of the
+                        // product — which corrupts `u64`/`i64` multiplies in
+                        // blake2 and friends.  When the result is a 64-bit
+                        // integer (signalled either by the IRInstr `ty` field
+                        // or by the inferred `vreg_types` entry), reuse the
+                        // same 64-bit sequence as the BinOpKind::Mul handler:
+                        //   result = a_lo*b_lo
+                        //          + (a_lo*b_hi + a_hi*b_lo) << 32
+                        // using MUL (low 32) and MULHU (high 32 of unsigned
+                        // mul) plus the two cross-word products.
+                        let vreg_ty = vreg_types.get(&dst_id);
+                        let is_64bit = matches!(ty, Some(IRType::I64) | Some(IRType::U64))
+                            || matches!(vreg_ty, Some(IRType::I64) | Some(IRType::U64));
+                        if is_64bit {
+                            // Register plan:
+                            //   T0 = a_lo, T2 = a_hi, T1 = b_lo, T3 = b_hi
+                            //   T4 = a_lo (saved), T5 = b_lo (saved), T6 = a_hi (saved)
+                            code.extend(ss_load_value_64(Gpr::T0, Gpr::T2, lhs, &vreg_stack_slots));
+                            code.extend(ss_load_value_64(Gpr::T1, Gpr::T3, rhs, &vreg_stack_slots));
+                            // Save a_lo, b_lo, a_hi before they're clobbered
+                            code.extend(Instruction::Addi { rd: Gpr::T4, rs1: Gpr::T0, imm: 0 }.encode()); // T4 = a_lo
+                            code.extend(Instruction::Addi { rd: Gpr::T5, rs1: Gpr::T1, imm: 0 }.encode()); // T5 = b_lo
+                            code.extend(Instruction::Addi { rd: Gpr::T6, rs1: Gpr::T2, imm: 0 }.encode()); // T6 = a_hi
+                            // result_lo = MUL(a_lo, b_lo)
+                            code.extend(Instruction::Mul { rd: Gpr::T0, rs1: Gpr::T4, rs2: Gpr::T5 }.encode());
+                            // result_hi = MULHU(a_lo, b_lo)
+                            code.extend(Instruction::Mulhu { rd: Gpr::T2, rs1: Gpr::T4, rs2: Gpr::T5 }.encode());
+                            // result_hi += a_lo * b_hi = MUL(T4, T3)
+                            code.extend(Instruction::Mul { rd: Gpr::A0, rs1: Gpr::T4, rs2: Gpr::T3 }.encode());
+                            code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T2, rs2: Gpr::A0 }.encode());
+                            // result_hi += a_hi * b_lo = MUL(T6, T5)
+                            code.extend(Instruction::Mul { rd: Gpr::A0, rs1: Gpr::T6, rs2: Gpr::T5 }.encode());
+                            code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T2, rs2: Gpr::A0 }.encode());
+                            code.extend(ss_store_64(Gpr::T0, Gpr::T2, dst_offset));
+                        } else {
+                            let ty_ref = ty.as_ref().or(vreg_ty);
+                            code.extend(ss_load_value_typed(
+                                Gpr::T0, Gpr::T1, lhs, &vreg_stack_slots, ty_ref,
+                            ));
+                            code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T2));
+                            code.extend(Instruction::Mul { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T2 }.encode());
+                            code.extend(ss_store_to_slot_typed(Gpr::T0, Gpr::T1, dst_offset, ty_ref));
+                        }
                         code
                     }
                     IRInstr::Div { dst, lhs, rhs, .. } => {
