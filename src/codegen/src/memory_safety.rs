@@ -1031,7 +1031,27 @@ pub fn inject_bounds_check_ir(scg: &mut Scg, alloc_sizes: &HashMap<String, u64>)
     let mut stats = PointerStats::default();
     for node in &mut scg.nodes {
         if let ScgNode::Function(func) = node {
-            inject_bounds_check_ir_in_stmts(&mut func.body, alloc_sizes, &mut counter, &mut stats);
+            // W0-blake2: Build a PER-FUNCTION alloc_sizes table by merging
+            // the global table with this function's own AllocationNode::Stack
+            // entries. Without this, two functions that both use the same
+            // variable name (e.g. `let V = state_new(Blake2bV)` in
+            // blake2b_compress and `let V = state_new(Blake2sV)` in
+            // blake2s_compress) would share a single global entry, and
+            // last-writer-wins would give one function the WRONG size.
+            // For blake2, this caused blake2b's 128-byte V to be checked
+            // against blake2s's 64-byte size, triggering __oob_trap on
+            // every V.v[8..15] access (offset >= 64).
+            // W0-blake2: Use a PER-FUNCTION alloc_sizes table that only contains
+            // THIS function's local allocations. Do NOT inherit the global table,
+            // because variable names collide across functions (e.g. "V" in
+            // blake2b_compress = 128 bytes vs "V" in blake2s_compress = 64 bytes).
+            // Parameters (State<Layout>) have no local AllocationNode, so they
+            // will be classified as WILD (no bounds check) — this is a trade-off:
+            // we lose bounds checking on parameter accesses but avoid false
+            // positives from cross-function name collisions.
+            let mut func_sizes = HashMap::new();
+            collect_alloc_sizes_in_func(&func.body, &mut func_sizes);
+            inject_bounds_check_ir_in_stmts(&mut func.body, &func_sizes, &mut counter, &mut stats);
         }
     }
     vuma_log!(
@@ -1041,6 +1061,45 @@ pub fn inject_bounds_check_ir(scg: &mut Scg, alloc_sizes: &HashMap<String, u64>)
         stats.seq,
         stats.wild
     );
+}
+
+/// Collect AllocationNode::Stack sizes from a single function's body,
+/// merging into the provided table. Used by `inject_bounds_check_ir` to
+/// build a per-function alloc_sizes table that overrides the global
+/// table's entries for variables that are redeclared with different
+/// sizes in different functions.
+fn collect_alloc_sizes_in_func(
+    stmts: &[ScgStatement],
+    table: &mut HashMap<String, u64>,
+) {
+    for stmt in stmts {
+        if let ScgStatement::Allocation(AllocationNode::Stack { name, size, .. }) = stmt {
+            if std::env::var("VUMA_DEBUG_FUNC_SIZES").is_ok() {
+                eprintln!("  collect_alloc: {} -> {}", name, size);
+            }
+            table.insert(name.clone(), u64::from(*size));
+        }
+        if let ScgStatement::Control(ctrl) = stmt {
+            match ctrl {
+                ControlNode::If { then_body, else_body, .. } => {
+                    collect_alloc_sizes_in_func(then_body, table);
+                    if let Some(eb) = else_body {
+                        collect_alloc_sizes_in_func(eb, table);
+                    }
+                }
+                ControlNode::Loop { body, .. } => {
+                    collect_alloc_sizes_in_func(body, table);
+                }
+                ControlNode::Switch { arms, default_body, .. } => {
+                    for arm in arms {
+                        collect_alloc_sizes_in_func(&arm.body, table);
+                    }
+                    collect_alloc_sizes_in_func(default_body, table);
+                }
+                ControlNode::Break | ControlNode::Continue => {}
+            }
+        }
+    }
 }
 
 fn inject_bounds_check_ir_in_stmts(
@@ -1531,10 +1590,20 @@ pub fn inject_liveness_check_ir(scg: &mut Scg, alloc_sizes: &HashMap<String, u64
     let mut stats = LivenessStats::default();
     for node in &mut scg.nodes {
         if let ScgNode::Function(func) = node {
+            // W0-blake2: Build per-function alloc_sizes and state_offsets
+            // (same fix as inject_bounds_check_ir — see comment there).
+            let mut func_alloc_sizes = alloc_sizes.clone();
+            collect_alloc_sizes_in_func(&func.body, &mut func_alloc_sizes);
+            let mut func_state_offsets = state_offsets.clone();
+            collect_state_liveness_in_stmts(
+                &func.body,
+                &func_alloc_sizes,
+                &mut func_state_offsets,
+            );
             inject_liveness_check_ir_in_stmts(
                 &mut func.body,
-                &state_offsets,
-                alloc_sizes,
+                &func_state_offsets,
+                &func_alloc_sizes,
                 &mut counter,
                 &mut stats,
             );
