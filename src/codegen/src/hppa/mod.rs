@@ -1148,30 +1148,53 @@ fn const_fold_fp_cmp(kind: &crate::ir::CmpKind, lhs: i64, rhs: i64, is_f64: bool
     }
 }
 
-/// Emit a backward unconditional branch using the BL+LDO+BV pattern.
+/// Emit an unconditional branch (forward or backward) using either a direct
+/// BL (when the displacement fits in BL's 17-bit signed range) or the
+/// BL+LDO+BV indirect pattern (for out-of-range displacements).
 ///
-/// PA-RISC BL only supports forward branches, so to branch backward we:
-///   1. BL +0, R1  — sets R1 = current_PC + 8, branches to PC+8 (next instr)
-///   2. NOP        — delay slot
-///   3. LDO disp(R1), R1  — R1 = (PC+8) + disp = target_address
-///   4. BV R0(R1)  — branch to address in R1
-///   5. NOP        — delay slot
+/// PA-RISC BL has a 17-bit **signed** displacement field (scaled by 4), so it
+/// supports both forward and backward branches within ±256 KB
+/// (`[-262144, 262140]` bytes, 4-byte aligned). For displacements inside
+/// that range we emit a single `BL,n disp, R1` plus a NOP for the nullified
+/// delay slot — 8 bytes total, independent of the displacement magnitude.
 ///
-/// Uses R1 (RP) as the link register. R1 is saved in the prologue and restored
-/// in the epilogue, so it's free for use within the function body.
+/// For displacements beyond BL's range (i.e. a single function larger than
+/// ~512 KB, which is exceedingly rare), we fall back to the indirect
+/// BL+LDO+BV pattern. Each LDO adds up to ±8191 bytes of reach, so the
+/// sequence size grows linearly with displacement (4 + 4 + N*4 + 4 + 4
+/// bytes for N LDOs). The branch placeholder must be large enough to hold
+/// this worst case (see `BRANCH_PLACEHOLDER_INSTRS`).
+///
+/// Both forms clobber R1 (RP), which is saved in the prologue and restored
+/// in the epilogue, so it is free for use within the function body.
 ///
 /// `target_offset` is the absolute code offset of the branch target.
 /// `bl_offset` is the absolute code offset where the BL instruction will be emitted.
-/// Returns the 5-instruction (20-byte) sequence as a Vec<u8>.
+///
+/// [W1-hppa-branch] Previously this function *always* used the BL+LDO+BV
+/// indirect form, whose size grows with displacement. For large functions
+/// (e.g. blake2's ~80 KB body) the LDO chain exceeded the 40-byte branch
+/// placeholder, panicking during code emission. The BL fast path bounds the
+/// common case at 8 bytes.
 fn emit_backward_branch(target_offset: i64, bl_offset: i64) -> Vec<u8> {
     let mut code = Vec::new();
     let disp = target_offset - (bl_offset + 8);
+
+    // Fast path: displacement fits in BL's 17-bit signed range (±256 KB).
+    // emit 8 bytes (BL,n + nullified-delay-slot NOP).
+    if disp % 4 == 0 && disp >= -262144 && disp <= 262140 {
+        code.extend_from_slice(&encode_bl(disp as i32));
+        code.extend_from_slice(&encode_nop()); // nullified delay slot
+        return code;
+    }
+
+    // Fallback: BL +0, R1 + multi-LDO chain + BV R0(R1) for very large
+    // displacements (> 256 KB). Size grows linearly with displacement.
+    // For large functions, a single LDO can't reach the target — decompose
+    // the displacement into chunks of 8000 bytes each.
     // BL +0, R1 (link = R1, disp = 0)
     code.extend_from_slice(&0xE8200000u32.to_be_bytes());
     code.extend_from_slice(&encode_nop()); // delay slot
-                                           // [hppa-branch-range] LDO has a 14-bit signed displacement
-                                           // (±8191 bytes). For large functions (>8KB code), a single LDO can't
-                                           // reach the target. Use multiple LDOs to decompose the displacement.
     let mut remaining = disp;
     // Each LDO can add up to ±8191. Use chunks of 8000 to stay safe.
     while remaining.abs() > 8000 {
@@ -1605,25 +1628,45 @@ fn patch_cmpb_to_target(code: &mut [u8], cmpb_off: usize, target_off: usize) {
     code[cmpb_off..cmpb_off + 4].copy_from_slice(&patched.to_be_bytes());
 }
 
-/// Emit a 20-byte (5-NOP) placeholder for a forward unconditional branch.
-/// Patch later with `patch_forward_branch_to_here`.
+/// Number of 4-byte instruction slots reserved for an unconditional branch
+/// placeholder. The placeholder must be large enough to hold the longest
+/// sequence that `emit_backward_branch` can produce.
+///
+/// - Fast path (BL in range): 8 bytes (2 instrs).
+/// - Fallback (BL+LDO+BV with N LDOs): `8 + 4*N` bytes, growing with the
+///   displacement. For a 256 KB displacement cap on the fallback we need
+///   ~32 LDOs (136 bytes), but such giant functions are pathological.
+///
+/// 16 instructions (64 bytes) comfortably holds the fast path AND the
+/// fallback for any function up to ~96 KB (12 LDOs), which covers every
+/// realistic VUMA binary. The fast path (8 bytes) means typical branch
+/// placeholders are mostly NOPs.
+///
+/// [W1-hppa-branch] Previously 10 instructions (40 bytes), which was
+/// exceeded by the multi-LDO fallback for blake2 (10 LDOs = 56 bytes).
+const BRANCH_PLACEHOLDER_INSTRS: usize = 16;
+const BRANCH_PLACEHOLDER_BYTES: usize = BRANCH_PLACEHOLDER_INSTRS * 4;
+
+/// Emit a branch placeholder (16 NOPs / 64 bytes) for a forward
+/// unconditional branch. Patch later with `patch_forward_branch_to_here`.
 fn emit_forward_branch_placeholder(code: &mut Vec<u8>) -> usize {
     let off = code.len();
-    for _ in 0..10 {
+    for _ in 0..BRANCH_PLACEHOLDER_INSTRS {
         code.extend_from_slice(&encode_nop());
     }
     off
 }
 
-/// Patch a 20-byte forward-branch placeholder (emitted by
+/// Patch a forward-branch placeholder (emitted by
 /// `emit_forward_branch_placeholder`) to branch to the current code end.
 fn patch_forward_branch_to_here(code: &mut [u8], branch_off: usize) {
     let here = code.len() as i64;
     let (branch_code, _) = emit_branch(here, branch_off as i64);
     assert!(
-        branch_code.len() <= 40,
-        "forward branch {} bytes exceeds 20-byte placeholder",
-        branch_code.len()
+        branch_code.len() <= BRANCH_PLACEHOLDER_BYTES,
+        "forward branch {} bytes exceeds {}-byte placeholder",
+        branch_code.len(),
+        BRANCH_PLACEHOLDER_BYTES,
     );
     for (i, byte) in branch_code.iter().enumerate() {
         code[branch_off + i] = *byte;
@@ -5509,12 +5552,12 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
         // Emit terminator
         match &block.terminator {
             IRTerminator::Jump(target) => {
-                // Unconditional branch. Emit a 20-byte placeholder that can
-                // hold either a forward BL (8 bytes + 3 NOPs) or a
-                // backward BL+LDO+BV (20 bytes).
+                // Unconditional branch. Emit a BRANCH_PLACEHOLDER_BYTES-byte
+                // placeholder that can hold either a direct BL (8 bytes,
+                // fast path) or the BL+LDO+BV indirect form (up to 64 bytes
+                // for very large displacements). See `emit_backward_branch`.
                 let patch_off = code.len();
-                // Emit 5 NOPs (20 bytes) as placeholder.
-                for _ in 0..10 {
+                for _ in 0..BRANCH_PLACEHOLDER_INSTRS {
                     code.extend_from_slice(&encode_nop());
                 }
                 branch_patches.push(BranchPatch {
@@ -5529,33 +5572,44 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
             } => {
                 // Conditional branch: if cond != 0 → true_block, else → false_block.
                 //
-                // LONG-FORM CondBranch: always emit a 48-byte
-                // pattern that uses an inverted cmpb with a small fixed
-                // displacement to skip past the true_target's unconditional
-                // branch. This avoids the cmpb's ±8KB displacement limit
-                // (which was causing "cmpb displacement out of range"
-                // panics on large functions like driver_isolation's main).
+                // LONG-FORM CondBranch: emit a cmpb with a fixed displacement
+                // that skips past the true_target's unconditional-branch
+                // placeholder to reach the false_target's placeholder. This
+                // avoids the cmpb's ±8KB displacement limit (which was causing
+                // "cmpb displacement out of range" panics on large functions
+                // like driver_isolation's main).
                 //
-                // Layout:
-                //   X+0:  cmpb,=  S0, R0, +20  — if cond is FALSE (S0==0),
-                //                                 skip to X+28 (false_target's branch)
+                // Layout (BRANCH_PLACEHOLDER_BYTES = 64):
+                //   X+0:  cmpb,=  S0, R0, +64  — if cond is FALSE (S0==0),
+                //                                 skip to X+72 (false_target's branch)
                 //   X+4:  NOP                    — delay slot (executed regardless)
-                //   X+8:  20-byte placeholder    — unconditional branch to true_block
-                //                                   (BL+NOP+LDO+BV+NOP, patched later)
-                //   X+28: 20-byte placeholder    — unconditional branch to false_block
-                //                                   (BL+NOP+LDO+BV+NOP, patched later)
+                //   X+8:  64-byte placeholder    — unconditional branch to true_block
+                //                                   (BL fast path or BL+LDO+BV, patched later)
+                //   X+72: 64-byte placeholder    — unconditional branch to false_block
+                //                                   (BL fast path or BL+LDO+BV, patched later)
+                //
+                // The cmpb displacement equals BRANCH_PLACEHOLDER_BYTES (64),
+                // well within cmpb's ±8192-byte range.
                 //
                 // cmpb,= = major 0x20, cond=001 (=), inverted=false → '='
                 // (branches if S0 == R0, i.e., cond == 0)
                 code.extend(ss_load_value(cond, &vreg_stack_slots, S0));
 
-                // cmpb,= S0, R0, +20 (small fixed displacement; always fits)
-                code.extend_from_slice(&encode_cmpb(S0, R0, 0b001, false, false, 20));
+                // cmpb,= S0, R0, +BRANCH_PLACEHOLDER_BYTES (fixed displacement;
+                // always fits in cmpb's ±8192-byte range)
+                code.extend_from_slice(&encode_cmpb(
+                    S0,
+                    R0,
+                    0b001,
+                    false,
+                    false,
+                    BRANCH_PLACEHOLDER_BYTES as i32,
+                ));
                 code.extend_from_slice(&encode_nop()); // delay slot
 
-                // 20-byte placeholder for unconditional branch to true_block.
+                // Placeholder for unconditional branch to true_block.
                 let true_off = code.len();
-                for _ in 0..10 {
+                for _ in 0..BRANCH_PLACEHOLDER_INSTRS {
                     code.extend_from_slice(&encode_nop());
                 }
                 branch_patches.push(BranchPatch {
@@ -5563,9 +5617,9 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                     target_label: true_block.clone(),
                 });
 
-                // 20-byte placeholder for unconditional branch to false_block.
+                // Placeholder for unconditional branch to false_block.
                 let false_off = code.len();
-                for _ in 0..10 {
+                for _ in 0..BRANCH_PLACEHOLDER_INSTRS {
                     code.extend_from_slice(&encode_nop());
                 }
                 branch_patches.push(BranchPatch {
@@ -5630,17 +5684,19 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
 
     // ── Phase 4: Patch branch displacements ──
     // For each branch patch, determine if it's forward or backward, then
-    // emit the appropriate sequence (forward BL or backward BL+LDO+BV).
-    // The placeholder is 20 bytes (5 NOPs), which can hold either form.
+    // emit the appropriate sequence (direct BL fast path, or BL+LDO+BV
+    // fallback for out-of-range displacements). The placeholder is
+    // BRANCH_PLACEHOLDER_BYTES (64 bytes / 16 NOPs), which holds either form.
     for patch in &branch_patches {
         if let Some(&target_idx) = label_to_idx.get(&patch.target_label) {
             let target_offset = block_start_offsets[target_idx] as i64;
             let pc_offset = patch.code_offset as i64;
             let (branch_code, _) = emit_branch(target_offset, pc_offset);
             assert!(
-                branch_code.len() <= 40,
-                "branch code {} bytes exceeds 40-byte placeholder",
-                branch_code.len()
+                branch_code.len() <= BRANCH_PLACEHOLDER_BYTES,
+                "branch code {} bytes exceeds {}-byte placeholder",
+                branch_code.len(),
+                BRANCH_PLACEHOLDER_BYTES,
             );
             for (i, byte) in branch_code.iter().enumerate() {
                 code[patch.code_offset + i] = *byte;
