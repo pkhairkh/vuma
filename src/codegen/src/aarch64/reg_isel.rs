@@ -39,7 +39,7 @@ use crate::ir::{
     BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRTerminator, IRType, IRValue, UnaryOpKind,
 };
 use crate::regalloc::{GenericSpillCode, RegAllocResult};
-use crate::aarch64::{Condition, Instruction, Operand, Register};
+use crate::aarch64::{Condition, Instruction, Operand, RegWidth, Register};
 
 /// Resolved value: either a physical register or an immediate.
 enum ResolvedVal {
@@ -455,6 +455,15 @@ pub fn emit_function_regalloc_full(
 /// stack-slot ISel path.
 fn emit_instr(code: &mut Vec<u8>, instr: Instruction) {
     let word = instr.encode().unwrap_or_else(|e| {
+        panic!("aarch64 reg_isel: encoding failed for {:?}: {}", instr, e);
+    });
+    code.extend_from_slice(&word.to_le_bytes());
+}
+
+/// Emit an instruction with a specific register width (32 or 64 bit).
+/// Use this for instructions where the width matters (UBFM, shifts, etc.)
+fn emit_instr_w(code: &mut Vec<u8>, instr: Instruction, width: RegWidth) {
+    let word = instr.encode_with_width(width).unwrap_or_else(|e| {
         panic!("aarch64 reg_isel: encoding failed for {:?}: {}", instr, e);
     });
     code.extend_from_slice(&word.to_le_bytes());
@@ -950,6 +959,10 @@ fn emit_instruction(
             let (rhs_reg, rhs_operand): (Register, Operand) = if supports_imm {
                 match resolve_value(rhs, alloc) {
                     ResolvedVal::Imm(imm) if (0..=4095).contains(&imm) => {
+                        // For shift operations, the immediate must be 0-63 (64-bit)
+                        // or 0-31 (32-bit). Imm12 holds 0-4095 which is too wide.
+                        // For 32-bit shifts >= 32, we handle it in the shift emitter
+                        // (the Imm12 is still stored, and the shift handler checks).
                         (Register::XZR, Operand::Imm12(imm as u16))
                     }
                     _ => {
@@ -983,9 +996,38 @@ fn emit_instruction(
                 BinOpKind::And => emit_instr(code, Instruction::AND { rd: dst_reg, rn: lhs_reg, rm: rhs_reg }),
                 BinOpKind::Or  => emit_instr(code, Instruction::ORR { rd: dst_reg, rn: lhs_reg, rm: rhs_reg }),
                 BinOpKind::Xor => emit_instr(code, Instruction::EOR { rd: dst_reg, rn: lhs_reg, rm: rhs_reg }),
-                BinOpKind::Shl => emit_instr(code, Instruction::LSL { rd: dst_reg, rn: lhs_reg, rm: rhs_operand }),
-                BinOpKind::ShrL => emit_instr(code, Instruction::LSR { rd: dst_reg, rn: lhs_reg, rm: rhs_operand }),
-                BinOpKind::ShrA => emit_instr(code, Instruction::ASR { rd: dst_reg, rn: lhs_reg, rm: rhs_operand }),
+                BinOpKind::Shl => {
+                    if matches!(ty, Some(IRType::I32) | Some(IRType::U32)) {
+                        emit_instr_w(code, Instruction::LSL { rd: dst_reg, rn: lhs_reg, rm: rhs_operand }, RegWidth::W32);
+                    } else {
+                        emit_instr(code, Instruction::LSL { rd: dst_reg, rn: lhs_reg, rm: rhs_operand });
+                    }
+                }
+                BinOpKind::ShrL => {
+                    if matches!(ty, Some(IRType::I32) | Some(IRType::U32)) {
+                        // For 32-bit: shift by >= 32 produces 0.
+                        // Handle this specially to avoid UBFM with immr >= 32 (UNDEFINED).
+                        if let Operand::Imm12(imm) = &rhs_operand {
+                            if *imm >= 32 {
+                                // result = 0: MOV dst, XZR (ORR Xd, XZR, XZR)
+                                emit_instr(code, Instruction::ORR { rd: dst_reg, rn: Register::XZR, rm: Register::XZR });
+                            } else {
+                                emit_instr_w(code, Instruction::LSR { rd: dst_reg, rn: lhs_reg, rm: rhs_operand }, RegWidth::W32);
+                            }
+                        } else {
+                            emit_instr_w(code, Instruction::LSR { rd: dst_reg, rn: lhs_reg, rm: rhs_operand }, RegWidth::W32);
+                        }
+                    } else {
+                        emit_instr(code, Instruction::LSR { rd: dst_reg, rn: lhs_reg, rm: rhs_operand });
+                    }
+                }
+                BinOpKind::ShrA => {
+                    if matches!(ty, Some(IRType::I32) | Some(IRType::U32)) {
+                        emit_instr_w(code, Instruction::ASR { rd: dst_reg, rn: lhs_reg, rm: rhs_operand }, RegWidth::W32);
+                    } else {
+                        emit_instr(code, Instruction::ASR { rd: dst_reg, rn: lhs_reg, rm: rhs_operand });
+                    }
+                }
                 BinOpKind::Add => emit_instr(code, Instruction::ADD { rd: dst_reg, rn: lhs_reg, rm: rhs_operand }),
                 BinOpKind::Sub => emit_instr(code, Instruction::SUB { rd: dst_reg, rn: lhs_reg, rm: rhs_operand }),
                 BinOpKind::Mul => emit_instr(code, Instruction::MUL { rd: dst_reg, rn: lhs_reg, rm: rhs_reg }),
