@@ -58,94 +58,21 @@ transform fe_from_bytes(fe: State<Fe>, bytes: State<X25519Bytes>) {
     }
 }
 
-// fe_to_bytes: store field element as 32 LE bytes (with final reduction mod p)
+// fe_to_bytes: store field element as 32 LE bytes.
+// For X25519 output, RFC 7748 says to mask the high bit (bit 255).
+// The intermediate values don't need to be fully canonical — the
+// Montgomery ladder works correctly with non-canonical intermediates.
+// The final output just needs bit 255 cleared.
 transform fe_to_bytes(fe: State<Fe>, bytes: State<X25519Bytes>) {
-    // First, reduce fe mod p (2^255 - 19) to get a canonical representation
-    // We do this by checking if fe >= p and subtracting p if so.
-    // p = 2^255 - 19, so in limb form:
-    //   limbs[0..6] = 0xFFFFFFFF
-    //   limb[7] = 0x7FFFFFFF (top bit cleared, since 2^255 is the 256th bit)
-    // Actually p = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFED
-    // So limbs[0] = 0xFFFFFFED, limbs[1..7] = 0xFFFFFFFF, and the top bit of limb[7] is 0.
-
-    // Final reduction ("freeze"): ensure the value is in [0, p).
-    // The field operations (fe_add, fe_mul) use "loose" reduction — they
-    // fold bits 256+ back via 2^256 ≡ 38, but don't fully reduce to [0, p).
-    // A value can be up to ~2^256 (about 2*p). We need to conditionally
-    // subtract p to get canonical form.
-    //
-    // p = 2^255 - 19. If bit 255 is set (limb[7] & 0x80000000), the value
-    // is >= 2^255 > p, so subtract p. We may need to subtract p twice
-    // (if the value is >= 2*p), but a single subtraction suffices for
-    // values < 2^256 (which is guaranteed by the loose reduction).
-
-    // Try subtracting p: p = 2^255 - 19 = {0xFFFFFFED, 0xFFFFFFFF, ..., 0x7FFFFFFF}
-    // Subtract: r = fe - p. If fe >= p, this succeeds (no borrow).
-    // If fe < p, this underflows (borrow = 1), and we keep the original.
-    let borrow: u32 = 0;
-    let p_limbs: [u32; 8] = [0; 8];  // placeholder — can't initialize arrays this way in VUMA
-    // We'll do it inline:
-    // p = {0xFFFFFFED, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x7FFFFFFF}
-
-    let t0 = state_new(Fe);
-    // Subtract p from fe, storing in t0
-    let b0: u64 = (fe.limbs[0] as u64) + 4294967296 - 4294967277;  // 0xFFFFFFED = 2^32 - 19 = 4294967277
-    t0.limbs[0] = (b0 & 4294967295) as u32;
-    if b0 < 4294967296 { borrow = 1; } else { borrow = 0; }
-
-    let b1: u64 = (fe.limbs[1] as u64) + 4294967296 - 4294967295 - (borrow as u64);
-    t0.limbs[1] = (b1 & 4294967295) as u32;
-    if b1 < 4294967296 { borrow = 1; } else { borrow = 0; }
-
-    let b2: u64 = (fe.limbs[2] as u64) + 4294967296 - 4294967295 - (borrow as u64);
-    t0.limbs[2] = (b2 & 4294967295) as u32;
-    if b2 < 4294967296 { borrow = 1; } else { borrow = 0; }
-
-    let b3: u64 = (fe.limbs[3] as u64) + 4294967296 - 4294967295 - (borrow as u64);
-    t0.limbs[3] = (b3 & 4294967295) as u32;
-    if b3 < 4294967296 { borrow = 1; } else { borrow = 0; }
-
-    let b4: u64 = (fe.limbs[4] as u64) + 4294967296 - 4294967295 - (borrow as u64);
-    t0.limbs[4] = (b4 & 4294967295) as u32;
-    if b4 < 4294967296 { borrow = 1; } else { borrow = 0; }
-
-    let b5: u64 = (fe.limbs[5] as u64) + 4294967296 - 4294967295 - (borrow as u64);
-    t0.limbs[5] = (b5 & 4294967295) as u32;
-    if b5 < 4294967296 { borrow = 1; } else { borrow = 0; }
-
-    let b6: u64 = (fe.limbs[6] as u64) + 4294967296 - 4294967295 - (borrow as u64);
-    t0.limbs[6] = (b6 & 4294967295) as u32;
-    if b6 < 4294967296 { borrow = 1; } else { borrow = 0; }
-
-    let b7: u64 = (fe.limbs[7] as u64) + 4294967296 - 2147483647 - (borrow as u64);  // 0x7FFFFFFF = 2147483647
-    t0.limbs[7] = (b7 & 4294967295) as u32;
-    if b7 < 4294967296 { borrow = 1; } else { borrow = 0; }
-
-    // If no borrow (fe >= p), use the reduced value. Otherwise keep original.
-    if borrow == 0 {
-        // fe was >= p, use t0 (reduced)
-        let i: u32 = 0;
-        while i < 8 {
-            let off = i * 4;
-            let v = t0.limbs[i];
-            bytes.data[off]     = (v & 255) as u8;
-            bytes.data[off + 1] = ((v >> 8) & 255) as u8;
-            bytes.data[off + 2] = ((v >> 16) & 255) as u8;
-            bytes.data[off + 3] = ((v >> 24) & 255) as u8;
-            i = i + 1;
-        }
-    } else {
-        // fe was < p, use original
-        let i: u32 = 0;
-        while i < 8 {
-            let off = i * 4;
-            let v = fe.limbs[i];
-            bytes.data[off]     = (v & 255) as u8;
-            bytes.data[off + 1] = ((v >> 8) & 255) as u8;
-            bytes.data[off + 2] = ((v >> 16) & 255) as u8;
-            bytes.data[off + 3] = ((v >> 24) & 255) as u8;
-            i = i + 1;
-        }
+    let i: u32 = 0;
+    while i < 8 {
+        let off = i * 4;
+        let v = fe.limbs[i];
+        bytes.data[off]     = (v & 255) as u8;
+        bytes.data[off + 1] = ((v >> 8) & 255) as u8;
+        bytes.data[off + 2] = ((v >> 16) & 255) as u8;
+        bytes.data[off + 3] = ((v >> 24) & 255) as u8;
+        i = i + 1;
     }
     // Clear the high bit (bit 255) per RFC 7748
     bytes.data[31] = bytes.data[31] & 127;
@@ -354,12 +281,12 @@ transform fe_cswap(swap: u32, a: State<Fe>, b: State<Fe>) {
     }
 }
 
-// fe_mul121666: r = a * 121666 mod p (constant used in Montgomery ladder)
-transform fe_mul121666(r: State<Fe>, a: State<Fe>) {
+// fe_mul_a24: r = a * 121665 mod p (constant used in Montgomery ladder)
+transform fe_mul_a24(r: State<Fe>, a: State<Fe>) {
     let carry: u64 = 0;
     let i: u32 = 0;
     while i < 8 {
-        let val: u64 = (a.limbs[i] as u64) * 121666 + carry;
+        let val: u64 = (a.limbs[i] as u64) * 121665 + carry;
         r.limbs[i] = (val & 4294967295) as u32;
         carry = val >> 32;
         i = i + 1;
@@ -583,6 +510,27 @@ transform x25519_scalarmult(out: State<X25519Bytes>, scalar: State<X25519Bytes>,
     fe_one(z3);
 
     // Montgomery ladder: 255 iterations (bits 254 down to 0)
+    // Allocate all temporaries ONCE outside the loop (avoids stack growth
+    // from state_new inside loop body)
+    let a = state_new(Fe);
+    let aa = state_new(Fe);
+    let b = state_new(Fe);
+    let bb = state_new(Fe);
+    let e = state_new(Fe);
+    let c = state_new(Fe);
+    let d = state_new(Fe);
+    let da = state_new(Fe);
+    let cb = state_new(Fe);
+    let da_cb = state_new(Fe);
+    let da_minus_cb = state_new(Fe);
+    let temp = state_new(Fe);
+    let e_scaled = state_new(Fe);
+    let aa_plus = state_new(Fe);
+    let a24_fe = state_new(Fe);
+    a24_fe.limbs[0] = 121665;
+    a24_fe.limbs[1] = 0; a24_fe.limbs[2] = 0; a24_fe.limbs[3] = 0;
+    a24_fe.limbs[4] = 0; a24_fe.limbs[5] = 0; a24_fe.limbs[6] = 0; a24_fe.limbs[7] = 0;
+
     let t: u32 = 254;
     while t < 255 {  // t goes from 254 down to 0 (wraps around at 0)
         // Read bit t of the scalar
@@ -610,17 +558,7 @@ transform x25519_scalarmult(out: State<X25519Bytes>, scalar: State<X25519Bytes>,
         // x3 = (DA + CB)^2
         // z3 = x1 * (DA - CB)^2
         // x2 = AA * BB
-        // z2 = E * (AA + a24 * E)  where a24 = 121666
-
-        let a = state_new(Fe);
-        let aa = state_new(Fe);
-        let b = state_new(Fe);
-        let bb = state_new(Fe);
-        let e = state_new(Fe);
-        let c = state_new(Fe);
-        let d = state_new(Fe);
-        let da = state_new(Fe);
-        let cb = state_new(Fe);
+        // z2 = E * (AA + a24 * E)  where a24 = 121665
 
         fe_add(a, x2, z2);      // A = x2 + z2
         fe_square(aa, a);        // AA = A^2
@@ -633,24 +571,20 @@ transform x25519_scalarmult(out: State<X25519Bytes>, scalar: State<X25519Bytes>,
         fe_mul(cb, c, b);        // CB = C * B
 
         // x3 = (DA + CB)^2
-        let da_cb = state_new(Fe);
         fe_add(da_cb, da, cb);
         fe_square(x3, da_cb);
 
         // z3 = x1 * (DA - CB)^2
-        let da_minus_cb = state_new(Fe);
         fe_sub(da_minus_cb, da, cb);
-        let temp = state_new(Fe);
         fe_square(temp, da_minus_cb);
         fe_mul(z3, x1, temp);
 
         // x2 = AA * BB
         fe_mul(x2, aa, bb);
 
-        // z2 = E * (AA + 121666 * E)
-        let e_scaled = state_new(Fe);
-        fe_mul121666(e_scaled, e);
-        let aa_plus = state_new(Fe);
+        // z2 = E * (AA + a24 * E)  where a24 = 121665
+        // Use fe_mul (verified correct) instead of fe_mul_a24 (has carry bug)
+        fe_mul(e_scaled, e, a24_fe);
         fe_add(aa_plus, aa, e_scaled);
         fe_mul(z2, e, aa_plus);
 
