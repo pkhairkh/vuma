@@ -956,6 +956,9 @@ pub fn constant_fold(mut func: IRFunction) -> IRFunction {
                 let fold_ty = match &instr {
                     IRInstr::BinOp { ty, .. } => ty.clone(),
                     IRInstr::Cmp { ty, .. } => ty.clone(),
+                    IRInstr::Add { ty, .. } => ty.clone(),
+                    IRInstr::Sub { ty, .. } => ty.clone(),
+                    IRInstr::Mul { ty, .. } => ty.clone(),
                     // For Cast{ZExt/SExt}: preserve the TARGET type (to_ty)
                     // so the folded Add uses I64, not the source I32.
                     // Without this, a u32→u64 cast folded into Add{rhs:0}
@@ -970,12 +973,24 @@ pub fn constant_fold(mut func: IRFunction) -> IRFunction {
                     }
                     _ => None,
                 };
-                // W3-blake2: If fold_ty is None but the result doesn't fit
-                // in i32 (high 32 bits non-zero when unsigned), use ty: Some(U64)
-                // so 32-bit backends store the full 64-bit value. Without this,
-                // `let a: u64 = 0x6A09E667BB67AE85` is constant-folded to
-                // Add{lhs: imm, rhs: 0, ty: None}, and riscv32/m68k/hppa store
-                // only the low 32 bits, corrupting subsequent 64-bit operations.
+                // W4-blake2: If fold_ty is None, check if the folded result
+                // is used in a 64-bit context. We can't know the context here,
+                // so use a heuristic: if the result doesn't fit in i32 (unsigned),
+                // OR if the original instruction had a 64-bit type annotation,
+                // use ty: Some(U64). This preserves the original type when
+                // constant-folding BinOp{ty:Some(U64)} and Cast{to_ty:Some(U64)}.
+                //
+                // For small values (fit in i32) with no type annotation (ty:None),
+                // keep ty:None — this is safe for 32-bit operations and doesn't
+                // cause the m68k api.vuma regression (which was triggered by
+                // forcing ALL constants to U64, including 32-bit pointer arithmetic).
+                //
+                // The remaining issue: `let p1: u64 = 64` produces Add{ty:None}
+                // because the `let` assignment doesn't carry the declared type.
+                // A subsequent `p1 | 65536` loads p1 as 64-bit but the high
+                // word is garbage. This is fixed at the BACKEND level: when
+                // BinOp{ty:Some(U64)} loads an operand with ty:None, the backend
+                // should zero-extend the 32-bit value to 64 bits.
                 let fold_ty = fold_ty.or_else(|| {
                     if (result as u64) > 0xFFFFFFFF {
                         Some(IRType::U64)
