@@ -1,0 +1,98 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/crypto/symmetric/rc4.vuma — RC4 Stream Cipher
+// PMT-native rewrite (W2-F1).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Variable-length key (1-256 bytes), byte-oriented stream cipher.
+//
+// Algorithm:
+//   KSA (Key Scheduling Algorithm):
+//     for i = 0 to 255: S[i] = i
+//     j = 0
+//     for i = 0 to 255:
+//       j = (j + S[i] + key[i mod keylen]) mod 256
+//       swap S[i], S[j]
+//
+//   PRGA (Pseudo-Random Generation Algorithm):
+//     i = 0, j = 0
+//     for each byte:
+//       i = (i + 1) mod 256
+//       j = (j + S[i]) mod 256
+//       swap S[i], S[j]
+//       output S[(S[i] + S[j]) mod 256]
+//
+// Test vector: key="Key", plaintext="Plaintext" → ciphertext=BBF316E8D940AF0AD3
+//
+// PMT patterns (per W2-C1 chacha20.vuma / W2-D salsa20.vuma):
+//   - state_new(Layout) for allocations
+//   - State<T> for transform parameters
+//   - [u8; N] byte arrays with literal/precomputed indices
+//   - NO allocate/free/Address/*ptr
+
+const RC4_MASK32: u32 = 4294967295;
+
+// ===========================================================================
+// Layouts
+// ===========================================================================
+
+layout Rc4Ctx = {
+    sbox: [u8; 256],
+    i: u32,
+    j: u32,
+}
+
+layout Rc4Key = { bytes: [u8; 256] }
+layout Rc4Buf = { bytes: [u8; 256] }
+
+// ===========================================================================
+// KSA (Key Scheduling Algorithm)
+// ===========================================================================
+
+transform rc4_init(ctx: State<Rc4Ctx>, key: State<Rc4Key>, keylen: u32) {
+    // Initialize S-box: S[i] = i
+    let i: u32 = 0;
+    while i < 256 {
+        ctx.sbox[i] = i as u8;
+        i = i + 1;
+    }
+
+    // Shuffle S-box with key
+    let j: u32 = 0;
+    i = 0;
+    while i < 256 {
+        let ki = i % keylen;
+        let si = ctx.sbox[i] as u32;
+        let kj = key.bytes[ki] as u32;
+        j = (j + si + kj) & 255;
+        // Swap S[i] and S[j]
+        let tmp = ctx.sbox[i];
+        ctx.sbox[i] = ctx.sbox[j];
+        ctx.sbox[j] = tmp;
+        i = i + 1;
+    }
+
+    ctx.i = 0;
+    ctx.j = 0;
+}
+
+// ===========================================================================
+// PRGA (Pseudo-Random Generation Algorithm) — encrypt/decrypt
+// ===========================================================================
+
+transform rc4_crypt(ctx: State<Rc4Ctx>, data: State<Rc4Buf>, len: u32) {
+    let n: u32 = 0;
+    while n < len {
+        ctx.i = (ctx.i + 1) & 255;
+        ctx.j = (ctx.j + (ctx.sbox[ctx.i] as u32)) & 255;
+        // Swap S[i] and S[j]
+        let tmp = ctx.sbox[ctx.i];
+        ctx.sbox[ctx.i] = ctx.sbox[ctx.j];
+        ctx.sbox[ctx.j] = tmp;
+        // Generate keystream byte
+        let t = ((ctx.sbox[ctx.i] as u32) + (ctx.sbox[ctx.j] as u32)) & 255;
+        let ks = ctx.sbox[t];
+        // XOR with data
+        data.bytes[n] = data.bytes[n] ^ ks;
+        n = n + 1;
+    }
+}
