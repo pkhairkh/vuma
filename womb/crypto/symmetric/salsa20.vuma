@@ -1,22 +1,80 @@
-// womb/crypto/salsa20.vuma — Salsa20 / XSalsa20 Stream Cipher (eSTREAM)
-// No main() — importable library module.
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/crypto/symmetric/salsa20.vuma — Salsa20 / XSalsa20 Stream Cipher
+// (eSTREAM / Bernstein "Salsa20 specification") — PMT-native rewrite (W2-D).
+// ═══════════════════════════════════════════════════════════════════════════
 //
 // 256-bit key, 64-bit nonce (Salsa20), or 192-bit nonce (XSalsa20).
 // 20 rounds = 10 double rounds (column round + row round). ARX design
 // (add-rotate-XOR). State is 512 bits arranged as 16 little-endian
 // 32-bit words (Bernstein "Salsa20 specification"):
 //
-//   word  0          "expa"   (constant)
-//   word  1  2  3  4         key[0..3]
-//   word  5          "nd 3"   (constant)
-//   word  6  7               nonce[0..1]
-//   word  8  9               counter[0..1]
-//   word 10          "2-by"   (constant)
-//   word 11 12 13 14         key[4..7]
-//   word 15          "te k"   (constant)
+//   word  0          "expa"   (constant σ0 = 0x61707865)
+//   word  1  2  3  4         key[0..3]   (first 16 key bytes, 4 LE u32)
+//   word  5          "nd 3"   (constant σ1 = 0x3320646e)
+//   word  6  7               nonce[0..1] (8 nonce bytes, 2 LE u32)
+//   word  8  9               counter[0..1] (low, high — 64-bit counter)
+//   word 10          "2-by"   (constant σ2 = 0x79622d32)
+//   word 11 12 13 14         key[4..7]   (last 16 key bytes, 4 LE u32)
+//   word 15          "te k"   (constant σ3 = 0x6b206574)
 //
 // XSalsa20 (RFC 8439 §A.3): derive a subkey via HSalsa20(key, nonce[0..16])
 // then run Salsa20 with the subkey and nonce[16..24] as the 8-byte nonce.
+//
+// ── W2-D PMT rewrite ────────────────────────────────────────────────────────
+//   * Replaces all `Address` / `*ptr` / `allocate()` / `free()` pointer
+//     syntax (rejected by VUMA 2.0 PMT-only parser) with `state_new(Layout)`
+//     arena allocations and `State<T>` pass-by-reference parameters.
+//   * State held as a typed `[u32; 16]` array — `ctx.state[i]` reads/writes
+//     the i-th u32 word with VUMA's typed-array scaling (same idiom as
+//     sha.vuma's `W.w[i]`).
+//   * Key/nonce/block I/O held as `[u8; N]` byte arrays — byte-granular
+//     indexing with `as u32` widening casts before `<<` / `+` (same idiom
+//     as sha.vuma's load_state_le / md5.vuma's M.m loader).
+//   * Quarter-round inlined at each of the 16 call sites with LITERAL
+//     indices (avoids the v0.2.0-alpha.15 parameter-index codegen bug
+//     documented in md5.vuma's header — even though W0's compiler fix
+//     addresses the underlying bug, the inline-with-literals pattern is
+//     the safest and matches sha.vuma's `add_state_word(ctx, base, val)`
+//     call sites where `base` is a literal).
+//   * Loop-variable-derived byte offsets precomputed into local vars
+//     (`let off = i * 4;`) before array access — same pattern as md5.vuma's
+//     message-word loader.
+//
+// ── Verification (W2-D) ────────────────────────────────────────────────────
+//   Verified against the official eSTREAM Salsa20 256-bit-key test vector
+//   set (alexwebr/salsa20/test_vectors.256, derived from ECRYPT's verified
+//   test vectors). Two representative vectors are checked by the test
+//   harness (ref_tests/scripts/salsa20_test.py):
+//
+//   Vector A (eSTREAM Set 1, vector# 0):
+//     key   = 80000000000000000000000000000000 00000000000000000000000000000000
+//     nonce = 0000000000000000
+//     block 0 keystream[0..31] =
+//       E3BE8FDD8BECA2E3EA8EF9475B29A6E7003951E1097A5C38D23B7A5FAD9F6844
+//
+//   Vector B (eSTREAM Set 6, vector# 0):
+//     key   = 0053A6F94C9FF24598EB3E91E4378ADD 3083D6297CCF2275C81B6EC11467BA0D
+//     nonce = 0D74DB42A91077DE
+//     block 0 keystream[0..31] =
+//       F5FAD53F79F9DF58C4AEA0D0ED9A9601F278112CA7180D565B420A48019670EA
+//
+//   NOTE on user-supplied vectors: the W2-D task brief listed two vectors
+//   with discrepancies against the canonical eSTREAM set. Vector 1's key
+//   was 16 bytes (128-bit) but the expected keystream didn't match either
+//   the 128-bit or 256-bit Salsa20 output for that key — its first 12
+//   bytes coincide with the 128-bit eSTREAM Set 1 vector# 0 keystream
+//   (4DFA5E48 1DA23EA0 9A310220) but the remaining 20 bytes do not match
+//   any eSTREAM-published vector. Vector 2's expected keystream matches
+//   eSTREAM Set 6 vector# 0, but only with the *correct* 32-byte eSTREAM
+//   key — the key in the brief has a typo in its second half (C8B7C764782CE6AA
+//   vs the correct C81B6EC11467BA0D). The implementation below is verified
+//   against the canonical eSTREAM vectors; both vectors pass with the
+//   correct eSTREAM inputs. See ref_tests/scripts/salsa20_test.py for the
+//   full harness and the worklog entry for W2-D for the discrepancy audit.
+
+// ===========================================================================
+// Constants
+// ===========================================================================
 
 const SALSA20_MASK32: u32 = 4294967295;
 const SALSA20_KEY_SIZE: u32 = 32;
@@ -24,172 +82,453 @@ const SALSA20_NONCE_SIZE: u32 = 8;
 const SALSA20_BLOCK_SIZE: u32 = 64;
 const SALSA20_XSALSA20_NONCE_SIZE: u32 = 24;
 
-// "expand 32-byte k" as four little-endian u32 constants.
+// "expand 32-byte k" as four little-endian u32 constants (σ0..σ3).
+//   "expa" = 'e','x','p','a' = 65 78 70 61 → LE u32 = 0x61707865 = 1634760805
+//   "nd 3" = 'n','d',' ','3' = 6e 64 20 33 → LE u32 = 0x3320646e =  857760878
+//   "2-by" = '2','-','b','y' = 32 2d 62 79 → LE u32 = 0x79622d32 = 2036477234
+//   "te k" = 't','e',' ','k' = 74 65 20 6b → LE u32 = 0x6b206574 = 1797285236
 const SALSA20_SIGMA_0: u32 = 1634760805;  // "expa"
 const SALSA20_SIGMA_1: u32 = 857760878;   // "nd 3"
 const SALSA20_SIGMA_2: u32 = 2036477234;  // "2-by"
 const SALSA20_SIGMA_3: u32 = 1797285236;  // "te k"
 
 // ===========================================================================
-// 32-bit primitives.
+// Layouts
 // ===========================================================================
 
+// Salsa20 context: 16-word (512-bit) working state, 32-byte key, 8-byte
+// nonce, 32-bit block counter. The state field is rebuilt from
+// (key, nonce, counter) at the start of every salsa20_block call (the
+// state is not preserved across blocks — only key/nonce/counter are).
+//
+// `state: [u32; 16]` uses VUMA's typed-array scaling: `ctx.state[i]`
+// reads/writes the i-th u32 word at byte offset i*4 (same idiom as
+// sha.vuma's `W.w[i]` for the SHA-256 message schedule).
+layout Salsa20Ctx = {
+    state: [u32; 16],
+    key: [u8; 32],
+    nonce: [u8; 8],
+    counter: u32,
+}
+
+// 32-byte key wrapper (passed to salsa20_init / hsalsa20).
+layout Salsa20Key = { bytes: [u8; 32] }
+
+// 8-byte nonce wrapper (passed to salsa20_init / salsa20_block).
+layout Salsa20Nonce = { bytes: [u8; 8] }
+
+// 64-byte keystream block / single-block data buffer (Salsa20's block size).
+// Used as the keystream output of salsa20_block AND as the data buffer for
+// single-block (≤64-byte) encrypt/decrypt operations.
+layout Salsa20Block = { bytes: [u8; 64] }
+
+// 256-byte data buffer for multi-block encrypt/decrypt (up to 4 blocks).
+// Callers encrypting more than 256 bytes must chunk the input into
+// ≤256-byte segments and call salsa20_encrypt repeatedly (the counter
+// is reset to 0 at the start of each salsa20_encrypt call — for
+// chunked streaming, the caller must track the counter across chunks
+// and use salsa20_block directly with explicit counter values).
+//
+// This mirrors md5.vuma's Md5Data layout pattern (a fixed-size buffer
+// that caps a single API call's data volume).
+layout Salsa20Buf = { bytes: [u8; 256] }
+
+// 16-byte HSalsa20 nonce input (the first 16 bytes of an XSalsa20 nonce).
+layout Salsa20Nonce16 = { bytes: [u8; 16] }
+
+// 24-byte XSalsa20 nonce (16 bytes for HSalsa20 + 8 bytes for Salsa20).
+layout Salsa20Nonce24 = { bytes: [u8; 24] }
+
+// ===========================================================================
+// 32-bit primitives
+// ===========================================================================
+
+// rotl32: 32-bit left rotation. VUMA's default integer literal type widens
+// u32 arithmetic to u64; the explicit & SALSA20_MASK32 keeps the result
+// within 32-bit range (same idiom as sha.vuma's rotr32).
 transform salsa20_rotl32(x: u32, n: u32) -> u32 {
     return ((x << n) | (x >> (32 - n))) & SALSA20_MASK32;
 }
 
-transform salsa20_load_u32_le(ptr: Address, off: u32) -> u32 {
-    b0: u32 = *(ptr + off);
-    b1: u32 = *(ptr + off + 1);
-    b2: u32 = *(ptr + off + 2);
-    b3: u32 = *(ptr + off + 3);
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+// load_u32_le: read 4 little-endian bytes from `buf.bytes[off..off+3]` as
+// a u32. `off` is a local (loop-derived) — precomputed by the caller via
+// `let off = i * 4;` to avoid the v0.2.0-alpha.15 parameter-index codegen
+// bug (see md5.vuma header). `as u32` widens u8 operands before `<<` to
+// avoid u8+u8 overflow at the IVE layer.
+transform salsa20_load_u32_le(buf: State<Salsa20Block>, off: u32) -> u32 {
+    let b0 = buf.bytes[off] as u32;
+    let b1 = buf.bytes[off + 1] as u32;
+    let b2 = buf.bytes[off + 2] as u32;
+    let b3 = buf.bytes[off + 3] as u32;
+    return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & SALSA20_MASK32;
 }
 
-transform salsa20_store_u32_le(ptr: Address, off: u32, val: u32) {
-    *(ptr + off) = val & 255;
-    *(ptr + off + 1) = (val >> 8) & 255;
-    *(ptr + off + 2) = (val >> 16) & 255;
-    *(ptr + off + 3) = (val >> 24) & 255;
+// load_u32_le_key: same as salsa20_load_u32_le but for the 32-byte key
+// buffer (Salsa20Key layout). Separate transform because VUMA's State<T>
+// is layout-typed — a State<Salsa20Key> cannot be passed where a
+// State<Salsa20Block> is expected.
+transform salsa20_load_u32_le_key(buf: State<Salsa20Key>, off: u32) -> u32 {
+    let b0 = buf.bytes[off] as u32;
+    let b1 = buf.bytes[off + 1] as u32;
+    let b2 = buf.bytes[off + 2] as u32;
+    let b3 = buf.bytes[off + 3] as u32;
+    return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & SALSA20_MASK32;
 }
 
-// ===========================================================================
-// Bernstein quarterround(y0, y1, y2, y3) -> (z0, z1, z2, z3):
-//   z1 = y1 ^ rotl(y0 + y3,  7)
-//   z2 = y2 ^ rotl(z1 + y0,  9)
-//   z3 = y3 ^ rotl(z2 + z1, 13)
-//   z0 = y0 ^ rotl(z3 + z2, 18)
-// Operates in place on the 16-word state.
-// ===========================================================================
-
-transform salsa20_qr(state: Address, a: u32, b: u32, c: u32, d: u32) {
-    va: u32 = salsa20_load_u32_le(state, a * 4);
-    vb: u32 = salsa20_load_u32_le(state, b * 4);
-    vc: u32 = salsa20_load_u32_le(state, c * 4);
-    vd: u32 = salsa20_load_u32_le(state, d * 4);
-
-    vb = vb ^ salsa20_rotl32((va + vd) & SALSA20_MASK32, 7);
-    vc = vc ^ salsa20_rotl32((vb + va) & SALSA20_MASK32, 9);
-    vd = vd ^ salsa20_rotl32((vc + vb) & SALSA20_MASK32, 13);
-    va = va ^ salsa20_rotl32((vd + vc) & SALSA20_MASK32, 18);
-
-    salsa20_store_u32_le(state, a * 4, va);
-    salsa20_store_u32_le(state, b * 4, vb);
-    salsa20_store_u32_le(state, c * 4, vc);
-    salsa20_store_u32_le(state, d * 4, vd);
+// load_u32_le_nonce: same for the 8-byte nonce buffer.
+transform salsa20_load_u32_le_nonce(buf: State<Salsa20Nonce>, off: u32) -> u32 {
+    let b0 = buf.bytes[off] as u32;
+    let b1 = buf.bytes[off + 1] as u32;
+    let b2 = buf.bytes[off + 2] as u32;
+    let b3 = buf.bytes[off + 3] as u32;
+    return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & SALSA20_MASK32;
 }
 
-// One Salsa20 double-round: column round + row round.
-transform salsa20_double_round(state: Address) {
-    // Column round.
-    salsa20_qr(state, 0, 4, 8, 12);
-    salsa20_qr(state, 5, 9, 13, 1);
-    salsa20_qr(state, 10, 14, 2, 6);
-    salsa20_qr(state, 15, 3, 7, 11);
-    // Row round.
-    salsa20_qr(state, 0, 1, 2, 3);
-    salsa20_qr(state, 5, 6, 7, 4);
-    salsa20_qr(state, 10, 11, 8, 9);
-    salsa20_qr(state, 15, 12, 13, 14);
+// load_u32_le_nonce16: same for the 16-byte HSalsa20 nonce buffer.
+transform salsa20_load_u32_le_nonce16(buf: State<Salsa20Nonce16>, off: u32) -> u32 {
+    let b0 = buf.bytes[off] as u32;
+    let b1 = buf.bytes[off + 1] as u32;
+    let b2 = buf.bytes[off + 2] as u32;
+    let b3 = buf.bytes[off + 3] as u32;
+    return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & SALSA20_MASK32;
+}
+
+// store_u32_le: write `val` as 4 little-endian bytes into `buf.bytes[off..off+3]`.
+transform salsa20_store_u32_le(buf: State<Salsa20Block>, off: u32, val: u32) {
+    buf.bytes[off]     = (val & 255) as u8;
+    buf.bytes[off + 1] = ((val >> 8) & 255) as u8;
+    buf.bytes[off + 2] = ((val >> 16) & 255) as u8;
+    buf.bytes[off + 3] = ((val >> 24) & 255) as u8;
 }
 
 // ===========================================================================
-// Salsa20 block function — generates 64 bytes of keystream.
-// State layout (byte offsets / word indices):
-//   word 0  (off  0):  "expa"
-//   word 1  (off  4):  key[0]
-//   word 2  (off  8):  key[1]
-//   word 3  (off 12):  key[2]
-//   word 4  (off 16):  key[3]
-//   word 5  (off 20):  "nd 3"
-//   word 6  (off 24):  nonce[0]
-//   word 7  (off 28):  nonce[1]
-//   word 8  (off 32):  counter[0]   (low 32 bits)
-//   word 9  (off 36):  counter[1]   (high 32 bits, normally 0)
-//   word 10 (off 40):  "2-by"
-//   word 11 (off 44):  key[4]
-//   word 12 (off 48):  key[5]
-//   word 13 (off 52):  key[6]
-//   word 14 (off 56):  key[7]
-//   word 15 (off 60):  "te k"
+// Salsa20 state setup
 // ===========================================================================
 
-transform salsa20_block(key: Address, nonce: Address, counter: u32, out: Address) {
-    state = allocate(64);
-    initial = allocate(64);
+// salsa20_setup_state: populate ctx.state[0..15] from (key, nonce, counter)
+// per the Bernstein state layout:
+//   word  0       = σ0           word  5       = σ1
+//   words 1..4    = key[0..3]    words 6..7    = nonce[0..1]
+//   words 8..9    = counter      word 10       = σ2
+//   words 11..14  = key[4..7]    word 15       = σ3
+//
+// Constants are written with literal indices; the 8 key words and 2 nonce
+// words are loaded via loop with precomputed byte offsets (md5.vuma
+// pattern — `let off = i * 4;` before the array access).
+transform salsa20_setup_state(ctx: State<Salsa20Ctx>, key: State<Salsa20Key>,
+                              nonce: State<Salsa20Nonce>, counter: u32) {
+    // Constants at words 0, 5, 10, 15.
+    ctx.state[0]  = SALSA20_SIGMA_0;
+    ctx.state[5]  = SALSA20_SIGMA_1;
+    ctx.state[10] = SALSA20_SIGMA_2;
+    ctx.state[15] = SALSA20_SIGMA_3;
 
-    // Constants.
-    salsa20_store_u32_le(state, 0, SALSA20_SIGMA_0);   // word 0
-    salsa20_store_u32_le(state, 20, SALSA20_SIGMA_1);  // word 5
-    salsa20_store_u32_le(state, 40, SALSA20_SIGMA_2);  // word 10
-    salsa20_store_u32_le(state, 60, SALSA20_SIGMA_3);  // word 15
+    // Key first half: words 1..4 (key bytes 0..15, 4 LE u32 words).
+    // Unrolled with literal indices (avoids the parameter-index codegen
+    // bug AND lets us use salsa20_load_u32_le_key with a literal offset).
+    ctx.state[1] = salsa20_load_u32_le_key(key, 0);
+    ctx.state[2] = salsa20_load_u32_le_key(key, 4);
+    ctx.state[3] = salsa20_load_u32_le_key(key, 8);
+    ctx.state[4] = salsa20_load_u32_le_key(key, 12);
 
-    // Key first half: words 1..4 (offsets 4, 8, 12, 16).
-    i: u32 = 0;
-    while i < 4 {
-        salsa20_store_u32_le(state, 4 + i * 4, salsa20_load_u32_le(key, i * 4));
-        i = i + 1;
-    }
-    // Key second half: words 11..14 (offsets 44, 48, 52, 56).
-    i = 0;
-    while i < 4 {
-        salsa20_store_u32_le(state, 44 + i * 4, salsa20_load_u32_le(key, 16 + i * 4));
-        i = i + 1;
-    }
+    // Key second half: words 11..14 (key bytes 16..31, 4 LE u32 words).
+    ctx.state[11] = salsa20_load_u32_le_key(key, 16);
+    ctx.state[12] = salsa20_load_u32_le_key(key, 20);
+    ctx.state[13] = salsa20_load_u32_le_key(key, 24);
+    ctx.state[14] = salsa20_load_u32_le_key(key, 28);
 
-    // Nonce: words 6, 7 (offsets 24, 28).
-    salsa20_store_u32_le(state, 24, salsa20_load_u32_le(nonce, 0));
-    salsa20_store_u32_le(state, 28, salsa20_load_u32_le(nonce, 4));
+    // Nonce: words 6..7 (nonce bytes 0..7, 2 LE u32 words).
+    ctx.state[6] = salsa20_load_u32_le_nonce(nonce, 0);
+    ctx.state[7] = salsa20_load_u32_le_nonce(nonce, 4);
 
-    // Counter: words 8, 9 (offsets 32, 36). Low word = counter, high = 0.
-    salsa20_store_u32_le(state, 32, counter);
-    salsa20_store_u32_le(state, 36, 0);
+    // Counter: words 8..9 (64-bit counter, low word = counter, high = 0).
+    // The 32-bit `counter` field is the low 32 bits; high word is always 0
+    // (Salsa20's 64-bit counter is more than enough for any practical
+    // stream length at 64 bytes/block → 2^64 * 64 = 2^70 bytes).
+    ctx.state[8] = counter;
+    ctx.state[9] = 0;
+}
 
-    // Snapshot for the final state-add.
-    i = 0;
-    while i < 64 { *(initial + i) = *(state + i); i = i + 1; }
+// ===========================================================================
+// Quarter round (Bernstein)
+// ===========================================================================
+//
+// QR(a, b, c, d):
+//   b ^= rotl(a + d,  7)
+//   c ^= rotl(b + a,  9)
+//   d ^= rotl(c + b, 13)
+//   a ^= rotl(d + c, 18)
+//
+// Inlined at each of the 16 call sites with LITERAL state indices. This
+// avoids passing indices as transform parameters (the v0.2.0-alpha.15
+// codegen bug pattern from md5.vuma's header) and lets the compiler
+// constant-fold the array offsets. Each QR reads state[a,d], computes
+// the new state[b], then chains through (c, d, a) — so the four
+// assignments MUST happen in order (the second uses the new b, the third
+// uses the new b and c, the fourth uses the new c and d).
+//
+// The 16 QRs per double-round are grouped as:
+//   Column round: QR(0,4,8,12), QR(5,9,13,1), QR(10,14,2,6), QR(15,3,7,11)
+//   Row round:    QR(0,1,2,3),  QR(5,6,7,4),  QR(10,11,8,9), QR(15,12,13,14)
 
-    // 20 rounds = 10 double rounds.
-    round: u32 = 0;
+// salsa20_double_round: one Salsa20 double-round (column round + row round)
+// on ctx.state[0..15]. The 16 inline QR blocks use literal indices.
+transform salsa20_double_round(ctx: State<Salsa20Ctx>) {
+    // ── Column round ──
+    // QR(0, 4, 8, 12)
+    ctx.state[4]  = ctx.state[4]  ^ salsa20_rotl32((ctx.state[0]  + ctx.state[12]) & SALSA20_MASK32, 7);
+    ctx.state[8]  = ctx.state[8]  ^ salsa20_rotl32((ctx.state[4]  + ctx.state[0])  & SALSA20_MASK32, 9);
+    ctx.state[12] = ctx.state[12] ^ salsa20_rotl32((ctx.state[8]  + ctx.state[4])  & SALSA20_MASK32, 13);
+    ctx.state[0]  = ctx.state[0]  ^ salsa20_rotl32((ctx.state[12] + ctx.state[8])  & SALSA20_MASK32, 18);
+    // QR(5, 9, 13, 1)
+    ctx.state[9]  = ctx.state[9]  ^ salsa20_rotl32((ctx.state[5]  + ctx.state[1])  & SALSA20_MASK32, 7);
+    ctx.state[13] = ctx.state[13] ^ salsa20_rotl32((ctx.state[9]  + ctx.state[5])  & SALSA20_MASK32, 9);
+    ctx.state[1]  = ctx.state[1]  ^ salsa20_rotl32((ctx.state[13] + ctx.state[9])  & SALSA20_MASK32, 13);
+    ctx.state[5]  = ctx.state[5]  ^ salsa20_rotl32((ctx.state[1]  + ctx.state[13]) & SALSA20_MASK32, 18);
+    // QR(10, 14, 2, 6)
+    ctx.state[14] = ctx.state[14] ^ salsa20_rotl32((ctx.state[10] + ctx.state[6])  & SALSA20_MASK32, 7);
+    ctx.state[2]  = ctx.state[2]  ^ salsa20_rotl32((ctx.state[14] + ctx.state[10]) & SALSA20_MASK32, 9);
+    ctx.state[6]  = ctx.state[6]  ^ salsa20_rotl32((ctx.state[2]  + ctx.state[14]) & SALSA20_MASK32, 13);
+    ctx.state[10] = ctx.state[10] ^ salsa20_rotl32((ctx.state[6]  + ctx.state[2])  & SALSA20_MASK32, 18);
+    // QR(15, 3, 7, 11)
+    ctx.state[3]  = ctx.state[3]  ^ salsa20_rotl32((ctx.state[15] + ctx.state[11]) & SALSA20_MASK32, 7);
+    ctx.state[7]  = ctx.state[7]  ^ salsa20_rotl32((ctx.state[3]  + ctx.state[15]) & SALSA20_MASK32, 9);
+    ctx.state[11] = ctx.state[11] ^ salsa20_rotl32((ctx.state[7]  + ctx.state[3])  & SALSA20_MASK32, 13);
+    ctx.state[15] = ctx.state[15] ^ salsa20_rotl32((ctx.state[11] + ctx.state[7])  & SALSA20_MASK32, 18);
+
+    // ── Row round ──
+    // QR(0, 1, 2, 3)
+    ctx.state[1]  = ctx.state[1]  ^ salsa20_rotl32((ctx.state[0]  + ctx.state[3])  & SALSA20_MASK32, 7);
+    ctx.state[2]  = ctx.state[2]  ^ salsa20_rotl32((ctx.state[1]  + ctx.state[0])  & SALSA20_MASK32, 9);
+    ctx.state[3]  = ctx.state[3]  ^ salsa20_rotl32((ctx.state[2]  + ctx.state[1])  & SALSA20_MASK32, 13);
+    ctx.state[0]  = ctx.state[0]  ^ salsa20_rotl32((ctx.state[3]  + ctx.state[2])  & SALSA20_MASK32, 18);
+    // QR(5, 6, 7, 4)
+    ctx.state[6]  = ctx.state[6]  ^ salsa20_rotl32((ctx.state[5]  + ctx.state[4])  & SALSA20_MASK32, 7);
+    ctx.state[7]  = ctx.state[7]  ^ salsa20_rotl32((ctx.state[6]  + ctx.state[5])  & SALSA20_MASK32, 9);
+    ctx.state[4]  = ctx.state[4]  ^ salsa20_rotl32((ctx.state[7]  + ctx.state[6])  & SALSA20_MASK32, 13);
+    ctx.state[5]  = ctx.state[5]  ^ salsa20_rotl32((ctx.state[4]  + ctx.state[7])  & SALSA20_MASK32, 18);
+    // QR(10, 11, 8, 9)
+    ctx.state[11] = ctx.state[11] ^ salsa20_rotl32((ctx.state[10] + ctx.state[9])  & SALSA20_MASK32, 7);
+    ctx.state[8]  = ctx.state[8]  ^ salsa20_rotl32((ctx.state[11] + ctx.state[10]) & SALSA20_MASK32, 9);
+    ctx.state[9]  = ctx.state[9]  ^ salsa20_rotl32((ctx.state[8]  + ctx.state[11]) & SALSA20_MASK32, 13);
+    ctx.state[10] = ctx.state[10] ^ salsa20_rotl32((ctx.state[9]  + ctx.state[8])  & SALSA20_MASK32, 18);
+    // QR(15, 12, 13, 14)
+    ctx.state[12] = ctx.state[12] ^ salsa20_rotl32((ctx.state[15] + ctx.state[14]) & SALSA20_MASK32, 7);
+    ctx.state[13] = ctx.state[13] ^ salsa20_rotl32((ctx.state[12] + ctx.state[15]) & SALSA20_MASK32, 9);
+    ctx.state[14] = ctx.state[14] ^ salsa20_rotl32((ctx.state[13] + ctx.state[12]) & SALSA20_MASK32, 13);
+    ctx.state[15] = ctx.state[15] ^ salsa20_rotl32((ctx.state[14] + ctx.state[13]) & SALSA20_MASK32, 18);
+}
+
+// ===========================================================================
+// Salsa20 block function — generates 64 bytes of keystream
+// ===========================================================================
+//
+// Builds the 16-word state from (key, nonce, counter), snapshots it, runs
+// 10 double-rounds (= 20 rounds), then adds the snapshot back (mod 2^32)
+// and serializes the 16 u32 words as 64 little-endian bytes into `out`.
+//
+// This is the Salsa20 spec's "Salsa20(x)" core (Bernstein §8) wrapped
+// with the spec's keystream-expansion step (the +initial-state add and
+// the LE byte serialization).
+
+transform salsa20_block(ctx: State<Salsa20Ctx>, key: State<Salsa20Key>,
+                        nonce: State<Salsa20Nonce>, counter: u32,
+                        out: State<Salsa20Block>) {
+    // Step 1: build the 16-word state from (key, nonce, counter).
+    salsa20_setup_state(ctx, key, nonce, counter);
+
+    // Step 2: snapshot the initial state (added back after 20 rounds per
+    // the Salsa20 spec — the rounds operate on a *copy* and the final
+    // keystream word is round_output[i] + initial[i] mod 2^32).
+    let s0  = ctx.state[0];
+    let s1  = ctx.state[1];
+    let s2  = ctx.state[2];
+    let s3  = ctx.state[3];
+    let s4  = ctx.state[4];
+    let s5  = ctx.state[5];
+    let s6  = ctx.state[6];
+    let s7  = ctx.state[7];
+    let s8  = ctx.state[8];
+    let s9  = ctx.state[9];
+    let s10 = ctx.state[10];
+    let s11 = ctx.state[11];
+    let s12 = ctx.state[12];
+    let s13 = ctx.state[13];
+    let s14 = ctx.state[14];
+    let s15 = ctx.state[15];
+
+    // Step 3: 20 rounds = 10 double-rounds.
+    let round: u32 = 0;
     while round < 10 {
-        salsa20_double_round(state);
+        salsa20_double_round(ctx);
         round = round + 1;
     }
 
-    // Add the initial state back (mod 2^32) and emit 64 bytes of keystream.
-    i = 0;
-    while i < 16 {
-        s: u32 = salsa20_load_u32_le(state, i * 4);
-        init_val: u32 = salsa20_load_u32_le(initial, i * 4);
-        salsa20_store_u32_le(out, i * 4, (s + init_val) & SALSA20_MASK32);
-        i = i + 1;
-    }
+    // Step 4: add the initial state back (mod 2^32) and serialize the 16
+    // u32 words as 64 little-endian bytes into out.bytes[0..63].
+    // Precomputed byte offsets (md5.vuma pattern — `let off = i * 4;`)
+    // avoid the parameter-index codegen bug.
+    let w0  = (ctx.state[0]  + s0)  & SALSA20_MASK32;
+    let w1  = (ctx.state[1]  + s1)  & SALSA20_MASK32;
+    let w2  = (ctx.state[2]  + s2)  & SALSA20_MASK32;
+    let w3  = (ctx.state[3]  + s3)  & SALSA20_MASK32;
+    let w4  = (ctx.state[4]  + s4)  & SALSA20_MASK32;
+    let w5  = (ctx.state[5]  + s5)  & SALSA20_MASK32;
+    let w6  = (ctx.state[6]  + s6)  & SALSA20_MASK32;
+    let w7  = (ctx.state[7]  + s7)  & SALSA20_MASK32;
+    let w8  = (ctx.state[8]  + s8)  & SALSA20_MASK32;
+    let w9  = (ctx.state[9]  + s9)  & SALSA20_MASK32;
+    let w10 = (ctx.state[10] + s10) & SALSA20_MASK32;
+    let w11 = (ctx.state[11] + s11) & SALSA20_MASK32;
+    let w12 = (ctx.state[12] + s12) & SALSA20_MASK32;
+    let w13 = (ctx.state[13] + s13) & SALSA20_MASK32;
+    let w14 = (ctx.state[14] + s14) & SALSA20_MASK32;
+    let w15 = (ctx.state[15] + s15) & SALSA20_MASK32;
 
-    free(state);
-    free(initial);
+    // Words 0..3 → bytes 0..15.
+    out.bytes[0]  = (w0  & 255) as u8;
+    out.bytes[1]  = ((w0  >> 8)  & 255) as u8;
+    out.bytes[2]  = ((w0  >> 16) & 255) as u8;
+    out.bytes[3]  = ((w0  >> 24) & 255) as u8;
+    out.bytes[4]  = (w1  & 255) as u8;
+    out.bytes[5]  = ((w1  >> 8)  & 255) as u8;
+    out.bytes[6]  = ((w1  >> 16) & 255) as u8;
+    out.bytes[7]  = ((w1  >> 24) & 255) as u8;
+    out.bytes[8]  = (w2  & 255) as u8;
+    out.bytes[9]  = ((w2  >> 8)  & 255) as u8;
+    out.bytes[10] = ((w2  >> 16) & 255) as u8;
+    out.bytes[11] = ((w2  >> 24) & 255) as u8;
+    out.bytes[12] = (w3  & 255) as u8;
+    out.bytes[13] = ((w3  >> 8)  & 255) as u8;
+    out.bytes[14] = ((w3  >> 16) & 255) as u8;
+    out.bytes[15] = ((w3  >> 24) & 255) as u8;
+    // Words 4..7 → bytes 16..31.
+    out.bytes[16] = (w4  & 255) as u8;
+    out.bytes[17] = ((w4  >> 8)  & 255) as u8;
+    out.bytes[18] = ((w4  >> 16) & 255) as u8;
+    out.bytes[19] = ((w4  >> 24) & 255) as u8;
+    out.bytes[20] = (w5  & 255) as u8;
+    out.bytes[21] = ((w5  >> 8)  & 255) as u8;
+    out.bytes[22] = ((w5  >> 16) & 255) as u8;
+    out.bytes[23] = ((w5  >> 24) & 255) as u8;
+    out.bytes[24] = (w6  & 255) as u8;
+    out.bytes[25] = ((w6  >> 8)  & 255) as u8;
+    out.bytes[26] = ((w6  >> 16) & 255) as u8;
+    out.bytes[27] = ((w6  >> 24) & 255) as u8;
+    out.bytes[28] = (w7  & 255) as u8;
+    out.bytes[29] = ((w7  >> 8)  & 255) as u8;
+    out.bytes[30] = ((w7  >> 16) & 255) as u8;
+    out.bytes[31] = ((w7  >> 24) & 255) as u8;
+    // Words 8..11 → bytes 32..47.
+    out.bytes[32] = (w8  & 255) as u8;
+    out.bytes[33] = ((w8  >> 8)  & 255) as u8;
+    out.bytes[34] = ((w8  >> 16) & 255) as u8;
+    out.bytes[35] = ((w8  >> 24) & 255) as u8;
+    out.bytes[36] = (w9  & 255) as u8;
+    out.bytes[37] = ((w9  >> 8)  & 255) as u8;
+    out.bytes[38] = ((w9  >> 16) & 255) as u8;
+    out.bytes[39] = ((w9  >> 24) & 255) as u8;
+    out.bytes[40] = (w10 & 255) as u8;
+    out.bytes[41] = ((w10 >> 8)  & 255) as u8;
+    out.bytes[42] = ((w10 >> 16) & 255) as u8;
+    out.bytes[43] = ((w10 >> 24) & 255) as u8;
+    out.bytes[44] = (w11 & 255) as u8;
+    out.bytes[45] = ((w11 >> 8)  & 255) as u8;
+    out.bytes[46] = ((w11 >> 16) & 255) as u8;
+    out.bytes[47] = ((w11 >> 24) & 255) as u8;
+    // Words 12..15 → bytes 48..63.
+    out.bytes[48] = (w12 & 255) as u8;
+    out.bytes[49] = ((w12 >> 8)  & 255) as u8;
+    out.bytes[50] = ((w12 >> 16) & 255) as u8;
+    out.bytes[51] = ((w12 >> 24) & 255) as u8;
+    out.bytes[52] = (w13 & 255) as u8;
+    out.bytes[53] = ((w13 >> 8)  & 255) as u8;
+    out.bytes[54] = ((w13 >> 16) & 255) as u8;
+    out.bytes[55] = ((w13 >> 24) & 255) as u8;
+    out.bytes[56] = (w14 & 255) as u8;
+    out.bytes[57] = ((w14 >> 8)  & 255) as u8;
+    out.bytes[58] = ((w14 >> 16) & 255) as u8;
+    out.bytes[59] = ((w14 >> 24) & 255) as u8;
+    out.bytes[60] = (w15 & 255) as u8;
+    out.bytes[61] = ((w15 >> 8)  & 255) as u8;
+    out.bytes[62] = ((w15 >> 16) & 255) as u8;
+    out.bytes[63] = ((w15 >> 24) & 255) as u8;
 }
 
 // ===========================================================================
-// Salsa20 encrypt/decrypt (XOR with keystream). Identical for both
-// directions. Counter starts at 0 and increments by 1 per 64-byte block.
+// Salsa20 init / encrypt / decrypt
 // ===========================================================================
 
-transform salsa20_encrypt(data: Address, data_len: u32, key: Address,
-                   nonce: Address, output: Address) -> u32 {
-    pos: u32 = 0;
-    ctr: u32 = 0;
-    keystream = allocate(SALSA20_BLOCK_SIZE);
+// salsa20_init: stash the 32-byte key and 8-byte nonce into the ctx for
+// later use by salsa20_encrypt. (The 16-word working state is rebuilt
+// from key+nonce+counter at the start of every salsa20_block call, so
+// init only needs to copy key+nonce into the ctx and reset the counter.)
+transform salsa20_init(ctx: State<Salsa20Ctx>, key: State<Salsa20Key>,
+                       nonce: State<Salsa20Nonce>) {
+    // Copy 32 key bytes (literal indices — 32 lines is verbose but
+    // avoids any loop-variable-derived index codegen issues, and the
+    // compiler constant-folds the offsets).
+    ctx.key[0]  = key.bytes[0];   ctx.key[1]  = key.bytes[1];
+    ctx.key[2]  = key.bytes[2];   ctx.key[3]  = key.bytes[3];
+    ctx.key[4]  = key.bytes[4];   ctx.key[5]  = key.bytes[5];
+    ctx.key[6]  = key.bytes[6];   ctx.key[7]  = key.bytes[7];
+    ctx.key[8]  = key.bytes[8];   ctx.key[9]  = key.bytes[9];
+    ctx.key[10] = key.bytes[10];  ctx.key[11] = key.bytes[11];
+    ctx.key[12] = key.bytes[12];  ctx.key[13] = key.bytes[13];
+    ctx.key[14] = key.bytes[14];  ctx.key[15] = key.bytes[15];
+    ctx.key[16] = key.bytes[16];  ctx.key[17] = key.bytes[17];
+    ctx.key[18] = key.bytes[18];  ctx.key[19] = key.bytes[19];
+    ctx.key[20] = key.bytes[20];  ctx.key[21] = key.bytes[21];
+    ctx.key[22] = key.bytes[22];  ctx.key[23] = key.bytes[23];
+    ctx.key[24] = key.bytes[24];  ctx.key[25] = key.bytes[25];
+    ctx.key[26] = key.bytes[26];  ctx.key[27] = key.bytes[27];
+    ctx.key[28] = key.bytes[28];  ctx.key[29] = key.bytes[29];
+    ctx.key[30] = key.bytes[30];  ctx.key[31] = key.bytes[31];
+
+    // Copy 8 nonce bytes.
+    ctx.nonce[0] = nonce.bytes[0];  ctx.nonce[1] = nonce.bytes[1];
+    ctx.nonce[2] = nonce.bytes[2];  ctx.nonce[3] = nonce.bytes[3];
+    ctx.nonce[4] = nonce.bytes[4];  ctx.nonce[5] = nonce.bytes[5];
+    ctx.nonce[6] = nonce.bytes[6];  ctx.nonce[7] = nonce.bytes[7];
+
+    ctx.counter = 0;
+}
+
+// salsa20_encrypt: XOR `data_len` bytes of `data` with the Salsa20
+// keystream (starting at counter = 0, incrementing by 1 per 64-byte
+// block). Identical to salsa20_decrypt — Salsa20 is a stream cipher
+// (XOR with keystream), so encryption and decryption are the same
+// operation.
+//
+// `data` and `output` may alias (in-place encryption). The data buffer
+// is read in 64-byte chunks; the final chunk may be shorter. The
+// `data_len` must be ≤ 256 (the Salsa20Buf layout's capacity) — callers
+// encrypting more must chunk and call salsa20_encrypt repeatedly (or
+// drive salsa20_block directly with explicit counter values).
+transform salsa20_encrypt(ctx: State<Salsa20Ctx>, data: State<Salsa20Buf>,
+                          data_len: u32, output: State<Salsa20Buf>,
+                          key: State<Salsa20Key>, nonce: State<Salsa20Nonce>) -> u32 {
+    // Keystream scratch buffer — allocated in the arena, zeroed by
+    // state_new (per VUMA's arena semantics).
+    let keystream = state_new(Salsa20Block);
+
+    let pos: u32 = 0;
+    let ctr: u32 = 0;
 
     while pos < data_len {
-        salsa20_block(key, nonce, ctr, keystream);
+        // Generate the next 64-byte keystream block.
+        salsa20_block(ctx, key, nonce, ctr, keystream);
 
-        remaining: u32 = data_len - pos;
-        to_xor: u32 = SALSA20_BLOCK_SIZE;
+        // XOR min(64, data_len - pos) bytes of data with the keystream.
+        let remaining: u32 = data_len - pos;
+        let to_xor: u32 = SALSA20_BLOCK_SIZE;
         if remaining < SALSA20_BLOCK_SIZE { to_xor = remaining; }
 
-        i: u32 = 0;
+        let i: u32 = 0;
         while i < to_xor {
-            *(output + pos + i) = (*(data + pos + i) ^ *(keystream + i)) & 255;
+            let p = data.bytes[pos + i];
+            let k = keystream.bytes[i];
+            output.bytes[pos + i] = (p ^ k) & 255;
             i = i + 1;
         }
 
@@ -197,166 +536,230 @@ transform salsa20_encrypt(data: Address, data_len: u32, key: Address,
         ctr = ctr + 1;
     }
 
-    free(keystream);
     return data_len;
 }
 
-transform salsa20_decrypt(data: Address, data_len: u32, key: Address,
-                   nonce: Address, output: Address) -> u32 {
-    return salsa20_encrypt(data, data_len, key, nonce, output);
+// salsa20_decrypt: identical to salsa20_encrypt (XOR with keystream).
+transform salsa20_decrypt(ctx: State<Salsa20Ctx>, data: State<Salsa20Buf>,
+                          data_len: u32, output: State<Salsa20Buf>,
+                          key: State<Salsa20Key>, nonce: State<Salsa20Nonce>) -> u32 {
+    return salsa20_encrypt(ctx, data, data_len, output, key, nonce);
 }
 
 // ===========================================================================
-// HSalsa20 — core of XSalsa20 (RFC 8439 §A.2).
+// HSalsa20 — core of XSalsa20 (RFC 8439 §A.2)
+// ===========================================================================
+//
 // Identical to Salsa20's state initialization and 20 rounds, but:
 //   * The 16-byte input nonce occupies words 6, 7, 8, 9 (offsets 24, 28,
 //     32, 36) instead of the (counter, nonce) pair.
 //   * The final state-add step is SKIPPED.
 //   * The output is the 32-byte sequence of words
 //         0, 5, 10, 15, 6, 7, 8, 9
-//     (the constants and the four nonce words after 20 rounds).
-// These are exactly the words that an attacker cannot choose, which is
-// what makes HSalsa20 a secure PRF for subkey derivation.
-// ===========================================================================
+//     (the four constants followed by the four nonce words after 20
+//     rounds). These are exactly the words an attacker cannot choose,
+//     which is what makes HSalsa20 a secure PRF for subkey derivation.
 
-transform hsalsa20(key: Address, nonce_first16: Address, out: Address) {
-    state = allocate(64);
+transform hsalsa20(ctx: State<Salsa20Ctx>, key: State<Salsa20Key>,
+                   nonce_first16: State<Salsa20Nonce16>, out: State<Salsa20Key>) {
+    // Build the state with the 16-byte nonce in words 6, 7, 8, 9.
+    // Constants at 0, 5, 10, 15.
+    ctx.state[0]  = SALSA20_SIGMA_0;
+    ctx.state[5]  = SALSA20_SIGMA_1;
+    ctx.state[10] = SALSA20_SIGMA_2;
+    ctx.state[15] = SALSA20_SIGMA_3;
 
-    // Constants.
-    salsa20_store_u32_le(state, 0, SALSA20_SIGMA_0);
-    salsa20_store_u32_le(state, 20, SALSA20_SIGMA_1);
-    salsa20_store_u32_le(state, 40, SALSA20_SIGMA_2);
-    salsa20_store_u32_le(state, 60, SALSA20_SIGMA_3);
+    // Key first half: words 1..4.
+    ctx.state[1] = salsa20_load_u32_le_key(key, 0);
+    ctx.state[2] = salsa20_load_u32_le_key(key, 4);
+    ctx.state[3] = salsa20_load_u32_le_key(key, 8);
+    ctx.state[4] = salsa20_load_u32_le_key(key, 12);
+    // Key second half: words 11..14.
+    ctx.state[11] = salsa20_load_u32_le_key(key, 16);
+    ctx.state[12] = salsa20_load_u32_le_key(key, 20);
+    ctx.state[13] = salsa20_load_u32_le_key(key, 24);
+    ctx.state[14] = salsa20_load_u32_le_key(key, 28);
 
-    // Key first half: words 1..4 (offsets 4, 8, 12, 16).
-    i: u32 = 0;
-    while i < 4 {
-        salsa20_store_u32_le(state, 4 + i * 4, salsa20_load_u32_le(key, i * 4));
-        i = i + 1;
-    }
-    // Key second half: words 11..14 (offsets 44, 48, 52, 56).
-    i = 0;
-    while i < 4 {
-        salsa20_store_u32_le(state, 44 + i * 4, salsa20_load_u32_le(key, 16 + i * 4));
-        i = i + 1;
-    }
+    // HSalsa20 nonce: words 6, 7, 8, 9 (16 bytes).
+    ctx.state[6] = salsa20_load_u32_le_nonce16(nonce_first16, 0);
+    ctx.state[7] = salsa20_load_u32_le_nonce16(nonce_first16, 4);
+    ctx.state[8] = salsa20_load_u32_le_nonce16(nonce_first16, 8);
+    ctx.state[9] = salsa20_load_u32_le_nonce16(nonce_first16, 12);
 
-    // The 16-byte HSalsa20 nonce occupies words 6, 7, 8, 9
-    // (offsets 24, 28, 32, 36).
-    salsa20_store_u32_le(state, 24, salsa20_load_u32_le(nonce_first16, 0));
-    salsa20_store_u32_le(state, 28, salsa20_load_u32_le(nonce_first16, 4));
-    salsa20_store_u32_le(state, 32, salsa20_load_u32_le(nonce_first16, 8));
-    salsa20_store_u32_le(state, 36, salsa20_load_u32_le(nonce_first16, 12));
-
-    // 20 rounds = 10 double rounds. No final state-add (this is HSalsa20,
-    // not Salsa20).
-    round: u32 = 0;
+    // 20 rounds = 10 double rounds. NO final state-add (HSalsa20 vs Salsa20).
+    let round: u32 = 0;
     while round < 10 {
-        salsa20_double_round(state);
+        salsa20_double_round(ctx);
         round = round + 1;
     }
 
-    // Output words: 0, 5, 10, 15, 6, 7, 8, 9 — the four constants followed
-    // by the four nonce-derived words.
-    salsa20_store_u32_le(out, 0,  salsa20_load_u32_le(state, 0));   // word 0  "expa"
-    salsa20_store_u32_le(out, 4,  salsa20_load_u32_le(state, 20));  // word 5  "nd 3"
-    salsa20_store_u32_le(out, 8,  salsa20_load_u32_le(state, 40));  // word 10 "2-by"
-    salsa20_store_u32_le(out, 12, salsa20_load_u32_le(state, 60));  // word 15 "te k"
-    salsa20_store_u32_le(out, 16, salsa20_load_u32_le(state, 24));  // word 6
-    salsa20_store_u32_le(out, 20, salsa20_load_u32_le(state, 28));  // word 7
-    salsa20_store_u32_le(out, 24, salsa20_load_u32_le(state, 32));  // word 8
-    salsa20_store_u32_le(out, 28, salsa20_load_u32_le(state, 36));  // word 9
+    // Output words: 0, 5, 10, 15, 6, 7, 8, 9 — the four constants
+    // followed by the four nonce-derived words. Serialize as 8 LE u32
+    // words (32 bytes) into out.bytes[0..31].
+    let o0  = ctx.state[0];
+    let o5  = ctx.state[5];
+    let o10 = ctx.state[10];
+    let o15 = ctx.state[15];
+    let o6  = ctx.state[6];
+    let o7  = ctx.state[7];
+    let o8  = ctx.state[8];
+    let o9  = ctx.state[9];
 
-    free(state);
+    out.bytes[0]  = (o0  & 255) as u8;
+    out.bytes[1]  = ((o0  >> 8)  & 255) as u8;
+    out.bytes[2]  = ((o0  >> 16) & 255) as u8;
+    out.bytes[3]  = ((o0  >> 24) & 255) as u8;
+    out.bytes[4]  = (o5  & 255) as u8;
+    out.bytes[5]  = ((o5  >> 8)  & 255) as u8;
+    out.bytes[6]  = ((o5  >> 16) & 255) as u8;
+    out.bytes[7]  = ((o5  >> 24) & 255) as u8;
+    out.bytes[8]  = (o10 & 255) as u8;
+    out.bytes[9]  = ((o10 >> 8)  & 255) as u8;
+    out.bytes[10] = ((o10 >> 16) & 255) as u8;
+    out.bytes[11] = ((o10 >> 24) & 255) as u8;
+    out.bytes[12] = (o15 & 255) as u8;
+    out.bytes[13] = ((o15 >> 8)  & 255) as u8;
+    out.bytes[14] = ((o15 >> 16) & 255) as u8;
+    out.bytes[15] = ((o15 >> 24) & 255) as u8;
+    out.bytes[16] = (o6  & 255) as u8;
+    out.bytes[17] = ((o6  >> 8)  & 255) as u8;
+    out.bytes[18] = ((o6  >> 16) & 255) as u8;
+    out.bytes[19] = ((o6  >> 24) & 255) as u8;
+    out.bytes[20] = (o7  & 255) as u8;
+    out.bytes[21] = ((o7  >> 8)  & 255) as u8;
+    out.bytes[22] = ((o7  >> 16) & 255) as u8;
+    out.bytes[23] = ((o7  >> 24) & 255) as u8;
+    out.bytes[24] = (o8  & 255) as u8;
+    out.bytes[25] = ((o8  >> 8)  & 255) as u8;
+    out.bytes[26] = ((o8  >> 16) & 255) as u8;
+    out.bytes[27] = ((o8  >> 24) & 255) as u8;
+    out.bytes[28] = (o9  & 255) as u8;
+    out.bytes[29] = ((o9  >> 8)  & 255) as u8;
+    out.bytes[30] = ((o9  >> 16) & 255) as u8;
+    out.bytes[31] = ((o9  >> 24) & 255) as u8;
 }
 
 // ===========================================================================
-// XSalsa20 encrypt/decrypt — 192-bit nonce (RFC 8439 §A.3).
-//   subkey   = HSalsa20(key, nonce[0..16])
-//   output   = Salsa20(subkey, nonce[16..24], data)
-// The first 16 bytes of the nonce feed HSalsa20; the remaining 8 bytes are
-// the Salsa20 nonce. Encrypt and decrypt are identical (XOR keystream).
+// XSalsa20 encrypt/decrypt — 192-bit nonce (RFC 8439 §A.3)
 // ===========================================================================
+//
+//   subkey = HSalsa20(key, nonce[0..16])
+//   output = Salsa20(subkey, nonce[16..24], data)
+//
+// The first 16 bytes of the nonce feed HSalsa20; the remaining 8 bytes
+// are the Salsa20 nonce. Encrypt and decrypt are identical (XOR keystream).
 
-transform xsalsa20_encrypt(data: Address, data_len: u32, key: Address,
-                    nonce: Address, output: Address) -> u32 {
-    subkey = allocate(SALSA20_KEY_SIZE);
-    hsalsa20(key, nonce, subkey);
+transform xsalsa20_encrypt(ctx: State<Salsa20Ctx>, data: State<Salsa20Buf>,
+                           data_len: u32, key: State<Salsa20Key>,
+                           nonce: State<Salsa20Nonce24>,
+                           output: State<Salsa20Buf>) -> u32 {
+    // Derive the subkey from HSalsa20(key, nonce[0..16]).
+    let subkey = state_new(Salsa20Key);
+    let nonce_first16 = state_new(Salsa20Nonce16);
 
-    // The 8-byte Salsa20 nonce starts at offset 16 of the 24-byte input.
-    sub_nonce = nonce + 16;
+    // Copy nonce[0..15] into nonce_first16.
+    nonce_first16.bytes[0]  = nonce.bytes[0];   nonce_first16.bytes[1]  = nonce.bytes[1];
+    nonce_first16.bytes[2]  = nonce.bytes[2];   nonce_first16.bytes[3]  = nonce.bytes[3];
+    nonce_first16.bytes[4]  = nonce.bytes[4];   nonce_first16.bytes[5]  = nonce.bytes[5];
+    nonce_first16.bytes[6]  = nonce.bytes[6];   nonce_first16.bytes[7]  = nonce.bytes[7];
+    nonce_first16.bytes[8]  = nonce.bytes[8];   nonce_first16.bytes[9]  = nonce.bytes[9];
+    nonce_first16.bytes[10] = nonce.bytes[10];  nonce_first16.bytes[11] = nonce.bytes[11];
+    nonce_first16.bytes[12] = nonce.bytes[12];  nonce_first16.bytes[13] = nonce.bytes[13];
+    nonce_first16.bytes[14] = nonce.bytes[14];  nonce_first16.bytes[15] = nonce.bytes[15];
 
-    salsa20_encrypt(data, data_len, subkey, sub_nonce, output);
+    hsalsa20(ctx, key, nonce_first16, subkey);
 
-    free(subkey);
-    return data_len;
+    // The 8-byte Salsa20 nonce is nonce[16..23].
+    let sub_nonce = state_new(Salsa20Nonce);
+    sub_nonce.bytes[0] = nonce.bytes[16];  sub_nonce.bytes[1] = nonce.bytes[17];
+    sub_nonce.bytes[2] = nonce.bytes[18];  sub_nonce.bytes[3] = nonce.bytes[19];
+    sub_nonce.bytes[4] = nonce.bytes[20];  sub_nonce.bytes[5] = nonce.bytes[21];
+    sub_nonce.bytes[6] = nonce.bytes[22];  sub_nonce.bytes[7] = nonce.bytes[23];
+
+    return salsa20_encrypt(ctx, data, data_len, output, subkey, sub_nonce);
 }
 
-transform xsalsa20_decrypt(data: Address, data_len: u32, key: Address,
-                    nonce: Address, output: Address) -> u32 {
-    return xsalsa20_encrypt(data, data_len, key, nonce, output);
+transform xsalsa20_decrypt(ctx: State<Salsa20Ctx>, data: State<Salsa20Buf>,
+                           data_len: u32, key: State<Salsa20Key>,
+                           nonce: State<Salsa20Nonce24>,
+                           output: State<Salsa20Buf>) -> u32 {
+    return xsalsa20_encrypt(ctx, data, data_len, key, nonce, output);
 }
 
 // ===========================================================================
-// XSalsa20-Poly1305 "secretbox" style helper (crypto_secretbox_xsalsa20poly1305).
+// XSalsa20-Poly1305 "secretbox" style helper (crypto_secretbox_xsalsa20poly1305)
+// ===========================================================================
+//
 // Not part of RFC 8439 but provided for compatibility with NaCl-style APIs:
 //   * subkey = HSalsa20(key, nonce[0..16])
 //   * one-time Poly1305 key = Salsa20(subkey, nonce[16..24])[0..32]
 //   * ciphertext = Salsa20(subkey, nonce[16..24])(plaintext) with counter
 //     starting at 1 (so block 0 is reserved for the Poly1305 key).
-// Tag is computed over the ciphertext via poly1305.vuma.
-// ===========================================================================
+// Tag is computed over the ciphertext via poly1305.vuma (external import).
+//
+// NOTE: this transform references `poly1305_mac` from womb/crypto/symmetric/
+// poly1305.vuma. The salsa20.vuma module compiles standalone (the
+// poly1305_mac call is resolved at link time when the consumer links
+// both modules). If you only need Salsa20/XSalsa20, the poly1305_*
+// transforms below can be safely deleted.
 
-transform xsalsa20_poly1305_encrypt(key: Address, nonce: Address,
-                             plaintext: Address, pt_len: u32,
-                             ciphertext: Address, tag: Address) -> u32 {
-    subkey = allocate(SALSA20_KEY_SIZE);
-    hsalsa20(key, nonce, subkey);
+transform xsalsa20_poly1305_encrypt(ctx: State<Salsa20Ctx>, key: State<Salsa20Key>,
+                                    nonce: State<Salsa20Nonce24>,
+                                    plaintext: State<Salsa20Buf>, pt_len: u32,
+                                    ciphertext: State<Salsa20Buf>,
+                                    tag: State<Salsa20Block>) -> u32 {
+    // subkey = HSalsa20(key, nonce[0..16])
+    let subkey = state_new(Salsa20Key);
+    let nonce_first16 = state_new(Salsa20Nonce16);
+    nonce_first16.bytes[0]  = nonce.bytes[0];   nonce_first16.bytes[1]  = nonce.bytes[1];
+    nonce_first16.bytes[2]  = nonce.bytes[2];   nonce_first16.bytes[3]  = nonce.bytes[3];
+    nonce_first16.bytes[4]  = nonce.bytes[4];   nonce_first16.bytes[5]  = nonce.bytes[5];
+    nonce_first16.bytes[6]  = nonce.bytes[6];   nonce_first16.bytes[7]  = nonce.bytes[7];
+    nonce_first16.bytes[8]  = nonce.bytes[8];   nonce_first16.bytes[9]  = nonce.bytes[9];
+    nonce_first16.bytes[10] = nonce.bytes[10];  nonce_first16.bytes[11] = nonce.bytes[11];
+    nonce_first16.bytes[12] = nonce.bytes[12];  nonce_first16.bytes[13] = nonce.bytes[13];
+    nonce_first16.bytes[14] = nonce.bytes[14];  nonce_first16.bytes[15] = nonce.bytes[15];
+    hsalsa20(ctx, key, nonce_first16, subkey);
 
-    sub_nonce = nonce + 16;
+    // 8-byte Salsa20 nonce = nonce[16..23].
+    let sub_nonce = state_new(Salsa20Nonce);
+    sub_nonce.bytes[0] = nonce.bytes[16];  sub_nonce.bytes[1] = nonce.bytes[17];
+    sub_nonce.bytes[2] = nonce.bytes[18];  sub_nonce.bytes[3] = nonce.bytes[19];
+    sub_nonce.bytes[4] = nonce.bytes[20];  sub_nonce.bytes[5] = nonce.bytes[21];
+    sub_nonce.bytes[6] = nonce.bytes[22];  sub_nonce.bytes[7] = nonce.bytes[23];
 
     // Derive one-time Poly1305 key from the first 32 bytes of Salsa20
-    // keystream (counter = 0).
-    poly_key = allocate(32);
-    zero = allocate(32);
-    i: u32 = 0;
-    while i < 32 { *(zero + i) = 0; i = i + 1; }
-    salsa20_encrypt(zero, 32, subkey, sub_nonce, poly_key);
+    // keystream (counter = 0). XOR with zero plaintext = the keystream
+    // itself.
+    let poly_key = state_new(Salsa20Block);
+    let zero_in = state_new(Salsa20Block);
+    let i: u32 = 0;
+    while i < 32 { zero_in.bytes[i] = 0; i = i + 1; }
+    salsa20_encrypt(ctx, zero_in, 32, poly_key, subkey, sub_nonce);
 
-    // Encrypt the plaintext with counter starting at 1. We need to skip
-    // the first block of keystream; emulate that by pre-XORing the
-    // plaintext with the keystream offset by 64 bytes. Easiest is to
-    // generate the keystream block at counter=0, discard, then encrypt
-    // with counter=1 by manually XOR-ing. Since salsa20_encrypt always
-    // starts at counter 0, we generate two blocks and offset.
-    block0 = allocate(SALSA20_BLOCK_SIZE);
-    salsa20_block(subkey, sub_nonce, 0, block0);  // discarded except for poly_key
-    // Encrypt with counter starting at 1: walk the data, generating blocks
-    // at counter = 1, 2, 3, ...
-    pos: u32 = 0;
-    ctr: u32 = 1;
-    keystream = allocate(SALSA20_BLOCK_SIZE);
+    // Encrypt the plaintext with counter starting at 1 (block 0 was
+    // consumed by the Poly1305 key derivation above).
+    let pos: u32 = 0;
+    let ctr: u32 = 1;
+    let keystream = state_new(Salsa20Block);
     while pos < pt_len {
-        salsa20_block(subkey, sub_nonce, ctr, keystream);
-        remaining: u32 = pt_len - pos;
-        to_xor: u32 = SALSA20_BLOCK_SIZE;
+        salsa20_block(ctx, subkey, sub_nonce, ctr, keystream);
+        let remaining: u32 = pt_len - pos;
+        let to_xor: u32 = SALSA20_BLOCK_SIZE;
         if remaining < SALSA20_BLOCK_SIZE { to_xor = remaining; }
-        i = 0;
-        while i < to_xor {
-            *(ciphertext + pos + i) = (*(plaintext + pos + i) ^ *(keystream + i)) & 255;
-            i = i + 1;
+        let j: u32 = 0;
+        while j < to_xor {
+            let p = plaintext.bytes[pos + j];
+            let k = keystream.bytes[j];
+            ciphertext.bytes[pos + j] = (p ^ k) & 255;
+            j = j + 1;
         }
         pos = pos + to_xor;
         ctr = ctr + 1;
     }
 
-    // Tag = Poly1305 over the ciphertext.
+    // Tag = Poly1305 over the ciphertext (external poly1305.vuma import).
     poly1305_mac(poly_key, ciphertext, pt_len, tag);
 
-    free(subkey);
-    free(poly_key);
-    free(zero);
-    free(block0);
-    free(keystream);
     return pt_len;
 }
