@@ -1,22 +1,50 @@
-// womb/crypto/sha512.vuma — SHA-512 (NIST FIPS 180-4 Section 6.4.2)
+// womb/crypto/hash/sha512.vuma — SHA-512 (NIST FIPS 180-4 Section 6.4.2)
+// PMT-native, spec-compliant, self-contained library module (no main()).
+//
 // 80-round Merkle-Damgard hash over 1024-bit (128-byte) blocks; produces
 // the full 512-bit (64-byte) digest. SHA-512 is the canonical 64-bit hash
 // in the SHA-2 family; SHA-384, SHA-512/224, and SHA-512/256 reuse the
 // same compression function with different IVs and output lengths.
+//
 // Streaming API: sha512_init / sha512_update / sha512_final / sha512_oneshot,
-// plus the exposed compression primitive sha512_compress.
-// All arithmetic is u64 with explicit masking via MASK64.
-
+// plus the exposed compression primitive sha512_compress and the
+// sha512_load_k round-constants loader.
+//
+// ── PMT patterns ────────────────────────────────────────────────────────────
+//   - `state_new(Layout)` for all allocations (NEVER `allocate()`)
+//   - `State<T>` for transform parameters (NEVER `Address` / `*ptr`)
+//   - `[u8; N]` byte arrays with literal indices for state load/store
+//   - `[u64; N]` typed arrays for the message schedule (W) and round
+//     constants (K) — typed-array index scaling reads/writes the u64 word
+//     at slot i
+//   - Loop-variable-derived indices precomputed into local vars before
+//     array access (e.g. `let off = i * 8; ctx.buf[off]`)
+//
+// ── State layout ────────────────────────────────────────────────────────────
+//   The 8 hash state words are stored big-endian in ctx.state[0..63] —
+//   byte 0 is the most-significant byte of H0, byte 7 is the least-
+//   significant byte of H0, byte 8 is the MSB of H1, etc. This matches
+//   the FIPS-180-4 §5.1.2 digest serialization order, so sha512_final
+//   copies state bytes directly to the digest output without conversion.
+//
+//   The 128-bit message bit-length (used in the §5.1.2 padding suffix)
+//   is tracked as two u32 limbs (total_lo, total_hi) holding the low
+//   and high 32 bits of the 64-bit bit count. The high 64 bits of the
+//   128-bit field are always zero (sufficient for messages up to 2^61
+//   bytes — far beyond any practical input).
+//
 // VUMA's parser rejects integer literals >= 2^63 for u64. Constants at or
 // above that threshold are written as (1 << 63) | lower_63_bits, which the
 // parser evaluates to the correct unsigned u64 value.
+
 const MASK64: u64 = (1 << 63) | ((1 << 63) - 1);
 
 // ===========================================================================
 // SHA-512 round constants K[0..79] (FIPS 180-4 Section 4.2.3).
 // These are the first 64 bits of the fractional parts of the cube roots of
-// the first 80 prime numbers.
+// the first 80 prime numbers. Values >= 2^63 use the (1 << 63) | lower form.
 // ===========================================================================
+
 const K00: u64 = 4794697086780616226;
 const K01: u64 = 8158064640168781261;
 const K02: u64 = (1 << 63) | 3873372549979913007;
@@ -99,11 +127,12 @@ const K78: u64 = 6902733635092675308;
 const K79: u64 = 7801388544844847127;
 
 // ===========================================================================
-// SHA-512 initial hash values (FIPS 180-4 Section 5.3.5).
+// SHA-512 initial hash values (FIPS 180-4 Section 5.3.4).
 // H0=0x6a09e667f3bcc908 H1=0xbb67ae8584caa73b H2=0x3c6ef372fe94f82b
 // H3=0xa54ff53a5f1d36f1 H4=0x510e527fade682d1 H5=0x9b05688c2b3e6c1f
 // H6=0x1f83d9abfb41bd6b H7=0x5be0cd19137e2179
 // ===========================================================================
+
 const H0I: u64 = 7640891576956012808;
 const H1I: u64 = (1 << 63) | 4280581859320702779;
 const H2I: u64 = 4354685564936845355;
@@ -113,302 +142,483 @@ const H5I: u64 = (1 << 63) | 1947077365137828895;
 const H6I: u64 = 2270897969802886507;
 const H7I: u64 = 6620516959819538809;
 
-// Rotate-right guarded against n==0 (64-n would shift by full word).
+// ===========================================================================
+// Layouts
+// ===========================================================================
+
+// SHA-512 context (228 bytes):
+//   [  0.. 63] state[64]    8 × 8-byte big-endian hash state words
+//   [ 64..191] buf[128]     partial block accumulator (1024-bit block)
+//   [192..195] len          bytes currently in the message buffer (u32)
+//   [196..199] total_lo     low 32 bits of total message bit count
+//   [200..203] total_hi     high 32 bits of total message bit count
+layout Sha512Ctx = {
+    state: [u8; 64],
+    buf: [u8; 128],
+    len: u32,
+    total_lo: u32,
+    total_hi: u32,
+}
+
+// Input data wrapper (128 bytes — one full SHA-512 block).
+layout Sha512Data = { data: [u8; 128] }
+
+// SHA-512 digest output (64 bytes — eight 64-bit hash words serialized
+// big-endian per FIPS-180-4 §5.1.2).
+layout Sha512Digest = { data: [u8; 64] }
+
+// SHA-512 message schedule (80 × u64 words). Allocated via state_new(Sha512W)
+// inside sha512_compress. W[0..15] are big-endian loads of the 128-byte
+// input block; W[16..79] are expanded via the σ0/σ1 recurrence (§6.3.2).
+layout Sha512W = { w: [u64; 80] }
+
+// SHA-512 round-constants table (80 × u64). Loaded once per compression
+// call via sha512_load_k. K.k[i] returns the u64 constant at slot i.
+layout Sha512K = { k: [u64; 80] }
+
+// ===========================================================================
+// SHA-512 helper functions (FIPS-180-4 §4.1.3).
+// All arithmetic is u64; additions wrap mod 2^64 by definition in VUMA,
+// so no explicit masking is needed (unlike u32 SHA-256 which needs MASK32).
+// ===========================================================================
+
+// Right-rotate a 64-bit word by n positions (1 <= n <= 63).
 transform rotr64(x: u64, n: u64) -> u64 {
     if n == 0 { return x; }
     return (x >> n) | (x << (64 - n));
 }
 
-// Load 8 bytes big-endian into a u64.
-transform load_u64_be(ptr: Address, off: u32) -> u64 {
-    b0: u64 = *(ptr + off); b1: u64 = *(ptr + off + 1);
-    b2: u64 = *(ptr + off + 2); b3: u64 = *(ptr + off + 3);
-    b4: u64 = *(ptr + off + 4); b5: u64 = *(ptr + off + 5);
-    b6: u64 = *(ptr + off + 6); b7: u64 = *(ptr + off + 7);
-    return (b0 << 56) | (b1 << 48) | (b2 << 40) | (b3 << 32)
-         | (b4 << 24) | (b5 << 16) | (b6 << 8) | b7;
-}
-
-// Store a u64 big-endian into 8 bytes.
-transform store_u64_be(ptr: Address, off: u32, val: u64) {
-    *(ptr + off)     = (val >> 56) & 255;
-    *(ptr + off + 1) = (val >> 48) & 255;
-    *(ptr + off + 2) = (val >> 40) & 255;
-    *(ptr + off + 3) = (val >> 32) & 255;
-    *(ptr + off + 4) = (val >> 24) & 255;
-    *(ptr + off + 5) = (val >> 16) & 255;
-    *(ptr + off + 6) = (val >> 8) & 255;
-    *(ptr + off + 7) = val & 255;
-}
-
-// Ch(x, y, z) = (x AND y) XOR ((NOT x) AND z)
+// Ch(x, y, z) = (x AND y) XOR ((NOT x) AND z)  [§4.1.3]
+// (NOT x is computed as x XOR MASK64 — VUMA has no unary NOT on u64.)
 transform ch64(x: u64, y: u64, z: u64) -> u64 {
     return (x & y) ^ ((x ^ MASK64) & z);
 }
 
-// Maj(x, y, z) = (x AND y) XOR (x AND z) XOR (y AND z)
+// Maj(x, y, z) = (x AND y) XOR (x AND z) XOR (y AND z)  [§4.1.3]
 transform maj64(x: u64, y: u64, z: u64) -> u64 {
     return (x & y) ^ (x & z) ^ (y & z);
 }
 
-// Big Sigma0(x) = ROTR^28(x) XOR ROTR^34(x) XOR ROTR^39(x)
+// Big Sigma0(x) = ROTR^28(x) XOR ROTR^34(x) XOR ROTR^39(x)  [§4.1.3]
 transform big_sigma0_64(x: u64) -> u64 {
     return rotr64(x, 28) ^ rotr64(x, 34) ^ rotr64(x, 39);
 }
 
-// Big Sigma1(x) = ROTR^14(x) XOR ROTR^18(x) XOR ROTR^41(x)
+// Big Sigma1(x) = ROTR^14(x) XOR ROTR^18(x) XOR ROTR^41(x)  [§4.1.3]
 transform big_sigma1_64(x: u64) -> u64 {
     return rotr64(x, 14) ^ rotr64(x, 18) ^ rotr64(x, 41);
 }
 
-// Small sigma0(x) = ROTR^1(x) XOR ROTR^8(x) XOR SHR^7(x)
+// Small sigma0(x) = ROTR^1(x) XOR ROTR^8(x) XOR SHR^7(x)  [§4.1.3]
 transform small_sigma0_64(x: u64) -> u64 {
     return rotr64(x, 1) ^ rotr64(x, 8) ^ (x >> 7);
 }
 
-// Small sigma1(x) = ROTR^19(x) XOR ROTR^61(x) XOR SHR^6(x)
+// Small sigma1(x) = ROTR^19(x) XOR ROTR^61(x) XOR SHR^6(x)  [§4.1.3]
 transform small_sigma1_64(x: u64) -> u64 {
     return rotr64(x, 19) ^ rotr64(x, 61) ^ (x >> 6);
 }
 
-// Context layout (216 bytes):
-//   [  0.. 63] H[0..7]   8 x u64 big-endian state words
-//   [ 64.. 71] bit_lo    low 64 bits of total message length in bits
-//   [ 72.. 79] bit_hi    high 64 bits of total message length in bits
-//   [ 80.. 87] buf_len   bytes currently in the message buffer
-//   [ 88..215] buf[128]  partial block accumulator (1024-bit block)
-transform sha512_init(ctx: Address) {
-    store_u64_be(ctx, 0,  H0I);
-    store_u64_be(ctx, 8,  H1I);
-    store_u64_be(ctx, 16, H2I);
-    store_u64_be(ctx, 24, H3I);
-    store_u64_be(ctx, 32, H4I);
-    store_u64_be(ctx, 40, H5I);
-    store_u64_be(ctx, 48, H6I);
-    store_u64_be(ctx, 56, H7I);
-    store_u64_be(ctx, 64, 0);
-    store_u64_be(ctx, 72, 0);
-    store_u64_be(ctx, 80, 0);
+// ===========================================================================
+// Round-constants loader.
+// ===========================================================================
+
+// sha512_load_k: fill K.k[0..79] with the 80 FIPS-180-4 §4.2.3 round
+// constants. All literals are decimal or (1<<63)|lower form per the VUMA
+// convention for u64 values >= 2^63.
+transform sha512_load_k(K: State<Sha512K>) {
+    K.k[0] = K00; K.k[1] = K01; K.k[2] = K02; K.k[3] = K03;
+    K.k[4] = K04; K.k[5] = K05; K.k[6] = K06; K.k[7] = K07;
+    K.k[8] = K08; K.k[9] = K09; K.k[10] = K10; K.k[11] = K11;
+    K.k[12] = K12; K.k[13] = K13; K.k[14] = K14; K.k[15] = K15;
+    K.k[16] = K16; K.k[17] = K17; K.k[18] = K18; K.k[19] = K19;
+    K.k[20] = K20; K.k[21] = K21; K.k[22] = K22; K.k[23] = K23;
+    K.k[24] = K24; K.k[25] = K25; K.k[26] = K26; K.k[27] = K27;
+    K.k[28] = K28; K.k[29] = K29; K.k[30] = K30; K.k[31] = K31;
+    K.k[32] = K32; K.k[33] = K33; K.k[34] = K34; K.k[35] = K35;
+    K.k[36] = K36; K.k[37] = K37; K.k[38] = K38; K.k[39] = K39;
+    K.k[40] = K40; K.k[41] = K41; K.k[42] = K42; K.k[43] = K43;
+    K.k[44] = K44; K.k[45] = K45; K.k[46] = K46; K.k[47] = K47;
+    K.k[48] = K48; K.k[49] = K49; K.k[50] = K50; K.k[51] = K51;
+    K.k[52] = K52; K.k[53] = K53; K.k[54] = K54; K.k[55] = K55;
+    K.k[56] = K56; K.k[57] = K57; K.k[58] = K58; K.k[59] = K59;
+    K.k[60] = K60; K.k[61] = K61; K.k[62] = K62; K.k[63] = K63;
+    K.k[64] = K64; K.k[65] = K65; K.k[66] = K66; K.k[67] = K67;
+    K.k[68] = K68; K.k[69] = K69; K.k[70] = K70; K.k[71] = K71;
+    K.k[72] = K72; K.k[73] = K73; K.k[74] = K74; K.k[75] = K75;
+    K.k[76] = K76; K.k[77] = K77; K.k[78] = K78; K.k[79] = K79;
 }
 
-// Core compression: 80 rounds over a single 1024-bit block, per FIPS 180-4
-// Section 6.4.2. Builds the 80-word message schedule from the 16 input
-// words, then mixes each round with K[i] and the working-state registers
-// a..h using the SHA-512 mixing functions. The compressed block is added
-// back into the running state H[0..7].
-transform sha512_compress(ctx: Address, block: Address) {
-    a: u64 = load_u64_be(ctx, 0);
-    b: u64 = load_u64_be(ctx, 8);
-    c: u64 = load_u64_be(ctx, 16);
-    d: u64 = load_u64_be(ctx, 24);
-    e: u64 = load_u64_be(ctx, 32);
-    f: u64 = load_u64_be(ctx, 40);
-    g: u64 = load_u64_be(ctx, 48);
-    h: u64 = load_u64_be(ctx, 56);
+// ===========================================================================
+// SHA-512 API functions.
+// ===========================================================================
 
-    // 80-word message schedule: 80 x 8 bytes = 640 bytes
-    wbuf = allocate(640);
-    i: u32 = 0;
+// sha512_init: seed the SHA-512 initial hash state into ctx.
+// Writes all 8 IV words (byte-by-byte, big-endian) into ctx.state[0..63]
+// and zeroes ctx.len + ctx.total_lo + ctx.total_hi.
+transform sha512_init(ctx: State<Sha512Ctx>) {
+    // H0 = 0x6a09e667f3bcc908 → BE bytes
+    ctx.state[0] = ((H0I >> 56) & 255) as u8;
+    ctx.state[1] = ((H0I >> 48) & 255) as u8;
+    ctx.state[2] = ((H0I >> 40) & 255) as u8;
+    ctx.state[3] = ((H0I >> 32) & 255) as u8;
+    ctx.state[4] = ((H0I >> 24) & 255) as u8;
+    ctx.state[5] = ((H0I >> 16) & 255) as u8;
+    ctx.state[6] = ((H0I >> 8) & 255) as u8;
+    ctx.state[7] = (H0I & 255) as u8;
+    // H1 = 0xbb67ae8584caa73b
+    ctx.state[8] = ((H1I >> 56) & 255) as u8;
+    ctx.state[9] = ((H1I >> 48) & 255) as u8;
+    ctx.state[10] = ((H1I >> 40) & 255) as u8;
+    ctx.state[11] = ((H1I >> 32) & 255) as u8;
+    ctx.state[12] = ((H1I >> 24) & 255) as u8;
+    ctx.state[13] = ((H1I >> 16) & 255) as u8;
+    ctx.state[14] = ((H1I >> 8) & 255) as u8;
+    ctx.state[15] = (H1I & 255) as u8;
+    // H2 = 0x3c6ef372fe94f82b
+    ctx.state[16] = ((H2I >> 56) & 255) as u8;
+    ctx.state[17] = ((H2I >> 48) & 255) as u8;
+    ctx.state[18] = ((H2I >> 40) & 255) as u8;
+    ctx.state[19] = ((H2I >> 32) & 255) as u8;
+    ctx.state[20] = ((H2I >> 24) & 255) as u8;
+    ctx.state[21] = ((H2I >> 16) & 255) as u8;
+    ctx.state[22] = ((H2I >> 8) & 255) as u8;
+    ctx.state[23] = (H2I & 255) as u8;
+    // H3 = 0xa54ff53a5f1d36f1
+    ctx.state[24] = ((H3I >> 56) & 255) as u8;
+    ctx.state[25] = ((H3I >> 48) & 255) as u8;
+    ctx.state[26] = ((H3I >> 40) & 255) as u8;
+    ctx.state[27] = ((H3I >> 32) & 255) as u8;
+    ctx.state[28] = ((H3I >> 24) & 255) as u8;
+    ctx.state[29] = ((H3I >> 16) & 255) as u8;
+    ctx.state[30] = ((H3I >> 8) & 255) as u8;
+    ctx.state[31] = (H3I & 255) as u8;
+    // H4 = 0x510e527fade682d1
+    ctx.state[32] = ((H4I >> 56) & 255) as u8;
+    ctx.state[33] = ((H4I >> 48) & 255) as u8;
+    ctx.state[34] = ((H4I >> 40) & 255) as u8;
+    ctx.state[35] = ((H4I >> 32) & 255) as u8;
+    ctx.state[36] = ((H4I >> 24) & 255) as u8;
+    ctx.state[37] = ((H4I >> 16) & 255) as u8;
+    ctx.state[38] = ((H4I >> 8) & 255) as u8;
+    ctx.state[39] = (H4I & 255) as u8;
+    // H5 = 0x9b05688c2b3e6c1f
+    ctx.state[40] = ((H5I >> 56) & 255) as u8;
+    ctx.state[41] = ((H5I >> 48) & 255) as u8;
+    ctx.state[42] = ((H5I >> 40) & 255) as u8;
+    ctx.state[43] = ((H5I >> 32) & 255) as u8;
+    ctx.state[44] = ((H5I >> 24) & 255) as u8;
+    ctx.state[45] = ((H5I >> 16) & 255) as u8;
+    ctx.state[46] = ((H5I >> 8) & 255) as u8;
+    ctx.state[47] = (H5I & 255) as u8;
+    // H6 = 0x1f83d9abfb41bd6b
+    ctx.state[48] = ((H6I >> 56) & 255) as u8;
+    ctx.state[49] = ((H6I >> 48) & 255) as u8;
+    ctx.state[50] = ((H6I >> 40) & 255) as u8;
+    ctx.state[51] = ((H6I >> 32) & 255) as u8;
+    ctx.state[52] = ((H6I >> 24) & 255) as u8;
+    ctx.state[53] = ((H6I >> 16) & 255) as u8;
+    ctx.state[54] = ((H6I >> 8) & 255) as u8;
+    ctx.state[55] = (H6I & 255) as u8;
+    // H7 = 0x5be0cd19137e2179
+    ctx.state[56] = ((H7I >> 56) & 255) as u8;
+    ctx.state[57] = ((H7I >> 48) & 255) as u8;
+    ctx.state[58] = ((H7I >> 40) & 255) as u8;
+    ctx.state[59] = ((H7I >> 32) & 255) as u8;
+    ctx.state[60] = ((H7I >> 24) & 255) as u8;
+    ctx.state[61] = ((H7I >> 16) & 255) as u8;
+    ctx.state[62] = ((H7I >> 8) & 255) as u8;
+    ctx.state[63] = (H7I & 255) as u8;
+    ctx.len = 0;
+    ctx.total_lo = 0;
+    ctx.total_hi = 0;
+}
+
+// sha512_compress: fold one 128-byte block (ctx.buf) into ctx.state via
+// the FIPS-180-4 §6.3.2 80-round SHA-512 compression.
+//
+// Steps:
+//   1. Build the 80-word message schedule W[0..79]:
+//        W[0..15] = big-endian load of ctx.buf[i*8..i*8+7]
+//        W[i] (16 <= i < 80) = W[i-16] + σ0(W[i-15]) + W[i-7] + σ1(W[i-2])
+//   2. Initialize working variables a..h from ctx.state (BE load).
+//   3. Run 80 rounds:
+//        T1 = h + Σ1(e) + Ch(e,f,g) + K[i] + W[i]
+//        T2 = Σ0(a) + Maj(a,b,c)
+//        h = g; g = f; f = e; e = d + T1;
+//        d = c; c = b; b = a; a = T1 + T2.
+//   4. Fold a..h back into ctx.state (H[i] += working[i] mod 2^64).
+transform sha512_compress(ctx: State<Sha512Ctx>) {
+    let W = state_new(Sha512W);
+    let K = state_new(Sha512K);
+    sha512_load_k(K);
+
+    // Step 1: build the message schedule.
+    // W[0..15] = big-endian load of ctx.buf[i*8..i*8+7].
+    let i = 0;
     while i < 16 {
-        store_u64_be(wbuf, i * 8, load_u64_be(block, i * 8));
+        let off = i * 8;
+        let b0 = ctx.buf[off] as u64;
+        let b1 = ctx.buf[off + 1] as u64;
+        let b2 = ctx.buf[off + 2] as u64;
+        let b3 = ctx.buf[off + 3] as u64;
+        let b4 = ctx.buf[off + 4] as u64;
+        let b5 = ctx.buf[off + 5] as u64;
+        let b6 = ctx.buf[off + 6] as u64;
+        let b7 = ctx.buf[off + 7] as u64;
+        W.w[i] = (b0 << 56) | (b1 << 48) | (b2 << 40) | (b3 << 32)
+               | (b4 << 24) | (b5 << 16) | (b6 << 8) | b7;
         i = i + 1;
     }
-    // Rounds 16..79: W[i] = SSig1(W[i-2]) + W[i-7] + SSig0(W[i-15]) + W[i-16]
+    // W[16..79] = W[i-16] + ssig0(W[i-15]) + W[i-7] + ssig1(W[i-2])  (§6.3.2).
     i = 16;
     while i < 80 {
-        w15: u64 = load_u64_be(wbuf, (i - 15) * 8);
-        w2:  u64 = load_u64_be(wbuf, (i - 2) * 8);
-        w16: u64 = load_u64_be(wbuf, (i - 16) * 8)
-                 + small_sigma0_64(w15)
-                 + load_u64_be(wbuf, (i - 7) * 8)
-                 + small_sigma1_64(w2);
-        store_u64_be(wbuf, i * 8, w16);
+        let w15 = W.w[i - 15];
+        let w2 = W.w[i - 2];
+        let w7 = W.w[i - 7];
+        let w16 = W.w[i - 16];
+        W.w[i] = w16 + small_sigma0_64(w15) + w7 + small_sigma1_64(w2);
         i = i + 1;
     }
 
-    i = 0;
-    while i < 80 {
-        ki: u64 = 0;
-        if i == 0  { ki = K00; }
-        if i == 1  { ki = K01; }
-        if i == 2  { ki = K02; }
-        if i == 3  { ki = K03; }
-        if i == 4  { ki = K04; }
-        if i == 5  { ki = K05; }
-        if i == 6  { ki = K06; }
-        if i == 7  { ki = K07; }
-        if i == 8  { ki = K08; }
-        if i == 9  { ki = K09; }
-        if i == 10 { ki = K10; }
-        if i == 11 { ki = K11; }
-        if i == 12 { ki = K12; }
-        if i == 13 { ki = K13; }
-        if i == 14 { ki = K14; }
-        if i == 15 { ki = K15; }
-        if i == 16 { ki = K16; }
-        if i == 17 { ki = K17; }
-        if i == 18 { ki = K18; }
-        if i == 19 { ki = K19; }
-        if i == 20 { ki = K20; }
-        if i == 21 { ki = K21; }
-        if i == 22 { ki = K22; }
-        if i == 23 { ki = K23; }
-        if i == 24 { ki = K24; }
-        if i == 25 { ki = K25; }
-        if i == 26 { ki = K26; }
-        if i == 27 { ki = K27; }
-        if i == 28 { ki = K28; }
-        if i == 29 { ki = K29; }
-        if i == 30 { ki = K30; }
-        if i == 31 { ki = K31; }
-        if i == 32 { ki = K32; }
-        if i == 33 { ki = K33; }
-        if i == 34 { ki = K34; }
-        if i == 35 { ki = K35; }
-        if i == 36 { ki = K36; }
-        if i == 37 { ki = K37; }
-        if i == 38 { ki = K38; }
-        if i == 39 { ki = K39; }
-        if i == 40 { ki = K40; }
-        if i == 41 { ki = K41; }
-        if i == 42 { ki = K42; }
-        if i == 43 { ki = K43; }
-        if i == 44 { ki = K44; }
-        if i == 45 { ki = K45; }
-        if i == 46 { ki = K46; }
-        if i == 47 { ki = K47; }
-        if i == 48 { ki = K48; }
-        if i == 49 { ki = K49; }
-        if i == 50 { ki = K50; }
-        if i == 51 { ki = K51; }
-        if i == 52 { ki = K52; }
-        if i == 53 { ki = K53; }
-        if i == 54 { ki = K54; }
-        if i == 55 { ki = K55; }
-        if i == 56 { ki = K56; }
-        if i == 57 { ki = K57; }
-        if i == 58 { ki = K58; }
-        if i == 59 { ki = K59; }
-        if i == 60 { ki = K60; }
-        if i == 61 { ki = K61; }
-        if i == 62 { ki = K62; }
-        if i == 63 { ki = K63; }
-        if i == 64 { ki = K64; }
-        if i == 65 { ki = K65; }
-        if i == 66 { ki = K66; }
-        if i == 67 { ki = K67; }
-        if i == 68 { ki = K68; }
-        if i == 69 { ki = K69; }
-        if i == 70 { ki = K70; }
-        if i == 71 { ki = K71; }
-        if i == 72 { ki = K72; }
-        if i == 73 { ki = K73; }
-        if i == 74 { ki = K74; }
-        if i == 75 { ki = K75; }
-        if i == 76 { ki = K76; }
-        if i == 77 { ki = K77; }
-        if i == 78 { ki = K78; }
-        if i == 79 { ki = K79; }
+    // Step 2: initialize working variables a..h from ctx.state (BE load).
+    let a0 = (ctx.state[0] as u64) << 56 | (ctx.state[1] as u64) << 48
+           | (ctx.state[2] as u64) << 40 | (ctx.state[3] as u64) << 32
+           | (ctx.state[4] as u64) << 24 | (ctx.state[5] as u64) << 16
+           | (ctx.state[6] as u64) << 8  | (ctx.state[7] as u64);
+    let b0 = (ctx.state[8] as u64) << 56 | (ctx.state[9] as u64) << 48
+           | (ctx.state[10] as u64) << 40 | (ctx.state[11] as u64) << 32
+           | (ctx.state[12] as u64) << 24 | (ctx.state[13] as u64) << 16
+           | (ctx.state[14] as u64) << 8  | (ctx.state[15] as u64);
+    let c0 = (ctx.state[16] as u64) << 56 | (ctx.state[17] as u64) << 48
+           | (ctx.state[18] as u64) << 40 | (ctx.state[19] as u64) << 32
+           | (ctx.state[20] as u64) << 24 | (ctx.state[21] as u64) << 16
+           | (ctx.state[22] as u64) << 8  | (ctx.state[23] as u64);
+    let d0 = (ctx.state[24] as u64) << 56 | (ctx.state[25] as u64) << 48
+           | (ctx.state[26] as u64) << 40 | (ctx.state[27] as u64) << 32
+           | (ctx.state[28] as u64) << 24 | (ctx.state[29] as u64) << 16
+           | (ctx.state[30] as u64) << 8  | (ctx.state[31] as u64);
+    let e0 = (ctx.state[32] as u64) << 56 | (ctx.state[33] as u64) << 48
+           | (ctx.state[34] as u64) << 40 | (ctx.state[35] as u64) << 32
+           | (ctx.state[36] as u64) << 24 | (ctx.state[37] as u64) << 16
+           | (ctx.state[38] as u64) << 8  | (ctx.state[39] as u64);
+    let f0 = (ctx.state[40] as u64) << 56 | (ctx.state[41] as u64) << 48
+           | (ctx.state[42] as u64) << 40 | (ctx.state[43] as u64) << 32
+           | (ctx.state[44] as u64) << 24 | (ctx.state[45] as u64) << 16
+           | (ctx.state[46] as u64) << 8  | (ctx.state[47] as u64);
+    let g0 = (ctx.state[48] as u64) << 56 | (ctx.state[49] as u64) << 48
+           | (ctx.state[50] as u64) << 40 | (ctx.state[51] as u64) << 32
+           | (ctx.state[52] as u64) << 24 | (ctx.state[53] as u64) << 16
+           | (ctx.state[54] as u64) << 8  | (ctx.state[55] as u64);
+    let h0 = (ctx.state[56] as u64) << 56 | (ctx.state[57] as u64) << 48
+           | (ctx.state[58] as u64) << 40 | (ctx.state[59] as u64) << 32
+           | (ctx.state[60] as u64) << 24 | (ctx.state[61] as u64) << 16
+           | (ctx.state[62] as u64) << 8  | (ctx.state[63] as u64);
 
-        wi: u64 = load_u64_be(wbuf, i * 8);
-        t1: u64 = h + big_sigma1_64(e) + ch64(e, f, g) + ki + wi;
-        t2: u64 = big_sigma0_64(a) + maj64(a, b, c);
-        h = g; g = f; f = e; e = d + t1;
-        d = c; c = b; b = a; a = t1 + t2;
-        i = i + 1;
+    let a: u64 = a0;
+    let b: u64 = b0;
+    let c: u64 = c0;
+    let d: u64 = d0;
+    let e: u64 = e0;
+    let f: u64 = f0;
+    let g: u64 = g0;
+    let h: u64 = h0;
+
+    // Step 3: 80 SHA-512 rounds (FIPS-180-4 §6.3.2).
+    let r = 0;
+    while r < 80 {
+        let ki = K.k[r];
+        let wi = W.w[r];
+        let t1 = h + big_sigma1_64(e) + ch64(e, f, g) + ki + wi;
+        let t2 = big_sigma0_64(a) + maj64(a, b, c);
+        h = g;
+        g = f;
+        f = e;
+        e = d + t1;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 + t2;
+        r = r + 1;
     }
 
-    // Add the compressed chunk back into the running state. u64 arithmetic
-    // wraps mod 2^64 by definition in VUMA, so no explicit masking needed.
-    store_u64_be(ctx, 0,  load_u64_be(ctx, 0)  + a);
-    store_u64_be(ctx, 8,  load_u64_be(ctx, 8)  + b);
-    store_u64_be(ctx, 16, load_u64_be(ctx, 16) + c);
-    store_u64_be(ctx, 24, load_u64_be(ctx, 24) + d);
-    store_u64_be(ctx, 32, load_u64_be(ctx, 32) + e);
-    store_u64_be(ctx, 40, load_u64_be(ctx, 40) + f);
-    store_u64_be(ctx, 48, load_u64_be(ctx, 48) + g);
-    store_u64_be(ctx, 56, load_u64_be(ctx, 56) + h);
-    free(wbuf);
+    // Step 4: fold a..h back into ctx.state (H[i] += working[i] mod 2^64).
+    let na = a0 + a;
+    let nb = b0 + b;
+    let nc = c0 + c;
+    let nd = d0 + d;
+    let ne = e0 + e;
+    let nf = f0 + f;
+    let ng = g0 + g;
+    let nh = h0 + h;
+    ctx.state[0] = ((na >> 56) & 255) as u8;
+    ctx.state[1] = ((na >> 48) & 255) as u8;
+    ctx.state[2] = ((na >> 40) & 255) as u8;
+    ctx.state[3] = ((na >> 32) & 255) as u8;
+    ctx.state[4] = ((na >> 24) & 255) as u8;
+    ctx.state[5] = ((na >> 16) & 255) as u8;
+    ctx.state[6] = ((na >> 8) & 255) as u8;
+    ctx.state[7] = (na & 255) as u8;
+    ctx.state[8] = ((nb >> 56) & 255) as u8;
+    ctx.state[9] = ((nb >> 48) & 255) as u8;
+    ctx.state[10] = ((nb >> 40) & 255) as u8;
+    ctx.state[11] = ((nb >> 32) & 255) as u8;
+    ctx.state[12] = ((nb >> 24) & 255) as u8;
+    ctx.state[13] = ((nb >> 16) & 255) as u8;
+    ctx.state[14] = ((nb >> 8) & 255) as u8;
+    ctx.state[15] = (nb & 255) as u8;
+    ctx.state[16] = ((nc >> 56) & 255) as u8;
+    ctx.state[17] = ((nc >> 48) & 255) as u8;
+    ctx.state[18] = ((nc >> 40) & 255) as u8;
+    ctx.state[19] = ((nc >> 32) & 255) as u8;
+    ctx.state[20] = ((nc >> 24) & 255) as u8;
+    ctx.state[21] = ((nc >> 16) & 255) as u8;
+    ctx.state[22] = ((nc >> 8) & 255) as u8;
+    ctx.state[23] = (nc & 255) as u8;
+    ctx.state[24] = ((nd >> 56) & 255) as u8;
+    ctx.state[25] = ((nd >> 48) & 255) as u8;
+    ctx.state[26] = ((nd >> 40) & 255) as u8;
+    ctx.state[27] = ((nd >> 32) & 255) as u8;
+    ctx.state[28] = ((nd >> 24) & 255) as u8;
+    ctx.state[29] = ((nd >> 16) & 255) as u8;
+    ctx.state[30] = ((nd >> 8) & 255) as u8;
+    ctx.state[31] = (nd & 255) as u8;
+    ctx.state[32] = ((ne >> 56) & 255) as u8;
+    ctx.state[33] = ((ne >> 48) & 255) as u8;
+    ctx.state[34] = ((ne >> 40) & 255) as u8;
+    ctx.state[35] = ((ne >> 32) & 255) as u8;
+    ctx.state[36] = ((ne >> 24) & 255) as u8;
+    ctx.state[37] = ((ne >> 16) & 255) as u8;
+    ctx.state[38] = ((ne >> 8) & 255) as u8;
+    ctx.state[39] = (ne & 255) as u8;
+    ctx.state[40] = ((nf >> 56) & 255) as u8;
+    ctx.state[41] = ((nf >> 48) & 255) as u8;
+    ctx.state[42] = ((nf >> 40) & 255) as u8;
+    ctx.state[43] = ((nf >> 32) & 255) as u8;
+    ctx.state[44] = ((nf >> 24) & 255) as u8;
+    ctx.state[45] = ((nf >> 16) & 255) as u8;
+    ctx.state[46] = ((nf >> 8) & 255) as u8;
+    ctx.state[47] = (nf & 255) as u8;
+    ctx.state[48] = ((ng >> 56) & 255) as u8;
+    ctx.state[49] = ((ng >> 48) & 255) as u8;
+    ctx.state[50] = ((ng >> 40) & 255) as u8;
+    ctx.state[51] = ((ng >> 32) & 255) as u8;
+    ctx.state[52] = ((ng >> 24) & 255) as u8;
+    ctx.state[53] = ((ng >> 16) & 255) as u8;
+    ctx.state[54] = ((ng >> 8) & 255) as u8;
+    ctx.state[55] = (ng & 255) as u8;
+    ctx.state[56] = ((nh >> 56) & 255) as u8;
+    ctx.state[57] = ((nh >> 48) & 255) as u8;
+    ctx.state[58] = ((nh >> 40) & 255) as u8;
+    ctx.state[59] = ((nh >> 32) & 255) as u8;
+    ctx.state[60] = ((nh >> 24) & 255) as u8;
+    ctx.state[61] = ((nh >> 16) & 255) as u8;
+    ctx.state[62] = ((nh >> 8) & 255) as u8;
+    ctx.state[63] = (nh & 255) as u8;
 }
 
-// Increment the 128-bit bit counter by `bits` (1 <= bits <= 1024), carrying
-// into the high 64-bit limb when the low limb wraps.
-transform sha512_add_bits(ctx: Address, bits: u64) {
-    lo: u64 = load_u64_be(ctx, 64);
-    hi: u64 = load_u64_be(ctx, 72);
-    new_lo: u64 = lo + bits;
-    if new_lo < lo { hi = hi + 1; }
-    store_u64_be(ctx, 64, new_lo);
-    store_u64_be(ctx, 72, hi);
+// Increment the 64-bit bit counter (stored as two u32 limbs) by `bits`.
+// Carries into total_hi when the low limb wraps mod 2^32.
+transform sha512_add_bits(ctx: State<Sha512Ctx>, bits: u32) {
+    let lo = ctx.total_lo;
+    let hi = ctx.total_hi;
+    let new_lo = lo + bits;
+    if new_lo < lo {
+        ctx.total_hi = hi + 1;
+    }
+    ctx.total_lo = new_lo;
 }
 
-// Absorb `len` bytes of `data` into the context, compressing a full 128-byte
-// block each time the buffer fills.
-transform sha512_update(ctx: Address, data: Address, len: u32) {
-    buf_len: u64 = load_u64_be(ctx, 80);
-    i: u32 = 0;
+// sha512_update: absorb `len` bytes of data into the hash state.
+// Buffers input bytes into ctx.buf. When ctx.len reaches 128, calls
+// sha512_compress to fold the block into ctx.state and resets ctx.len.
+transform sha512_update(ctx: State<Sha512Ctx>, data: State<Sha512Data>, len: u32) {
+    let i: u32 = 0;
     while i < len {
-        *(ctx + 88 + buf_len) = *(data + i);
-        buf_len = buf_len + 1;
+        let bl = ctx.len;
+        ctx.buf[bl] = data.data[i];
+        ctx.len = bl + 1;
         i = i + 1;
-        if buf_len == 128 {
-            sha512_compress(ctx, ctx + 88);
+        if ctx.len == 128 {
+            sha512_compress(ctx);
             sha512_add_bits(ctx, 1024);
-            buf_len = 0;
+            ctx.len = 0;
         }
     }
-    store_u64_be(ctx, 80, buf_len);
 }
 
-// Pad the buffered message per FIPS 180-4 Section 5.1.2 (1024-bit variant),
-// run the final compression, and write the 64-byte digest to `out`.
-// Padding is: 0x80 bit, then zeros, then the 128-bit big-endian bit length
-// of the original message at the last 16 bytes of the final block.
-transform sha512_final(ctx: Address, out: Address) {
-    buf_len: u64 = load_u64_be(ctx, 80);
-
-    // Account for the unprocessed buffered bytes in the bit counter
+// sha512_final: emit the 64-byte SHA-512 digest into `out`.
+//
+// FIPS-180-4 §5.1.2 padding (1024-bit variant):
+//   1. Append 0x80 at ctx.buf[ctx.len].
+//   2. Zero-pad to offset 112 (mod 128). If ctx.len + 1 > 112, the padding
+//      overflows into a second block — compress the first, then start a
+//      fresh zero block for the length suffix.
+//   3. Write the 128-bit big-endian bit count at ctx.buf[112..127].
+//      (High 64 bits at 112..119 = 0; low 64 bits at 120..127 from
+//      total_hi:total_lo.)
+//   4. Run the final compression.
+//   5. Copy ctx.state[0..63] to out.data[0..63] (already BE — §5.1.2).
+transform sha512_final(ctx: State<Sha512Ctx>, out: State<Sha512Digest>) {
+    let buf_len: u32 = ctx.len;
     sha512_add_bits(ctx, buf_len * 8);
 
-    // Append the 0x80 bit after the message
-    *(ctx + 88 + buf_len) = 128;
+    // Step 1: append the 0x80 padding bit.
+    ctx.buf[buf_len] = 128;
     buf_len = buf_len + 1;
 
-    // If not enough room for the 16-byte length suffix, pad this block with
-    // zeros, compress, and start a fresh block.
+    // Step 2: zero-pad to offset 112 (mod 128).
     if buf_len > 112 {
         while buf_len < 128 {
-            *(ctx + 88 + buf_len) = 0;
+            ctx.buf[buf_len] = 0;
             buf_len = buf_len + 1;
         }
-        sha512_compress(ctx, ctx + 88);
+        sha512_compress(ctx);
         buf_len = 0;
     }
-    // Pad with zeros up to the length field at offset 112
     while buf_len < 112 {
-        *(ctx + 88 + buf_len) = 0;
+        ctx.buf[buf_len] = 0;
         buf_len = buf_len + 1;
     }
-    // Append 128-bit big-endian bit length (high 64 bits first, then low)
-    store_u64_be(ctx, 88 + 112, load_u64_be(ctx, 72));
-    store_u64_be(ctx, 88 + 120, load_u64_be(ctx, 64));
 
-    sha512_compress(ctx, ctx + 88);
+    // Step 3: 128-bit big-endian bit count at ctx.buf[112..127].
+    // High 64 bits (112..119) = 0 (already zero-padded above).
+    // Low 64 bits (120..127) = total_hi : total_lo (each BE 4 bytes).
+    let lo = ctx.total_lo;
+    let hi = ctx.total_hi;
+    ctx.buf[112] = 0;
+    ctx.buf[113] = 0;
+    ctx.buf[114] = 0;
+    ctx.buf[115] = 0;
+    ctx.buf[116] = 0;
+    ctx.buf[117] = 0;
+    ctx.buf[118] = 0;
+    ctx.buf[119] = 0;
+    ctx.buf[120] = ((hi >> 24) & 255) as u8;
+    ctx.buf[121] = ((hi >> 16) & 255) as u8;
+    ctx.buf[122] = ((hi >> 8) & 255) as u8;
+    ctx.buf[123] = (hi & 255) as u8;
+    ctx.buf[124] = ((lo >> 24) & 255) as u8;
+    ctx.buf[125] = ((lo >> 16) & 255) as u8;
+    ctx.buf[126] = ((lo >> 8) & 255) as u8;
+    ctx.buf[127] = (lo & 255) as u8;
 
-    // Emit all 8 state words (64 bytes) big-endian — full SHA-512 digest
-    i: u32 = 0;
-    while i < 8 {
-        store_u64_be(out, i * 8, load_u64_be(ctx, i * 8));
+    // Step 4: final compression.
+    sha512_compress(ctx);
+
+    // Step 5: copy state (BE) to digest output (BE — direct copy).
+    let i = 0;
+    while i < 64 {
+        out.data[i] = ctx.state[i];
         i = i + 1;
     }
 }
 
 // Convenience wrapper: initialise a fresh context, absorb `data`, finalise
-// into `out`, and free the context.
-transform sha512_oneshot(data: Address, len: u32, out: Address) {
-    ctx = allocate(216);
+// into `out`.
+transform sha512_oneshot(data: State<Sha512Data>, len: u32, out: State<Sha512Digest>) {
+    let ctx = state_new(Sha512Ctx);
     sha512_init(ctx);
     sha512_update(ctx, data, len);
     sha512_final(ctx, out);
-    free(ctx);
 }
