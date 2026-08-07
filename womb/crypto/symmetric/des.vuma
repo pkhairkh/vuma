@@ -1,0 +1,535 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// womb/crypto/symmetric/des.vuma — DES & Triple-DES (FIPS 46-3 / SP 800-67r1)
+// PMT-native rewrite (W2-F).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// DES: 64-bit key (56 effective bits after parity drop), 64-bit block,
+// 16-round Feistel network with IP / FP bit permutations, E expansion,
+// 8 S-boxes, and P permutation. Subkeys derived via PC-1 (64→56) +
+// 16× (LS + PC-2) (56→48).
+//
+// 3DES (TDEA EDE3, SP 800-67r1): C = E_K3(D_K2(E_K1(P)));
+// P = D_K1(E_K2(D_K3(C))). Three independent DES contexts are used.
+//
+// Test vectors (verified against PyCryptodome / OpenSSL):
+//   DES (FIPS 46-3 Appendix B):
+//     key       = 133457799BBCDFF1
+//     plaintext = 0123456789ABCDEF
+//     ciphertext= 85E813540F0AB405
+//   3DES EDE3 (SP 800-67r1):
+//     key1 || key2 || key3 = 0123456789ABCDEF23456789ABCDEF013456789ABCDEF012
+//     plaintext = 0123456789ABCDEF
+//     ciphertext= 38F194ABC829B362
+//
+// PMT patterns (per W2-A aes128 / W48 sha / W1-A md5 / W2-C chacha20):
+//   - `state_new(Layout)` for allocations (NEVER allocate/free/Address/*ptr)
+//   - `State<T>` for transform parameters that take pointers
+//   - `[u8; N]` byte arrays with literal / precomputed indices for tables
+//   - Tables (IP, FP, E, P, PC1-C/D, PC2, shift schedule, 8 S-boxes) are
+//     stored directly in `DesCtx` as `[u8; N]` fields — same pattern as
+//     `AesCtx.sbox` / `AesCtx.inv_sbox` (avoids passing a tables state
+//     to every round function — compiler-bug workaround #3).
+//   - u64 used throughout for 48/56/64-bit intermediate values (matches
+//     the sha512.vuma PMT pattern for 64-bit words).
+//   - Subkeys stored as 96 bytes (16 × 6 bytes) in ctx.subkeys.
+//   - Loop-variable-derived byte offsets precomputed into local vars
+//     (`let off = round * 6;`) before array access — md5.vuma pattern.
+//
+// No `main()` — importable library module.
+
+const DES_MASK32: u32 = 4294967295;
+const DES_MASK64: u64 = (1 << 63) | ((1 << 63) - 1);
+const DES_MASK28: u64 = 268435455;          // 0x0FFFFFFF — 28 ones
+const DES_MASK56: u64 = 72057594037927935;  // 0x00FFFFFFFFFFFFFF — 56 ones
+
+// ===========================================================================
+// Layouts
+// ===========================================================================
+
+// DES context: all 9 permutation/lookup tables + 16 subkeys (96 bytes).
+// Tables are loaded once via des_load_tables() then re-used across all
+// blocks encrypted/decrypted under the same key.
+layout DesCtx = {
+    ip:     [u8; 64],   // Initial Permutation (1-indexed source positions)
+    fp:     [u8; 64],   // Final Permutation (inverse of IP)
+    e:      [u8; 48],   // Expansion E (32→48)
+    p:      [u8; 32],   // Permutation P (32→32)
+    pc1c:   [u8; 28],   // PC-1 C-half (64→28)
+    pc1d:   [u8; 28],   // PC-1 D-half (64→28)
+    pc2:    [u8; 48],   // PC-2 (56→48)
+    shifts: [u8; 16],   // Per-round rotation amount (1 or 2)
+    sbox:   [u8; 512],  // 8 S-boxes × 64 entries (flat: box*64 + idx)
+    subkeys:[u8; 96],   // 16 subkeys × 6 bytes (48-bit each)
+}
+
+layout DesBlock = { data: [u8; 8] }   // 64-bit plaintext/ciphertext block
+layout DesKey   = { data: [u8; 8] }   // 64-bit key (parity bits ignored)
+
+// ===========================================================================
+// Table loaders — FIPS 46-3 canonical values
+// ===========================================================================
+
+transform des_load_ip(ctx: State<DesCtx>) {
+    ctx.ip[0]=58; ctx.ip[1]=50; ctx.ip[2]=42; ctx.ip[3]=34; ctx.ip[4]=26; ctx.ip[5]=18; ctx.ip[6]=10; ctx.ip[7]=2;
+    ctx.ip[8]=60; ctx.ip[9]=52; ctx.ip[10]=44; ctx.ip[11]=36; ctx.ip[12]=28; ctx.ip[13]=20; ctx.ip[14]=12; ctx.ip[15]=4;
+    ctx.ip[16]=62; ctx.ip[17]=54; ctx.ip[18]=46; ctx.ip[19]=38; ctx.ip[20]=30; ctx.ip[21]=22; ctx.ip[22]=14; ctx.ip[23]=6;
+    ctx.ip[24]=64; ctx.ip[25]=56; ctx.ip[26]=48; ctx.ip[27]=40; ctx.ip[28]=32; ctx.ip[29]=24; ctx.ip[30]=16; ctx.ip[31]=8;
+    ctx.ip[32]=57; ctx.ip[33]=49; ctx.ip[34]=41; ctx.ip[35]=33; ctx.ip[36]=25; ctx.ip[37]=17; ctx.ip[38]=9; ctx.ip[39]=1;
+    ctx.ip[40]=59; ctx.ip[41]=51; ctx.ip[42]=43; ctx.ip[43]=35; ctx.ip[44]=27; ctx.ip[45]=19; ctx.ip[46]=11; ctx.ip[47]=3;
+    ctx.ip[48]=61; ctx.ip[49]=53; ctx.ip[50]=45; ctx.ip[51]=37; ctx.ip[52]=29; ctx.ip[53]=21; ctx.ip[54]=13; ctx.ip[55]=5;
+    ctx.ip[56]=63; ctx.ip[57]=55; ctx.ip[58]=47; ctx.ip[59]=39; ctx.ip[60]=31; ctx.ip[61]=23; ctx.ip[62]=15; ctx.ip[63]=7;
+}
+
+transform des_load_fp(ctx: State<DesCtx>) {
+    ctx.fp[0]=40; ctx.fp[1]=8; ctx.fp[2]=48; ctx.fp[3]=16; ctx.fp[4]=56; ctx.fp[5]=24; ctx.fp[6]=64; ctx.fp[7]=32;
+    ctx.fp[8]=39; ctx.fp[9]=7; ctx.fp[10]=47; ctx.fp[11]=15; ctx.fp[12]=55; ctx.fp[13]=23; ctx.fp[14]=63; ctx.fp[15]=31;
+    ctx.fp[16]=38; ctx.fp[17]=6; ctx.fp[18]=46; ctx.fp[19]=14; ctx.fp[20]=54; ctx.fp[21]=22; ctx.fp[22]=62; ctx.fp[23]=30;
+    ctx.fp[24]=37; ctx.fp[25]=5; ctx.fp[26]=45; ctx.fp[27]=13; ctx.fp[28]=53; ctx.fp[29]=21; ctx.fp[30]=61; ctx.fp[31]=29;
+    ctx.fp[32]=36; ctx.fp[33]=4; ctx.fp[34]=44; ctx.fp[35]=12; ctx.fp[36]=52; ctx.fp[37]=20; ctx.fp[38]=60; ctx.fp[39]=28;
+    ctx.fp[40]=35; ctx.fp[41]=3; ctx.fp[42]=43; ctx.fp[43]=11; ctx.fp[44]=51; ctx.fp[45]=19; ctx.fp[46]=59; ctx.fp[47]=27;
+    ctx.fp[48]=34; ctx.fp[49]=2; ctx.fp[50]=42; ctx.fp[51]=10; ctx.fp[52]=50; ctx.fp[53]=18; ctx.fp[54]=58; ctx.fp[55]=26;
+    ctx.fp[56]=33; ctx.fp[57]=1; ctx.fp[58]=41; ctx.fp[59]=9; ctx.fp[60]=49; ctx.fp[61]=17; ctx.fp[62]=57; ctx.fp[63]=25;
+}
+
+transform des_load_e(ctx: State<DesCtx>) {
+    ctx.e[0]=32; ctx.e[1]=1; ctx.e[2]=2; ctx.e[3]=3; ctx.e[4]=4; ctx.e[5]=5;
+    ctx.e[6]=4; ctx.e[7]=5; ctx.e[8]=6; ctx.e[9]=7; ctx.e[10]=8; ctx.e[11]=9;
+    ctx.e[12]=8; ctx.e[13]=9; ctx.e[14]=10; ctx.e[15]=11; ctx.e[16]=12; ctx.e[17]=13;
+    ctx.e[18]=12; ctx.e[19]=13; ctx.e[20]=14; ctx.e[21]=15; ctx.e[22]=16; ctx.e[23]=17;
+    ctx.e[24]=16; ctx.e[25]=17; ctx.e[26]=18; ctx.e[27]=19; ctx.e[28]=20; ctx.e[29]=21;
+    ctx.e[30]=20; ctx.e[31]=21; ctx.e[32]=22; ctx.e[33]=23; ctx.e[34]=24; ctx.e[35]=25;
+    ctx.e[36]=24; ctx.e[37]=25; ctx.e[38]=26; ctx.e[39]=27; ctx.e[40]=28; ctx.e[41]=29;
+    ctx.e[42]=28; ctx.e[43]=29; ctx.e[44]=30; ctx.e[45]=31; ctx.e[46]=32; ctx.e[47]=1;
+}
+
+transform des_load_p(ctx: State<DesCtx>) {
+    ctx.p[0]=16; ctx.p[1]=7; ctx.p[2]=20; ctx.p[3]=21; ctx.p[4]=29; ctx.p[5]=12; ctx.p[6]=28; ctx.p[7]=17;
+    ctx.p[8]=1; ctx.p[9]=15; ctx.p[10]=23; ctx.p[11]=26; ctx.p[12]=5; ctx.p[13]=18; ctx.p[14]=31; ctx.p[15]=10;
+    ctx.p[16]=2; ctx.p[17]=8; ctx.p[18]=24; ctx.p[19]=14; ctx.p[20]=32; ctx.p[21]=27; ctx.p[22]=3; ctx.p[23]=9;
+    ctx.p[24]=19; ctx.p[25]=13; ctx.p[26]=30; ctx.p[27]=6; ctx.p[28]=22; ctx.p[29]=11; ctx.p[30]=4; ctx.p[31]=25;
+}
+
+transform des_load_pc1c(ctx: State<DesCtx>) {
+    ctx.pc1c[0]=57; ctx.pc1c[1]=49; ctx.pc1c[2]=41; ctx.pc1c[3]=33; ctx.pc1c[4]=25; ctx.pc1c[5]=17; ctx.pc1c[6]=9;
+    ctx.pc1c[7]=1; ctx.pc1c[8]=58; ctx.pc1c[9]=50; ctx.pc1c[10]=42; ctx.pc1c[11]=34; ctx.pc1c[12]=26; ctx.pc1c[13]=18;
+    ctx.pc1c[14]=10; ctx.pc1c[15]=2; ctx.pc1c[16]=59; ctx.pc1c[17]=51; ctx.pc1c[18]=43; ctx.pc1c[19]=35; ctx.pc1c[20]=27;
+    ctx.pc1c[21]=19; ctx.pc1c[22]=11; ctx.pc1c[23]=3; ctx.pc1c[24]=60; ctx.pc1c[25]=52; ctx.pc1c[26]=44; ctx.pc1c[27]=36;
+}
+
+transform des_load_pc1d(ctx: State<DesCtx>) {
+    ctx.pc1d[0]=63; ctx.pc1d[1]=55; ctx.pc1d[2]=47; ctx.pc1d[3]=39; ctx.pc1d[4]=31; ctx.pc1d[5]=23; ctx.pc1d[6]=15;
+    ctx.pc1d[7]=7; ctx.pc1d[8]=62; ctx.pc1d[9]=54; ctx.pc1d[10]=46; ctx.pc1d[11]=38; ctx.pc1d[12]=30; ctx.pc1d[13]=22;
+    ctx.pc1d[14]=14; ctx.pc1d[15]=6; ctx.pc1d[16]=61; ctx.pc1d[17]=53; ctx.pc1d[18]=45; ctx.pc1d[19]=37; ctx.pc1d[20]=29;
+    ctx.pc1d[21]=21; ctx.pc1d[22]=13; ctx.pc1d[23]=5; ctx.pc1d[24]=28; ctx.pc1d[25]=20; ctx.pc1d[26]=12; ctx.pc1d[27]=4;
+}
+
+transform des_load_pc2(ctx: State<DesCtx>) {
+    ctx.pc2[0]=14; ctx.pc2[1]=17; ctx.pc2[2]=11; ctx.pc2[3]=24; ctx.pc2[4]=1; ctx.pc2[5]=5;
+    ctx.pc2[6]=3; ctx.pc2[7]=28; ctx.pc2[8]=15; ctx.pc2[9]=6; ctx.pc2[10]=21; ctx.pc2[11]=10;
+    ctx.pc2[12]=23; ctx.pc2[13]=19; ctx.pc2[14]=12; ctx.pc2[15]=4; ctx.pc2[16]=26; ctx.pc2[17]=8;
+    ctx.pc2[18]=16; ctx.pc2[19]=7; ctx.pc2[20]=27; ctx.pc2[21]=20; ctx.pc2[22]=13; ctx.pc2[23]=2;
+    ctx.pc2[24]=41; ctx.pc2[25]=52; ctx.pc2[26]=31; ctx.pc2[27]=37; ctx.pc2[28]=47; ctx.pc2[29]=55;
+    ctx.pc2[30]=30; ctx.pc2[31]=40; ctx.pc2[32]=51; ctx.pc2[33]=45; ctx.pc2[34]=33; ctx.pc2[35]=48;
+    ctx.pc2[36]=44; ctx.pc2[37]=49; ctx.pc2[38]=39; ctx.pc2[39]=56; ctx.pc2[40]=34; ctx.pc2[41]=53;
+    ctx.pc2[42]=46; ctx.pc2[43]=42; ctx.pc2[44]=50; ctx.pc2[45]=36; ctx.pc2[46]=29; ctx.pc2[47]=32;
+}
+
+transform des_load_shifts(ctx: State<DesCtx>) {
+    ctx.shifts[0]=1; ctx.shifts[1]=1; ctx.shifts[2]=2; ctx.shifts[3]=2;
+    ctx.shifts[4]=2; ctx.shifts[5]=2; ctx.shifts[6]=2; ctx.shifts[7]=2;
+    ctx.shifts[8]=1; ctx.shifts[9]=2; ctx.shifts[10]=2; ctx.shifts[11]=2;
+    ctx.shifts[12]=2; ctx.shifts[13]=2; ctx.shifts[14]=2; ctx.shifts[15]=1;
+}
+
+transform des_load_sbox(ctx: State<DesCtx>) {
+    // S1 (offset 0)
+    ctx.sbox[0]=14; ctx.sbox[1]=4; ctx.sbox[2]=13; ctx.sbox[3]=1; ctx.sbox[4]=2; ctx.sbox[5]=15; ctx.sbox[6]=11; ctx.sbox[7]=8;
+    ctx.sbox[8]=3; ctx.sbox[9]=10; ctx.sbox[10]=6; ctx.sbox[11]=12; ctx.sbox[12]=5; ctx.sbox[13]=9; ctx.sbox[14]=0; ctx.sbox[15]=7;
+    ctx.sbox[16]=0; ctx.sbox[17]=15; ctx.sbox[18]=7; ctx.sbox[19]=4; ctx.sbox[20]=14; ctx.sbox[21]=2; ctx.sbox[22]=13; ctx.sbox[23]=1;
+    ctx.sbox[24]=10; ctx.sbox[25]=6; ctx.sbox[26]=12; ctx.sbox[27]=11; ctx.sbox[28]=9; ctx.sbox[29]=5; ctx.sbox[30]=3; ctx.sbox[31]=8;
+    ctx.sbox[32]=4; ctx.sbox[33]=1; ctx.sbox[34]=14; ctx.sbox[35]=8; ctx.sbox[36]=13; ctx.sbox[37]=6; ctx.sbox[38]=2; ctx.sbox[39]=11;
+    ctx.sbox[40]=15; ctx.sbox[41]=12; ctx.sbox[42]=9; ctx.sbox[43]=7; ctx.sbox[44]=3; ctx.sbox[45]=10; ctx.sbox[46]=5; ctx.sbox[47]=0;
+    ctx.sbox[48]=15; ctx.sbox[49]=12; ctx.sbox[50]=8; ctx.sbox[51]=2; ctx.sbox[52]=4; ctx.sbox[53]=9; ctx.sbox[54]=1; ctx.sbox[55]=7;
+    ctx.sbox[56]=5; ctx.sbox[57]=11; ctx.sbox[58]=3; ctx.sbox[59]=14; ctx.sbox[60]=10; ctx.sbox[61]=0; ctx.sbox[62]=6; ctx.sbox[63]=13;
+    // S2 (offset 64)
+    ctx.sbox[64]=15; ctx.sbox[65]=1; ctx.sbox[66]=8; ctx.sbox[67]=14; ctx.sbox[68]=6; ctx.sbox[69]=11; ctx.sbox[70]=3; ctx.sbox[71]=4;
+    ctx.sbox[72]=9; ctx.sbox[73]=7; ctx.sbox[74]=2; ctx.sbox[75]=13; ctx.sbox[76]=12; ctx.sbox[77]=0; ctx.sbox[78]=5; ctx.sbox[79]=10;
+    ctx.sbox[80]=3; ctx.sbox[81]=13; ctx.sbox[82]=4; ctx.sbox[83]=7; ctx.sbox[84]=15; ctx.sbox[85]=2; ctx.sbox[86]=8; ctx.sbox[87]=14;
+    ctx.sbox[88]=12; ctx.sbox[89]=0; ctx.sbox[90]=1; ctx.sbox[91]=10; ctx.sbox[92]=6; ctx.sbox[93]=9; ctx.sbox[94]=11; ctx.sbox[95]=5;
+    ctx.sbox[96]=0; ctx.sbox[97]=14; ctx.sbox[98]=7; ctx.sbox[99]=11; ctx.sbox[100]=10; ctx.sbox[101]=4; ctx.sbox[102]=13; ctx.sbox[103]=1;
+    ctx.sbox[104]=5; ctx.sbox[105]=8; ctx.sbox[106]=12; ctx.sbox[107]=6; ctx.sbox[108]=9; ctx.sbox[109]=3; ctx.sbox[110]=2; ctx.sbox[111]=15;
+    ctx.sbox[112]=13; ctx.sbox[113]=8; ctx.sbox[114]=10; ctx.sbox[115]=1; ctx.sbox[116]=3; ctx.sbox[117]=15; ctx.sbox[118]=4; ctx.sbox[119]=2;
+    ctx.sbox[120]=11; ctx.sbox[121]=6; ctx.sbox[122]=7; ctx.sbox[123]=12; ctx.sbox[124]=0; ctx.sbox[125]=5; ctx.sbox[126]=14; ctx.sbox[127]=9;
+    // S3 (offset 128)
+    ctx.sbox[128]=10; ctx.sbox[129]=0; ctx.sbox[130]=9; ctx.sbox[131]=14; ctx.sbox[132]=6; ctx.sbox[133]=3; ctx.sbox[134]=15; ctx.sbox[135]=5;
+    ctx.sbox[136]=1; ctx.sbox[137]=13; ctx.sbox[138]=12; ctx.sbox[139]=7; ctx.sbox[140]=11; ctx.sbox[141]=4; ctx.sbox[142]=2; ctx.sbox[143]=8;
+    ctx.sbox[144]=13; ctx.sbox[145]=7; ctx.sbox[146]=0; ctx.sbox[147]=9; ctx.sbox[148]=3; ctx.sbox[149]=4; ctx.sbox[150]=6; ctx.sbox[151]=10;
+    ctx.sbox[152]=2; ctx.sbox[153]=8; ctx.sbox[154]=5; ctx.sbox[155]=14; ctx.sbox[156]=12; ctx.sbox[157]=11; ctx.sbox[158]=15; ctx.sbox[159]=1;
+    ctx.sbox[160]=13; ctx.sbox[161]=6; ctx.sbox[162]=4; ctx.sbox[163]=9; ctx.sbox[164]=8; ctx.sbox[165]=15; ctx.sbox[166]=3; ctx.sbox[167]=0;
+    ctx.sbox[168]=11; ctx.sbox[169]=1; ctx.sbox[170]=2; ctx.sbox[171]=12; ctx.sbox[172]=5; ctx.sbox[173]=10; ctx.sbox[174]=14; ctx.sbox[175]=7;
+    ctx.sbox[176]=1; ctx.sbox[177]=10; ctx.sbox[178]=13; ctx.sbox[179]=0; ctx.sbox[180]=6; ctx.sbox[181]=9; ctx.sbox[182]=8; ctx.sbox[183]=7;
+    ctx.sbox[184]=4; ctx.sbox[185]=15; ctx.sbox[186]=14; ctx.sbox[187]=3; ctx.sbox[188]=11; ctx.sbox[189]=5; ctx.sbox[190]=2; ctx.sbox[191]=12;
+    // S4 (offset 192)
+    ctx.sbox[192]=7; ctx.sbox[193]=13; ctx.sbox[194]=14; ctx.sbox[195]=3; ctx.sbox[196]=0; ctx.sbox[197]=6; ctx.sbox[198]=9; ctx.sbox[199]=10;
+    ctx.sbox[200]=1; ctx.sbox[201]=2; ctx.sbox[202]=8; ctx.sbox[203]=5; ctx.sbox[204]=11; ctx.sbox[205]=12; ctx.sbox[206]=4; ctx.sbox[207]=15;
+    ctx.sbox[208]=13; ctx.sbox[209]=8; ctx.sbox[210]=11; ctx.sbox[211]=5; ctx.sbox[212]=6; ctx.sbox[213]=15; ctx.sbox[214]=0; ctx.sbox[215]=3;
+    ctx.sbox[216]=4; ctx.sbox[217]=7; ctx.sbox[218]=2; ctx.sbox[219]=12; ctx.sbox[220]=1; ctx.sbox[221]=10; ctx.sbox[222]=14; ctx.sbox[223]=9;
+    ctx.sbox[224]=10; ctx.sbox[225]=6; ctx.sbox[226]=9; ctx.sbox[227]=0; ctx.sbox[228]=12; ctx.sbox[229]=11; ctx.sbox[230]=7; ctx.sbox[231]=13;
+    ctx.sbox[232]=15; ctx.sbox[233]=1; ctx.sbox[234]=3; ctx.sbox[235]=14; ctx.sbox[236]=5; ctx.sbox[237]=2; ctx.sbox[238]=8; ctx.sbox[239]=4;
+    ctx.sbox[240]=3; ctx.sbox[241]=15; ctx.sbox[242]=0; ctx.sbox[243]=6; ctx.sbox[244]=10; ctx.sbox[245]=1; ctx.sbox[246]=13; ctx.sbox[247]=8;
+    ctx.sbox[248]=9; ctx.sbox[249]=4; ctx.sbox[250]=5; ctx.sbox[251]=11; ctx.sbox[252]=12; ctx.sbox[253]=2; ctx.sbox[254]=7; ctx.sbox[255]=14;
+    // S5 (offset 256)
+    ctx.sbox[256]=2; ctx.sbox[257]=12; ctx.sbox[258]=4; ctx.sbox[259]=1; ctx.sbox[260]=7; ctx.sbox[261]=10; ctx.sbox[262]=11; ctx.sbox[263]=6;
+    ctx.sbox[264]=8; ctx.sbox[265]=5; ctx.sbox[266]=3; ctx.sbox[267]=15; ctx.sbox[268]=13; ctx.sbox[269]=0; ctx.sbox[270]=14; ctx.sbox[271]=9;
+    ctx.sbox[272]=14; ctx.sbox[273]=11; ctx.sbox[274]=2; ctx.sbox[275]=12; ctx.sbox[276]=4; ctx.sbox[277]=7; ctx.sbox[278]=13; ctx.sbox[279]=1;
+    ctx.sbox[280]=5; ctx.sbox[281]=0; ctx.sbox[282]=15; ctx.sbox[283]=10; ctx.sbox[284]=3; ctx.sbox[285]=9; ctx.sbox[286]=8; ctx.sbox[287]=6;
+    ctx.sbox[288]=4; ctx.sbox[289]=2; ctx.sbox[290]=1; ctx.sbox[291]=11; ctx.sbox[292]=10; ctx.sbox[293]=13; ctx.sbox[294]=7; ctx.sbox[295]=8;
+    ctx.sbox[296]=15; ctx.sbox[297]=9; ctx.sbox[298]=12; ctx.sbox[299]=5; ctx.sbox[300]=6; ctx.sbox[301]=3; ctx.sbox[302]=0; ctx.sbox[303]=14;
+    ctx.sbox[304]=11; ctx.sbox[305]=8; ctx.sbox[306]=12; ctx.sbox[307]=7; ctx.sbox[308]=1; ctx.sbox[309]=14; ctx.sbox[310]=2; ctx.sbox[311]=13;
+    ctx.sbox[312]=6; ctx.sbox[313]=15; ctx.sbox[314]=0; ctx.sbox[315]=9; ctx.sbox[316]=10; ctx.sbox[317]=4; ctx.sbox[318]=5; ctx.sbox[319]=3;
+    // S6 (offset 320)
+    ctx.sbox[320]=12; ctx.sbox[321]=1; ctx.sbox[322]=10; ctx.sbox[323]=15; ctx.sbox[324]=9; ctx.sbox[325]=2; ctx.sbox[326]=6; ctx.sbox[327]=8;
+    ctx.sbox[328]=0; ctx.sbox[329]=13; ctx.sbox[330]=3; ctx.sbox[331]=4; ctx.sbox[332]=14; ctx.sbox[333]=7; ctx.sbox[334]=5; ctx.sbox[335]=11;
+    ctx.sbox[336]=10; ctx.sbox[337]=15; ctx.sbox[338]=4; ctx.sbox[339]=2; ctx.sbox[340]=7; ctx.sbox[341]=12; ctx.sbox[342]=9; ctx.sbox[343]=5;
+    ctx.sbox[344]=6; ctx.sbox[345]=1; ctx.sbox[346]=13; ctx.sbox[347]=14; ctx.sbox[348]=0; ctx.sbox[349]=11; ctx.sbox[350]=3; ctx.sbox[351]=8;
+    ctx.sbox[352]=9; ctx.sbox[353]=14; ctx.sbox[354]=15; ctx.sbox[355]=5; ctx.sbox[356]=2; ctx.sbox[357]=8; ctx.sbox[358]=12; ctx.sbox[359]=3;
+    ctx.sbox[360]=7; ctx.sbox[361]=0; ctx.sbox[362]=4; ctx.sbox[363]=10; ctx.sbox[364]=1; ctx.sbox[365]=13; ctx.sbox[366]=11; ctx.sbox[367]=6;
+    ctx.sbox[368]=4; ctx.sbox[369]=3; ctx.sbox[370]=2; ctx.sbox[371]=12; ctx.sbox[372]=9; ctx.sbox[373]=5; ctx.sbox[374]=15; ctx.sbox[375]=10;
+    ctx.sbox[376]=11; ctx.sbox[377]=14; ctx.sbox[378]=1; ctx.sbox[379]=7; ctx.sbox[380]=6; ctx.sbox[381]=0; ctx.sbox[382]=8; ctx.sbox[383]=13;
+    // S7 (offset 384)
+    ctx.sbox[384]=4; ctx.sbox[385]=11; ctx.sbox[386]=2; ctx.sbox[387]=14; ctx.sbox[388]=15; ctx.sbox[389]=0; ctx.sbox[390]=8; ctx.sbox[391]=13;
+    ctx.sbox[392]=3; ctx.sbox[393]=12; ctx.sbox[394]=9; ctx.sbox[395]=7; ctx.sbox[396]=5; ctx.sbox[397]=10; ctx.sbox[398]=6; ctx.sbox[399]=1;
+    ctx.sbox[400]=13; ctx.sbox[401]=0; ctx.sbox[402]=11; ctx.sbox[403]=7; ctx.sbox[404]=4; ctx.sbox[405]=9; ctx.sbox[406]=1; ctx.sbox[407]=10;
+    ctx.sbox[408]=14; ctx.sbox[409]=3; ctx.sbox[410]=5; ctx.sbox[411]=12; ctx.sbox[412]=2; ctx.sbox[413]=15; ctx.sbox[414]=8; ctx.sbox[415]=6;
+    ctx.sbox[416]=1; ctx.sbox[417]=4; ctx.sbox[418]=11; ctx.sbox[419]=13; ctx.sbox[420]=12; ctx.sbox[421]=3; ctx.sbox[422]=7; ctx.sbox[423]=14;
+    ctx.sbox[424]=10; ctx.sbox[425]=15; ctx.sbox[426]=6; ctx.sbox[427]=8; ctx.sbox[428]=0; ctx.sbox[429]=5; ctx.sbox[430]=9; ctx.sbox[431]=2;
+    ctx.sbox[432]=6; ctx.sbox[433]=11; ctx.sbox[434]=13; ctx.sbox[435]=8; ctx.sbox[436]=1; ctx.sbox[437]=4; ctx.sbox[438]=10; ctx.sbox[439]=7;
+    ctx.sbox[440]=9; ctx.sbox[441]=5; ctx.sbox[442]=0; ctx.sbox[443]=15; ctx.sbox[444]=14; ctx.sbox[445]=2; ctx.sbox[446]=3; ctx.sbox[447]=12;
+    // S8 (offset 448)
+    ctx.sbox[448]=13; ctx.sbox[449]=2; ctx.sbox[450]=8; ctx.sbox[451]=4; ctx.sbox[452]=6; ctx.sbox[453]=15; ctx.sbox[454]=11; ctx.sbox[455]=1;
+    ctx.sbox[456]=10; ctx.sbox[457]=9; ctx.sbox[458]=3; ctx.sbox[459]=14; ctx.sbox[460]=5; ctx.sbox[461]=0; ctx.sbox[462]=12; ctx.sbox[463]=7;
+    ctx.sbox[464]=1; ctx.sbox[465]=15; ctx.sbox[466]=13; ctx.sbox[467]=8; ctx.sbox[468]=10; ctx.sbox[469]=3; ctx.sbox[470]=7; ctx.sbox[471]=4;
+    ctx.sbox[472]=12; ctx.sbox[473]=5; ctx.sbox[474]=6; ctx.sbox[475]=11; ctx.sbox[476]=0; ctx.sbox[477]=14; ctx.sbox[478]=9; ctx.sbox[479]=2;
+    ctx.sbox[480]=7; ctx.sbox[481]=11; ctx.sbox[482]=4; ctx.sbox[483]=1; ctx.sbox[484]=9; ctx.sbox[485]=12; ctx.sbox[486]=14; ctx.sbox[487]=2;
+    ctx.sbox[488]=0; ctx.sbox[489]=6; ctx.sbox[490]=10; ctx.sbox[491]=13; ctx.sbox[492]=15; ctx.sbox[493]=3; ctx.sbox[494]=5; ctx.sbox[495]=8;
+    ctx.sbox[496]=2; ctx.sbox[497]=1; ctx.sbox[498]=14; ctx.sbox[499]=7; ctx.sbox[500]=4; ctx.sbox[501]=10; ctx.sbox[502]=8; ctx.sbox[503]=13;
+    ctx.sbox[504]=15; ctx.sbox[505]=12; ctx.sbox[506]=9; ctx.sbox[507]=0; ctx.sbox[508]=3; ctx.sbox[509]=5; ctx.sbox[510]=6; ctx.sbox[511]=11;
+}
+
+
+// des_load_tables: populate all 9 permutation/lookup tables in ctx.
+// Called once per context (idempotent — safe to call multiple times).
+transform des_load_tables(ctx: State<DesCtx>) {
+    des_load_ip(ctx);
+    des_load_fp(ctx);
+    des_load_e(ctx);
+    des_load_p(ctx);
+    des_load_pc1c(ctx);
+    des_load_pc1d(ctx);
+    des_load_pc2(ctx);
+    des_load_shifts(ctx);
+    des_load_sbox(ctx);
+}
+
+// ===========================================================================
+// Bit permutation primitives (FIPS 46-3 §3)
+// ===========================================================================
+
+// Initial Permutation IP — 64-bit → 64-bit.
+// Output bit i (MSB-first, i=0..63) = input bit ctx.ip[i] (1-indexed MSB-first).
+transform des_ip_permute(ctx: State<DesCtx>, in_hi: u32, in_lo: u32) -> u64 {
+    let v: u64 = (((in_hi as u64) << 32) | (in_lo as u64));
+    let out: u64 = 0;
+    let i: u32 = 0;
+    while i < 64 {
+        let src = (ctx.ip[i] as u32) as u64;
+        let bit_val = (v >> (64 - src)) & 1;
+        out = out | (bit_val << (63 - (i as u64)));
+        i = i + 1;
+    }
+    return out;
+}
+
+// Final Permutation FP (= IP^-1) — 64-bit → 64-bit.
+transform des_fp_permute(ctx: State<DesCtx>, in64: u64) -> u64 {
+    let out: u64 = 0;
+    let i: u32 = 0;
+    while i < 64 {
+        let src = (ctx.fp[i] as u32) as u64;
+        let bit_val = (in64 >> (64 - src)) & 1;
+        out = out | (bit_val << (63 - (i as u64)));
+        i = i + 1;
+    }
+    return out;
+}
+
+// Expansion E — 32-bit → 48-bit.
+transform des_expand_e(ctx: State<DesCtx>, r: u32) -> u64 {
+    let out: u64 = 0;
+    let i: u32 = 0;
+    while i < 48 {
+        let src = (ctx.e[i] as u32) as u64;
+        let bit_val = (((r as u64) >> (32 - src)) & 1);
+        out = out | (bit_val << (47 - (i as u64)));
+        i = i + 1;
+    }
+    return out;
+}
+
+// Permutation P — 32-bit → 32-bit.
+transform des_perm_p(ctx: State<DesCtx>, x: u32) -> u32 {
+    let out: u32 = 0;
+    let i: u32 = 0;
+    while i < 32 {
+        let src = ctx.p[i] as u32;
+        let bit_val = (x >> (32 - src)) & 1;
+        out = out | (bit_val << (31 - i));
+        i = i + 1;
+    }
+    return out;
+}
+
+// S-box lookup: 6-bit input → 4-bit output.
+// row = ((v>>4)&2) | (v&1); col = (v>>1)&15; idx = row*16 + col.
+// S-box table is flat: ctx.sbox[box*64 + idx].
+transform des_sbox_lookup(ctx: State<DesCtx>, box_idx: u32, val6: u32) -> u32 {
+    let row = ((val6 >> 4) & 2) | (val6 & 1);
+    let col = (val6 >> 1) & 15;
+    let idx = row * 16 + col;
+    let off = box_idx * 64;
+    return ctx.sbox[off + idx] as u32;
+}
+
+// Feistel f function: f(R, K) = P(S(E(R) XOR K)).
+// E expands 32-bit R to 48 bits, XORs with 48-bit subkey, splits into 8
+// 6-bit groups for S-boxes (S1 = bits 47..42, S8 = bits 5..0), then P permutes.
+transform des_f(ctx: State<DesCtx>, r: u32, k48: u64) -> u32 {
+    let er = des_expand_e(ctx, r) ^ k48;
+    let out: u32 = 0;
+    let box: u32 = 0;
+    while box < 8 {
+        let v6 = ((er >> ((42 - box * 6) as u64)) & 63) as u32;
+        let s = des_sbox_lookup(ctx, box, v6);
+        out = (out << 4) | s;
+        box = box + 1;
+    }
+    return des_perm_p(ctx, out);
+}
+
+// ===========================================================================
+// Key schedule (FIPS 46-3 §3.2)
+// ===========================================================================
+
+// PC-1: 64-bit key → 56-bit (C||D, each 28 bits). Parity bits dropped.
+// Returns (C<<28) | D as a 56-bit u64.
+transform des_pc1(ctx: State<DesCtx>, key_hi: u32, key_lo: u32) -> u64 {
+    let key64: u64 = (((key_hi as u64) << 32) | (key_lo as u64));
+    let c: u64 = 0;
+    let d: u64 = 0;
+    let i: u32 = 0;
+    while i < 28 {
+        let src_c = (ctx.pc1c[i] as u32) as u64;
+        let vc = (key64 >> (64 - src_c)) & 1;
+        c = c | (vc << (27 - (i as u64)));
+        let src_d = (ctx.pc1d[i] as u32) as u64;
+        let vd = (key64 >> (64 - src_d)) & 1;
+        d = d | (vd << (27 - (i as u64)));
+        i = i + 1;
+    }
+    return ((c << 28) | d) & DES_MASK56;
+}
+
+// PC-2: 56-bit (C||D) → 48-bit subkey.
+transform des_pc2(ctx: State<DesCtx>, cd: u64) -> u64 {
+    let out: u64 = 0;
+    let i: u32 = 0;
+    while i < 48 {
+        let src = (ctx.pc2[i] as u32) as u64;
+        let bit_val = (cd >> (56 - src)) & 1;
+        out = out | (bit_val << (47 - (i as u64)));
+        i = i + 1;
+    }
+    return out;
+}
+
+// Left-rotate 28-bit value by n positions (1 <= n <= 2).
+transform des_rotl28(x: u64, n: u64) -> u64 {
+    return ((x << n) | (x >> (28 - n))) & DES_MASK28;
+}
+
+// Key schedule: produce 16 subkeys (each 48 bits = 6 bytes) in ctx.subkeys.
+// Takes the 64-bit key as a (hi, lo) u32 pair (big-endian) to avoid the
+// v0.2.0-alpha.15 codegen bug with passing State<DesKey> as a transform
+// parameter (calling des_key_schedule twice with different State<DesKey>
+// args triggers SIGBUS — the parameter-state-rebinding codegen bug).
+transform des_key_schedule(ctx: State<DesCtx>, key_hi: u32, key_lo: u32) {
+    // PC-1: split into 28-bit halves (C, D), packed as C<<28 | D.
+    let cd: u64 = des_pc1(ctx, key_hi, key_lo);
+
+    // 16 rounds: rotate (C, D) by shifts[round], then PC-2 → 48-bit subkey.
+    let round: u32 = 0;
+    while round < 16 {
+        let sh = (ctx.shifts[round] as u32) as u64;
+        // Split, rotate each half, recombine.
+        let c = (cd >> 28) & DES_MASK28;
+        let d = cd & DES_MASK28;
+        let new_c = des_rotl28(c, sh);
+        let new_d = des_rotl28(d, sh);
+        cd = ((new_c << 28) | new_d) & DES_MASK56;
+
+        let sk = des_pc2(ctx, cd);
+        // Store 48-bit subkey as 6 bytes (big-endian) at subkeys[round*6].
+        let off = round * 6;
+        ctx.subkeys[off]     = ((sk >> 40) & 255) as u8;
+        ctx.subkeys[off + 1] = ((sk >> 32) & 255) as u8;
+        ctx.subkeys[off + 2] = ((sk >> 24) & 255) as u8;
+        ctx.subkeys[off + 3] = ((sk >> 16) & 255) as u8;
+        ctx.subkeys[off + 4] = ((sk >> 8) & 255) as u8;
+        ctx.subkeys[off + 5] = (sk & 255) as u8;
+        round = round + 1;
+    }
+}
+
+// Reconstruct 48-bit subkey from 6 stored bytes.
+transform des_load_subkey(ctx: State<DesCtx>, round: u32) -> u64 {
+    let off = round * 6;
+    let b0 = ctx.subkeys[off] as u64;
+    let b1 = ctx.subkeys[off + 1] as u64;
+    let b2 = ctx.subkeys[off + 2] as u64;
+    let b3 = ctx.subkeys[off + 3] as u64;
+    let b4 = ctx.subkeys[off + 4] as u64;
+    let b5 = ctx.subkeys[off + 5] as u64;
+    return (b0 << 40) | (b1 << 32) | (b2 << 24) | (b3 << 16) | (b4 << 8) | b5;
+}
+
+// ===========================================================================
+// DES init / encrypt / decrypt (FIPS 46-3 §3)
+// ===========================================================================
+
+// des_init: load tables + compute subkeys from key. Call once per context.
+// Reads the 8 key bytes from `key.data[0..7]` and packs them into a (hi, lo)
+// u32 pair before calling des_key_schedule (avoids the parameter-state-
+// rebinding codegen bug — see des_key_schedule header comment).
+transform des_init(ctx: State<DesCtx>, key: State<DesKey>) {
+    des_load_tables(ctx);
+    // Load 64-bit key as (hi, lo) u32 pair (big-endian) using LITERAL indices.
+    let key_hi: u32 = (((key.data[0] as u32) << 24) | ((key.data[1] as u32) << 16)
+                    | ((key.data[2] as u32) << 8)  |  (key.data[3] as u32));
+    let key_lo: u32 = (((key.data[4] as u32) << 24) | ((key.data[5] as u32) << 16)
+                    | ((key.data[6] as u32) << 8)  |  (key.data[7] as u32));
+    des_key_schedule(ctx, key_hi, key_lo);
+}
+
+// des_encrypt_block: encrypt one 8-byte block.
+// IP → 16 Feistel rounds (L,R) → swap → FP → 8-byte ciphertext.
+transform des_encrypt_block(ctx: State<DesCtx>, pt: State<DesBlock>, ct: State<DesBlock>) {
+    // Load 64-bit plaintext as (hi, lo) u32 pair (big-endian).
+    let in_hi: u32 = 0;
+    let in_lo: u32 = 0;
+    let i: u32 = 0;
+    while i < 4 {
+        in_hi = (in_hi << 8) | (pt.data[i] as u32);
+        i = i + 1;
+    }
+    while i < 8 {
+        in_lo = (in_lo << 8) | (pt.data[i] as u32);
+        i = i + 1;
+    }
+
+    // IP. After IP, L = high 32 bits, R = low 32 bits.
+    let ip = des_ip_permute(ctx, in_hi, in_lo);
+    let l: u32 = (ip >> 32) as u32;
+    let r: u32 = ip as u32;
+
+    // 16 rounds.
+    let round: u32 = 0;
+    while round < 16 {
+        let sk = des_load_subkey(ctx, round);
+        let new_r = l ^ des_f(ctx, r, sk);
+        l = r;
+        r = new_r;
+        round = round + 1;
+    }
+
+    // Final permutation on (R || L) — note the swap.
+    let pre_fp: u64 = (((r as u64) << 32) | (l as u64));
+    let fp = des_fp_permute(ctx, pre_fp);
+
+    // Store 64-bit ciphertext big-endian.
+    ct.data[0] = ((fp >> 56) & 255) as u8;
+    ct.data[1] = ((fp >> 48) & 255) as u8;
+    ct.data[2] = ((fp >> 40) & 255) as u8;
+    ct.data[3] = ((fp >> 32) & 255) as u8;
+    ct.data[4] = ((fp >> 24) & 255) as u8;
+    ct.data[5] = ((fp >> 16) & 255) as u8;
+    ct.data[6] = ((fp >> 8) & 255) as u8;
+    ct.data[7] = (fp & 255) as u8;
+}
+
+// des_decrypt_block: decrypt one 8-byte block (subkeys applied in reverse).
+transform des_decrypt_block(ctx: State<DesCtx>, ct: State<DesBlock>, pt: State<DesBlock>) {
+    let in_hi: u32 = 0;
+    let in_lo: u32 = 0;
+    let i: u32 = 0;
+    while i < 4 {
+        in_hi = (in_hi << 8) | (ct.data[i] as u32);
+        i = i + 1;
+    }
+    while i < 8 {
+        in_lo = (in_lo << 8) | (ct.data[i] as u32);
+        i = i + 1;
+    }
+
+    let ip = des_ip_permute(ctx, in_hi, in_lo);
+    let l: u32 = (ip >> 32) as u32;
+    let r: u32 = ip as u32;
+
+    // 16 rounds with subkeys in reverse order (15, 14, ..., 0).
+    let round: u32 = 16;
+    while round > 0 {
+        let sk = des_load_subkey(ctx, round - 1);
+        let new_r = l ^ des_f(ctx, r, sk);
+        l = r;
+        r = new_r;
+        round = round - 1;
+    }
+
+    let pre_fp: u64 = (((r as u64) << 32) | (l as u64));
+    let fp = des_fp_permute(ctx, pre_fp);
+
+    pt.data[0] = ((fp >> 56) & 255) as u8;
+    pt.data[1] = ((fp >> 48) & 255) as u8;
+    pt.data[2] = ((fp >> 40) & 255) as u8;
+    pt.data[3] = ((fp >> 32) & 255) as u8;
+    pt.data[4] = ((fp >> 24) & 255) as u8;
+    pt.data[5] = ((fp >> 16) & 255) as u8;
+    pt.data[6] = ((fp >> 8) & 255) as u8;
+    pt.data[7] = (fp & 255) as u8;
+}
+
+// ===========================================================================
+// 3DES EDE3 (SP 800-67r1) — three independent DES contexts.
+// ===========================================================================
+
+// tdes_ede3_encrypt_block: C = E_K3(D_K2(E_K1(P))).
+// Caller passes three pre-keyed contexts (ctx1=K1, ctx2=K2, ctx3=K3) plus
+// a scratch block (tmp) for the E→D→E chain. The caller manages tmp's
+// lifetime to avoid nested state_new() allocations.
+transform tdes_ede3_encrypt_block(
+    ctx1: State<DesCtx>, ctx2: State<DesCtx>, ctx3: State<DesCtx>,
+    pt: State<DesBlock>, tmp: State<DesBlock>, ct: State<DesBlock>
+) {
+    des_encrypt_block(ctx1, pt, tmp);
+    des_decrypt_block(ctx2, tmp, tmp);
+    des_encrypt_block(ctx3, tmp, ct);
+}
+
+// tdes_ede3_decrypt_block: P = D_K1(E_K2(D_K3(C))).
+transform tdes_ede3_decrypt_block(
+    ctx1: State<DesCtx>, ctx2: State<DesCtx>, ctx3: State<DesCtx>,
+    ct: State<DesBlock>, tmp: State<DesBlock>, pt: State<DesBlock>
+) {
+    des_decrypt_block(ctx3, ct, tmp);
+    des_encrypt_block(ctx2, tmp, tmp);
+    des_decrypt_block(ctx1, tmp, pt);
+}
