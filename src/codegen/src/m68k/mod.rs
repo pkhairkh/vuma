@@ -1266,7 +1266,18 @@ fn emit_instr(
     relocations: &mut Vec<RelocationEntry>,
 ) {
     match instr {
-        IRInstr::Add { dst, lhs, rhs, ty: _ } => {
+        IRInstr::Add { dst, lhs, rhs, ty } => {
+            let is_64bit = matches!(ty, Some(IRType::I64) | Some(IRType::U64));
+            let is_move = matches!(rhs, IRValue::Immediate(0)) && ty.is_none();
+            if !is_64bit && !is_move {
+                // 32-bit add: operate on low word only, ss_st zeros high word
+                let dst_id = dst.as_register().unwrap_or(0);
+                let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
+                code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
+                code.extend(Instruction::Add { src: S1, dst: S0 }.encode());
+                code.extend(ss_st(S0, dst_off));
+            } else {
             // W8d: Handle 64-bit immediate materialization.
             // The IR optimizer's constant_fold replaces
             //   Cast { UIntToFloat/IntToFloat, src: Immediate(<i64>) }
@@ -1298,8 +1309,19 @@ fn emit_instr(
             }
             code.extend(Instruction::Addx { src: S1, dst: S0 }.encode());
             code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+            }
         }
-        IRInstr::Sub { dst, lhs, rhs, ty: _ } => {
+        IRInstr::Sub { dst, lhs, rhs, ty } => {
+            let is_64bit = matches!(ty, Some(IRType::I64) | Some(IRType::U64));
+            if !is_64bit {
+                // 32-bit sub: operate on low word only, ss_st zeros high word
+                let dst_id = dst.as_register().unwrap_or(0);
+                let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
+                code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
+                code.extend(Instruction::Sub { src: S1, dst: S0 }.encode());
+                code.extend(ss_st(S0, dst_off));
+            } else {
             let dst_id = dst.as_register().unwrap_or(0);
             let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
@@ -1317,6 +1339,7 @@ fn emit_instr(
             }
             code.extend(Instruction::Subx { src: S1, dst: S0 }.encode());
             code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+            }
         }
         IRInstr::Mul { dst, lhs, rhs, ty } => {
             // The previous handler unconditionally used
@@ -1605,13 +1628,21 @@ fn emit_instr(
             let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
             match kind {
                 CastKind::ZExt | CastKind::SExt | CastKind::Trunc | CastKind::BitCast => {
-                    // For a 32-bit architecture, casting between integer types
-                    // just keeps the low bits. Load src into S0 and store.
                     code.extend(ss_load_value(src, vreg_stack_slots, S0));
+                    // Mask to destination width for narrowing casts
+                    match to_ty {
+                        Some(IRType::I8) | Some(IRType::U8) => {
+                            // ANDI.L #0xFF, D0 (S0=D0)
+                            code.extend_from_slice(&[0x02, 0x80, 0x00, 0x00, 0x00, 0xFF]);
+                        }
+                        Some(IRType::I16) | Some(IRType::U16) => {
+                            // ANDI.L #0xFFFF, D0 (S0=D0)
+                            code.extend_from_slice(&[0x02, 0x80, 0x00, 0x00, 0xFF, 0xFF]);
+                        }
+                        _ => {}
+                    }
                     code.extend(ss_st(S0, dst_off));
-                    // For ZExt to I64, MUST zero the high
-                    // word. Without this, the FNV-1a loop's I64 XOR reads
-                    // garbage from [dst_off+4], corrupting the hash.
+                    // For ZExt to I64, MUST zero the high word
                     if matches!(to_ty, Some(IRType::I64) | Some(IRType::U64)) {
                         code.extend(ss_load_imm(S0, 0));
                         code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
