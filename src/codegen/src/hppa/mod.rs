@@ -5980,6 +5980,18 @@ impl Backend for HppaBackend {
 
         let _start_stub_size = start_stub.len();
 
+        // ── _start call trampoline (for large binaries) ──
+        // Emit a trampoline right after the _start stub that loads main's
+        // absolute address and branches to it. This is within BL range of
+        // the _start call site. The _start call is patched to BL to this
+        // trampoline, which then branches to main (any distance).
+        // Placeholder: ss_load_imm(R1, 0) + BV R0(R1) + NOP = ~56 bytes.
+        // We emit this as a placeholder and patch it with main's address later.
+        let _start_trampoline_offset = start_stub.len();
+        start_stub.extend(ss_load_imm(R1, 0)); // placeholder, patched with main addr
+        start_stub.extend_from_slice(&encode_bv_real(R1)); // BV R0(R1)
+        start_stub.extend_from_slice(&encode_nop()); // delay slot
+
         // ── FFI return-0 stub ──
         // Returns 0 in R28 and branches back to R2 (return address).
         // This is used for extern functions like print_int that don't
@@ -6677,18 +6689,18 @@ impl Backend for HppaBackend {
         let mut trampolines: Vec<(usize, usize)> = Vec::new(); // (call_offset, target_offset)
 
         // ── Patch _start call to main ──
-        // The _start stub uses the 32-byte call pattern.
-        // Patch it the same way as function calls.
+        // For large binaries (>256KB), the _start call can't reach main via BL.
+        // Use the _start trampoline (emitted right after the _start stub):
+        //   1. Patch the trampoline's ss_load_imm with main's absolute address
+        //   2. Patch the _start call site with BL to the trampoline (short distance)
+        // For small binaries, BL can reach main directly — use patch_call_site.
         let main_key = func_offsets
             .keys()
             .find(|k| *k == "main" || k.starts_with("fn_main"))
             .cloned();
         if let Some(ref key) = main_key {
             let main_offset = func_offsets[key] as i64;
-            // The _start stub has stack-setup code before the 32-byte call pattern.
-            // We need to find the call pattern's offset within start_stub.
-            // The call pattern starts with BL,n +0, R1 (0xE8200000).
-            // Search for it in the first 128 bytes of all_code.
+            // Find the BL,n +0, R1 (0xE8200000) in the first 128 bytes.
             let mut start_call_offset = 0usize;
             for off in (0..128).step_by(4) {
                 if off + 4 <= all_code.len() {
@@ -6704,13 +6716,37 @@ impl Backend for HppaBackend {
                     }
                 }
             }
-            let _abs_offset = start_call_offset as i64;
-            patch_call_site(
-                &mut all_code,
-                start_call_offset,
-                main_offset as usize,
-                &mut trampolines,
-            );
+            // Check if BL can reach main directly
+            let direct_disp = main_offset - (start_call_offset as i64) - 8;
+            if direct_disp.abs() <= 262140 && direct_disp % 4 == 0 {
+                // Small binary: BL can reach main directly
+                patch_call_site(
+                    &mut all_code,
+                    start_call_offset,
+                    main_offset as usize,
+                    &mut trampolines,
+                );
+            } else {
+                // Large binary: use the _start trampoline
+                // Patch trampoline's ss_load_imm with main's absolute address
+                const TEXT_OFFSET: u64 = 192;
+                let main_vaddr = (0x10000u64 + TEXT_OFFSET + main_offset as u64) as i64;
+                let tramp_imm = ss_load_imm(R1, main_vaddr);
+                let tramp_pos = _start_trampoline_offset;
+                all_code[tramp_pos..tramp_pos + tramp_imm.len()].copy_from_slice(&tramp_imm);
+                // Patch _start call site with BL to trampoline
+                // BL is at start_call_offset + 12, branches to PC+8+disp
+                let bl_disp = (_start_trampoline_offset as i64) - (start_call_offset as i64) - 20;
+                if bl_disp.abs() <= 262140 && bl_disp % 4 == 0 {
+                    let bl = encode_bl(bl_disp as i32);
+                    all_code[start_call_offset + 12..start_call_offset + 16].copy_from_slice(&bl);
+                    let nop = encode_nop();
+                    for off in [16, 20, 24, 28].iter() {
+                        let o = start_call_offset + off;
+                        all_code[o..o + 4].copy_from_slice(&nop);
+                    }
+                }
+            }
         }
 
         // ── Patch inter-function calls and GetAddress relocations ──
