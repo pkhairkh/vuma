@@ -2489,7 +2489,16 @@ fn lower_function(func: &IRFunction) -> Result<LoweredWasmFunction, BackendError
             .param_types
             .get(i)
             .and_then(WasmType::from_ir_type)
-            .map(|t| if t.is_integer() { WasmType::I32 } else { t })
+            .map(|t| {
+                // I64/U64 params stay as I64 (needed for 64-bit crypto values
+                // like blake2/sha3). Other integer types become I32 (wasm32
+                // has no i8/i16 locals; pointers are 32-bit).
+                match t {
+                    WasmType::I64 => WasmType::I64,
+                    _ if t.is_integer() => WasmType::I32,
+                    _ => t,
+                }
+            })
             .unwrap_or(WasmType::I32);
         if let IRValue::Register(id) = param {
             // Map vreg to the wasm param local index (0, 1, 2, ...).
@@ -2627,7 +2636,11 @@ fn lower_function(func: &IRFunction) -> Result<LoweredWasmFunction, BackendError
         .param_types
         .iter()
         .filter_map(WasmType::from_ir_type)
-        .map(|t| if t.is_integer() { WasmType::I32 } else { t })
+        .map(|t| match t {
+            WasmType::I64 => WasmType::I64,
+            _ if t.is_integer() => WasmType::I32,
+            _ => t,
+        })
         .collect();
 
     // IMPORTANT: All program functions are emitted as `() -> ()` (void)
@@ -3693,11 +3706,14 @@ fn lower_instruction(instr: &IRInstr, ctx: &mut LoweringContext) -> Result<(), B
                         .and_then(|params| params.get(num_args_to_push))
                         .map(|t| {
                             // Mirror allocate_function's param-type mapping:
-                            // integers become I32 (wasm32 has no i8/i16/i64
-                            // locals — i64 is held in I64 locals only via the
-                            // 64-bit-return path), F64/F32 stay as-is.
+                            // I64/U64 stay as I64 (for 64-bit crypto values),
+                            // other integers become I32, F64/F32 stay as-is.
                             WasmType::from_ir_type(t)
-                                .map(|wt| if wt.is_integer() { WasmType::I32 } else { wt })
+                                .map(|wt| match wt {
+                                    WasmType::I64 => WasmType::I64,
+                                    _ if wt.is_integer() => WasmType::I32,
+                                    _ => wt,
+                                })
                                 .unwrap_or(WasmType::I32)
                         })
                 };
