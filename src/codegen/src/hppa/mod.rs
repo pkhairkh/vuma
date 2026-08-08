@@ -1188,22 +1188,36 @@ fn emit_backward_branch(target_offset: i64, bl_offset: i64) -> Vec<u8> {
         return code;
     }
 
-    // Fallback: BL +0, R1 + multi-LDO chain + BV R0(R1) for very large
-    // displacements (> 256 KB). Size grows linearly with displacement.
-    // For large functions, a single LDO can't reach the target — decompose
-    // the displacement into chunks of 8000 bytes each.
-    // BL +0, R1 (link = R1, disp = 0)
+    // Medium path: displacement fits in 4 LDOs (±32764).
+    // BL +0, R1; NOP; 4×LDO; BV; NOP = 8 instructions = 32 bytes.
+    if disp.abs() <= 4 * 8191 && disp % 4 == 0 {
+        code.extend_from_slice(&0xE8200000u32.to_be_bytes()); // BL +0, R1
+        code.extend_from_slice(&encode_nop()); // delay slot
+        let mut remaining = disp;
+        for _ in 0..4 {
+            if remaining == 0 {
+                code.extend_from_slice(&encode_nop());
+            } else {
+                let chunk = remaining.clamp(-8191, 8191);
+                code.extend_from_slice(&encode_ldo_raw(R1, chunk as i16, R1));
+                remaining -= chunk;
+            }
+        }
+        code.extend_from_slice(&encode_bv_real(R1)); // BV R0(R1)
+        code.extend_from_slice(&encode_nop()); // delay slot
+        return code;
+    }
+
+    // Large path: use ss_load_imm to load the displacement into R2, add to R1
+    // (PC+8 from BL), and BV. Fixed size (~24-28 instructions, fits in 128 bytes).
+    // BL +0, R1 (R1 = PC + 8)
     code.extend_from_slice(&0xE8200000u32.to_be_bytes());
     code.extend_from_slice(&encode_nop()); // delay slot
-    let mut remaining = disp;
-    // Each LDO can add up to ±8191. Use chunks of 8000 to stay safe.
-    while remaining.abs() > 8000 {
-        let chunk = if remaining > 0 { 8000i16 } else { -8000i16 };
-        code.extend_from_slice(&encode_ldo_raw(R1, chunk, R1));
-        remaining -= chunk as i64;
-    }
-    code.extend_from_slice(&encode_ldo_raw(R1, remaining as i16, R1));
-    // BV R0(R1) — branch to address in R1
+    // R2 = disp (the remaining displacement from R1 to target)
+    code.extend(ss_load_imm(R2, disp));
+    // R1 = R1 + R2 (target address)
+    code.extend_from_slice(&encode_add(R1, R2, R1));
+    // BV R0(R1) — branch to target
     code.extend_from_slice(&encode_bv_real(R1));
     code.extend_from_slice(&encode_nop()); // delay slot
     code
@@ -1644,7 +1658,10 @@ fn patch_cmpb_to_target(code: &mut [u8], cmpb_off: usize, target_off: usize) {
 ///
 /// [W1-hppa-branch] Previously 10 instructions (40 bytes), which was
 /// exceeded by the multi-LDO fallback for blake2 (10 LDOs = 56 bytes).
-const BRANCH_PLACEHOLDER_INSTRS: usize = 16;
+/// [W3-hppa-sha3] Increased to 128 instructions (512 bytes) to accommodate
+/// the large multi-LDO fallback chains needed by sha3's 115KB+ binary,
+/// where branch displacements can exceed 700KB requiring ~90+ LDOs.
+const BRANCH_PLACEHOLDER_INSTRS: usize = 32;
 const BRANCH_PLACEHOLDER_BYTES: usize = BRANCH_PLACEHOLDER_INSTRS * 4;
 
 /// Emit a branch placeholder (16 NOPs / 64 bytes) for a forward
@@ -5692,7 +5709,7 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
             let target_offset = block_start_offsets[target_idx] as i64;
             let pc_offset = patch.code_offset as i64;
             let (branch_code, _) = emit_branch(target_offset, pc_offset);
-            assert!(
+                    assert!(
                 branch_code.len() <= BRANCH_PLACEHOLDER_BYTES,
                 "branch code {} bytes exceeds {}-byte placeholder",
                 branch_code.len(),
@@ -5940,16 +5957,26 @@ impl Backend for HppaBackend {
         // patcher below.
         start_stub.extend(ss_load_imm(R30, STACK_TOP as i64));
 
-        // 32-byte call pattern (8 instructions)
+        // 64-byte call pattern (16 instructions) — large enough to hold
+        // ss_load_imm(R1, target) + BV,n R0(R1) for binaries > 256KB where
+        // BL can't reach main. For small binaries, patch_call_site patches
+        // +12 with BL and NOPs the rest. For large binaries, the _start
+        // patcher in encode_program fills ss_load_imm with main's address.
+        // Layout:
+        //   +0:  BL,n +0, R1        ; R1 = PC + 8
+        //   +4:  NOP                 ; delay slot
+        //   +8:  LDO 56(R1), R2     ; R2 = return addr = PC + 64 (after pattern)
+        //   +12..+56: ss_load_imm(R1, 0) — 12 instrs (48 bytes), patched
+        //   +60: BV,n R0(R1)        ; branch to R1, nullify delay slot
         start_stub.extend_from_slice(&0xE8200000u32.to_be_bytes()); // BL,n +0, R1
         start_stub.extend_from_slice(&encode_nop()); // delay slot (nullified)
-        start_stub.extend_from_slice(&encode_ldo_raw(R1, 24, R2)); // R2 = return addr = PC+32
-        start_stub.extend_from_slice(&encode_ldo_raw(R1, 0, R1)); // placeholder, patched
-        start_stub.extend_from_slice(&encode_nop()); // placeholder for d2
-        start_stub.extend_from_slice(&encode_nop()); // placeholder for d3
-        start_stub.extend_from_slice(&encode_nop()); // placeholder for d4
-        start_stub.extend_from_slice(&encode_nop()); // placeholder for BV/BV,n
-                                                     // COPY R28, R26 (move return value to arg1)
+        start_stub.extend_from_slice(&encode_ldo_raw(R1, 56, R2)); // R2 = PC+64
+        // ss_load_imm placeholder (12 instructions = 48 bytes)
+        start_stub.extend(ss_load_imm(R1, 0)); // patched with main's absolute addr
+        // BV,n R0(R1) — nullify delayslot; 0xE820C002 | (R1 << 21)
+        let bv_n_r1 = 0xE820C002u32 | ((R1 as u32) << 21);
+        start_stub.extend_from_slice(&bv_n_r1.to_be_bytes());
+        // COPY R28, R26 (move return value to arg1)
         start_stub.extend_from_slice(&encode_copy(R28, R26));
         // LDI 1, R20 (SYS_exit)
         start_stub.extend(ss_load_imm(R20, 1));
@@ -6655,18 +6682,16 @@ impl Backend for HppaBackend {
         let mut trampolines: Vec<(usize, usize)> = Vec::new(); // (call_offset, target_offset)
 
         // ── Patch _start call to main ──
-        // The _start stub uses the 32-byte call pattern.
-        // Patch it the same way as function calls.
+        // The _start stub uses a 64-byte call pattern with ss_load_imm(R1)
+        // + BV,n R0(R1). We directly patch ss_load_imm with main's absolute
+        // address. This works for any binary size (no BL range limit).
         let main_key = func_offsets
             .keys()
             .find(|k| *k == "main" || k.starts_with("fn_main"))
             .cloned();
         if let Some(ref key) = main_key {
             let main_offset = func_offsets[key] as i64;
-            // The _start stub has stack-setup code before the 32-byte call pattern.
-            // We need to find the call pattern's offset within start_stub.
-            // The call pattern starts with BL,n +0, R1 (0xE8200000).
-            // Search for it in the first 128 bytes of all_code.
+            // Find the BL,n +0, R1 (0xE8200000) in the first 128 bytes.
             let mut start_call_offset = 0usize;
             for off in (0..128).step_by(4) {
                 if off + 4 <= all_code.len() {
@@ -6682,13 +6707,13 @@ impl Backend for HppaBackend {
                     }
                 }
             }
-            let _abs_offset = start_call_offset as i64;
-            patch_call_site(
-                &mut all_code,
-                start_call_offset,
-                main_offset as usize,
-                &mut trampolines,
-            );
+            // Patch ss_load_imm at +12 with main's absolute address.
+            // text_offset = ((52 + 4*32) + 15) & !15 = 192
+            const TEXT_OFFSET: u64 = 192;
+            let main_vaddr = (0x10000u64 + TEXT_OFFSET + main_offset as u64) as i64;
+            let imm_code = ss_load_imm(R1, main_vaddr);
+            let imm_pos = start_call_offset + 12; // ss_load_imm starts at +12
+            all_code[imm_pos..imm_pos + imm_code.len()].copy_from_slice(&imm_code);
         }
 
         // ── Patch inter-function calls and GetAddress relocations ──
