@@ -8431,8 +8431,20 @@ impl Backend for Arm32Backend {
                                 // only) so they line up with the kernel EABI
                                 // stubs.  All VUMA extern arg values (fd,
                                 // pointer, count, …) fit in 32 bits on arm32.
-                                if *is_extern { vec![false; num_args] }
-                                else { vec![true; num_args] }
+                                if *is_extern {
+                                    vec![false; num_args]
+                                } else {
+                                    // Callee types unknown (parallel compilation
+                                    // race). Be conservative: check immediate
+                                    // values; default Register args to 32-bit.
+                                    args.iter().map(|arg| {
+                                        if let crate::ir::IRValue::Immediate(v) = arg {
+                                            (*v as u64) > 0xFFFFFFFF
+                                        } else {
+                                            false
+                                        }
+                                    }).collect()
+                                }
                             }
                         };
 
