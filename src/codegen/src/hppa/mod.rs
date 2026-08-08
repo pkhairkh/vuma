@@ -3628,14 +3628,27 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                             code.extend(ss_load_value_64(lhs, &vreg_stack_slots, S0, S1));
                             ss_store_64(S0, S1, dst_off, &mut code);
                         } else if matches!(ty, Some(IRType::I64) | Some(IRType::U64)) {
-                            // I64 Add: compute high word from both operands' hi words.
+                            // I64/U64 Add with carry propagation.
+                            // S0=lhs_lo, S3=lhs_hi, S1=rhs_lo, S4=rhs_hi
+                            // Carry = 1 if (lhs_lo + rhs_lo) overflows (result <u lhs_lo).
+                            // Extract carry via: S5 = lhs_lo (saved); S0 = lhs_lo + rhs_lo;
+                            //   S2 = S0 - S5 (if carry, S0 < S5, so S2 has MSB set);
+                            //   S2 = SHRPW(R0, S2, 31) → extracts bit 31 = carry.
                             code.extend(ss_load_value(lhs, &vreg_stack_slots, S0));
-                            code.extend(ss_load_value(rhs, &vreg_stack_slots, S1));
-                            code.extend_from_slice(&encode_add(S0, S1, S0));
-                            code.extend(ss_st(S0, dst_off));
                             code.extend(ss_load_value_hi(lhs, &vreg_stack_slots, S3));
+                            code.extend(ss_load_value(rhs, &vreg_stack_slots, S1));
                             code.extend(ss_load_value_hi(rhs, &vreg_stack_slots, S4));
+                            code.extend_from_slice(&encode_copy(S0, S5)); // S5 = lhs_lo (save)
+                            code.extend_from_slice(&encode_add(S0, S1, S0)); // S0 = lo result
+                            // S2 = S0 - S5. If no carry (S0 >= S5), S2 = rhs_lo (MSB=0).
+                            // If carry (S0 < S5), S2 = rhs_lo - 2^32 (MSB=1).
+                            code.extend_from_slice(&encode_sub(S0, S5, S2)); // S2 = S0 - S5
+                            // Extract carry bit: SHRPW(R0, S2, 31, S2) = S2 >> 31 = 0 or 1
+                            code.extend_from_slice(&encode_shrpw(R0, S2, 31, S2));
+                            // High: S3 = S3 + S4 + S2 (carry)
                             code.extend_from_slice(&encode_add(S3, S4, S3));
+                            code.extend_from_slice(&encode_add(S3, S2, S3));
+                            code.extend(ss_st(S0, dst_off));
                             code.extend(ss_st(S3, dst_off - 4));
                         } else {
                             code.extend(ss_load_value(lhs, &vreg_stack_slots, S0));
@@ -4821,13 +4834,20 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                         let d_off = vreg_stack_slots.get(&d_id).copied().unwrap_or(0);
                         match kind {
                             CastKind::ZExt | CastKind::SExt | CastKind::Trunc | CastKind::BitCast => {
-                                // Integer casts: store as-is (HPPA is 32-bit; 64-bit values
-                                // are handled via the TMP64_* mechanism elsewhere).
                                 code.extend(ss_load_value(src, &vreg_stack_slots, S0));
+                                // Mask to destination width for narrowing casts
+                                match to_ty {
+                                    Some(IRType::U8) | Some(IRType::I8) => {
+                                        code.extend(ss_load_imm(S1, 0xFF));
+                                        code.extend_from_slice(&encode_and(S0, S1, S0));
+                                    }
+                                    Some(IRType::U16) | Some(IRType::I16) => {
+                                        code.extend(ss_load_imm(S1, 0xFFFF));
+                                        code.extend_from_slice(&encode_and(S0, S1, S0));
+                                    }
+                                    _ => {}
+                                }
                                 code.extend(ss_st(S0, d_off));
-                                // For ZExt to I64, MUST zero the high
-                                // word. Without this, I64 XOR/And in the FNV-1a hash loop
-                                // reads garbage from [d_off-4], corrupting the hash.
                                 if matches!(to_ty, Some(IRType::I64) | Some(IRType::U64)) {
                                     code.extend(ss_load_imm(S0, 0));
                                     code.extend(ss_st(S0, d_off - 4));
