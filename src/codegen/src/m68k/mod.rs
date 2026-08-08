@@ -2452,7 +2452,7 @@ fn emit_binop(
             //   result = a_lo*b_lo + (a_lo*b_hi + a_hi*b_lo) << 32  [mod 2^64]
             // Each 32×32→64 partial is computed by emit_mulu32_to_64, which uses
             // four MULU.W (16×16→32) multiplies internally.
-            let is_64 = matches!(ty, Some(IRType::I64) | Some(IRType::U64));
+            let is_64 = matches!(ty, Some(IRType::I64) | Some(IRType::U64)) || ty.is_none();
             if is_64 {
                 // Load 64-bit operands: S0=a_lo, S2=a_hi, S1=b_lo, S3=b_hi
                 code.extend(ss_load_value_64(lhs, vreg_stack_slots, S0, S2));
@@ -2745,7 +2745,7 @@ fn emit_binop(
             );
         }
         BinOpKind::Shl => {
-            let is_64 = matches!(ty, Some(IRType::I64) | Some(IRType::U64));
+            let is_64 = matches!(ty, Some(IRType::I64) | Some(IRType::U64)) || ty.is_none();
             if !is_64 {
                 // 32-bit shift: simple LSL.L + zero high word
                 code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
@@ -2855,65 +2855,118 @@ fn emit_binop(
             }
         }
         BinOpKind::ShrL => {
-            // 64-bit right shift: handle shift by 32 specially.
-            code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
-            code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            // CMPI.L #32, D1
-            code.extend_from_slice(&[0x0C, 0x81, 0x00, 0x00, 0x00, 0x20]);
-            // BNE.S to normal_shift
-            let bne_patch = code.len();
-            code.extend_from_slice(&[0x66, 0x00]);
-            // 64-bit shift by 32: low = x_high, high = 0
-            let lhs_off = if let IRValue::Register(id) = lhs {
-                vreg_stack_slots.get(id).copied().unwrap_or(0)
+            let is_64 = matches!(ty, Some(IRType::I64) | Some(IRType::U64)) || ty.is_none();
+            if !is_64 {
+                // 32-bit shift: simple LSR.L + zero high word
+                code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
+                if let IRValue::Immediate(n) = rhs {
+                    let n = *n as u32 & 0x1F;
+                    if n > 0 {
+                        let mut rem = n;
+                        while rem > 0 {
+                            let c = rem.min(8);
+                            let ec = if c == 8 { 0u8 } else { c as u8 };
+                            // LSR.L #c, S0: 0xE088 | (ec << 9) | reg
+                            let w = 0xE088u16 | ((ec as u16) << 9) | (S0.encoding() as u16 & 0x7);
+                            code.extend_from_slice(&w.to_be_bytes());
+                            rem -= c;
+                        }
+                    }
+                } else {
+                    code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
+                    // LSR.L D1, D0: 0xE2A8 base
+                    let w = 0xE2A8u16 | ((S1.encoding() as u16 & 0x7) << 9) | (S0.encoding() as u16 & 0x7);
+                    code.extend_from_slice(&w.to_be_bytes());
+                }
+                code.extend(ss_st(S0, dst_off));
+                code.extend(Instruction::Moveq { dst: S1, imm: 0 }.encode());
+                code.extend(Instruction::Store { src: S1, base: FP, offset: (dst_off + 4) as i16 }.encode());
+            } else if let IRValue::Immediate(n_val) = rhs {
+                // 64-bit shift with immediate
+                let n = *n_val as u32;
+                if n == 0 {
+                    code.extend(ss_load_value_64(lhs, vreg_stack_slots, S0, S1));
+                } else if n < 32 {
+                    code.extend(ss_load_value_64(lhs, vreg_stack_slots, S0, S1));
+                    code.extend(Instruction::Move { src: S1, dst: S2 }.encode());
+                    // LSR.L #n, S0 (low word >> n)
+                    let mut rem = n;
+                    while rem > 0 {
+                        let c = rem.min(8);
+                        let ec = if c == 8 { 0u8 } else { c as u8 };
+                        let w = 0xE088u16 | ((ec as u16) << 9) | (S0.encoding() as u16 & 0x7);
+                        code.extend_from_slice(&w.to_be_bytes());
+                        rem -= c;
+                    }
+                    // LSL.L #(32-n), S2 (old_hi << (32-n) for carry)
+                    let inv = 32 - n;
+                    rem = inv;
+                    while rem > 0 {
+                        let c = rem.min(8);
+                        let ec = if c == 8 { 0u8 } else { c as u8 };
+                        let w = 0xE188u16 | ((ec as u16) << 9) | (S2.encoding() as u16 & 0x7);
+                        code.extend_from_slice(&w.to_be_bytes());
+                        rem -= c;
+                    }
+                    code.extend(Instruction::Or { src: S2, dst: S0 }.encode());
+                    // LSR.L #n, S1 (high word >> n)
+                    rem = n;
+                    while rem > 0 {
+                        let c = rem.min(8);
+                        let ec = if c == 8 { 0u8 } else { c as u8 };
+                        let w = 0xE088u16 | ((ec as u16) << 9) | (S1.encoding() as u16 & 0x7);
+                        code.extend_from_slice(&w.to_be_bytes());
+                        rem -= c;
+                    }
+                } else if n == 32 {
+                    code.extend(ss_load_value_64(lhs, vreg_stack_slots, S0, S1));
+                    code.extend(Instruction::Move { src: S1, dst: S0 }.encode());
+                    code.extend(Instruction::Moveq { dst: S1, imm: 0 }.encode());
+                } else if n < 64 {
+                    let shift = n - 32;
+                    code.extend(ss_load_value_64(lhs, vreg_stack_slots, S0, S1));
+                    // result_lo = old_hi >> (n-32)
+                    code.extend(Instruction::Move { src: S1, dst: S0 }.encode());
+                    let mut rem = shift;
+                    while rem > 0 {
+                        let c = rem.min(8);
+                        let ec = if c == 8 { 0u8 } else { c as u8 };
+                        let w = 0xE088u16 | ((ec as u16) << 9) | (S0.encoding() as u16 & 0x7);
+                        code.extend_from_slice(&w.to_be_bytes());
+                        rem -= c;
+                    }
+                    code.extend(Instruction::Moveq { dst: S1, imm: 0 }.encode());
+                } else {
+                    code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
+                    code.extend(Instruction::Moveq { dst: S1, imm: 0 }.encode());
+                }
+                code.extend(ss_st(S0, dst_off));
+                code.extend(Instruction::Store { src: S1, base: FP, offset: (dst_off + 4) as i16 }.encode());
             } else {
-                0
-            };
-            // Load high word of lhs into S0
-            code.extend(
-                Instruction::Load {
-                    base: FP,
-                    offset: (lhs_off + 4) as i16,
-                    dst: S0,
-                }
-                .encode(),
-            );
-            // Store as low word of result
-            code.extend(ss_st(S0, dst_off));
-            // Store 0 as high word
-            code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
-            code.extend(
-                Instruction::Store {
-                    src: S0,
-                    base: FP,
-                    offset: (dst_off + 4) as i16,
-                }
-                .encode(),
-            );
-            // BRA.S to done
-            let bra_patch = code.len();
-            code.extend_from_slice(&[0x60, 0x00]);
-            // normal_shift:
-            let normal_start = code.len();
-            let bne_disp = (normal_start - bne_patch - 2) as i8;
-            code[bne_patch + 1] = bne_disp as u8;
-            // Normal 32-bit shift
-            let w = 0xE0A8u16 | ((S1.encoding() as u16 & 0x7) << 9) | (S0.encoding() as u16 & 0x7);
-            code.extend_from_slice(&w.to_be_bytes());
-            code.extend(ss_st(S0, dst_off));
-            code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
-            code.extend(
-                Instruction::Store {
-                    src: S0,
-                    base: FP,
-                    offset: (dst_off + 4) as i16,
-                }
-                .encode(),
-            );
-            // done:
-            let done = code.len();
-            let bra_disp = (done - bra_patch - 2) as i8;
-            code[bra_patch + 1] = bra_disp as u8;
+                // Variable 64-bit shift: runtime check for == 32
+                code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
+                code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
+                code.extend_from_slice(&[0x0C, 0x81, 0x00, 0x00, 0x00, 0x20]);
+                let bne_patch = code.len();
+                code.extend_from_slice(&[0x66, 0x00]);
+                // shift by 32: low = high, high = 0
+                let lhs_off = if let IRValue::Register(id) = lhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
+                code.extend(Instruction::Load { base: FP, offset: (lhs_off + 4) as i16, dst: S0 }.encode());
+                code.extend(ss_st(S0, dst_off));
+                code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
+                code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+                let bra_patch = code.len();
+                code.extend_from_slice(&[0x60, 0x00]);
+                let normal_start = code.len();
+                code[bne_patch + 1] = (normal_start - bne_patch - 2) as u8;
+                let w = 0xE2A8u16 | ((S1.encoding() as u16 & 0x7) << 9) | (S0.encoding() as u16 & 0x7);
+                code.extend_from_slice(&w.to_be_bytes());
+                code.extend(ss_st(S0, dst_off));
+                code.extend(Instruction::Moveq { dst: S1, imm: 0 }.encode());
+                code.extend(Instruction::Store { src: S1, base: FP, offset: (dst_off + 4) as i16 }.encode());
+                let done = code.len();
+                code[bra_patch + 1] = (done - bra_patch - 2) as u8;
+            }
         }
         BinOpKind::ShrA => {
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
