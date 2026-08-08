@@ -51,6 +51,20 @@ fn func_param_types(
     FUNC_PARAM_TYPES.get_or_init(|| std::sync::RwLock::new(None))
 }
 
+/// Pre-register ALL functions' parameter types BEFORE the
+/// `allocate_registers` loop begins. This eliminates the order-dependency
+/// where function A (compiled first) calls function B (compiled later)
+/// and B's param types aren't registered yet, causing the Call handler
+/// to fall back to incorrect 32-bit argument passing.
+pub fn preregister_param_types(functions: &[crate::ir::IRFunction]) {
+    let lock = func_param_types();
+    let mut guard = lock.write().unwrap();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    for func in functions {
+        map.insert(func.name.clone(), func.param_types.clone());
+    }
+}
+
 // ===========================================================================
 // General-Purpose Registers
 // ===========================================================================

@@ -388,6 +388,14 @@ fn compile_for_backend_with_path(
         vuma_codegen::arm32::preregister_param_types(&ir_program.functions);
     }
 
+    // W1-x86_32: Same pre-registration for x86_32. The x86_32 Call handler
+    // also looks up callee param types to decide 32-vs-64-bit arg passing.
+    // Without pre-registration, a race condition causes U64 args to be
+    // passed as 32-bit when the callee hasn't registered yet.
+    if matches!(kind, BackendKind::X86_32) {
+        vuma_codegen::x86_32::preregister_param_types(&ir_program.functions);
+    }
+
     // F2a (Task 7-a): Central pre-lowering float-op verification.
     //
     // Reject bitwise/shift/remainder ops (`And`/`Or`/`Xor`/`Shl`/`ShrL`/
