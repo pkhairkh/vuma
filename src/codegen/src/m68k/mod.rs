@@ -258,7 +258,9 @@ pub enum Instruction {
     Load { base: Gpr, offset: i16, dst: Gpr },
     Store { src: Gpr, base: Gpr, offset: i16 },
     Add { src: Gpr, dst: Gpr },
+    Addx { src: Gpr, dst: Gpr },  // ADDX.L: dst = dst + src + X (carry/extend)
     Sub { src: Gpr, dst: Gpr },
+    Subx { src: Gpr, dst: Gpr },  // SUBX.L: dst = dst - src - X (borrow/extend)
     And { src: Gpr, dst: Gpr },
     Or { src: Gpr, dst: Gpr },
     Xor { src: Gpr, dst: Gpr },
@@ -291,7 +293,9 @@ impl Instruction {
             Instruction::Load { .. } => "move.l",
             Instruction::Store { .. } => "move.l",
             Instruction::Add { .. } => "add.l",
+            Instruction::Addx { .. } => "addx.l",
             Instruction::Sub { .. } => "sub.l",
+            Instruction::Subx { .. } => "subx.l",
             Instruction::And { .. } => "and.l",
             Instruction::Or { .. } => "or.l",
             Instruction::Xor { .. } => "eor.l",
@@ -369,8 +373,22 @@ impl Instruction {
                     | (src.encoding() as u16 & 0x7);
                 w.to_be_bytes().to_vec()
             }
+            Instruction::Addx { src, dst } => {
+                // ADDX.L Dy, Dx: Dx = Dx + Dy + X (extend/carry flag)
+                let w = 0xD140u16
+                    | ((dst.encoding() as u16 & 0x7) << 9)
+                    | (src.encoding() as u16 & 0x7);
+                w.to_be_bytes().to_vec()
+            }
             Instruction::Sub { src, dst } => {
                 let w = 0x9080u16
+                    | ((dst.encoding() as u16 & 0x7) << 9)
+                    | (src.encoding() as u16 & 0x7);
+                w.to_be_bytes().to_vec()
+            }
+            Instruction::Subx { src, dst } => {
+                // SUBX.L Dy, Dx: Dx = Dx - Dy - X (extend/borrow flag)
+                let w = 0x9140u16
                     | ((dst.encoding() as u16 & 0x7) << 9)
                     | (src.encoding() as u16 & 0x7);
                 w.to_be_bytes().to_vec()
@@ -516,7 +534,9 @@ impl fmt::Display for Instruction {
                 write!(f, "move.l {}, {}({})", src, offset, base)
             }
             Instruction::Add { src, dst } => write!(f, "add.l {}, {}", src, dst),
+            Instruction::Addx { src, dst } => write!(f, "addx.l {}, {}", src, dst),
             Instruction::Sub { src, dst } => write!(f, "sub.l {}, {}", src, dst),
+            Instruction::Subx { src, dst } => write!(f, "subx.l {}, {}", src, dst),
             Instruction::And { src, dst } => write!(f, "and.l {}, {}", src, dst),
             Instruction::Or { src, dst } => write!(f, "or.l {}, {}", src, dst),
             Instruction::Xor { src, dst } => write!(f, "eor.l {}, {}", src, dst),
@@ -575,13 +595,25 @@ fn ss_load_imm(dst: Gpr, val: i64) -> Vec<u8> {
 /// managed explicitly by operations that produce 64-bit results (Shl 32,
 /// Or with 64-bit operands).
 fn ss_st(src: Gpr, offset: i32) -> Vec<u8> {
+    // Store the low 32 bits AND zero the high 32 bits. This ensures that
+    // 32-bit values are properly zero-extended to 64 bits, so subsequent
+    // 64-bit operations (which always load both words) don't read garbage
+    // from the high word. Each vreg slot is 8 bytes, so this is safe.
     if (-32768..=32767).contains(&offset) {
-        Instruction::Store {
+        let mut code = Instruction::Store {
             src,
             base: FP,
             offset: offset as i16,
         }
-        .encode()
+        .encode();
+        // CLR.L (offset+4, FP) — zero the high word
+        let hi_off = offset + 4;
+        if (-32768..=32767).contains(&hi_off) {
+            let clr = 0x42A8u16 | (FP.encoding() as u16 & 0x7);
+            code.extend_from_slice(&clr.to_be_bytes());
+            code.extend_from_slice(&(hi_off as i16).to_be_bytes());
+        }
+        code
     } else {
         let mut code = Vec::new();
         code.extend_from_slice(&[0x22, 0x46]); // movea.l %a6, %a1
@@ -589,6 +621,11 @@ fn ss_st(src: Gpr, offset: i32) -> Vec<u8> {
         code.extend_from_slice(&[0xD3, 0xC2]); // adda.l %d2, %a1
         let w = 0x2000u16 | (1u16 << 9) | (2u16 << 3) | (src.encoding() as u16 & 0x7);
         code.extend_from_slice(&w.to_be_bytes());
+        // Also zero high word at offset+4 via the computed address
+        code.extend(ss_load_imm(S2, (offset + 4) as i64));
+        code.extend_from_slice(&[0x22, 0x46]); // movea.l %a6, %a1 (recompute)
+        code.extend_from_slice(&[0xD3, 0xC2]); // adda.l %d2, %a1
+        code.extend_from_slice(&[0x42, 0x18]); // CLR.L (A1)
         code
     }
 }
@@ -1246,9 +1283,7 @@ fn emit_instr(
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
             code.extend(Instruction::Add { src: S1, dst: S0 }.encode());
             code.extend(ss_st(S0, dst_off));
-            // 64-bit: also add high words.
-            // W8d: For Immediate lhs, compute hi from the immediate value
-            // (not from FP+lhs_off+4, which is garbage when lhs_off=0).
+            // 64-bit: also add high words (with carry via ADDX).
             if let IRValue::Immediate(v) = lhs {
                 code.extend(ss_load_imm(S0, (v >> 32) as i64));
             } else {
@@ -1261,7 +1296,7 @@ fn emit_instr(
                 let rhs_off = if let IRValue::Register(id) = rhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
                 code.extend(Instruction::Load { base: FP, offset: (rhs_off + 4) as i16, dst: S1 }.encode());
             }
-            code.extend(Instruction::Add { src: S1, dst: S0 }.encode());
+            code.extend(Instruction::Addx { src: S1, dst: S0 }.encode());
             code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
         }
         IRInstr::Sub { dst, lhs, rhs, ty: _ } => {
@@ -1271,7 +1306,7 @@ fn emit_instr(
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
             code.extend(Instruction::Sub { src: S1, dst: S0 }.encode());
             code.extend(ss_st(S0, dst_off));
-            // 64-bit: also sub high words
+            // 64-bit: also sub high words (with borrow via SUBX)
             let lhs_off = if let IRValue::Register(id) = lhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
             code.extend(Instruction::Load { base: FP, offset: (lhs_off + 4) as i16, dst: S0 }.encode());
             if let IRValue::Immediate(v) = rhs {
@@ -1280,7 +1315,7 @@ fn emit_instr(
                 let rhs_off = if let IRValue::Register(id) = rhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
                 code.extend(Instruction::Load { base: FP, offset: (rhs_off + 4) as i16, dst: S1 }.encode());
             }
-            code.extend(Instruction::Sub { src: S1, dst: S0 }.encode());
+            code.extend(Instruction::Subx { src: S1, dst: S0 }.encode());
             code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
         }
         IRInstr::Mul { dst, lhs, rhs, ty } => {
