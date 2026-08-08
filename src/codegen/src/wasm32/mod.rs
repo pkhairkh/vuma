@@ -2216,7 +2216,7 @@ fn emit_type_conversion(ctx: &mut LoweringContext, from: WasmType, to: WasmType)
         // packing at ipc_lowering.rs:809), which goes through the Cast arm
         // (line ~3382) and is unaffected. The I32→F64 bitcast path below
         // still uses ZExt to preserve the low-32-bit pattern.
-        (WasmType::I32, WasmType::I64) => ctx.emit(WasmInstr::I64ExtendI32S),
+        (WasmType::I32, WasmType::I64) => ctx.emit(WasmInstr::I64ExtendI32U),
         (WasmType::I64, WasmType::F64) => ctx.emit(WasmInstr::F64ReinterpretI64),
         (WasmType::F64, WasmType::I64) => ctx.emit(WasmInstr::I64ReinterpretF64),
         (WasmType::I32, WasmType::F32) => ctx.emit(WasmInstr::F32ReinterpretI32),
