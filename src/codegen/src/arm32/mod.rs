@@ -8670,10 +8670,10 @@ impl Backend for Arm32Backend {
                         // Emit phi copies for (target, current_block) before the jump.
                         if let Some(pairs) = phi_map.get(&(target.clone(), block.label.clone())) {
                             for (dst, src) in pairs {
-                                code.extend(ss_load_value(src, &vreg_stack_slots, Gpr::R0));
                                 let dst_id = dst.as_register().unwrap_or(0);
                                 let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                                code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                                code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, src, &vreg_stack_slots));
+                                code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
                             }
                         }
                         let branch_offset_in_enc = code.len();
@@ -8703,20 +8703,20 @@ impl Backend for Arm32Backend {
                         let false_copies: Vec<u8> = if let Some(pairs) = phi_map.get(&(false_target.clone(), block.label.clone())) {
                             let mut c = Vec::new();
                             for (dst, src) in pairs {
-                                c.extend(ss_load_value(src, &vreg_stack_slots, Gpr::R0));
                                 let dst_id = dst.as_register().unwrap_or(0);
                                 let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                                c.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                                c.extend(ss_load_value_64(Gpr::R0, Gpr::R2, src, &vreg_stack_slots));
+                                c.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
                             }
                             c
                         } else { Vec::new() };
                         let true_copies: Vec<u8> = if let Some(pairs) = phi_map.get(&(true_target.clone(), block.label.clone())) {
                             let mut c = Vec::new();
                             for (dst, src) in pairs {
-                                c.extend(ss_load_value(src, &vreg_stack_slots, Gpr::R0));
                                 let dst_id = dst.as_register().unwrap_or(0);
                                 let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                                c.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                                c.extend(ss_load_value_64(Gpr::R0, Gpr::R2, src, &vreg_stack_slots));
+                                c.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
                             }
                             c
                         } else { Vec::new() };
