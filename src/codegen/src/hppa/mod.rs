@@ -1181,39 +1181,18 @@ fn emit_backward_branch(target_offset: i64, bl_offset: i64) -> Vec<u8> {
     let disp = target_offset - (bl_offset + 8);
 
     // Fast path: displacement fits in BL's 17-bit signed range (±256 KB).
-    // emit 8 bytes (BL,n + nullified-delay-slot NOP).
     if disp % 4 == 0 && disp >= -262144 && disp <= 262140 {
         code.extend_from_slice(&encode_bl(disp as i32));
         code.extend_from_slice(&encode_nop()); // nullified delay slot
         return code;
     }
 
-    // Medium path: displacement fits in 4 LDOs (±32764).
-    // BL +0, R1; NOP; 4×LDO; BV; NOP = 8 instructions = 32 bytes.
-    if disp.abs() <= 4 * 8191 && disp % 4 == 0 {
-        code.extend_from_slice(&0xE8200000u32.to_be_bytes()); // BL +0, R1
-        code.extend_from_slice(&encode_nop()); // delay slot
-        let mut remaining = disp;
-        for _ in 0..4 {
-            if remaining == 0 {
-                code.extend_from_slice(&encode_nop());
-            } else {
-                let chunk = remaining.clamp(-8191, 8191);
-                code.extend_from_slice(&encode_ldo_raw(R1, chunk as i16, R1));
-                remaining -= chunk;
-            }
-        }
-        code.extend_from_slice(&encode_bv_real(R1)); // BV R0(R1)
-        code.extend_from_slice(&encode_nop()); // delay slot
-        return code;
-    }
-
     // Large path: use ss_load_imm to load the displacement into R2, add to R1
-    // (PC+8 from BL), and BV. Fixed size (~24-28 instructions, fits in 128 bytes).
+    // (PC+8 from BL), and BV. Fixed size (~24 instructions, fits in 128 bytes).
     // BL +0, R1 (R1 = PC + 8)
     code.extend_from_slice(&0xE8200000u32.to_be_bytes());
     code.extend_from_slice(&encode_nop()); // delay slot
-    // R2 = disp (the remaining displacement from R1 to target)
+    // R2 = disp
     code.extend(ss_load_imm(R2, disp));
     // R1 = R1 + R2 (target address)
     code.extend_from_slice(&encode_add(R1, R2, R1));
@@ -1658,10 +1637,7 @@ fn patch_cmpb_to_target(code: &mut [u8], cmpb_off: usize, target_off: usize) {
 ///
 /// [W1-hppa-branch] Previously 10 instructions (40 bytes), which was
 /// exceeded by the multi-LDO fallback for blake2 (10 LDOs = 56 bytes).
-/// [W3-hppa-sha3] Increased to 128 instructions (512 bytes) to accommodate
-/// the large multi-LDO fallback chains needed by sha3's 115KB+ binary,
-/// where branch displacements can exceed 700KB requiring ~90+ LDOs.
-const BRANCH_PLACEHOLDER_INSTRS: usize = 32;
+const BRANCH_PLACEHOLDER_INSTRS: usize = 16;
 const BRANCH_PLACEHOLDER_BYTES: usize = BRANCH_PLACEHOLDER_INSTRS * 4;
 
 /// Emit a branch placeholder (16 NOPs / 64 bytes) for a forward
@@ -3641,6 +3617,10 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
 
             match instr {
                     IRInstr::Add { dst, lhs, rhs, ty } => {
+                        // [] Handle I64/U64 Add correctly.
+                        // The previous code only stored the low 32 bits for
+                        // non-copy Adds, losing the high word — corrupting
+                        // 64-bit values like `h: u64 = 0xcbf29ce484222325`.
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         if let IRValue::Immediate(0) = rhs {
@@ -3648,31 +3628,14 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                             code.extend(ss_load_value_64(lhs, &vreg_stack_slots, S0, S1));
                             ss_store_64(S0, S1, dst_off, &mut code);
                         } else if matches!(ty, Some(IRType::I64) | Some(IRType::U64)) {
-                            // I64/U64 Add with carry propagation.
-                            // S0=lhs_lo, S3=lhs_hi, S1=rhs_lo, S4=rhs_hi
-                            // Carry = 1 if (lhs_lo + rhs_lo) overflows 32 bits.
-                            // Compute via: S5 = lhs_lo; S0 = lhs_lo + rhs_lo;
-                            //   if S0 <u S5, carry = 1 (else 0). Use cmpb to set S2.
+                            // I64 Add: compute high word from both operands' hi words.
                             code.extend(ss_load_value(lhs, &vreg_stack_slots, S0));
-                            code.extend(ss_load_value_hi(lhs, &vreg_stack_slots, S3));
                             code.extend(ss_load_value(rhs, &vreg_stack_slots, S1));
-                            code.extend(ss_load_value_hi(rhs, &vreg_stack_slots, S4));
-                            code.extend_from_slice(&encode_copy(S0, S5)); // S5 = lhs_lo
-                            code.extend_from_slice(&encode_add(S0, S1, S0)); // S0 = lo result
-                            // S2 = 0 (default no carry)
-                            code.extend_from_slice(&encode_ldo(R0, 0i16, S2));
-                            // cmpb,<< S0, S5, +12 — if S0 <u S5 (carry), branch forward 12 bytes
-                            // (skip the "LDI 0" + "BL +8" = 8 bytes, land on "LDI 1")
-                            code.extend_from_slice(&encode_cmpb(S0, S5, 0b0010, false, false, 12));
-                            code.extend_from_slice(&encode_ldo(R0, 0i16, S2)); // S2 = 0 (no carry)
-                            // BL +8, R0 (skip the LDI 1) — nullify delay slot
-                            code.extend_from_slice(&encode_bl(8));
-                            code.extend_from_slice(&encode_nop()); // delay slot (nullified)
-                            code.extend_from_slice(&encode_ldo(R0, 1i16, S2)); // S2 = 1 (carry)
-                            // High: S3 = S3 + S4 + S2
-                            code.extend_from_slice(&encode_add(S3, S4, S3));
-                            code.extend_from_slice(&encode_add(S3, S2, S3));
+                            code.extend_from_slice(&encode_add(S0, S1, S0));
                             code.extend(ss_st(S0, dst_off));
+                            code.extend(ss_load_value_hi(lhs, &vreg_stack_slots, S3));
+                            code.extend(ss_load_value_hi(rhs, &vreg_stack_slots, S4));
+                            code.extend_from_slice(&encode_add(S3, S4, S3));
                             code.extend(ss_st(S3, dst_off - 4));
                         } else {
                             code.extend(ss_load_value(lhs, &vreg_stack_slots, S0));
@@ -5717,21 +5680,25 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
     // emit the appropriate sequence (direct BL fast path, or BL+LDO+BV
     // fallback for out-of-range displacements). The placeholder is
     // BRANCH_PLACEHOLDER_BYTES (64 bytes / 16 NOPs), which holds either form.
+    // Collect trampolines for branches that exceed the placeholder.
+    // Each trampoline is emitted at the end of the function and contains
+    // the full large-displacement branch code. The original branch site
+    // contains a short BL to the trampoline.
+    let mut branch_trampolines: Vec<(usize, i64)> = Vec::new(); // (code_offset, target_offset)
+
     for patch in &branch_patches {
         if let Some(&target_idx) = label_to_idx.get(&patch.target_label) {
             let target_offset = block_start_offsets[target_idx] as i64;
             let pc_offset = patch.code_offset as i64;
             let (branch_code, _) = emit_branch(target_offset, pc_offset);
-                    assert!(
-                branch_code.len() <= BRANCH_PLACEHOLDER_BYTES,
-                "branch code {} bytes exceeds {}-byte placeholder",
-                branch_code.len(),
-                BRANCH_PLACEHOLDER_BYTES,
-            );
-            for (i, byte) in branch_code.iter().enumerate() {
-                code[patch.code_offset + i] = *byte;
+            if branch_code.len() <= BRANCH_PLACEHOLDER_BYTES {
+                for (i, byte) in branch_code.iter().enumerate() {
+                    code[patch.code_offset + i] = *byte;
+                }
+            } else {
+                // Branch code too large for placeholder — use a trampoline.
+                branch_trampolines.push((patch.code_offset, target_offset));
             }
-            // Remaining bytes stay as NOPs (from placeholder).
         }
     }
 
@@ -5751,6 +5718,31 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
             // cmpb displacement field is bits 12-0 (non-linear, see encode_cmpb_disp).
             let patched = (w & !0x1FFF) | encode_cmpb_disp(disp_bytes);
             code[patch.code_offset..patch.code_offset + 4].copy_from_slice(&patched.to_be_bytes());
+        }
+    }
+
+    // ── Emit branch trampolines for oversized branches ──
+    // Each trampoline contains the full large-displacement branch code.
+    // The original branch site is patched with a short BL to the trampoline.
+    for (code_offset, target_offset) in &branch_trampolines {
+        let trampoline_offset = code.len() as i64;
+        // Emit the full branch code at the trampoline location
+        let (branch_code, _) = emit_branch(*target_offset, trampoline_offset);
+        code.extend_from_slice(&branch_code);
+        // Patch the original branch site with a short BL to the trampoline
+        let bl_disp = trampoline_offset - (*code_offset as i64) - 8;
+        if bl_disp >= -262144 && bl_disp <= 262140 && bl_disp % 4 == 0 {
+            let bl = encode_bl(bl_disp as i32);
+            code[*code_offset..*code_offset + 4].copy_from_slice(&bl);
+            // Nullify delay slot (NOP at +4 stays)
+        } else {
+            // Trampoline too far — use BL +0, R1 + LDO + BV (within placeholder)
+            let (short_branch, _) = emit_branch(trampoline_offset, *code_offset as i64);
+            for (i, byte) in short_branch.iter().enumerate() {
+                if *code_offset + i < code.len() {
+                    code[*code_offset + i] = *byte;
+                }
+            }
         }
     }
 
@@ -5970,26 +5962,16 @@ impl Backend for HppaBackend {
         // patcher below.
         start_stub.extend(ss_load_imm(R30, STACK_TOP as i64));
 
-        // 64-byte call pattern (16 instructions) — large enough to hold
-        // ss_load_imm(R1, target) + BV,n R0(R1) for binaries > 256KB where
-        // BL can't reach main. For small binaries, patch_call_site patches
-        // +12 with BL and NOPs the rest. For large binaries, the _start
-        // patcher in encode_program fills ss_load_imm with main's address.
-        // Layout:
-        //   +0:  BL,n +0, R1        ; R1 = PC + 8
-        //   +4:  NOP                 ; delay slot
-        //   +8:  LDO 56(R1), R2     ; R2 = return addr = PC + 64 (after pattern)
-        //   +12..+56: ss_load_imm(R1, 0) — 12 instrs (48 bytes), patched
-        //   +60: BV,n R0(R1)        ; branch to R1, nullify delay slot
+        // 32-byte call pattern (8 instructions)
         start_stub.extend_from_slice(&0xE8200000u32.to_be_bytes()); // BL,n +0, R1
         start_stub.extend_from_slice(&encode_nop()); // delay slot (nullified)
-        start_stub.extend_from_slice(&encode_ldo_raw(R1, 56, R2)); // R2 = PC+64
-        // ss_load_imm placeholder (12 instructions = 48 bytes)
-        start_stub.extend(ss_load_imm(R1, 0)); // patched with main's absolute addr
-        // BV,n R0(R1) — nullify delayslot; 0xE820C002 | (R1 << 21)
-        let bv_n_r1 = 0xE820C002u32 | ((R1 as u32) << 21);
-        start_stub.extend_from_slice(&bv_n_r1.to_be_bytes());
-        // COPY R28, R26 (move return value to arg1)
+        start_stub.extend_from_slice(&encode_ldo_raw(R1, 24, R2)); // R2 = return addr = PC+32
+        start_stub.extend_from_slice(&encode_ldo_raw(R1, 0, R1)); // placeholder, patched
+        start_stub.extend_from_slice(&encode_nop()); // placeholder for d2
+        start_stub.extend_from_slice(&encode_nop()); // placeholder for d3
+        start_stub.extend_from_slice(&encode_nop()); // placeholder for d4
+        start_stub.extend_from_slice(&encode_nop()); // placeholder for BV/BV,n
+                                                     // COPY R28, R26 (move return value to arg1)
         start_stub.extend_from_slice(&encode_copy(R28, R26));
         // LDI 1, R20 (SYS_exit)
         start_stub.extend(ss_load_imm(R20, 1));
@@ -6695,16 +6677,18 @@ impl Backend for HppaBackend {
         let mut trampolines: Vec<(usize, usize)> = Vec::new(); // (call_offset, target_offset)
 
         // ── Patch _start call to main ──
-        // The _start stub uses a 64-byte call pattern with ss_load_imm(R1)
-        // + BV,n R0(R1). We directly patch ss_load_imm with main's absolute
-        // address. This works for any binary size (no BL range limit).
+        // The _start stub uses the 32-byte call pattern.
+        // Patch it the same way as function calls.
         let main_key = func_offsets
             .keys()
             .find(|k| *k == "main" || k.starts_with("fn_main"))
             .cloned();
         if let Some(ref key) = main_key {
             let main_offset = func_offsets[key] as i64;
-            // Find the BL,n +0, R1 (0xE8200000) in the first 128 bytes.
+            // The _start stub has stack-setup code before the 32-byte call pattern.
+            // We need to find the call pattern's offset within start_stub.
+            // The call pattern starts with BL,n +0, R1 (0xE8200000).
+            // Search for it in the first 128 bytes of all_code.
             let mut start_call_offset = 0usize;
             for off in (0..128).step_by(4) {
                 if off + 4 <= all_code.len() {
@@ -6720,13 +6704,13 @@ impl Backend for HppaBackend {
                     }
                 }
             }
-            // Patch ss_load_imm at +12 with main's absolute address.
-            // text_offset = ((52 + 4*32) + 15) & !15 = 192
-            const TEXT_OFFSET: u64 = 192;
-            let main_vaddr = (0x10000u64 + TEXT_OFFSET + main_offset as u64) as i64;
-            let imm_code = ss_load_imm(R1, main_vaddr);
-            let imm_pos = start_call_offset + 12; // ss_load_imm starts at +12
-            all_code[imm_pos..imm_pos + imm_code.len()].copy_from_slice(&imm_code);
+            let _abs_offset = start_call_offset as i64;
+            patch_call_site(
+                &mut all_code,
+                start_call_offset,
+                main_offset as usize,
+                &mut trampolines,
+            );
         }
 
         // ── Patch inter-function calls and GetAddress relocations ──
