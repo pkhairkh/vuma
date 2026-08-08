@@ -5603,7 +5603,7 @@ fn ss_load_fpr_from_value(
     } else if is_f64 {
         // f64 immediate/address: spill 8 bytes to scratch slot, then FLD.
         // ss_load_value_64 loads lo into T0 and hi into T1.
-        code.extend(ss_load_value_64(Gpr::T0, Gpr::T1, val, slots));
+        code.extend(ss_load_value_64(Gpr::T0, Gpr::T1, val, slots, &HashMap::new()));
         code.extend(ss_store_to_slot(Gpr::T0, scratch_off));
         code.extend(ss_store_to_slot(Gpr::T1, scratch_off - 4));
         code.extend(ss_load_fpr_d_from_slot(fpr, scratch_off));
@@ -5688,13 +5688,19 @@ fn ss_load_value(val: &IRValue, slots: &HashMap<u32, i32>, scratch: Gpr) -> Vec<
 /// On riscv32, stack slots are 8 bytes but `ss_load_from_slot` only loads
 /// the low 32 bits (via Lw). This helper loads both the low and high words
 /// so that 64-bit return values are correctly passed in a0:a1 (RV32 ABI).
-fn ss_load_value_64(lo_reg: Gpr, hi_reg: Gpr, val: &IRValue, slots: &HashMap<u32, i32>) -> Vec<u8> {
+fn ss_load_value_64(lo_reg: Gpr, hi_reg: Gpr, val: &IRValue, slots: &HashMap<u32, i32>, vreg_types: &HashMap<u32, IRType>) -> Vec<u8> {
     let mut code = Vec::new();
     match val {
         IRValue::Register(id) => {
             let offset = slots.get(id).copied().unwrap_or(0);
             // Load low word from [S0 - offset]
             code.extend(ss_load_from_slot(lo_reg, offset));
+            // Determine whether this vreg was stored as 8 bytes (I64/U64/F64)
+            // or only 4 bytes (I32/U32/Ptr/Bool/None). When constant_fold
+            // produces Add{ty:None}, the result is stored as 32 bits; loading
+            // the high word from [offset-4] reads the ADJACENT vreg's data.
+            // Fix: if the vreg is not a known 8-byte type, ZERO the high word
+            // (zero-extension of a 32-bit value to 64-bit).
             // Load high word from [S0 - offset + 4] (next 4 bytes)
             // riscv32 Lw imm is 12-bit signed; offset+4 should still fit
             // since slot offsets are typically small.
@@ -5787,9 +5793,10 @@ fn ss_load_value_typed(
     val: &IRValue,
     slots: &HashMap<u32, i32>,
     ty: Option<&IRType>,
+    vreg_types: &HashMap<u32, IRType>,
 ) -> Vec<u8> {
     if is_8byte_type(ty) {
-        ss_load_value_64(lo_scratch, hi_scratch, val, slots)
+        ss_load_value_64(lo_scratch, hi_scratch, val, slots, vreg_types)
     } else {
         ss_load_value(val, slots, lo_scratch)
     }
@@ -6655,8 +6662,8 @@ impl Backend for RiscV32Backend {
                                 // both operands have high=0), the high-word op
                                 // is 0 <op> 0 = 0, so the result is unchanged.
                                 // See Task 7-C (cluster F).
-                                code.extend(ss_load_value_64(Gpr::T0, Gpr::T2, lhs, &vreg_stack_slots));
-                                code.extend(ss_load_value_64(Gpr::T1, Gpr::T3, rhs, &vreg_stack_slots));
+                                code.extend(ss_load_value_64(Gpr::T0, Gpr::T2, lhs, &vreg_stack_slots, &vreg_types));
+                                code.extend(ss_load_value_64(Gpr::T1, Gpr::T3, rhs, &vreg_stack_slots, &vreg_types));
                                 let rv_op = match op {
                                     BinOpKind::And => Instruction::And { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 },
                                     BinOpKind::Or => Instruction::Or { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 },
@@ -6697,8 +6704,8 @@ impl Backend for RiscV32Backend {
                                 // required for the channel handle 'Add(handle, 0)' copy
                                 // and pointer arithmetic on I64 values.
                                 if is_64bit && matches!(op, BinOpKind::Add | BinOpKind::Sub) {
-                                    code.extend(ss_load_value_64(Gpr::T0, Gpr::T2, lhs, &vreg_stack_slots));
-                                    code.extend(ss_load_value_64(Gpr::T1, Gpr::T3, rhs, &vreg_stack_slots));
+                                    code.extend(ss_load_value_64(Gpr::T0, Gpr::T2, lhs, &vreg_stack_slots, &vreg_types));
+                                    code.extend(ss_load_value_64(Gpr::T1, Gpr::T3, rhs, &vreg_stack_slots, &vreg_types));
                                     if matches!(op, BinOpKind::Add) {
                                         // Low: T0 = T0 + T1
                                         code.extend(Instruction::Add { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
@@ -6725,7 +6732,7 @@ impl Backend for RiscV32Backend {
                                     //           result_high = (lhs_high << n) | (lhs_low >> (32-n))
                                     // For ShrA: same as ShrL but high uses Sra (arithmetic)
                                     let n = if let IRValue::Immediate(n) = rhs { *n as u32 } else { 0 };
-                                    code.extend(ss_load_value_64(Gpr::T0, Gpr::T2, lhs, &vreg_stack_slots));
+                                    code.extend(ss_load_value_64(Gpr::T0, Gpr::T2, lhs, &vreg_stack_slots, &vreg_types));
                                     match op {
                                         BinOpKind::ShrL => {
                                             // T4 = lhs_high << (32-n)
@@ -6760,7 +6767,7 @@ impl Backend for RiscV32Backend {
                                     // W4-blake2: 64-bit shift with VARIABLE shift amount (Register).
                                     // riscv32 has no 64-bit shift instruction. Use a shift-by-1 loop.
                                     // T0 = lhs_lo, T2 = lhs_hi, T1 = shift_count
-                                    code.extend(ss_load_value_64(Gpr::T0, Gpr::T2, lhs, &vreg_stack_slots));
+                                    code.extend(ss_load_value_64(Gpr::T0, Gpr::T2, lhs, &vreg_stack_slots, &vreg_types));
                                     code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T1));
                                     let loop_label = code.len();
                                     // Placeholder beq — patch offset after emitting loop body
@@ -6815,8 +6822,8 @@ impl Backend for RiscV32Backend {
                                     // Register plan:
                                     //   T0 = a_lo, T2 = a_hi, T1 = b_lo, T3 = b_hi
                                     //   T4 = a_lo (saved), T5 = b_lo (saved), T6 = a_hi (saved)
-                                    code.extend(ss_load_value_64(Gpr::T0, Gpr::T2, lhs, &vreg_stack_slots));
-                                    code.extend(ss_load_value_64(Gpr::T1, Gpr::T3, rhs, &vreg_stack_slots));
+                                    code.extend(ss_load_value_64(Gpr::T0, Gpr::T2, lhs, &vreg_stack_slots, &vreg_types));
+                                    code.extend(ss_load_value_64(Gpr::T1, Gpr::T3, rhs, &vreg_stack_slots, &vreg_types));
                                     // Save a_lo, b_lo, a_hi before they're clobbered
                                     code.extend(Instruction::Addi { rd: Gpr::T4, rs1: Gpr::T0, imm: 0 }.encode()); // T4 = a_lo
                                     code.extend(Instruction::Addi { rd: Gpr::T5, rs1: Gpr::T1, imm: 0 }.encode()); // T5 = b_lo
@@ -6868,32 +6875,52 @@ impl Backend for RiscV32Backend {
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let ty = vreg_types.get(&dst_id);
                         let mut code = Vec::new();
-                        if std::env::var("VUMA_DBG_ADD").is_ok() {
-                            eprintln!("[W4C-DBG] Add dst_id={} dst_offset={} lhs={:?} rhs={:?} ty={:?}", dst_id, dst_offset, lhs, rhs, ty);
-                        }
-                        // Type-aware load/store: 8-byte values (F64/I64/U64)
-                        // use paired Lw/Sw so the high word is preserved.
-                        // The IR optimizer emits `Add { ty: None }` as a move
-                        // (rhs = Imm(0)); for real 64-bit arithmetic it uses
-                        // `BinOp { ty: Some(I64/U64) }` (handled separately
-                        // with carry propagation).  T1 holds the high word
-                        // for 8-byte values; T2 is the rhs scratch.
-                        code.extend(ss_load_value_typed(
-                            Gpr::T0, Gpr::T1, lhs, &vreg_stack_slots, ty,
-                        ));
-                        if let IRValue::Immediate(imm) = rhs {
-                            let i = *imm as i32;
-                            if (-2048..=2047).contains(&i) {
-                                code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T0, imm: i }.encode());
+                        // For Add{ty:None} moves (rhs=Imm(0)), the dst type may be
+                        // unknown. Check the lhs source type — if it's 8-byte (or
+                        // a Call return with no type), do a 64-bit copy to avoid
+                        // truncating 64-bit values. This fixes sha3/blake2 where
+                        // keccak_load_lane/rotr64 return U64 values that are moved
+                        // via Add{ty:None} and later used in 64-bit Xor.
+                        let lhs_is_8byte = if let IRValue::Register(lhs_id) = lhs {
+                            vreg_types.get(lhs_id).map(|t| is_8byte_type(Some(t))).unwrap_or(true) // unknown → assume 8-byte (Call return)
+                        } else {
+                            // Immediate: check if value needs 64 bits
+                            if let IRValue::Immediate(v) = lhs { (*v as u64) > 0xFFFFFFFF } else { false }
+                        };
+                        if is_8byte_type(ty) || (ty.is_none() && lhs_is_8byte && matches!(rhs, IRValue::Immediate(0))) {
+                            // 64-bit add with carry propagation.
+                            // T0=lhs_lo, T2=lhs_hi, T1=rhs_lo, T3=rhs_hi, T4=carry
+                            code.extend(ss_load_value_64(Gpr::T0, Gpr::T2, lhs, &vreg_stack_slots, &vreg_types));
+                            if !matches!(rhs, IRValue::Immediate(0)) {
+                                code.extend(ss_load_value_64(Gpr::T1, Gpr::T3, rhs, &vreg_stack_slots, &vreg_types));
+                                // Low: T0 = T0 + T1
+                                code.extend(Instruction::Add { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+                                // Carry: T4 = (T0 <u T1) ? 1 : 0
+                                code.extend(Instruction::Sltu { rd: Gpr::T4, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+                                // High: T2 = T2 + T3 + carry
+                                code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T2, rs2: Gpr::T3 }.encode());
+                                code.extend(Instruction::Add { rd: Gpr::T2, rs1: Gpr::T2, rs2: Gpr::T4 }.encode());
+                            }
+                            code.extend(ss_store_64(Gpr::T0, Gpr::T2, dst_offset));
+                        } else {
+                            // 32-bit add (original behavior for moves and 32-bit types)
+                            code.extend(ss_load_value_typed(
+                                Gpr::T0, Gpr::T1, lhs, &vreg_stack_slots, ty, &vreg_types,
+                            ));
+                            if let IRValue::Immediate(imm) = rhs {
+                                let i = *imm as i32;
+                                if (-2048..=2047).contains(&i) {
+                                    code.extend(Instruction::Addi { rd: Gpr::T0, rs1: Gpr::T0, imm: i }.encode());
+                                } else {
+                                    code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T2));
+                                    code.extend(Instruction::Add { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T2 }.encode());
+                                }
                             } else {
                                 code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T2));
                                 code.extend(Instruction::Add { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T2 }.encode());
                             }
-                        } else {
-                            code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T2));
-                            code.extend(Instruction::Add { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T2 }.encode());
+                            code.extend(ss_store_to_slot_typed(Gpr::T0, Gpr::T1, dst_offset, ty));
                         }
-                        code.extend(ss_store_to_slot_typed(Gpr::T0, Gpr::T1, dst_offset, ty));
                         code
                     }
                     IRInstr::Sub { dst, lhs, rhs, .. } => {
@@ -6901,12 +6928,30 @@ impl Backend for RiscV32Backend {
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let ty = vreg_types.get(&dst_id);
                         let mut code = Vec::new();
-                        code.extend(ss_load_value_typed(
-                            Gpr::T0, Gpr::T1, lhs, &vreg_stack_slots, ty,
-                        ));
-                        code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T2));
-                        code.extend(Instruction::Sub { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T2 }.encode());
-                        code.extend(ss_store_to_slot_typed(Gpr::T0, Gpr::T1, dst_offset, ty));
+                        if is_8byte_type(ty) {
+                            // 64-bit sub with borrow propagation.
+                            // T0=lhs_lo, T2=lhs_hi, T1=rhs_lo, T3=rhs_hi, T4=borrow
+                            code.extend(ss_load_value_64(Gpr::T0, Gpr::T2, lhs, &vreg_stack_slots, &vreg_types));
+                            if !matches!(rhs, IRValue::Immediate(0)) {
+                                code.extend(ss_load_value_64(Gpr::T1, Gpr::T3, rhs, &vreg_stack_slots, &vreg_types));
+                                // Borrow: T4 = (lhs_lo <u rhs_lo) ? 1 : 0 (computed BEFORE sub)
+                                code.extend(Instruction::Sltu { rd: Gpr::T4, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+                                // Low: T0 = T0 - T1
+                                code.extend(Instruction::Sub { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T1 }.encode());
+                                // High: T2 = T2 - T3 - borrow
+                                code.extend(Instruction::Sub { rd: Gpr::T2, rs1: Gpr::T2, rs2: Gpr::T3 }.encode());
+                                code.extend(Instruction::Sub { rd: Gpr::T2, rs1: Gpr::T2, rs2: Gpr::T4 }.encode());
+                            }
+                            code.extend(ss_store_64(Gpr::T0, Gpr::T2, dst_offset));
+                        } else {
+                            // 32-bit sub (original behavior)
+                            code.extend(ss_load_value_typed(
+                                Gpr::T0, Gpr::T1, lhs, &vreg_stack_slots, ty, &vreg_types,
+                            ));
+                            code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T2));
+                            code.extend(Instruction::Sub { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T2 }.encode());
+                            code.extend(ss_store_to_slot_typed(Gpr::T0, Gpr::T1, dst_offset, ty));
+                        }
                         code
                     }
                     IRInstr::Mul { dst, lhs, rhs, ty } => {
@@ -6932,8 +6977,8 @@ impl Backend for RiscV32Backend {
                             // Register plan:
                             //   T0 = a_lo, T2 = a_hi, T1 = b_lo, T3 = b_hi
                             //   T4 = a_lo (saved), T5 = b_lo (saved), T6 = a_hi (saved)
-                            code.extend(ss_load_value_64(Gpr::T0, Gpr::T2, lhs, &vreg_stack_slots));
-                            code.extend(ss_load_value_64(Gpr::T1, Gpr::T3, rhs, &vreg_stack_slots));
+                            code.extend(ss_load_value_64(Gpr::T0, Gpr::T2, lhs, &vreg_stack_slots, &vreg_types));
+                            code.extend(ss_load_value_64(Gpr::T1, Gpr::T3, rhs, &vreg_stack_slots, &vreg_types));
                             // Save a_lo, b_lo, a_hi before they're clobbered
                             code.extend(Instruction::Addi { rd: Gpr::T4, rs1: Gpr::T0, imm: 0 }.encode()); // T4 = a_lo
                             code.extend(Instruction::Addi { rd: Gpr::T5, rs1: Gpr::T1, imm: 0 }.encode()); // T5 = b_lo
@@ -6952,7 +6997,7 @@ impl Backend for RiscV32Backend {
                         } else {
                             let ty_ref = ty.as_ref().or(vreg_ty);
                             code.extend(ss_load_value_typed(
-                                Gpr::T0, Gpr::T1, lhs, &vreg_stack_slots, ty_ref,
+                                Gpr::T0, Gpr::T1, lhs, &vreg_stack_slots, ty_ref, &vreg_types,
                             ));
                             code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T2));
                             code.extend(Instruction::Mul { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T2 }.encode());
@@ -6966,7 +7011,7 @@ impl Backend for RiscV32Backend {
                         let ty = vreg_types.get(&dst_id);
                         let mut code = Vec::new();
                         code.extend(ss_load_value_typed(
-                            Gpr::T0, Gpr::T1, lhs, &vreg_stack_slots, ty,
+                            Gpr::T0, Gpr::T1, lhs, &vreg_stack_slots, ty, &vreg_types,
                         ));
                         code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::T2));
                         code.extend(Instruction::Div { rd: Gpr::T0, rs1: Gpr::T0, rs2: Gpr::T2 }.encode());
@@ -6980,7 +7025,7 @@ impl Backend for RiscV32Backend {
                         let ty = vreg_types.get(&dst_id);
                         let mut code = Vec::new();
                         code.extend(ss_load_value_typed(
-                            Gpr::T0, Gpr::T1, operand, &vreg_stack_slots, ty,
+                            Gpr::T0, Gpr::T1, operand, &vreg_stack_slots, ty, &vreg_types,
                         ));
                         match op {
                             UnaryOpKind::Neg => { code.extend(Instruction::Sub { rd: Gpr::T0, rs1: Gpr::Zero, rs2: Gpr::T0 }.encode()); }
@@ -7120,8 +7165,8 @@ impl Backend for RiscV32Backend {
                         } else if matches!(ty, Some(IRType::I64) | Some(IRType::U64)) {
                             // 64-bit integer comparison.
                             // Load hi/lo for both operands.
-                            code.extend(ss_load_value_64(Gpr::T0, Gpr::T1, lhs, &vreg_stack_slots)); // T0=lo, T1=hi
-                            code.extend(ss_load_value_64(Gpr::T2, Gpr::T3, rhs, &vreg_stack_slots)); // T2=lo, T3=hi
+                            code.extend(ss_load_value_64(Gpr::T0, Gpr::T1, lhs, &vreg_stack_slots, &vreg_types)); // T0=lo, T1=hi
+                            code.extend(ss_load_value_64(Gpr::T2, Gpr::T3, rhs, &vreg_stack_slots, &vreg_types)); // T2=lo, T3=hi
                             // T4 = result (default 0)
                             code.extend(Instruction::Addi { rd: Gpr::T4, rs1: Gpr::Zero, imm: 0 }.encode());
                             let is_signed = matches!(kind, CmpKind::SLt | CmpKind::SLe | CmpKind::SGt | CmpKind::SGe);
@@ -7430,7 +7475,7 @@ impl Backend for RiscV32Backend {
                                         code.extend(ss_load_fpr_d_from_slot(Fpr::F0, voff));
                                     } else {
                                         // f64 immediate: spill to scratch, then FLD.
-                                        code.extend(ss_load_value_64(Gpr::T0, Gpr::T1, value, &vreg_stack_slots));
+                                        code.extend(ss_load_value_64(Gpr::T0, Gpr::T1, value, &vreg_stack_slots, &vreg_types));
                                         code.extend(ss_store_to_slot(Gpr::T0, fp_scratch_off_0));
                                         code.extend(ss_store_to_slot(Gpr::T1, fp_scratch_off_0 - 4));
                                         code.extend(ss_load_fpr_d_from_slot(Fpr::F0, fp_scratch_off_0));
@@ -7451,7 +7496,7 @@ impl Backend for RiscV32Backend {
                                     if is_label {
                                         code.extend(Instruction::Addi { rd: Gpr::T1, rs1: Gpr::Zero, imm: 0 }.encode());
                                     } else {
-                                        code.extend(ss_load_value_64(Gpr::T0, Gpr::T1, value, &vreg_stack_slots));
+                                        code.extend(ss_load_value_64(Gpr::T0, Gpr::T1, value, &vreg_stack_slots, &vreg_types));
                                     }
                                     if off >= -2048 && off <= 2047 {
                                         code.extend(Instruction::Sw { rs1: Gpr::T2, rs2: Gpr::T0, imm: off }.encode());
@@ -7611,7 +7656,7 @@ impl Backend for RiscV32Backend {
                                         // U64 → F64: RV32 has no fcvt.d.lu.
                                         // Split into hi:lo, convert each to double, combine:
                                         //   F0 = fcvt.d.wu(hi) * 2^32 + fcvt.d.wu(lo)
-                                        code.extend(ss_load_value_64(Gpr::T2, Gpr::T3, src, &vreg_stack_slots));
+                                        code.extend(ss_load_value_64(Gpr::T2, Gpr::T3, src, &vreg_stack_slots, &vreg_types));
                                         // F0 = fcvt.d.wu(T3) = hi as double
                                         code.extend(Instruction::FcvtDWU { rd: Fpr::F0, rs1: Gpr::T3 }.encode());
                                         // F1 = 2^32 as double (f64 bits = 0x41F0000000000000)
@@ -7771,8 +7816,8 @@ impl Backend for RiscV32Backend {
                         ) || ty.is_none();
                         if is_64bit {
                             // T0/T2 = false_val (lo, hi); T1/T3 = true_val (lo, hi); T4 = cond
-                            code.extend(ss_load_value_64(Gpr::T0, Gpr::T2, false_val, &vreg_stack_slots));
-                            code.extend(ss_load_value_64(Gpr::T1, Gpr::T3, true_val, &vreg_stack_slots));
+                            code.extend(ss_load_value_64(Gpr::T0, Gpr::T2, false_val, &vreg_stack_slots, &vreg_types));
+                            code.extend(ss_load_value_64(Gpr::T1, Gpr::T3, true_val, &vreg_stack_slots, &vreg_types));
                             code.extend(ss_load_value(cond, &vreg_stack_slots, Gpr::T4));
                             // BEQ T4, zero, +12 → if cond == 0, skip both
                             // MOVEs (8 bytes) below and land on the store.
@@ -8019,7 +8064,7 @@ impl Backend for RiscV32Backend {
                                 code.extend(ss_load_value_64(
                                     arg_reg_list[reg_idx],
                                     arg_reg_list[reg_idx + 1],
-                                    arg, &vreg_stack_slots,
+                                    arg, &vreg_stack_slots, &vreg_types,
                                 ));
                                 reg_idx += 2;
                             } else {
@@ -8079,7 +8124,7 @@ impl Backend for RiscV32Backend {
                             });
                         if let Some(val) = values.first() {
                             if is_64bit_ret {
-                                code.extend(ss_load_value_64(Gpr::A0, Gpr::A1, val, &vreg_stack_slots));
+                                code.extend(ss_load_value_64(Gpr::A0, Gpr::A1, val, &vreg_stack_slots, &vreg_types));
                             } else {
                                 code.extend(ss_load_value(val, &vreg_stack_slots, Gpr::A0));
                             }
@@ -8122,7 +8167,7 @@ impl Backend for RiscV32Backend {
                                 let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                                 let ty = vreg_types.get(&dst_id);
                                 code.extend(ss_load_value_typed(
-                                    Gpr::T0, Gpr::T1, src, &vreg_stack_slots, ty,
+                                    Gpr::T0, Gpr::T1, src, &vreg_stack_slots, ty, &vreg_types,
                                 ));
                                 code.extend(ss_store_to_slot_typed(
                                     Gpr::T0, Gpr::T1, dst_off, ty,
@@ -8164,7 +8209,7 @@ impl Backend for RiscV32Backend {
                                 let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                                 let ty = vreg_types.get(&dst_id);
                                 c.extend(ss_load_value_typed(
-                                    Gpr::T0, Gpr::T1, src, &vreg_stack_slots, ty,
+                                    Gpr::T0, Gpr::T1, src, &vreg_stack_slots, ty, &vreg_types,
                                 ));
                                 c.extend(ss_store_to_slot_typed(
                                     Gpr::T0, Gpr::T1, dst_off, ty,
@@ -8179,7 +8224,7 @@ impl Backend for RiscV32Backend {
                                 let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                                 let ty = vreg_types.get(&dst_id);
                                 c.extend(ss_load_value_typed(
-                                    Gpr::T0, Gpr::T1, src, &vreg_stack_slots, ty,
+                                    Gpr::T0, Gpr::T1, src, &vreg_stack_slots, ty, &vreg_types,
                                 ));
                                 c.extend(ss_store_to_slot_typed(
                                     Gpr::T0, Gpr::T1, dst_off, ty,
