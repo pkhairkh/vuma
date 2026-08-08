@@ -3641,10 +3641,6 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
 
             match instr {
                     IRInstr::Add { dst, lhs, rhs, ty } => {
-                        // [] Handle I64/U64 Add correctly.
-                        // The previous code only stored the low 32 bits for
-                        // non-copy Adds, losing the high word — corrupting
-                        // 64-bit values like `h: u64 = 0xcbf29ce484222325`.
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         if let IRValue::Immediate(0) = rhs {
@@ -3652,14 +3648,31 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                             code.extend(ss_load_value_64(lhs, &vreg_stack_slots, S0, S1));
                             ss_store_64(S0, S1, dst_off, &mut code);
                         } else if matches!(ty, Some(IRType::I64) | Some(IRType::U64)) {
-                            // I64 Add: compute high word from both operands' hi words.
+                            // I64/U64 Add with carry propagation.
+                            // S0=lhs_lo, S3=lhs_hi, S1=rhs_lo, S4=rhs_hi
+                            // Carry = 1 if (lhs_lo + rhs_lo) overflows 32 bits.
+                            // Compute via: S5 = lhs_lo; S0 = lhs_lo + rhs_lo;
+                            //   if S0 <u S5, carry = 1 (else 0). Use cmpb to set S2.
                             code.extend(ss_load_value(lhs, &vreg_stack_slots, S0));
-                            code.extend(ss_load_value(rhs, &vreg_stack_slots, S1));
-                            code.extend_from_slice(&encode_add(S0, S1, S0));
-                            code.extend(ss_st(S0, dst_off));
                             code.extend(ss_load_value_hi(lhs, &vreg_stack_slots, S3));
+                            code.extend(ss_load_value(rhs, &vreg_stack_slots, S1));
                             code.extend(ss_load_value_hi(rhs, &vreg_stack_slots, S4));
+                            code.extend_from_slice(&encode_copy(S0, S5)); // S5 = lhs_lo
+                            code.extend_from_slice(&encode_add(S0, S1, S0)); // S0 = lo result
+                            // S2 = 0 (default no carry)
+                            code.extend_from_slice(&encode_ldo(R0, 0i16, S2));
+                            // cmpb,<< S0, S5, +12 — if S0 <u S5 (carry), branch forward 12 bytes
+                            // (skip the "LDI 0" + "BL +8" = 8 bytes, land on "LDI 1")
+                            code.extend_from_slice(&encode_cmpb(S0, S5, 0b0010, false, false, 12));
+                            code.extend_from_slice(&encode_ldo(R0, 0i16, S2)); // S2 = 0 (no carry)
+                            // BL +8, R0 (skip the LDI 1) — nullify delay slot
+                            code.extend_from_slice(&encode_bl(8));
+                            code.extend_from_slice(&encode_nop()); // delay slot (nullified)
+                            code.extend_from_slice(&encode_ldo(R0, 1i16, S2)); // S2 = 1 (carry)
+                            // High: S3 = S3 + S4 + S2
                             code.extend_from_slice(&encode_add(S3, S4, S3));
+                            code.extend_from_slice(&encode_add(S3, S2, S3));
+                            code.extend(ss_st(S0, dst_off));
                             code.extend(ss_st(S3, dst_off - 4));
                         } else {
                             code.extend(ss_load_value(lhs, &vreg_stack_slots, S0));
