@@ -46,7 +46,8 @@ use super::{
     encode_mul_reg, encode_mulsd_xmm_xmm, encode_mulss_xmm_xmm, encode_neg_reg, encode_nop,
     encode_not_reg, encode_or_reg_imm32, encode_or_reg_reg, encode_pop, encode_push, encode_ret,
     encode_rol_reg_cl, encode_ror_reg_cl, encode_sar_reg_cl, encode_sbb_reg_imm32,
-    encode_sbb_reg_reg, encode_setcc, encode_shl_reg_cl, encode_shr_reg_cl, encode_sqrtsd_xmm_xmm,
+    encode_sbb_reg_reg, encode_setcc, encode_shl_reg_cl, encode_shl_reg_imm8, encode_shr_reg_cl,
+    encode_shr_reg_imm8, encode_rcr_reg_imm8, encode_sqrtsd_xmm_xmm,
     encode_sqrtss_xmm_xmm, encode_store_imm32_mem_ebp, encode_sub_reg_imm32, encode_sub_reg_reg,
     encode_subsd_xmm_xmm, encode_subss_xmm_xmm, encode_syscall, encode_test_reg_reg,
     encode_ucomisd_xmm_xmm, encode_ucomiss_xmm_xmm, encode_xor_reg_imm32, encode_xor_reg_reg,
@@ -447,6 +448,14 @@ fn infer_fp_vregs(
 pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, BackendError> {
     let func_name = func.name.clone();
 
+    // Register this function's param types for cross-function Call ABI.
+    {
+        let lock = super::func_param_types();
+        let mut guard = lock.write().unwrap();
+        let map = guard.get_or_insert_with(|| std::collections::HashMap::new());
+        map.insert(func.name.clone(), func.param_types.clone());
+    }
+
     // ── Phase 0: FP type inference ──
     // VUMA's IR drops the type tag on arithmetic ops (Add/Sub/Mul/Div).
     // Recover FP-ness from Casts, float-builtin Calls, param types, and
@@ -834,9 +843,24 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 emit(param_code, "store_fp_param");
                 fp_stack_idx += 1;
             } else if reg_count < arg_regs.len() {
-                // Non-FP param in register: store_vreg (writes low + zeros high).
-                emit(store_vreg(id, arg_regs[reg_count]), "store_param");
-                reg_count += 1;
+                // Non-FP param in register.
+                // For 64-bit integer params (U64/I64), use TWO consecutive
+                // registers (e.g., EDI:ESI) and store both words.
+                let param_ty = func.param_types.get(i);
+                let is_8byte = matches!(param_ty,
+                    Some(IRType::U64) | Some(IRType::I64) | Some(IRType::Channel(_)));
+                if is_8byte && reg_count + 1 < arg_regs.len() {
+                    let off = slot_offset(id);
+                    let mut pc = Vec::new();
+                    pc.extend(encode_mov_mem_reg(Gpr::Rbp, off, arg_regs[reg_count]));
+                    pc.extend(encode_mov_mem_reg(Gpr::Rbp, off + 4, arg_regs[reg_count + 1]));
+                    emit(pc, "store_param_64");
+                    reg_count += 2;
+                } else {
+                    // 32-bit param: store_vreg (writes low + zeros high).
+                    emit(store_vreg(id, arg_regs[reg_count]), "store_param");
+                    reg_count += 1;
+                }
             } else {
                 // Overflow non-FP param: load from [EBP + 8 + fp_count*8 + overflow*4].
                 // (FP params come first on the stack, then overflow non-FP params.)
@@ -911,23 +935,94 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         instr_opcode = Some(if is_f64 { "addsd" } else { "addss" }.to_string());
                         code
                     } else {
-                        // Load lhs into RAX
-                        code.extend(load_value(lhs, Gpr::Rax));
-                        // Add rhs (immediate or from stack)
-                        if let IRValue::Immediate(imm) = rhs {
-                            let imm = *imm;
-                            if (-2147483648..=2147483647).contains(&imm) {
-                                code.extend(encode_add_reg_imm32(Gpr::Rax, imm as i32));
+                        // Check if this is a 64-bit operation.
+                        // ty:Some(U64/I64) → 64-bit add with carry.
+                        // ty:None + rhs=Imm(0) → 64-bit move (preserve high word
+                        //   for Call returns / 64-bit values that lost their type).
+                        let is_8byte = matches!(ty,
+                            Some(IRType::U64) | Some(IRType::I64) | Some(IRType::Channel(_)));
+                        let is_move = matches!(rhs, IRValue::Immediate(0));
+                        if is_8byte || (ty.is_none() && is_move) {
+                            if is_move {
+                                // 64-bit move: copy both words of lhs to dst
+                                code.extend(load_value(lhs, Gpr::Rax));
+                                code.extend(store_vreg_lo(dst_id, Gpr::Rax));
+                                if let IRValue::Register(lhs_id) = lhs {
+                                    code.extend(load_vreg_hi(*lhs_id, Gpr::Rax));
+                                } else {
+                                    // Immediate: high word = sign extension
+                                    if let IRValue::Immediate(v) = lhs {
+                                        if *v < 0 || (*v as u64) > 0xFFFFFFFF {
+                                            code.extend(encode_mov_reg_imm32(Gpr::Rax, -1));
+                                        } else {
+                                            code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                        }
+                                    } else {
+                                        code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                    }
+                                }
+                                code.extend(store_vreg_hi(dst_id, Gpr::Rax));
+                            } else {
+                                // 64-bit add with carry: ADD low, ADC high
+                                code.extend(load_value(lhs, Gpr::Rax));
+                                if let IRValue::Immediate(imm) = rhs {
+                                    let imm = *imm;
+                                    if (-2147483648..=2147483647).contains(&imm) {
+                                        code.extend(encode_add_reg_imm32(Gpr::Rax, imm as i32));
+                                    } else {
+                                        code.extend(load_value(rhs, Gpr::Rcx));
+                                        code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                    }
+                                } else {
+                                    code.extend(load_value(rhs, Gpr::Rcx));
+                                    code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                }
+                                code.extend(store_vreg_lo(dst_id, Gpr::Rax));
+                                // High word with carry
+                                if let IRValue::Register(rhs_id) = rhs {
+                                    if let IRValue::Register(lhs_id) = lhs {
+                                        code.extend(load_vreg_hi(*lhs_id, Gpr::Rax));
+                                    } else {
+                                        code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                    }
+                                    code.extend(load_vreg_hi(*rhs_id, Gpr::Rcx));
+                                    code.extend(encode_adc_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                } else {
+                                    if let IRValue::Register(lhs_id) = lhs {
+                                        code.extend(load_vreg_hi(*lhs_id, Gpr::Rax));
+                                    } else {
+                                        code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
+                                    }
+                                    if let IRValue::Immediate(imm) = rhs {
+                                        if *imm < 0 || *imm > 0x7FFFFFFF {
+                                            code.extend(encode_mov_reg_imm32(Gpr::Rcx, -1));
+                                            code.extend(encode_adc_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                        } else {
+                                            code.extend(encode_adc_reg_imm32(Gpr::Rax, 0));
+                                        }
+                                    } else {
+                                        code.extend(encode_adc_reg_imm32(Gpr::Rax, 0));
+                                    }
+                                }
+                                code.extend(store_vreg_hi(dst_id, Gpr::Rax));
+                            }
+                        } else {
+                            // 32-bit add (original behavior)
+                            code.extend(load_value(lhs, Gpr::Rax));
+                            if let IRValue::Immediate(imm) = rhs {
+                                let imm = *imm;
+                                if (-2147483648..=2147483647).contains(&imm) {
+                                    code.extend(encode_add_reg_imm32(Gpr::Rax, imm as i32));
+                                } else {
+                                    code.extend(load_value(rhs, Gpr::Rcx));
+                                    code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rcx));
+                                }
                             } else {
                                 code.extend(load_value(rhs, Gpr::Rcx));
                                 code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rcx));
                             }
-                        } else {
-                            code.extend(load_value(rhs, Gpr::Rcx));
-                            code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rcx));
+                            code.extend(store_vreg(dst_id, Gpr::Rax));
                         }
-                        // Store result to dst stack slot
-                        code.extend(store_vreg(dst_id, Gpr::Rax));
                         code
                     }
                 }
@@ -1596,11 +1691,39 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                         code.extend(store_vreg_hi(dst_id, Gpr::Rax));
                                     }
                                 } else {
-                                    // Variable shift count: fall back to 32-bit only
+                                    // Variable shift count: 64-bit shift-by-1 loop.
+                                    // EAX = lo, EDX = hi, ECX = counter
                                     code.extend(load_value(lhs, Gpr::Rax));
+                                    if let IRValue::Register(lhs_id) = lhs {
+                                        code.extend(load_vreg_hi(*lhs_id, Gpr::Rdx));
+                                    } else {
+                                        if let IRValue::Immediate(v) = lhs {
+                                            if *v < 0 || (*v as u64) > 0xFFFFFFFF {
+                                                code.extend(encode_mov_reg_imm32(Gpr::Rdx, -1));
+                                            } else {
+                                                code.extend(encode_xor_reg_reg(Gpr::Rdx, Gpr::Rdx));
+                                            }
+                                        } else {
+                                            code.extend(encode_xor_reg_reg(Gpr::Rdx, Gpr::Rdx));
+                                        }
+                                    }
                                     code.extend(load_value(rhs, Gpr::Rcx));
-                                    code.extend(encode_shl_reg_cl(Gpr::Rax));
-                                    code.extend(store_vreg(dst_id, Gpr::Rax));
+                                    let loop_start = code.len();
+                                    code.extend(encode_test_reg_reg(Gpr::Rcx, Gpr::Rcx));
+                                    code.extend(encode_jcc_rel32(Cc::Equal, 0));
+                                    let jz_off_pos = code.len() - 4;
+                                    // Shift left by 1: ADD EAX,EAX (CF=bit31), ADC EDX,EDX
+                                    code.extend(encode_add_reg_reg(Gpr::Rax, Gpr::Rax));
+                                    code.extend(encode_adc_reg_reg(Gpr::Rdx, Gpr::Rdx));
+                                    code.extend(encode_sub_reg_imm32(Gpr::Rcx, 1));
+                                    let back_off = loop_start as i64 - (code.len() as i64 + 5);
+                                    code.extend(encode_jmp_rel32(back_off as i32));
+                                    let exit_pos = code.len();
+                                    let jz_off = exit_pos as i64 - (jz_off_pos as i64 + 4);
+                                    code[jz_off_pos..jz_off_pos + 4]
+                                        .copy_from_slice(&(jz_off as i32).to_le_bytes());
+                                    code.extend(store_vreg_lo(dst_id, Gpr::Rax));
+                                    code.extend(store_vreg_hi(dst_id, Gpr::Rdx));
                                 }
                             } else {
                                 code.extend(load_value(lhs, Gpr::Rax));
@@ -1655,10 +1778,31 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                         code.extend(store_vreg(dst_id, Gpr::Rax));
                                     }
                                 } else {
+                                    // Variable shift count: 64-bit shift-by-1 loop.
+                                    // EAX = lo, EDX = hi, ECX = counter
                                     code.extend(load_value(lhs, Gpr::Rax));
+                                    if let IRValue::Register(lhs_id) = lhs {
+                                        code.extend(load_vreg_hi(*lhs_id, Gpr::Rdx));
+                                    } else {
+                                        code.extend(encode_xor_reg_reg(Gpr::Rdx, Gpr::Rdx));
+                                    }
                                     code.extend(load_value(rhs, Gpr::Rcx));
-                                    code.extend(encode_shr_reg_cl(Gpr::Rax));
-                                    code.extend(store_vreg(dst_id, Gpr::Rax));
+                                    let loop_start = code.len();
+                                    code.extend(encode_test_reg_reg(Gpr::Rcx, Gpr::Rcx));
+                                    code.extend(encode_jcc_rel32(Cc::Equal, 0));
+                                    let jz_off_pos = code.len() - 4;
+                                    // Shift right by 1: SHR EDX,1 (CF=bit0), RCR EAX,1
+                                    code.extend(encode_shr_reg_imm8(Gpr::Rdx, 1));
+                                    code.extend(encode_rcr_reg_imm8(Gpr::Rax, 1));
+                                    code.extend(encode_sub_reg_imm32(Gpr::Rcx, 1));
+                                    let back_off = loop_start as i64 - (code.len() as i64 + 5);
+                                    code.extend(encode_jmp_rel32(back_off as i32));
+                                    let exit_pos = code.len();
+                                    let jz_off = exit_pos as i64 - (jz_off_pos as i64 + 4);
+                                    code[jz_off_pos..jz_off_pos + 4]
+                                        .copy_from_slice(&(jz_off as i32).to_le_bytes());
+                                    code.extend(store_vreg_lo(dst_id, Gpr::Rax));
+                                    code.extend(store_vreg_hi(dst_id, Gpr::Rdx));
                                 }
                             } else {
                                 code.extend(load_value(lhs, Gpr::Rax));
@@ -3091,7 +3235,6 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             false
                         });
                     if let Some(val) = values.first() {
-                        eprintln!("[DBG-RET] val={:?} is_64bit_ret={} result_types={:?}", val, is_64bit_ret, func.result_types);
                         if is_64bit_ret {
                             // Load low word (EAX) from slot
                             code.extend(load_value(val, Gpr::Rax));
@@ -3250,21 +3393,45 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let call_arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx];
 
                     // Compute the call layout (mirrors the prologue).
-                    let mut reg_assignments: Vec<(usize, Gpr)> = Vec::new();
+                    let mut reg_assignments: Vec<(usize, Gpr, bool)> = Vec::new(); // (arg_idx, reg, is_64bit)
                     let mut stack_assignments: Vec<(usize, i32)> = Vec::new(); // (arg_idx, size_bytes)
                     let mut reg_count = 0usize;
+                    // Look up callee param types for 64-bit arg detection
+                    let callee_param_types: Option<Vec<crate::ir::IRType>> = if !*is_extern {
+                        let lock = super::func_param_types();
+                        let guard = lock.read().unwrap();
+                        guard.as_ref()
+                            .and_then(|map| map.get(call_target))
+                            .cloned()
+                    } else { None };
                     for (i, arg) in args.iter().enumerate() {
                         let is_fp = match arg {
                             IRValue::Register(id) => fp_vregs.contains(id),
                             _ => false,
                         };
+                        // Determine if this arg is 64-bit integer
+                        let is_8byte = if is_fp {
+                            false
+                        } else if let Some(ref types) = callee_param_types {
+                            types.get(i).map(|t| matches!(t,
+                                crate::ir::IRType::U64 | crate::ir::IRType::I64
+                                | crate::ir::IRType::Channel(_))).unwrap_or(false)
+                        } else {
+                            // Fallback: check immediate value
+                            if let IRValue::Immediate(v) = arg { (*v as u64) > 0xFFFFFFFF }
+                            else { false } // conservative: assume 32-bit for Register
+                        };
                         if is_fp {
                             stack_assignments.push((i, 8));
+                        } else if is_8byte && reg_count + 1 < call_arg_regs.len() {
+                            // 64-bit integer arg: use TWO consecutive registers
+                            reg_assignments.push((i, call_arg_regs[reg_count], true));
+                            reg_count += 2;
                         } else if reg_count < call_arg_regs.len() {
-                            reg_assignments.push((i, call_arg_regs[reg_count]));
+                            reg_assignments.push((i, call_arg_regs[reg_count], false));
                             reg_count += 1;
                         } else {
-                            stack_assignments.push((i, 4));
+                            stack_assignments.push((i, if is_8byte { 8 } else { 4 }));
                         }
                     }
 
@@ -3350,8 +3517,31 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     }
 
                     // Load non-FP register args into their registers.
-                    for (arg_idx, reg) in &reg_assignments {
-                        code.extend(load_value(&args[*arg_idx], *reg));
+                    for (arg_idx, reg, is_64) in &reg_assignments {
+                        let arg = &args[*arg_idx];
+                        if *is_64 {
+                            // 64-bit arg: load low into *reg, high into next reg
+                            code.extend(load_value(arg, *reg));
+                            // Find the next consecutive register
+                            let next_reg_idx = call_arg_regs.iter().position(|r| *r == *reg)
+                                .map(|p| p + 1).unwrap_or(0);
+                            if next_reg_idx < call_arg_regs.len() {
+                                let hi_reg = call_arg_regs[next_reg_idx];
+                                if let IRValue::Register(id) = arg {
+                                    code.extend(load_vreg_hi(*id, hi_reg));
+                                } else {
+                                    // Immediate: load high 32 bits
+                                    if let IRValue::Immediate(v) = arg {
+                                        let hi = ((*v as u64) >> 32) as u32 as i32;
+                                        code.extend(encode_mov_reg_imm32(hi_reg, hi));
+                                    } else {
+                                        code.extend(encode_xor_reg_reg(hi_reg, hi_reg));
+                                    }
+                                }
+                            }
+                        } else {
+                            code.extend(load_value(arg, *reg));
+                        }
                     }
 
                     // CALL rel32

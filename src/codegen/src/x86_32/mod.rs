@@ -42,6 +42,15 @@ use crate::ir::{CastKind, IRInstr, IRType, UnaryOpKind};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
+// Global cache of function name -> parameter types, used by the Call handler
+// to determine if an arg should be passed as 64-bit (two registers).
+static FUNC_PARAM_TYPES: crate::FuncParamTypesCache = std::sync::OnceLock::new();
+
+fn func_param_types(
+) -> &'static std::sync::RwLock<Option<std::collections::HashMap<String, Vec<crate::ir::IRType>>>> {
+    FUNC_PARAM_TYPES.get_or_init(|| std::sync::RwLock::new(None))
+}
+
 // ===========================================================================
 // General-Purpose Registers
 // ===========================================================================
@@ -548,6 +557,21 @@ pub fn encode_shr_reg_cl(dst: Gpr) -> Vec<u8> {
 pub fn encode_sar_reg_cl(dst: Gpr) -> Vec<u8> {
     // x86_32: SHL/SHR/SAR r32, CL = D3 /7 (no REX)
     vec![0xD3, modrm(3, 7, dst.encoding() & 7)]
+}
+
+/// Encode SHR r32, imm8 (C1 /5 ib)
+pub fn encode_shr_reg_imm8(dst: Gpr, imm: u8) -> Vec<u8> {
+    vec![0xC1, modrm(3, 5, dst.encoding() & 7), imm]
+}
+
+/// Encode RCR r32, imm8 (C1 /3 ib) — rotate right through carry
+pub fn encode_rcr_reg_imm8(dst: Gpr, imm: u8) -> Vec<u8> {
+    vec![0xC1, modrm(3, 3, dst.encoding() & 7), imm]
+}
+
+/// Encode SHL r32, imm8 (C1 /4 ib)
+pub fn encode_shl_reg_imm8(dst: Gpr, imm: u8) -> Vec<u8> {
+    vec![0xC1, modrm(3, 4, dst.encoding() & 7), imm]
 }
 
 /// Encode JMP rel32 (E9 + 4-byte offset)
