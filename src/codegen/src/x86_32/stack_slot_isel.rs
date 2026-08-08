@@ -2606,6 +2606,18 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                     _ => {}
                                 }
                             }
+                            // If to_ty is smaller than from_ty, this is actually a
+                            // truncation (IR uses ZExt for narrowing casts too).
+                            // Mask to the destination width.
+                            match to_ty {
+                                Some(IRType::U8) | Some(IRType::I8) => {
+                                    code.extend(encode_and_reg_imm32(Gpr::Rax, 0xFF));
+                                }
+                                Some(IRType::U16) | Some(IRType::I16) => {
+                                    code.extend(encode_and_reg_imm32(Gpr::Rax, 0xFFFF));
+                                }
+                                _ => {}
+                            }
                             // For I32→I64 ZExt: store low word, then zero high word.
                             // This is critical — without zeroing the high word,
                             // the 64-bit value contains garbage in the upper 32 bits.
@@ -3243,10 +3255,15 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 let high_off = slot_offset(*id) + 4;
                                 code.extend(encode_mov_reg_mem(Gpr::Rdx, Gpr::Rbp, high_off));
                             } else {
-                                // For immediates, the high word is 0 or 0xFFFFFFFF
-                                // (sign extension is handled by load_value for the low word).
-                                // CDQ (0x99) sign-extends EAX into EDX:EAX.
-                                code.extend_from_slice(&[0x99u8]);
+                                // For immediates/addresses, load the actual
+                                // high 32 bits. CDQ (sign-extend EAX→EDX:EAX)
+                                // is WRONG for u64 constants whose high word
+                                // differs from the sign extension of the low
+                                // word — e.g. 0x8000000000000000 has low=0
+                                // (CDQ→EDX=0) but the true high word is
+                                // 0x80000000. This corrupted rotl64/keccak
+                                // constant-folded returns on x86_32.
+                                code.extend(load_value_hi(val, Gpr::Rdx));
                             }
                         } else {
                             code.extend(load_value(val, Gpr::Rax));
