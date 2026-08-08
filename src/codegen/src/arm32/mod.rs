@@ -6541,38 +6541,68 @@ impl Backend for Arm32Backend {
                     }
 
                     // ── Add/Sub/Mul/Div (dedicated) ──
-                    crate::ir::IRInstr::Add { dst, lhs, rhs, .. } => {
+                    crate::ir::IRInstr::Add { dst, lhs, rhs, ty } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
-                        code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, lhs, &vreg_stack_slots));
-                        code.extend(ss_load_value_64(Gpr::R1, Gpr::R3, rhs, &vreg_stack_slots));
-                        code.extend_from_slice(&encode_dp_reg(
-                            Condition::Al, DP_ADD, true,
-                            Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
-                        ));
-                        code.extend_from_slice(&encode_dp_reg(
-                            Condition::Al, DP_ADC, true,
-                            Gpr::R2.encoding(), Gpr::R2.encoding(), Gpr::R3.encoding(),
-                        ));
-                        code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
+                        let is_64bit = matches!(ty, Some(crate::ir::IRType::I64) | Some(crate::ir::IRType::U64));
+                        let is_move = matches!(rhs, crate::ir::IRValue::Immediate(0));
+                        if is_move && (is_64bit || ty.is_none()) {
+                            // 64-bit move: copy both words of lhs to dst
+                            code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, lhs, &vreg_stack_slots));
+                            code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
+                        } else if is_64bit {
+                            // 64-bit add with carry
+                            code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, lhs, &vreg_stack_slots));
+                            code.extend(ss_load_value_64(Gpr::R1, Gpr::R3, rhs, &vreg_stack_slots));
+                            code.extend_from_slice(&encode_dp_reg(
+                                Condition::Al, DP_ADD, true,
+                                Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
+                            ));
+                            code.extend_from_slice(&encode_dp_reg(
+                                Condition::Al, DP_ADC, true,
+                                Gpr::R2.encoding(), Gpr::R2.encoding(), Gpr::R3.encoding(),
+                            ));
+                            code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
+                        } else {
+                            // 32-bit add: operate on low word only, zero high word
+                            code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                            code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+                            code.extend_from_slice(&encode_dp_reg(
+                                Condition::Al, DP_ADD, false,
+                                Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
+                            ));
+                            code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                        }
                         code
                     }
-                    crate::ir::IRInstr::Sub { dst, lhs, rhs, .. } => {
+                    crate::ir::IRInstr::Sub { dst, lhs, rhs, ty } => {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
-                        code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, lhs, &vreg_stack_slots));
-                        code.extend(ss_load_value_64(Gpr::R1, Gpr::R3, rhs, &vreg_stack_slots));
-                        code.extend_from_slice(&encode_dp_reg(
-                            Condition::Al, DP_SUB, true,
-                            Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
-                        ));
-                        code.extend_from_slice(&encode_dp_reg(
-                            Condition::Al, DP_SBC, true,
-                            Gpr::R2.encoding(), Gpr::R2.encoding(), Gpr::R3.encoding(),
-                        ));
-                        code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
+                        let is_64bit = matches!(ty, Some(crate::ir::IRType::I64) | Some(crate::ir::IRType::U64));
+                        if is_64bit {
+                            code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, lhs, &vreg_stack_slots));
+                            code.extend(ss_load_value_64(Gpr::R1, Gpr::R3, rhs, &vreg_stack_slots));
+                            code.extend_from_slice(&encode_dp_reg(
+                                Condition::Al, DP_SUB, true,
+                                Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
+                            ));
+                            code.extend_from_slice(&encode_dp_reg(
+                                Condition::Al, DP_SBC, true,
+                                Gpr::R2.encoding(), Gpr::R2.encoding(), Gpr::R3.encoding(),
+                            ));
+                            code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
+                        } else {
+                            // 32-bit sub: operate on low word only, zero high word
+                            code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                            code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+                            code.extend_from_slice(&encode_dp_reg(
+                                Condition::Al, DP_SUB, false,
+                                Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
+                            ));
+                            code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                        }
                         code
                     }
                     crate::ir::IRInstr::Mul { dst, lhs, rhs, ty } => {
@@ -8789,6 +8819,30 @@ impl Backend for Arm32Backend {
                                         ));
                                     }
                                     // I32/U32/I64/U64 — already full width, no-op.
+                                    _ => {}
+                                }
+                                // If to_ty is smaller than from_ty, this is actually
+                                // a truncation (IR uses ZExt for narrowing casts too).
+                                // Mask to the destination width.
+                                match to_ty.as_ref() {
+                                    Some(crate::ir::IRType::I8)
+                                    | Some(crate::ir::IRType::U8) => {
+                                        code.extend_from_slice(
+                                            &encode_dp_imm(
+                                                Condition::Al, DP_AND, false,
+                                                Gpr::R0.encoding(), Gpr::R0.encoding(),
+                                                0, 0xFF,
+                                            ),
+                                        );
+                                    }
+                                    Some(crate::ir::IRType::I16)
+                                    | Some(crate::ir::IRType::U16) => {
+                                        code.extend_from_slice(&0xE30CFFFFu32.to_le_bytes());
+                                        code.extend_from_slice(&encode_dp_reg(
+                                            Condition::Al, DP_AND, false,
+                                            Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R12.encoding(),
+                                        ));
+                                    }
                                     _ => {}
                                 }
                             }
