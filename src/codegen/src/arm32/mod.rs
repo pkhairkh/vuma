@@ -5660,6 +5660,47 @@ impl Backend for Arm32Backend {
                         }
 
                         if !fp_arith {
+                        // Determine if this is a 64-bit operation.
+                        // U64/I64 → 64-bit. None → 64-bit (default, for safety).
+                        // Explicit 32-bit types (U32/I32/U16/U8/etc) → 32-bit.
+                        let is_64bit = matches!(ty.as_ref(),
+                            Some(crate::ir::IRType::U64)
+                            | Some(crate::ir::IRType::I64)
+                            | Some(crate::ir::IRType::Channel(_)))
+                            || ty.is_none();
+                        if !is_64bit {
+                            // 32-bit BinOp: operate on low word only, zero high word.
+                            code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
+                            code.extend(ss_load_value(rhs, &vreg_stack_slots, Gpr::R1));
+                            match op {
+                                BinOpKind::Add => {
+                                    code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_ADD, false, Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding()));
+                                }
+                                BinOpKind::Sub => {
+                                    code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_SUB, false, Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding()));
+                                }
+                                BinOpKind::And => {
+                                    code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_AND, false, Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding()));
+                                }
+                                BinOpKind::Or => {
+                                    code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_ORR, false, Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding()));
+                                }
+                                BinOpKind::Xor => {
+                                    code.extend_from_slice(&encode_dp_reg(Condition::Al, DP_EOR, false, Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding()));
+                                }
+                                BinOpKind::Shl => {
+                                    code.extend_from_slice(&encode_dp_shift_reg(Condition::Al, DP_MOV, false, 0, Gpr::R0.encoding(), 0, Gpr::R1.encoding(), Gpr::R0.encoding()));
+                                }
+                                BinOpKind::ShrL => {
+                                    code.extend_from_slice(&encode_dp_shift_reg(Condition::Al, DP_MOV, false, 0, Gpr::R0.encoding(), 1, Gpr::R1.encoding(), Gpr::R0.encoding()));
+                                }
+                                BinOpKind::ShrA => {
+                                    code.extend_from_slice(&encode_dp_shift_reg(Condition::Al, DP_MOV, false, 0, Gpr::R0.encoding(), 2, Gpr::R1.encoding(), Gpr::R0.encoding()));
+                                }
+                                _ => {}
+                            }
+                            code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
+                        } else {
                         match op {
                             BinOpKind::Add | BinOpKind::Sub => {
                                 // 64-bit add/sub: load 64-bit lhs (R0:R2) and rhs (R1:R3),
@@ -6494,6 +6535,7 @@ impl Backend for Arm32Backend {
                                 code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
                             }
                         }
+                        } // end if !is_64bit else
                         } // end if !fp_arith (integer path)
                         code
                     }
