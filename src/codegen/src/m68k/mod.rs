@@ -62,6 +62,35 @@ use crate::ir::VirtualRegister;
 use crate::ir::{BinOpKind, CastKind, CmpKind, IRFunction, IRInstr, IRType, IRValue, UnaryOpKind};
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::OnceLock;
+
+/// Global map of function name → parameter types, used by the Call handler
+/// to determine 64-bit-ness of each argument. Populated by
+/// `preregister_param_types` before parallel `allocate_registers` begins.
+static FUNC_PARAM_TYPES: OnceLock<std::sync::RwLock<Option<HashMap<String, Vec<IRType>>>>> = OnceLock::new();
+
+fn func_param_types(
+) -> &'static std::sync::RwLock<Option<HashMap<String, Vec<IRType>>>> {
+    FUNC_PARAM_TYPES.get_or_init(|| std::sync::RwLock::new(None))
+}
+
+/// Pre-register ALL functions' parameter types BEFORE parallel
+/// `allocate_registers` begins. This eliminates the race condition where
+/// function A's Call handler looks up function B's param types before B
+/// has been registered. When the lookup misses, the Call handler falls
+/// back to treating all args as 32-bit, corrupting the calling convention
+/// for U64 params (callee receives only the low 32 bits).
+///
+/// Call this from the driver (e.g. `compile_dump.rs`) right before the
+/// parallel `backend.allocate_registers(func)` loop, for m68k backend only.
+pub fn preregister_param_types(functions: &[crate::ir::IRFunction]) {
+    let lock = func_param_types();
+    let mut guard = lock.write().unwrap();
+    let map = guard.get_or_insert_with(HashMap::new);
+    for func in functions {
+        map.insert(func.name.clone(), func.param_types.clone());
+    }
+}
 
 /// Full register-based instruction selection (Wave 16).
 #[allow(clippy::all)]
@@ -375,7 +404,9 @@ impl Instruction {
             }
             Instruction::Addx { src, dst } => {
                 // ADDX.L Dy, Dx: Dx = Dx + Dy + X (extend/carry flag)
-                let w = 0xD140u16
+                // Size field (bits 7-6) = 10 (long). 0xD180 = ADDX.L base.
+                // (0xD140 would be ADDX.W — word-sized, wrong for 32-bit carry.)
+                let w = 0xD180u16
                     | ((dst.encoding() as u16 & 0x7) << 9)
                     | (src.encoding() as u16 & 0x7);
                 w.to_be_bytes().to_vec()
@@ -388,7 +419,9 @@ impl Instruction {
             }
             Instruction::Subx { src, dst } => {
                 // SUBX.L Dy, Dx: Dx = Dx - Dy - X (extend/borrow flag)
-                let w = 0x9140u16
+                // Size field (bits 7-6) = 10 (long). 0x9180 = SUBX.L base.
+                // (0x9140 would be SUBX.W — word-sized, wrong for 32-bit borrow.)
+                let w = 0x9180u16
                     | ((dst.encoding() as u16 & 0x7) << 9)
                     | (src.encoding() as u16 & 0x7);
                 w.to_be_bytes().to_vec()
@@ -626,6 +659,38 @@ fn ss_st(src: Gpr, offset: i32) -> Vec<u8> {
         code.extend_from_slice(&[0x22, 0x46]); // movea.l %a6, %a1 (recompute)
         code.extend_from_slice(&[0xD3, 0xC2]); // adda.l %d2, %a1
         code.extend_from_slice(&[0x42, 0x18]); // CLR.L (A1)
+        code
+    }
+}
+
+/// Store TWO registers (lo, hi) into a vreg slot — 64-bit store.
+/// Unlike `ss_st`, this does NOT zero the high word (both words have data).
+fn ss_store_64(lo_reg: Gpr, hi_reg: Gpr, offset: i32) -> Vec<u8> {
+    let mut code = Vec::new();
+    // Store low word at [FP + offset]
+    code.extend(ss_st_to_slot(lo_reg, offset));
+    // Store high word at [FP + offset + 4]
+    code.extend(ss_st_to_slot(hi_reg, offset + 4));
+    code
+}
+
+/// Store a single 32-bit register to [FP + offset] WITHOUT zeroing the high word.
+/// (ss_st zeros the high word; this helper does not.)
+fn ss_st_to_slot(src: Gpr, offset: i32) -> Vec<u8> {
+    if (-32768..=32767).contains(&offset) {
+        Instruction::Store {
+            src,
+            base: FP,
+            offset: offset as i16,
+        }
+        .encode()
+    } else {
+        let mut code = Vec::new();
+        code.extend_from_slice(&[0x22, 0x46]); // movea.l %a6, %a1
+        code.extend(ss_load_imm(S2, offset as i64));
+        code.extend_from_slice(&[0xD3, 0xC2]); // adda.l %d2, %a1
+        let w = 0x2000u16 | (1u16 << 9) | (2u16 << 3) | (src.encoding() as u16 & 0x7);
+        code.extend_from_slice(&w.to_be_bytes());
         code
     }
 }
@@ -961,12 +1026,64 @@ fn m68k_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
         .encode(),
     );
 
-    // Save incoming args (D1-D5) to their stack slots.
+    // Save incoming args to their stack slots.
+    // U64/I64 params consume TWO consecutive arg registers (e.g. D1:D2) and
+    // are stored as 64-bit values (both low and high words). 32-bit params
+    // consume ONE register and are zero-extended to 64 bits via ss_st.
+    // When arg registers (D1-D5) are exhausted, remaining args are loaded
+    // from the caller's stack frame at [FP + 8 + stack_off].
+    let arg_reg_count = 5usize; // D1-D5
+    let mut arg_reg_idx = 0usize;
+    let mut stack_arg_off: i32 = 8; // first stack arg at [FP + 8] (above saved FP/return addr)
     for (i, param) in func.params.iter().enumerate() {
         if let Some(id) = param.as_register() {
-            if let Some(arg_reg) = Gpr::arg_register(i) {
-                let offset = vreg_stack_slots.get(&id).copied().unwrap_or(0);
-                code.extend(ss_st(arg_reg, offset));
+            let param_ty = func.param_types.get(i);
+            let is_64bit = matches!(
+                param_ty,
+                Some(IRType::F64) | Some(IRType::I64) | Some(IRType::U64)
+            );
+            let offset = vreg_stack_slots.get(&id).copied().unwrap_or(0);
+            let fits_in_regs = if is_64bit {
+                arg_reg_idx + 1 < arg_reg_count
+            } else {
+                arg_reg_idx < arg_reg_count
+            };
+            if fits_in_regs {
+                if is_64bit {
+                    // 64-bit param: 2 consecutive regs (lo, hi)
+                    if let (Some(lo_reg), Some(hi_reg)) = (
+                        Gpr::arg_register(arg_reg_idx),
+                        Gpr::arg_register(arg_reg_idx + 1),
+                    ) {
+                        code.extend(ss_store_64(lo_reg, hi_reg, offset));
+                    }
+                    arg_reg_idx += 2;
+                } else {
+                    // 32-bit param: 1 reg, zero-extend
+                    if let Some(arg_reg) = Gpr::arg_register(arg_reg_idx) {
+                        code.extend(ss_st(arg_reg, offset));
+                    }
+                    arg_reg_idx += 1;
+                }
+            } else {
+                // Stack-passed arg: located at [FP + stack_arg_off].
+                // Load into S0 (and S1 for 64-bit), then store to slot.
+                if is_64bit {
+                    // Load low word from [FP + stack_arg_off]
+                    code.extend(ss_ld(S0, stack_arg_off));
+                    // Load high word from [FP + stack_arg_off + 4]
+                    code.extend(ss_ld(S1, stack_arg_off + 4));
+                    code.extend(ss_store_64(S0, S1, offset));
+                    stack_arg_off += 8;
+                } else {
+                    code.extend(ss_ld(S0, stack_arg_off));
+                    code.extend(ss_st(S0, offset));
+                    stack_arg_off += 4;
+                }
+                // 64-bit param that skipped remaining reg(s): mark exhausted
+                if is_64bit && arg_reg_idx < arg_reg_count {
+                    arg_reg_idx = arg_reg_count;
+                }
             }
         }
     }
@@ -1834,17 +1951,127 @@ fn emit_instr(
             args,
             is_extern: _,
         } => {
-            // Move args into D1-D5 (up to 5 args).
-            for (i, arg) in args.iter().enumerate() {
-                if let Some(arg_reg) = Gpr::arg_register(i) {
-                    code.extend(ss_load_value(arg, vreg_stack_slots, S0));
-                    code.extend(Instruction::Move { src: S0, dst: arg_reg }.encode());
+            // Look up callee's parameter types to determine 64-bit-ness.
+            // U64/I64 args consume TWO consecutive arg registers (D1:D2, D3:D4, etc.)
+            // and must be loaded via ss_load_value_64 (both low and high words).
+            // When arg registers (D1-D5) are exhausted, remaining args are pushed
+            // onto the stack.
+            let callee_param_types: Option<Vec<IRType>> = {
+                let lock = func_param_types();
+                let guard = lock.read().unwrap();
+                guard.as_ref().and_then(|map| map.get(func).cloned())
+            };
+            let arg_is_64bit: Vec<bool> = match &callee_param_types {
+                Some(types) => args.iter().enumerate().map(|(i, _)| {
+                    types.get(i)
+                        .map(|t| matches!(t, IRType::F64 | IRType::I64 | IRType::U64))
+                        .unwrap_or(false)
+                }).collect(),
+                None => {
+                    // Callee types unknown. Conservative: check immediate values.
+                    args.iter().map(|arg| {
+                        if let IRValue::Immediate(v) = arg {
+                            (*v as u64) > 0xFFFFFFFF
+                        } else {
+                            false
+                        }
+                    }).collect()
+                }
+            };
+
+            let num_args = args.len();
+            let arg_reg_count = 5usize; // D1-D5
+            let mut arg_reg_idx = 0usize;
+            let mut arg_in_reg: Vec<Option<usize>> = vec![None; num_args];
+            let mut stack_arg_sizes: Vec<u32> = Vec::new();
+            for i in 0..num_args {
+                let is_64 = arg_is_64bit[i];
+                let fits = if is_64 { arg_reg_idx + 1 < arg_reg_count } else { arg_reg_idx < arg_reg_count };
+                if fits {
+                    arg_in_reg[i] = Some(arg_reg_idx);
+                    arg_reg_idx += if is_64 { 2 } else { 1 };
+                } else {
+                    stack_arg_sizes.push(if is_64 { 8 } else { 4 });
+                    if is_64 && arg_reg_idx < arg_reg_count {
+                        arg_reg_idx = arg_reg_count;
+                    }
                 }
             }
+
+            // Stack alignment: pad total stack args to 4-byte boundary.
+            let stack_args_bytes: u32 = (stack_arg_sizes.iter().sum::<u32>() + 3) & !3;
+
+            // 1. SUB SP to make room for stack-passed args
+            if stack_args_bytes > 0 {
+                code.extend(ss_load_imm(S0, stack_args_bytes as i64));
+                // SUB.L S0, SP: 0x9E80 | (S0<<9) — actually m68k SUBA.L is different.
+                // Use: SUB.L S0, SP → actually SUB.L Dn, SP isn't direct.
+                // m68k: SUBA.L Dn, An: 0x90C0 | (an<<9) | dn
+                // SP = A7. So: 0x90C0 | (7<<9) | (S0 & 7) = 0x90C0 | 0xE00 | S0
+                let w = 0x9EC0u16 | ((Gpr::A7.encoding() as u16 & 0x7) << 9) | (S0.encoding() as u16 & 0x7);
+                code.extend_from_slice(&w.to_be_bytes());
+            }
+
+            // 2. Store stack args at [SP + offset]. Done BEFORE loading reg args.
+            let mut stack_off: u32 = 0;
+            for i in 0..num_args {
+                if arg_in_reg[i].is_none() {
+                    let is_64 = arg_is_64bit[i];
+                    let size = if is_64 { 8 } else { 4 };
+                    if is_64 {
+                        // Load 64-bit value into S0:S1, store both words to [SP+off]
+                        code.extend(ss_load_value_64(&args[i], vreg_stack_slots, S0, S1));
+                        // MOVE.L S0, (SP, stack_off) — use A0 as scratch
+                        code.extend(Instruction::Move { src: Gpr::A7, dst: Gpr::A0 }.encode());
+                        if stack_off > 0 {
+                            code.extend(ss_load_imm(S2, stack_off as i64));
+                            // ADDA.L S2, A0: 0xD1C0 | (0<<9) | (S2&7) → 0xD1C0 | S2
+                            let w = 0xD1C0u16 | (S2.encoding() as u16 & 0x7);
+                            code.extend_from_slice(&w.to_be_bytes());
+                        }
+                        // MOVE.L S0, (A0): 0x2080 | (S0&7)
+                        let w = 0x2080u16 | (S0.encoding() as u16 & 0x7);
+                        code.extend_from_slice(&w.to_be_bytes());
+                        // MOVE.L S1, 4(A0): 0x2080 | (S1&7) + offset 4
+                        let w = 0x2080u16 | (S1.encoding() as u16 & 0x7);
+                        code.extend_from_slice(&w.to_be_bytes());
+                        code.extend_from_slice(&4u16.to_be_bytes());
+                    } else {
+                        code.extend(ss_load_value(&args[i], vreg_stack_slots, S0));
+                        code.extend(Instruction::Move { src: Gpr::A7, dst: Gpr::A0 }.encode());
+                        if stack_off > 0 {
+                            code.extend(ss_load_imm(S2, stack_off as i64));
+                            let w = 0xD1C0u16 | (S2.encoding() as u16 & 0x7);
+                            code.extend_from_slice(&w.to_be_bytes());
+                        }
+                        let w = 0x2080u16 | (S0.encoding() as u16 & 0x7);
+                        code.extend_from_slice(&w.to_be_bytes());
+                    }
+                    stack_off += size;
+                }
+            }
+
+            // 3. Move register args into D1-D5.
+            //    64-bit args use 2 consecutive regs (lo, hi).
+            for i in 0..num_args {
+                if let Some(reg_idx) = arg_in_reg[i] {
+                    if arg_is_64bit[i] {
+                        if let (Some(lo_reg), Some(hi_reg)) = (
+                            Gpr::arg_register(reg_idx),
+                            Gpr::arg_register(reg_idx + 1),
+                        ) {
+                            code.extend(ss_load_value_64(&args[i], vreg_stack_slots, lo_reg, hi_reg));
+                        }
+                    } else {
+                        if let Some(arg_reg) = Gpr::arg_register(reg_idx) {
+                            code.extend(ss_load_value(&args[i], vreg_stack_slots, S0));
+                            code.extend(Instruction::Move { src: S0, dst: arg_reg }.encode());
+                        }
+                    }
+                }
+            }
+
             // BSR.L disp32: 0x61 0xFF + 4-byte disp32 (6 bytes total).
-            // The 0xFF in the 8-bit displacement field signals BSR.L (32-bit
-            // displacement follows). The old encoding (0x61 0x00 0xFF 0xFF)
-            // was BSR.W with displacement 0xFFFF = -1, branching to PC-1.
             let call_offset = code.len() as u64;
             code.extend_from_slice(&[0x61, 0xFF]);
             code.extend_from_slice(&0u32.to_be_bytes());
@@ -1853,6 +2080,15 @@ fn emit_instr(
                 symbol: func.clone(),
                 reloc_type: "R_68K_PC32".to_string(),
             });
+
+            // 4. Caller cleanup: pop stack-passed args
+            if stack_args_bytes > 0 {
+                code.extend(ss_load_imm(S0, stack_args_bytes as i64));
+                // ADDA.L Dn, An: 0xD0C0 | (an<<9) | dn. SP = A7 (encoding 7).
+                let w = 0xD0C0u16 | ((Gpr::A7.encoding() as u16 & 0x7) << 9) | (S0.encoding() as u16 & 0x7);
+                code.extend_from_slice(&w.to_be_bytes());
+            }
+
             // Move return value from D0 (low) and D1 (high) to dst's stack slot.
             if let Some(d) = dst {
                 let d_id = d.as_register().unwrap_or(0);
@@ -2380,7 +2616,7 @@ fn emit_binop(
                     .encode(),
                 );
             }
-            code.extend(Instruction::Add { src: S1, dst: S0 }.encode()); // ADDX.L would be better (with carry)
+            code.extend(Instruction::Addx { src: S1, dst: S0 }.encode()); // ADDX.L propagates carry from low word
             code.extend(
                 Instruction::Store {
                     src: S0,
@@ -2427,7 +2663,7 @@ fn emit_binop(
                     .encode(),
                 );
             }
-            code.extend(Instruction::Sub { src: S1, dst: S0 }.encode());
+            code.extend(Instruction::Subx { src: S1, dst: S0 }.encode()); // SUBX.L propagates borrow from low word
             code.extend(
                 Instruction::Store {
                     src: S0,

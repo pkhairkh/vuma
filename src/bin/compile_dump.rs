@@ -396,6 +396,14 @@ fn compile_for_backend_with_path(
         vuma_codegen::x86_32::preregister_param_types(&ir_program.functions);
     }
 
+    // W3-m68k: Same pre-registration for m68k. The m68k Call handler now
+    // looks up callee param types to allocate 2 consecutive registers per
+    // U64 arg. Without pre-registration, the fallback treats all args as
+    // 32-bit, truncating U64 values.
+    if matches!(kind, BackendKind::M68k) {
+        vuma_codegen::m68k::preregister_param_types(&ir_program.functions);
+    }
+
     // F2a (Task 7-a): Central pre-lowering float-op verification.
     //
     // Reject bitwise/shift/remainder ops (`And`/`Or`/`Xor`/`Shl`/`ShrL`/
