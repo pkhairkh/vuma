@@ -1395,37 +1395,35 @@ fn emit_instr(
                 code.extend(Instruction::Add { src: S1, dst: S0 }.encode());
                 code.extend(ss_st(S0, dst_off));
             } else {
-            // W8d: Handle 64-bit immediate materialization.
-            // The IR optimizer's constant_fold replaces
-            //   Cast { UIntToFloat/IntToFloat, src: Immediate(<i64>) }
-            // with
-            //   Add { lhs: Immediate(<f64 bits>), rhs: Immediate(0) }
-            // The f64 bits can be up to 64 bits wide.  The old code loaded
-            // the high word from `FP + lhs_off + 4`, but when lhs is an
-            // Immediate, lhs_off was 0, loading garbage from FP+4.
-            // Fix: when lhs is Immediate, compute the high word from
-            // (v >> 32) directly.
+            // 64-bit add: load BOTH low and high words first, then do
+            // ADD.L (low, sets X) immediately followed by ADDX.L (high,
+            // uses X). This ensures NO instructions between ADD and ADDX
+            // that might clear the X flag (e.g. CLR.L in ss_st).
             let dst_id = dst.as_register().unwrap_or(0);
             let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+            // Load low words into S0 (lhs) and S1 (rhs)
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            code.extend(Instruction::Add { src: S1, dst: S0 }.encode());
-            code.extend(ss_st(S0, dst_off));
-            // 64-bit: also add high words (with carry via ADDX).
+            // Load high words into S2 (lhs_hi) and S3 (rhs_hi) BEFORE ADD
             if let IRValue::Immediate(v) = lhs {
-                code.extend(ss_load_imm(S0, (v >> 32) as i64));
+                code.extend(ss_load_imm(S2, (v >> 32) as i64));
             } else {
                 let lhs_off = if let IRValue::Register(id) = lhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
-                code.extend(Instruction::Load { base: FP, offset: (lhs_off + 4) as i16, dst: S0 }.encode());
+                code.extend(Instruction::Load { base: FP, offset: (lhs_off + 4) as i16, dst: S2 }.encode());
             }
             if let IRValue::Immediate(v) = rhs {
-                code.extend(ss_load_imm(S1, (v >> 32) as i64));
+                code.extend(ss_load_imm(S3, (v >> 32) as i64));
             } else {
                 let rhs_off = if let IRValue::Register(id) = rhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
-                code.extend(Instruction::Load { base: FP, offset: (rhs_off + 4) as i16, dst: S1 }.encode());
+                code.extend(Instruction::Load { base: FP, offset: (rhs_off + 4) as i16, dst: S3 }.encode());
             }
-            code.extend(Instruction::Addx { src: S1, dst: S0 }.encode());
-            code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+            // ADD.L S1, S0 (low word, sets X flag) — immediately followed by ADDX.L
+            code.extend(Instruction::Add { src: S1, dst: S0 }.encode());
+            // ADDX.L S3, S2 (high word + carry) — NO gap, X preserved
+            code.extend(Instruction::Addx { src: S3, dst: S2 }.encode());
+            // NOW store results (ss_st may CLR the high word, but ADDX already done)
+            code.extend(ss_st(S0, dst_off));
+            code.extend(Instruction::Store { src: S2, base: FP, offset: (dst_off + 4) as i16 }.encode());
             }
         }
         IRInstr::Sub { dst, lhs, rhs, ty } => {
@@ -1439,23 +1437,31 @@ fn emit_instr(
                 code.extend(Instruction::Sub { src: S1, dst: S0 }.encode());
                 code.extend(ss_st(S0, dst_off));
             } else {
+            // 64-bit sub: load BOTH low and high words first, then do
+            // SUB.L (low, sets X) immediately followed by SUBX.L (high,
+            // uses X). Same pattern as Add — no gap between SUB and SUBX.
             let dst_id = dst.as_register().unwrap_or(0);
             let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            code.extend(Instruction::Sub { src: S1, dst: S0 }.encode());
-            code.extend(ss_st(S0, dst_off));
-            // 64-bit: also sub high words (with borrow via SUBX)
-            let lhs_off = if let IRValue::Register(id) = lhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
-            code.extend(Instruction::Load { base: FP, offset: (lhs_off + 4) as i16, dst: S0 }.encode());
+            // Load high words BEFORE SUB
+            if let IRValue::Immediate(v) = lhs {
+                code.extend(ss_load_imm(S2, (v >> 32) as i64));
+            } else {
+                let lhs_off = if let IRValue::Register(id) = lhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
+                code.extend(Instruction::Load { base: FP, offset: (lhs_off + 4) as i16, dst: S2 }.encode());
+            }
             if let IRValue::Immediate(v) = rhs {
-                code.extend(ss_load_imm(S1, (v >> 32) as i64));
+                code.extend(ss_load_imm(S3, (v >> 32) as i64));
             } else {
                 let rhs_off = if let IRValue::Register(id) = rhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
-                code.extend(Instruction::Load { base: FP, offset: (rhs_off + 4) as i16, dst: S1 }.encode());
+                code.extend(Instruction::Load { base: FP, offset: (rhs_off + 4) as i16, dst: S3 }.encode());
             }
-            code.extend(Instruction::Subx { src: S1, dst: S0 }.encode());
-            code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+            // SUB.L S1, S0 (low word, sets X) — immediately followed by SUBX.L
+            code.extend(Instruction::Sub { src: S1, dst: S0 }.encode());
+            code.extend(Instruction::Subx { src: S3, dst: S2 }.encode());
+            code.extend(ss_st(S0, dst_off));
+            code.extend(Instruction::Store { src: S2, base: FP, offset: (dst_off + 4) as i16 }.encode());
             }
         }
         IRInstr::Mul { dst, lhs, rhs, ty } => {
@@ -2579,99 +2585,60 @@ fn emit_binop(
     let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
     match op {
         BinOpKind::Add => {
-            // 64-bit add: add low words, then add high words (with carry).
+            // 64-bit add: load BOTH low and high words first, then do
+            // ADD.L (low, sets X) immediately followed by ADDX.L (high,
+            // uses X). No gap between ADD and ADDX to preserve X flag.
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            code.extend(Instruction::Add { src: S1, dst: S0 }.encode());
-            code.extend(ss_st(S0, dst_off));
-            // Add high words (ignore carry for simplicity — works for small values)
-            let lhs_off = if let IRValue::Register(id) = lhs {
-                vreg_stack_slots.get(id).copied().unwrap_or(0)
+            // Load high words into S2, S3 BEFORE ADD
+            if let IRValue::Immediate(v) = lhs {
+                code.extend(ss_load_imm(S2, (v >> 32) as i64));
             } else {
-                0
-            };
-            let rhs_off = if let IRValue::Register(id) = rhs {
-                vreg_stack_slots.get(id).copied().unwrap_or(0)
-            } else {
-                0
-            };
-            code.extend(
-                Instruction::Load {
-                    base: FP,
-                    offset: (lhs_off + 4) as i16,
-                    dst: S0,
-                }
-                .encode(),
-            );
-            if let IRValue::Immediate(v) = rhs {
-                let hi = (v >> 32) as i32;
-                code.extend(ss_load_imm(S1, hi as i64));
-            } else {
-                code.extend(
-                    Instruction::Load {
-                        base: FP,
-                        offset: (rhs_off + 4) as i16,
-                        dst: S1,
-                    }
-                    .encode(),
-                );
+                let lhs_off = if let IRValue::Register(id) = lhs {
+                    vreg_stack_slots.get(id).copied().unwrap_or(0)
+                } else { 0 };
+                code.extend(Instruction::Load { base: FP, offset: (lhs_off + 4) as i16, dst: S2 }.encode());
             }
-            code.extend(Instruction::Addx { src: S1, dst: S0 }.encode()); // ADDX.L propagates carry from low word
-            code.extend(
-                Instruction::Store {
-                    src: S0,
-                    base: FP,
-                    offset: (dst_off + 4) as i16,
-                }
-                .encode(),
-            );
+            if let IRValue::Immediate(v) = rhs {
+                code.extend(ss_load_imm(S3, (v >> 32) as i64));
+            } else {
+                let rhs_off = if let IRValue::Register(id) = rhs {
+                    vreg_stack_slots.get(id).copied().unwrap_or(0)
+                } else { 0 };
+                code.extend(Instruction::Load { base: FP, offset: (rhs_off + 4) as i16, dst: S3 }.encode());
+            }
+            // ADD.L S1, S0 (low, sets X) — immediately followed by ADDX.L
+            code.extend(Instruction::Add { src: S1, dst: S0 }.encode());
+            code.extend(Instruction::Addx { src: S3, dst: S2 }.encode());
+            code.extend(ss_st(S0, dst_off));
+            code.extend(Instruction::Store { src: S2, base: FP, offset: (dst_off + 4) as i16 }.encode());
         }
         BinOpKind::Sub => {
-            // 64-bit sub: sub low words, then sub high words.
+            // 64-bit sub: load BOTH low and high words first, then do
+            // SUB.L (low, sets X) immediately followed by SUBX.L (high,
+            // uses X). No gap between SUB and SUBX to preserve X flag.
             code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
             code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            code.extend(Instruction::Sub { src: S1, dst: S0 }.encode());
-            code.extend(ss_st(S0, dst_off));
-            let lhs_off = if let IRValue::Register(id) = lhs {
-                vreg_stack_slots.get(id).copied().unwrap_or(0)
+            if let IRValue::Immediate(v) = lhs {
+                code.extend(ss_load_imm(S2, (v >> 32) as i64));
             } else {
-                0
-            };
-            let rhs_off = if let IRValue::Register(id) = rhs {
-                vreg_stack_slots.get(id).copied().unwrap_or(0)
-            } else {
-                0
-            };
-            code.extend(
-                Instruction::Load {
-                    base: FP,
-                    offset: (lhs_off + 4) as i16,
-                    dst: S0,
-                }
-                .encode(),
-            );
-            if let IRValue::Immediate(v) = rhs {
-                let hi = (v >> 32) as i32;
-                code.extend(ss_load_imm(S1, hi as i64));
-            } else {
-                code.extend(
-                    Instruction::Load {
-                        base: FP,
-                        offset: (rhs_off + 4) as i16,
-                        dst: S1,
-                    }
-                    .encode(),
-                );
+                let lhs_off = if let IRValue::Register(id) = lhs {
+                    vreg_stack_slots.get(id).copied().unwrap_or(0)
+                } else { 0 };
+                code.extend(Instruction::Load { base: FP, offset: (lhs_off + 4) as i16, dst: S2 }.encode());
             }
-            code.extend(Instruction::Subx { src: S1, dst: S0 }.encode()); // SUBX.L propagates borrow from low word
-            code.extend(
-                Instruction::Store {
-                    src: S0,
-                    base: FP,
-                    offset: (dst_off + 4) as i16,
-                }
-                .encode(),
-            );
+            if let IRValue::Immediate(v) = rhs {
+                code.extend(ss_load_imm(S3, (v >> 32) as i64));
+            } else {
+                let rhs_off = if let IRValue::Register(id) = rhs {
+                    vreg_stack_slots.get(id).copied().unwrap_or(0)
+                } else { 0 };
+                code.extend(Instruction::Load { base: FP, offset: (rhs_off + 4) as i16, dst: S3 }.encode());
+            }
+            code.extend(Instruction::Sub { src: S1, dst: S0 }.encode());
+            code.extend(Instruction::Subx { src: S3, dst: S2 }.encode());
+            code.extend(ss_st(S0, dst_off));
+            code.extend(Instruction::Store { src: S2, base: FP, offset: (dst_off + 4) as i16 }.encode());
         }
         BinOpKind::Mul => {
             // [m68k-muluw] I64 Mul on m68k using MULU.W (16×16→32).
