@@ -825,13 +825,22 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
     let arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx];
     let mut reg_count = 0usize;
     let mut fp_stack_idx = 0usize; // number of FP params seen so far
+    // Running byte offset (from [EBP+8]) of the next stack arg.  This
+    // accumulates 8 bytes per FP arg, 8 bytes per 8-byte non-FP overflow
+    // arg, and 4 bytes per 4-byte non-FP overflow arg — matching the Call
+    // handler's `esp_off` exactly so caller and callee agree on layout.
+    let mut overflow_byte_offset: i32 = 0;
     for (i, param) in func.params.iter().enumerate() {
         if let Some(id) = param.as_register() {
             let is_fp = i < func.param_types.len()
                 && matches!(func.param_types[i], IRType::F32 | IRType::F64);
+            let param_ty = func.param_types.get(i);
+            let is_8byte = !is_fp && matches!(param_ty,
+                Some(IRType::U64) | Some(IRType::I64) | Some(IRType::Channel(_)));
             if is_fp {
-                // FP param: load 8 bytes from [EBP + 8 + fp_stack_idx*8].
-                let stack_off = 8 + (fp_stack_idx * 8) as i32;
+                // FP param: load 8 bytes from [EBP + 8 + overflow_byte_offset].
+                // (FP params are always passed on the stack on x86_32.)
+                let stack_off = 8 + overflow_byte_offset;
                 let dst_off = slot_offset(id);
                 let mut param_code = Vec::new();
                 // MOV EAX, [EBP + stack_off]; MOV [EBP + dst_off], EAX (low)
@@ -841,34 +850,47 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 param_code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rbp, stack_off + 4));
                 param_code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off + 4, Gpr::Rax));
                 emit(param_code, "store_fp_param");
+                overflow_byte_offset += 8;
                 fp_stack_idx += 1;
-            } else if reg_count < arg_regs.len() {
-                // Non-FP param in register.
-                // For 64-bit integer params (U64/I64), use TWO consecutive
-                // registers (e.g., EDI:ESI) and store both words.
-                let param_ty = func.param_types.get(i);
-                let is_8byte = matches!(param_ty,
-                    Some(IRType::U64) | Some(IRType::I64) | Some(IRType::Channel(_)));
-                if is_8byte && reg_count + 1 < arg_regs.len() {
-                    let off = slot_offset(id);
-                    let mut pc = Vec::new();
-                    pc.extend(encode_mov_mem_reg(Gpr::Rbp, off, arg_regs[reg_count]));
-                    pc.extend(encode_mov_mem_reg(Gpr::Rbp, off + 4, arg_regs[reg_count + 1]));
-                    emit(pc, "store_param_64");
-                    reg_count += 2;
-                } else {
-                    // 32-bit param: store_vreg (writes low + zeros high).
-                    emit(store_vreg(id, arg_regs[reg_count]), "store_param");
-                    reg_count += 1;
-                }
+            } else if is_8byte && reg_count + 1 < arg_regs.len() {
+                // 64-bit integer param: use TWO consecutive registers
+                // (e.g., EDI:ESI) and store both words.
+                let off = slot_offset(id);
+                let mut pc = Vec::new();
+                pc.extend(encode_mov_mem_reg(Gpr::Rbp, off, arg_regs[reg_count]));
+                pc.extend(encode_mov_mem_reg(Gpr::Rbp, off + 4, arg_regs[reg_count + 1]));
+                emit(pc, "store_param_64");
+                reg_count += 2;
+            } else if !is_8byte && reg_count < arg_regs.len() {
+                // 32-bit integer param: use ONE register.
+                // (8-byte args with only 1 register remaining must NOT take
+                // it — they would be truncated to 32 bits. Fall through to
+                // the stack-spill path below, which preserves the full 64-bit
+                // value. This leaves a "hole" (1 unused register) before the
+                // spill, matching the Call handler and SysV i386 behaviour
+                // for 8-byte args that don't fit in 2 consecutive registers.)
+                emit(store_vreg(id, arg_regs[reg_count]), "store_param");
+                reg_count += 1;
             } else {
-                // Overflow non-FP param: load from [EBP + 8 + fp_count*8 + overflow*4].
-                // (FP params come first on the stack, then overflow non-FP params.)
-                let overflow_idx = reg_count - arg_regs.len();
-                let stack_off = 8 + (fp_stack_idx * 8) as i32 + (overflow_idx * 4) as i32;
+                // Overflow non-FP param: load from [EBP + 8 + overflow_byte_offset].
+                // 8-byte args load both low and high 32-bit words; 4-byte
+                // args load a single word (store_vreg zeros the high word).
+                let stack_off = 8 + overflow_byte_offset;
                 let mut param_code = Vec::new();
-                param_code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rbp, stack_off));
-                param_code.extend(store_vreg(id, Gpr::Rax));
+                if is_8byte {
+                    let dst_off = slot_offset(id);
+                    // MOV EAX, [EBP + stack_off]; MOV [EBP + dst_off], EAX (low)
+                    param_code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rbp, stack_off));
+                    param_code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off, Gpr::Rax));
+                    // MOV EAX, [EBP + stack_off + 4]; MOV [EBP + dst_off + 4], EAX (high)
+                    param_code.extend(encode_mov_reg32_mem(Gpr::Rax, Gpr::Rbp, stack_off + 4));
+                    param_code.extend(encode_mov_mem32_reg32(Gpr::Rbp, dst_off + 4, Gpr::Rax));
+                    overflow_byte_offset += 8;
+                } else {
+                    param_code.extend(encode_mov_reg_mem(Gpr::Rax, Gpr::Rbp, stack_off));
+                    param_code.extend(store_vreg(id, Gpr::Rax));
+                    overflow_byte_offset += 4;
+                }
                 emit(param_code, "store_stack_param");
             }
         }
@@ -3444,7 +3466,15 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             // 64-bit integer arg: use TWO consecutive registers
                             reg_assignments.push((i, call_arg_regs[reg_count], true));
                             reg_count += 2;
-                        } else if reg_count < call_arg_regs.len() {
+                        } else if !is_8byte && reg_count < call_arg_regs.len() {
+                            // 32-bit integer arg: use ONE register.
+                            // (8-byte args with only 1 register remaining must
+                            // NOT take it — they would be truncated to 32 bits.
+                            // Fall through to the stack-spill path below, which
+                            // preserves the full 64-bit value. This leaves a
+                            // "hole" (1 unused register) before the spill,
+                            // matching SysV i386 behaviour for 8-byte args
+                            // that don't fit in 2 consecutive registers.)
                             reg_assignments.push((i, call_arg_regs[reg_count], false));
                             reg_count += 1;
                         } else {
