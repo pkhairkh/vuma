@@ -2745,57 +2745,114 @@ fn emit_binop(
             );
         }
         BinOpKind::Shl => {
-            // 64-bit left shift: handle shift by 32 specially.
-            // The m68k LSL.L instruction masks shift count to 5 bits (0-31),
-            // so << 32 becomes << 0 (no-op).  We need to check at runtime
-            // if the shift amount is >= 32 and handle it as a 64-bit shift.
-            code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
-            code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
-            // CMPI.L #32, D1 — compare shift amount with 32
-            code.extend_from_slice(&[0x0C, 0x81, 0x00, 0x00, 0x00, 0x20]);
-            // BNE.S to normal_shift (offset will be patched)
-            let bne_patch = code.len();
-            code.extend_from_slice(&[0x66, 0x00]); // BNE.S +0 (placeholder)
-                                                   // 64-bit shift by 32: low = 0, high = S0
-                                                   // Store S0 as high word at dst_off+4
-            code.extend(
-                Instruction::Store {
-                    src: S0,
-                    base: FP,
-                    offset: (dst_off + 4) as i16,
+            let is_64 = matches!(ty, Some(IRType::I64) | Some(IRType::U64));
+            if !is_64 {
+                // 32-bit shift: simple LSL.L + zero high word
+                code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
+                if let IRValue::Immediate(n) = rhs {
+                    let n = *n as u32 & 0x1F;
+                    if n > 0 {
+                        let mut rem = n;
+                        while rem > 0 {
+                            let c = rem.min(8);
+                            let ec = if c == 8 { 0u8 } else { c as u8 };
+                            // LSL.L #c, S0: 0xE188 | (ec << 9) | reg
+                            let w = 0xE188u16 | ((ec as u16) << 9) | (S0.encoding() as u16 & 0x7);
+                            code.extend_from_slice(&w.to_be_bytes());
+                            rem -= c;
+                        }
+                    }
+                } else {
+                    code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
+                    // LSL.L D1, D0: register-count form
+                    // 1110 001 1 10 1 01 000 = 0xE3C8 for D1 count, D0 dest
+                    let w = 0xE3A8u16 | ((S1.encoding() as u16 & 0x7) << 9) | (S0.encoding() as u16 & 0x7);
+                    code.extend_from_slice(&w.to_be_bytes());
                 }
-                .encode(),
-            );
-            // Store 0 as low word at dst_off
-            code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
-            code.extend(ss_st(S0, dst_off));
-            // BRA.S to done
-            let bra_patch = code.len();
-            code.extend_from_slice(&[0x60, 0x00]); // BRA.S +0 (placeholder)
-                                                   // normal_shift:
-            let normal_start = code.len();
-            // Patch BNE to jump here
-            let bne_disp = (normal_start - bne_patch - 2) as i8;
-            code[bne_patch + 1] = bne_disp as u8;
-            // Normal 32-bit shift
-            let w = 0xE1A8u16 | ((S1.encoding() as u16 & 0x7) << 9) | (S0.encoding() as u16 & 0x7);
-            code.extend_from_slice(&w.to_be_bytes());
-            code.extend(ss_st(S0, dst_off));
-            // Clear high word
-            code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
-            code.extend(
-                Instruction::Store {
-                    src: S0,
-                    base: FP,
-                    offset: (dst_off + 4) as i16,
+                code.extend(ss_st(S0, dst_off));
+                code.extend(Instruction::Moveq { dst: S1, imm: 0 }.encode());
+                code.extend(Instruction::Store { src: S1, base: FP, offset: (dst_off + 4) as i16 }.encode());
+            } else if let IRValue::Immediate(n_val) = rhs {
+                // 64-bit shift with immediate
+                let n = *n_val as u32;
+                if n == 0 {
+                    code.extend(ss_load_value_64(lhs, vreg_stack_slots, S0, S1));
+                } else if n < 32 {
+                    code.extend(ss_load_value_64(lhs, vreg_stack_slots, S0, S1));
+                    code.extend(Instruction::Move { src: S0, dst: S2 }.encode());
+                    let mut rem = n;
+                    while rem > 0 {
+                        let c = rem.min(8);
+                        let ec = if c == 8 { 0u8 } else { c as u8 };
+                        let w = 0xE188u16 | ((ec as u16) << 9) | (S1.encoding() as u16 & 0x7);
+                        code.extend_from_slice(&w.to_be_bytes());
+                        rem -= c;
+                    }
+                    let inv = 32 - n;
+                    rem = inv;
+                    while rem > 0 {
+                        let c = rem.min(8);
+                        let ec = if c == 8 { 0u8 } else { c as u8 };
+                        // LSR.L #c, S2: 0xE088 | (ec << 9) | reg
+                        let w = 0xE088u16 | ((ec as u16) << 9) | (S2.encoding() as u16 & 0x7);
+                        code.extend_from_slice(&w.to_be_bytes());
+                        rem -= c;
+                    }
+                    code.extend(Instruction::Or { src: S2, dst: S1 }.encode());
+                    rem = n;
+                    while rem > 0 {
+                        let c = rem.min(8);
+                        let ec = if c == 8 { 0u8 } else { c as u8 };
+                        let w = 0xE188u16 | ((ec as u16) << 9) | (S0.encoding() as u16 & 0x7);
+                        code.extend_from_slice(&w.to_be_bytes());
+                        rem -= c;
+                    }
+                } else if n == 32 {
+                    code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
+                    code.extend(Instruction::Move { src: S0, dst: S1 }.encode());
+                    code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
+                } else if n < 64 {
+                    let shift = n - 32;
+                    code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
+                    let mut rem = shift;
+                    while rem > 0 {
+                        let c = rem.min(8);
+                        let ec = if c == 8 { 0u8 } else { c as u8 };
+                        let w = 0xE188u16 | ((ec as u16) << 9) | (S0.encoding() as u16 & 0x7);
+                        code.extend_from_slice(&w.to_be_bytes());
+                        rem -= c;
+                    }
+                    code.extend(Instruction::Move { src: S0, dst: S1 }.encode());
+                    code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
+                } else {
+                    code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
+                    code.extend(Instruction::Moveq { dst: S1, imm: 0 }.encode());
                 }
-                .encode(),
-            );
-            // done:
-            let done = code.len();
-            // Patch BRA to jump here
-            let bra_disp = (done - bra_patch - 2) as i8;
-            code[bra_patch + 1] = bra_disp as u8;
+                code.extend(ss_st(S0, dst_off));
+                code.extend(Instruction::Store { src: S1, base: FP, offset: (dst_off + 4) as i16 }.encode());
+            } else {
+                // Variable 64-bit shift: runtime check for == 32
+                code.extend(ss_load_value(lhs, vreg_stack_slots, S0));
+                code.extend(ss_load_value(rhs, vreg_stack_slots, S1));
+                code.extend_from_slice(&[0x0C, 0x81, 0x00, 0x00, 0x00, 0x20]);
+                let bne_patch = code.len();
+                code.extend_from_slice(&[0x66, 0x00]);
+                code.extend(Instruction::Store { src: S0, base: FP, offset: (dst_off + 4) as i16 }.encode());
+                code.extend(Instruction::Moveq { dst: S0, imm: 0 }.encode());
+                code.extend(ss_st(S0, dst_off));
+                let bra_patch = code.len();
+                code.extend_from_slice(&[0x60, 0x00]);
+                let normal_start = code.len();
+                code[bne_patch + 1] = (normal_start - bne_patch - 2) as u8;
+                // LSL.L D1, D0 (register-count form)
+                let w = 0xE3A8u16 | ((S1.encoding() as u16 & 0x7) << 9) | (S0.encoding() as u16 & 0x7);
+                code.extend_from_slice(&w.to_be_bytes());
+                code.extend(ss_st(S0, dst_off));
+                code.extend(Instruction::Moveq { dst: S1, imm: 0 }.encode());
+                code.extend(Instruction::Store { src: S1, base: FP, offset: (dst_off + 4) as i16 }.encode());
+                let done = code.len();
+                code[bra_patch + 1] = (done - bra_patch - 2) as u8;
+            }
         }
         BinOpKind::ShrL => {
             // 64-bit right shift: handle shift by 32 specially.
