@@ -293,14 +293,37 @@ fn encode_cmpb(r1: Reg, r2: Reg, cond: u32, inverted: bool, f: bool, disp_bytes:
 /// Actually: 0010 10ss 000 0 t aaaa aaa ddddd iiii iiii iiii iiii i
 /// The LDIL instruction loads imm21 into bits 31:11 of the target register.
 fn encode_ldil(reg: Reg, imm: u32) -> [u8; 4] {
-    let imm21 = imm & 0x1FFFFF;
-    // [hppa-ldil] PA-RISC 1.1 LDIL L,s: major opcode 0x0A (001010).
-    // LDIL: s = im21 << 11, where s is the register at bits 25:21.
-    // Previous code used 0x20000000 (major 0x08 = ADDIL), which stores
-    // the result in R1 (implicit), NOT in the specified register. This
-    // made GetAddress store the WRONG register (R8 unchanged instead of
-    // R8 = address), causing CallIndirect to branch to garbage.
-    let word = 0x20000000u32 | ((reg as u32) << 21) | imm21;
+    let val = imm & 0x1FFFFF; // 21-bit immediate value (before << 11)
+    // [hppa-ldil] PA-RISC 1.1 LDIL L,s: major opcode 0x08 (001000).
+    // LDIL: r = sign_extend(imm21) << 11, where r is the register at bits 25:21.
+    //
+    // W4-hppa: The 21-bit immediate field is split across the instruction
+    // word in a non-contiguous layout, matching QEMU's assemble_21() decode
+    // (from target/hppa/insns.decode):
+    //
+    //   %assemble_21  0:s1 1:11 12:2 14:2 16:5  !function=expand_shl11
+    //
+    // The fields are listed MSB→LSB and map to the 21-bit value as:
+    //   val[20]    ← insn[0]       (1-bit sign)
+    //   val[19:9]  ← insn[1:11]    (11 bits)
+    //   val[8:7]   ← insn[12:13]   (2 bits)
+    //   val[6:5]   ← insn[14:15]   (2 bits)
+    //   val[4:0]   ← insn[16:20]   (5 bits)
+    //
+    // Then the final register value is sign_extend(val) << 11.
+    let f_sign = (val >> 20) & 0x1;       // val[20] → insn[0]
+    let f_11 = (val >> 9) & 0x7FF;        // val[19:9] → insn[1:11]
+    let f_2a = (val >> 7) & 0x3;          // val[8:7] → insn[12:13]
+    let f_2b = (val >> 5) & 0x3;          // val[6:5] → insn[14:15]
+    let f_5 = val & 0x1F;                 // val[4:0] → insn[16:20]
+
+    let word = 0x20000000u32              // major opcode 0x08 (LDIL)
+        | ((reg as u32 & 0x1F) << 21)     // target register [25:21]
+        | (f_5 << 16)                     // val[4:0] → insn[20:16]
+        | (f_2b << 14)                    // val[6:5] → insn[15:14]
+        | (f_2a << 12)                    // val[8:7] → insn[13:12]
+        | (f_11 << 1)                     // val[19:9] → insn[11:1]
+        | f_sign;                         // val[20] → insn[0]
     word.to_be_bytes()
 }
 
@@ -1033,20 +1056,20 @@ fn emit_softfloat_call(
     symbol: &str,
 ) {
     let call_offset = code.len() as u64;
-    // Instr 1: BL,n +0, R1 — R1 = PC+8, branch to PC+8 (skip delay slot)
-    code.extend_from_slice(&0xE8200000u32.to_be_bytes());
-    // Instr 2: NOP (delay slot, nullified)
-    code.extend_from_slice(&encode_nop());
-    // Instr 3: LDO 24(R1), R2 — R2 = return address = PC + 32
-    code.extend_from_slice(&encode_ldo_raw(R1, 24, R2));
-    // Instr 4: LDO 0(R1), R1 — placeholder (patched with target disp or d1)
-    code.extend_from_slice(&encode_ldo_raw(R1, 0, R1));
-    // Instr 5-7: NOPs (placeholders for d2, d3, d4 in long calls)
-    code.extend_from_slice(&encode_nop());
-    code.extend_from_slice(&encode_nop());
-    code.extend_from_slice(&encode_nop());
-    // Instr 8: NOP (placeholder; patched to BV R0(R1) or BV,n R0(R1))
-    code.extend_from_slice(&encode_nop());
+    // 80-byte call pattern (same layout as IRInstr::Call).
+    // W4-hppa: Updated to 80 bytes to support ss_load_imm long calls.
+    code.extend_from_slice(&0xE8200000u32.to_be_bytes()); // +0: BL,n +0, R1
+    code.extend_from_slice(&encode_nop()); // +4: NOP
+    code.extend_from_slice(&encode_ldo_raw(R1, 72, R2)); // +8: LDO 72(R1), R2 (return=PC+80)
+    code.extend_from_slice(&encode_ldo_raw(R0, 0, R1)); // +12: LDO 0(R0), R1 (placeholder)
+    for _ in 0..11 {
+        code.extend_from_slice(&encode_add(R1, R1, R1)); // +16..+56: 11 ADDs
+    }
+    code.extend_from_slice(&encode_ldo_raw(R1, 0, R1)); // +60: LDO 0(R1), R1 (placeholder)
+    code.extend_from_slice(&encode_bv_real(R1)); // +64: BV R0(R1)
+    code.extend_from_slice(&encode_nop()); // +68: NOP
+    code.extend_from_slice(&encode_nop()); // +72: NOP
+    code.extend_from_slice(&encode_nop()); // +76: NOP
     relocations.push(crate::backend::RelocationEntry {
         offset: call_offset,
         symbol: symbol.to_string(),
@@ -1499,88 +1522,80 @@ fn patch_call_site(
     all_code: &mut [u8],
     abs_offset: usize,
     target_offset: usize,
-    trampolines: &mut Vec<(usize, usize)>,
+    _trampolines: &mut Vec<(usize, usize)>,
 ) {
     let nop = encode_nop();
     let disp = target_offset as i64 - abs_offset as i64 - 8;
 
     // Case 1: BL range (forward, 16-byte aligned, 0-4080)
-    if disp >= 0 && disp % 16 == 0 && disp / 16 <= 255 {
-        let bl_disp = (disp / 16) as i32;
-        let patched = 0xE8400000u32 | ((bl_disp as u32 & 0xFF) << 5);
-        all_code[abs_offset..abs_offset + 4].copy_from_slice(&patched.to_be_bytes());
-        for off in [8, 12, 16, 20, 24, 28].iter() {
-            let o = abs_offset + off;
-            all_code[o..o + 4].copy_from_slice(&nop);
-        }
-        return;
-    }
+    // Use BL (NOT nullified) with LDO in delay slot to set return address.
+    // The BL branches to target; delay slot at +4 sets R2 = return addr.
+    // But our +4 is a NOP and +8 is the LDO. We need to move the LDO to +4.
+    // Actually, for BL (not BL,n), the delay slot at +4 executes BEFORE
+    // the branch. So we patch +0 to BL, +4 to LDO 56(R1),R2, and NOP +8..+80.
+    // R1 = PC+8 (from the original BL,n at +0, but we're overwriting it).
+    // Wait — if we overwrite +0 with BL (not BL,n), R1 is NOT set.
+    // We need R1 = PC+8 for the LDO at +4 to compute R2 = PC+64.
+    //
+    // Simpler approach: keep the original BL,n +0,R1 at +0 (sets R1=PC+8,
+    // branches to +8, nullifies +4). Then at +8, the LDO sets R2=PC+64.
+    // Then at +12, put a BL to the target. But this means the BL at +12
+    // executes, and the callee returns to R2=PC+64. The instructions at
+    // +16..+60 are NOPs, so execution slides to +64, then +68..+80 NOPs,
+    // then post-call code at +80.
+    //
+    // But this is exactly Case 2! So Case 1 is unnecessary — Case 2 handles
+    // all BL-range calls. Remove Case 1 and fall through to Case 2.
+    // (Case 1 was an optimization for very short forward calls, but the
+    // 80-byte pattern makes it unnecessary.)
 
-    // Case 2-3: LDO range (1-4 LDOs)
-    if disp.abs() <= 4 * 8191 {
-        // Decompose disp into up to 4 chunks of max 8191 each.
-        let mut remaining = disp;
-        let ldo_positions = [12usize, 16, 20, 24];
-        let mut n_ldos = 0;
-        for &pos in &ldo_positions {
-            if remaining == 0 {
-                all_code[abs_offset + pos..abs_offset + pos + 4].copy_from_slice(&nop);
-            } else {
-                let chunk = remaining.clamp(-8191, 8191);
-                let ldo = encode_ldo_raw(R1, chunk as i16, R1);
-                all_code[abs_offset + pos..abs_offset + pos + 4].copy_from_slice(&ldo);
-                remaining -= chunk;
-                n_ldos += 1;
-            }
-        }
-        if n_ldos > 1 {
-            // Debug: eprintln!("HPPA: multi-LDO call at {} -> {} (disp={}, {} LDOs)", abs_offset, target_offset, disp, n_ldos);
-        }
-        // Patch +28 to BV,n R0(R1) (nullify +32 = next instruction).
-        // encode_bv_real(R1) = 0xE820C000. The nullify bit for BV is bit 1.
-        // BV,n = 0xE820C000 | 2 = 0xE820C002.
-        let bv_n = 0xE820C002u32 | ((R1 as u32) << 21);
-        all_code[abs_offset + 28..abs_offset + 32].copy_from_slice(&bv_n.to_be_bytes());
-        return;
-    }
-
-    // Case 4: Beyond 4-LDO range — use BL directly (±256KB range).
-    //
-    // NOT a QEMU bug — this is the long-call
-    // codegen fallback for the case where the 4-LDO strategy (Case 3,
-    // max ±32764 byte displacement) cannot reach the target. Used when
-    // VUMA binaries exceed ~32 KB and call sites near the start of the
-    // text segment need to reach callees near the end. Tested under
-    // QEMU 7.2.0 hppa user-mode emulation; BL with the nullify bit set
-    // (`BL,n`, 17-bit signed displacement = ±256 KB) is correctly
-    // decoded by QEMU.
-    //
-    // [K15A-hppa-large-payload] For binaries > ~32KB, call sites near the
-    // beginning can't reach trampolines at the end via 4 LDOs (max 32764).
-    // The previous fallback wrote LDO 0(R1),R1 (a no-op), leaving R1 = pc+8
-    // and causing BV R0(R1) to branch to pc+8 = infinite loop / timeout.
-    //
-    // Fix: patch +12 to BL,n target, R1. The +0 BL .+8, R1 (load PC into R1)
-    // and +8 LDO 24(R1), R2 (set return address = pc+32) still execute first.
-    // The +12 BL branches to the target with nullified delay slot (+16).
-    // The callee returns to R2 = pc+32 (set by +8 LDO), executing the
-    // post-call code at +32. +16..+28 are dead code (NOP).
-    //
-    // BL has ±262144 byte (±256KB) range — sufficient for any practical
-    // binary. For binaries > 256KB (extremely rare), fall back to trampoline.
+    // Case 2: BL,n range (±256KB, 4-byte aligned)
+    // +0: BL,n +0, R1 (already emitted — sets R1=PC+8, branches to +8)
+    // +4: NOP (nullified delay)
+    // +8: LDO 56(R1), R2 (already emitted — sets R2=PC+64 return addr)
+    // +12: patched to BL,n target (branches to target, nullifies +16)
+    // +16..+80: NOPs (dead code; callee returns to R2=PC+64)
+    // At PC+64: NOP (slides to +80, then post-call code)
     let bl_disp = (disp - 12) as i32;
     if bl_disp.abs() <= 262140 && bl_disp % 4 == 0 {
         let bl = encode_bl(bl_disp);
         all_code[abs_offset + 12..abs_offset + 16].copy_from_slice(&bl);
-        for off in [16, 20, 24, 28].iter() {
+        // NOP-fill +16 to +80 (the long-call placeholders)
+        for off in (16..80).step_by(4) {
             let o = abs_offset + off;
             all_code[o..o + 4].copy_from_slice(&nop);
         }
         return;
     }
 
-    // Fallback: trampoline for binaries > 256KB (extremely rare).
-    trampolines.push((abs_offset, target_offset));
+    // Case 3: Long call — use ss_load_imm (LDO+ADD) to load the full
+    // 32-bit target address. This is the SAME mechanism used by GetAddress
+    // (R_PARISC_DIR32 patching), which is proven to work.
+    //
+    // The call pattern was emitted as a 64-byte pattern:
+    //   +0:  BL,n +0, R1           ; R1 = PC+8
+    //   +4:  NOP                    ; nullified delay
+    //   +8:  LDO 56(R1), R2         ; R2 = PC+64 (return address)
+    //   +12: LDO 0(R0), R1          ; placeholder (patched: upper_shifted)
+    //   +16..+56: 11× ADD R1,R1,R1  ; shift left by 11 (pre-emitted)
+    //   +60: LDO 0(R1), R1          ; placeholder (patched: lower offset)
+    //   +64: BV R0(R1)              ; branch to target
+    //   +68: NOP                    ; delay slot for BV
+    //
+    // We only need to patch +12 (LDO upper) and +60 (LDO lower).
+    const TEXT_OFFSET: u64 = 192;
+    const BASE_ADDR: u64 = 0x10000;
+    let target_vaddr = (BASE_ADDR + TEXT_OFFSET + target_offset as u64) as u32;
+    let upper_shifted = (target_vaddr >> 11) as i16;
+    let lower = (target_vaddr & 0x7FF) as i16;
+
+    // Patch +12: LDO upper_shifted(R0), R1
+    let ldo1 = encode_ldo_raw(R0, upper_shifted, R1);
+    all_code[abs_offset + 12..abs_offset + 16].copy_from_slice(&ldo1);
+    // Patch +60: LDO lower(R1), R1
+    let ldo2 = encode_ldo_raw(R1, lower, R1);
+    all_code[abs_offset + 60..abs_offset + 64].copy_from_slice(&ldo2);
+    // +64 is already BV R0(R1), +68 is already NOP (from pattern emission)
 }
 
 // ===========================================================================
@@ -4780,38 +4795,23 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                     }
                     IRInstr::Alloc { dst, size } => {
                         // Call __vuma_alloc(size) → returns ptr in R28.
-                        // Load size into R26 (arg0), then use 32-byte call pattern.
+                        // Load size into R26 (arg0), then use 80-byte call pattern
+                        // (same as regular calls — supports BL, BL,n, and ss_load_imm).
                         code.extend(ss_load_imm(R26, *size as i64));
                         let call_offset = code.len() as u64;
-                        // 32-byte call pattern (8 instructions):
-                        //   1. BL,n +0, R1 — R1 = PC+8, branch to PC+8 (instr 3)
-                        //   2. NOP (delay slot, nullified)
-                        //   3. LDO 24(R1), R2 — R2 = PC+32 (return address)
-                        //   4. LDO 0(R1), R1 — placeholder (patched with target disp or d1)
-                        //   5. NOP — placeholder (patched with d2 for long calls)
-                        //   6. NOP — placeholder (patched with d3 for long calls)
-                        //   7. NOP — placeholder (patched with d4 for long calls)
-                        //   8. BV,n R0(R1) or BV R0(R1) — branch to target
-                        // For short calls: instr 4 = LDO disp, instr 5-7 = NOP, instr 8 = BV (delay slot = NOP at +20... wait)
-                        // Actually, for 32-byte pattern:
-                        //   Short: +0 BL,n +0,R1; +4 NOP; +8 LDO 24(R1),R2; +12 LDO disp(R1),R1; +16 BV R0(R1); +20 NOP; +24 NOP; +28 NOP
-                        //   Long:  +0 BL,n +0,R1; +4 NOP; +8 LDO 24(R1),R2; +12 LDO d1; +16 LDO d2; +20 LDO d3; +24 LDO d4; +28 BV,n R0(R1)
-                        // Instr 1: BL,n +0, R1
-                        code.extend_from_slice(&0xE8200000u32.to_be_bytes());
-                        // Instr 2: NOP (delay slot, nullified)
-                        code.extend_from_slice(&encode_nop());
-                        // Instr 3: LDO 24(R1), R2 (return address = PC + 32)
-                        code.extend_from_slice(&encode_ldo_raw(R1, 24, R2));
-                        // Instr 4: LDO 0(R1), R1 (placeholder, patched)
-                        code.extend_from_slice(&encode_ldo_raw(R1, 0, R1));
-                        // Instr 5: NOP (placeholder for d2)
-                        code.extend_from_slice(&encode_nop());
-                        // Instr 6: NOP (placeholder for d3)
-                        code.extend_from_slice(&encode_nop());
-                        // Instr 7: NOP (placeholder for d4)
-                        code.extend_from_slice(&encode_nop());
-                        // Instr 8: BV R0(R1) (placeholder; patched to BV,n for long calls)
-                        code.extend_from_slice(&encode_bv_real(R1));
+                        // 80-byte call pattern (same layout as IRInstr::Call)
+                        code.extend_from_slice(&0xE8200000u32.to_be_bytes()); // +0: BL,n +0, R1
+                        code.extend_from_slice(&encode_nop()); // +4: NOP
+                        code.extend_from_slice(&encode_ldo_raw(R1, 72, R2)); // +8: LDO 72(R1), R2 (return=PC+80)
+                        code.extend_from_slice(&encode_ldo_raw(R0, 0, R1)); // +12: LDO 0(R0), R1 (placeholder)
+                        for _ in 0..11 {
+                            code.extend_from_slice(&encode_add(R1, R1, R1)); // +16..+56: 11 ADDs
+                        }
+                        code.extend_from_slice(&encode_ldo_raw(R1, 0, R1)); // +60: LDO 0(R1), R1 (placeholder)
+                        code.extend_from_slice(&encode_bv_real(R1)); // +64: BV R0(R1)
+                        code.extend_from_slice(&encode_nop()); // +68: NOP
+                        code.extend_from_slice(&encode_nop()); // +72: NOP
+                        code.extend_from_slice(&encode_nop()); // +76: NOP
                         relocations.push(RelocationEntry {
                             offset: call_offset,
                             symbol: "__vuma_alloc".to_string(),
@@ -5141,43 +5141,69 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                                     code.extend_from_slice(&encode_stw(S0, R30, stack_off as i16));
                                 }
                             }
-                            // 32-byte call pattern (8 instructions):
-                            //   1. BL,n +0, R1 — R1 = PC+8, branch to PC+8 (instr 3), skip delay slot
-                            //   2. NOP — delay slot (nullified)
-                            //   3. LDO 24(R1), R2 — R2 = PC+32 (return address)
-                            //   4. LDO 0(R1), R1 — placeholder (patched with d1 or disp)
-                            //   5. NOP — placeholder (patched with d2 for long calls)
-                            //   6. NOP — placeholder (patched with d3 for long calls)
-                            //   7. NOP — placeholder (patched with d4 for long calls)
-                            //   8. BV R0(R1) — placeholder (patched to BV,n for long calls)
+                            // 64-byte call pattern (16 instructions):
                             //
-                            // For short calls (|disp| <= 8191):
-                            //   - Patch instr 4 to LDO disp(R1), R1
-                            //   - Keep instr 8 as BV R0(R1) (delay slot at +20 is NOP... wait, +20 is instr 5)
-                            //   Actually: BV at +28, delay slot at +32 = next instruction. WRONG.
-                            //   Fix: BV at +16 (instr 4 position), but that's where LDO goes.
-                            //   OK, for short calls:
-                            //   +0: BL,n +0,R1; +4: NOP; +8: LDO 24(R1),R2; +12: LDO disp(R1),R1; +16: BV R0(R1); +20: NOP; +24: NOP; +28: NOP
-                            //   Return addr = R2 = PC+32. BV delay slot at +20 = NOP. Then NOPs to +32. ✓
-                            //   For long calls:
-                            //   +0: BL,n +0,R1; +4: NOP; +8: LDO 24(R1),R2; +12: LDO d1; +16: LDO d2; +20: LDO d3; +24: LDO d4; +28: BV,n R0(R1)
-                            //   Return addr = R2 = PC+32. BV,n nullifies +32. Callee returns to +32. ✓
+                            // Supports three patching strategies (selected by patch_call_site
+                            // based on the target distance):
+                            //
+                            //   1. BL (short, ±1KB forward, 16-byte aligned):
+                            //      +0 is patched to BL. Rest is NOP.
+                            //
+                            //   2. BL,n (medium, ±256KB):
+                            //      +12 is patched to BL,n target.
+                            //
+                            //   3. ss_load_imm long call (any 32-bit address):
+                            //      +12 is patched with LDO upper(R0), R1
+                            //      +16..+56 are pre-emitted ADD R1,R1,R1 (11 shifts)
+                            //      +60 is patched with LDO lower(R1), R1
+                            //      +64 is BV R0(R1) (pre-emitted)
+                            //
+                            // Layout:
+                            //   +0:  BL,n +0, R1         ; R1 = PC+8
+                            //   +4:  NOP                  ; nullified delay
+                            //   +8:  LDO 56(R1), R2       ; R2 = PC+64 (return address)
+                            //   +12: LDO 0(R0), R1        ; placeholder (patched: upper_shifted)
+                            //   +16: ADD R1,R1,R1         ; shift left (×11)
+                            //   +20: ADD R1,R1,R1
+                            //   +24: ADD R1,R1,R1
+                            //   +28: ADD R1,R1,R1
+                            //   +32: ADD R1,R1,R1
+                            //   +36: ADD R1,R1,R1
+                            //   +40: ADD R1,R1,R1
+                            //   +44: ADD R1,R1,R1
+                            //   +48: ADD R1,R1,R1
+                            //   +52: ADD R1,R1,R1
+                            //   +56: ADD R1,R1,R1         ; 11 ADDs total
+                            //   +60: LDO 0(R1), R1        ; placeholder (patched: lower)
+                            //   +64: BV R0(R1)            ; branch to target
+                            //   +68: NOP                  ; delay slot for BV
+                            //   +72: NOP                  ; padding
+                            //   +76: NOP                  ; padding
+                            //
+                            // Total: 80 bytes (20 instructions).
+                            // For cases 1 and 2, the patcher overwrites +8..+76 with NOPs.
                             let call_offset = code.len() as u64;
-                            // Instr 1: BL,n +0, R1
+                            // +0: BL,n +0, R1
                             code.extend_from_slice(&0xE8200000u32.to_be_bytes());
-                            // Instr 2: NOP (delay slot, nullified)
+                            // +4: NOP (nullified delay)
                             code.extend_from_slice(&encode_nop());
-                            // Instr 3: LDO 24(R1), R2 (return address = PC + 32)
-                            code.extend_from_slice(&encode_ldo_raw(R1, 24, R2));
-                            // Instr 4: LDO 0(R1), R1 (placeholder, patched)
+                            // +8: LDO 56(R1), R2 (return = PC+64)
+                            code.extend_from_slice(&encode_ldo_raw(R1, 72, R2));
+                            // +12: LDO 0(R0), R1 (placeholder, patched for long calls)
+                            code.extend_from_slice(&encode_ldo_raw(R0, 0, R1));
+                            // +16..+56: 11× ADD R1,R1,R1 (shift left by 11)
+                            for _ in 0..11 {
+                                code.extend_from_slice(&encode_add(R1, R1, R1));
+                            }
+                            // +60: LDO 0(R1), R1 (placeholder, patched for long calls)
                             code.extend_from_slice(&encode_ldo_raw(R1, 0, R1));
-                            // Instr 5: NOP (placeholder for d2)
+                            // +64: BV R0(R1) (branch to target)
+                            code.extend_from_slice(&encode_bv_real(R1));
+                            // +68: NOP (delay slot for BV)
                             code.extend_from_slice(&encode_nop());
-                            // Instr 6: NOP (placeholder for d3)
+                            // +72: NOP (padding)
                             code.extend_from_slice(&encode_nop());
-                            // Instr 7: NOP (placeholder for d4)
-                            code.extend_from_slice(&encode_nop());
-                            // Instr 8: NOP (placeholder; patched to BV R0(R1) for short, BV,n for long)
+                            // +76: NOP (padding)
                             code.extend_from_slice(&encode_nop());
                             relocations.push(RelocationEntry {
                                 offset: call_offset,
@@ -5519,26 +5545,29 @@ fn hppa_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
                             }
                         }
                         // [hppa-callindirect] Indirect call using the SAME
-                        // 32-byte (8-instruction) pattern as direct calls, but with
-                        // COPY S0,R1 instead of LDO disp(R1),R1 for the target.
-                        // This ensures the return address (R2 = PC+32) and BV layout
-                        // match exactly what the callee's prologue/epilogue expect.
+                        // 80-byte pattern as direct calls, but with COPY S0,R1
+                        // instead of LDO+ADD for the target address.
+                        // The return address is R2 = PC+64 (same as direct calls).
                         code.extend(ss_load_value(func_ptr, &vreg_stack_slots, S0)); // S0 = func_ptr
-                        // +0: BL +0, R1 (same as direct call)
+                        // +0: BL,n +0, R1
                         code.extend_from_slice(&0xE8200000u32.to_be_bytes());
-                        // +4: NOP (delay slot)
+                        // +4: NOP (nullified delay)
                         code.extend_from_slice(&encode_nop());
-                        // +8: LDO 24(R1), R2 (R2 = PC+32, same as direct call)
-                        code.extend_from_slice(&encode_ldo_raw(R1, 24, R2));
-                        // +12: COPY S0, R1 (R1 = func_ptr — replaces LDO disp)
+                        // +8: LDO 56(R1), R2 (return = PC+64)
+                        code.extend_from_slice(&encode_ldo_raw(R1, 72, R2));
+                        // +12: COPY S0, R1 (R1 = func_ptr — the target)
                         code.extend_from_slice(&encode_copy(S0, R1));
-                        // +16: BV R0(R1) (same as direct call)
+                        // +16..+60: NOPs (skip the LDO+ADD placeholders)
+                        for _ in 0..12 {
+                            code.extend_from_slice(&encode_nop());
+                        }
+                        // +64: BV R0(R1) (branch to func_ptr)
                         code.extend_from_slice(&encode_bv_real(R1));
-                        // +20: NOP (delay slot for BV; return address is PC+32)
+                        // +68: NOP (delay slot)
                         code.extend_from_slice(&encode_nop());
-                        // +24: NOP (padding to match 32-byte pattern)
+                        // +72: NOP (padding)
                         code.extend_from_slice(&encode_nop());
-                        // +28: NOP (padding to match 32-byte pattern)
+                        // +76: NOP (padding)
                         code.extend_from_slice(&encode_nop());
                         // Move return value from R28 to dst's stack slot.
                         if let Some(d) = dst {
@@ -5963,9 +5992,12 @@ impl Backend for HppaBackend {
         //   4. LDI 1, R20 (SYS_exit)
         //   5. GATE (syscall)
 
-        const STACK_VADDR: u64 = BASE_ADDR + 0x20000; // 0x30000
         const STACK_MEMSZ: u64 = 0x800000; // 8 MB
-        const STACK_TOP: u64 = STACK_VADDR + STACK_MEMSZ; // 0x830000
+        // W4-hppa: Stack placed at a high fixed address to avoid overlap
+        // with the text segment. Text can be up to ~1MB (sha3=770KB).
+        // 0x200000 (2MB) above BASE_ADDR gives plenty of room.
+        const STACK_VADDR: u64 = BASE_ADDR + 0x200000; // 0x210000
+        const STACK_TOP: u64 = STACK_VADDR + STACK_MEMSZ; // 0xA10000
 
         let mut start_stub: Vec<u8> = Vec::new();
 
@@ -5982,15 +6014,23 @@ impl Backend for HppaBackend {
         // patcher below.
         start_stub.extend(ss_load_imm(R30, STACK_TOP as i64));
 
-        // 32-byte call pattern (8 instructions)
-        start_stub.extend_from_slice(&0xE8200000u32.to_be_bytes()); // BL,n +0, R1
-        start_stub.extend_from_slice(&encode_nop()); // delay slot (nullified)
-        start_stub.extend_from_slice(&encode_ldo_raw(R1, 24, R2)); // R2 = return addr = PC+32
-        start_stub.extend_from_slice(&encode_ldo_raw(R1, 0, R1)); // placeholder, patched
-        start_stub.extend_from_slice(&encode_nop()); // placeholder for d2
-        start_stub.extend_from_slice(&encode_nop()); // placeholder for d3
-        start_stub.extend_from_slice(&encode_nop()); // placeholder for d4
-        start_stub.extend_from_slice(&encode_nop()); // placeholder for BV/BV,n
+        // 80-byte call pattern (20 instructions) — same as regular calls.
+        // W4-hppa: Uses ss_load_imm (LDO+ADD+LDO) for long calls, matching
+        // the regular call pattern. This allows _start to reach main at ANY
+        // distance without trampolines.
+        let _start_call_offset: usize = start_stub.len();
+        start_stub.extend_from_slice(&0xE8200000u32.to_be_bytes()); // +0: BL,n +0, R1
+        start_stub.extend_from_slice(&encode_nop()); // +4: NOP
+        start_stub.extend_from_slice(&encode_ldo_raw(R1, 72, R2)); // +8: LDO 72(R1), R2 (return=PC+80)
+        start_stub.extend_from_slice(&encode_ldo_raw(R0, 0, R1)); // +12: LDO 0(R0), R1 (placeholder)
+        for _ in 0..11 {
+            start_stub.extend_from_slice(&encode_add(R1, R1, R1)); // +16..+56: 11 ADDs
+        }
+        start_stub.extend_from_slice(&encode_ldo_raw(R1, 0, R1)); // +60: LDO 0(R1), R1 (placeholder)
+        start_stub.extend_from_slice(&encode_bv_real(R1)); // +64: BV R0(R1)
+        start_stub.extend_from_slice(&encode_nop()); // +68: NOP (delay slot)
+        start_stub.extend_from_slice(&encode_nop()); // +72: NOP (padding)
+        start_stub.extend_from_slice(&encode_nop()); // +76: NOP (padding)
                                                      // COPY R28, R26 (move return value to arg1)
         start_stub.extend_from_slice(&encode_copy(R28, R26));
         // LDI 1, R20 (SYS_exit)
@@ -6000,17 +6040,9 @@ impl Backend for HppaBackend {
 
         let _start_stub_size = start_stub.len();
 
-        // ── _start call trampoline (for large binaries) ──
-        // Emit a trampoline right after the _start stub that loads main's
-        // absolute address and branches to it. This is within BL range of
-        // the _start call site. The _start call is patched to BL to this
-        // trampoline, which then branches to main (any distance).
-        // Placeholder: ss_load_imm(R1, 0) + BV R0(R1) + NOP = ~56 bytes.
-        // We emit this as a placeholder and patch it with main's address later.
-        let _start_trampoline_offset = start_stub.len();
-        start_stub.extend(ss_load_imm(R1, 0)); // placeholder, patched with main addr
-        start_stub.extend_from_slice(&encode_bv_real(R1)); // BV R0(R1)
-        start_stub.extend_from_slice(&encode_nop()); // delay slot
+        // W4-hppa: The _start trampoline is no longer needed. The _start call
+        // pattern uses LDIL+LDO+BV (same as regular calls), which can reach
+        // main at any distance. patch_call_site handles the patching uniformly.
 
         // ── FFI return-0 stub ──
         // Returns 0 in R28 and branches back to R2 (return address).
@@ -6711,70 +6743,32 @@ impl Backend for HppaBackend {
         // ── Patch _start call to main ──
         // For large binaries (>256KB), the _start call can't reach main via BL.
         // Use the _start trampoline (emitted right after the _start stub):
-        //   1. Patch the trampoline's ss_load_imm with main's absolute address
-        //   2. Patch the _start call site with BL to the trampoline (short distance)
-        // For small binaries, BL can reach main directly — use patch_call_site.
+        // W4-hppa: Use the same patch_call_site as inter-function calls.
+        // The _start call pattern now uses LDIL+LDO+BV (same as regular calls),
+        // so patch_call_site can handle it uniformly — short (BL), medium (BL,n),
+        // or long (LDIL+LDO) — without any special trampoline handling.
         let main_key = func_offsets
             .keys()
             .find(|k| *k == "main" || k.starts_with("fn_main"))
             .cloned();
         if let Some(ref key) = main_key {
-            let main_offset = func_offsets[key] as i64;
-            // Find the BL,n +0, R1 (0xE8200000) in the first 128 bytes.
-            let mut start_call_offset = 0usize;
-            for off in (0..128).step_by(4) {
-                if off + 4 <= all_code.len() {
-                    let w = u32::from_be_bytes([
-                        all_code[off],
-                        all_code[off + 1],
-                        all_code[off + 2],
-                        all_code[off + 3],
-                    ]);
-                    if w == 0xE8200000 {
-                        start_call_offset = off;
-                        break;
-                    }
-                }
-            }
-            // Check if BL can reach main directly
-            let direct_disp = main_offset - (start_call_offset as i64) - 8;
-            if direct_disp.abs() <= 262140 && direct_disp % 4 == 0 {
-                // Small binary: BL can reach main directly
-                patch_call_site(
-                    &mut all_code,
-                    start_call_offset,
-                    main_offset as usize,
-                    &mut trampolines,
-                );
-            } else {
-                // Large binary: use the _start trampoline
-                // Patch trampoline's ss_load_imm with main's absolute address
-                const TEXT_OFFSET: u64 = 192;
-                let main_vaddr = (0x10000u64 + TEXT_OFFSET + main_offset as u64) as i64;
-                let tramp_imm = ss_load_imm(R1, main_vaddr);
-                let tramp_pos = _start_trampoline_offset;
-                all_code[tramp_pos..tramp_pos + tramp_imm.len()].copy_from_slice(&tramp_imm);
-                // Patch _start call site with BL to trampoline
-                // BL is at start_call_offset + 12, branches to PC+8+disp
-                let bl_disp = (_start_trampoline_offset as i64) - (start_call_offset as i64) - 20;
-                if bl_disp.abs() <= 262140 && bl_disp % 4 == 0 {
-                    let bl = encode_bl(bl_disp as i32);
-                    all_code[start_call_offset + 12..start_call_offset + 16].copy_from_slice(&bl);
-                    let nop = encode_nop();
-                    for off in [16, 20, 24, 28].iter() {
-                        let o = start_call_offset + off;
-                        all_code[o..o + 4].copy_from_slice(&nop);
-                    }
-                }
-            }
+            let main_offset = func_offsets[key];
+            patch_call_site(
+                &mut all_code,
+                _start_call_offset,
+                main_offset,
+                &mut trampolines,
+            );
         }
 
         // ── Patch inter-function calls and GetAddress relocations ──
         // Each call site is a 32-byte pattern (8 instructions).
-        // patch_call_site handles short (BL), medium (1-4 LDOs), and
-        // long (trampoline) cases.
-        // GetAddress uses R_PARISC_DIR32 — a 2-instruction (8-byte) LDIL+LDO
-        // sequence that gets patched with the symbol's absolute address.
+        // W4-hppa: patch_call_site now handles three cases:
+        //   1. BL (short, ±1KB forward, 16-byte aligned)
+        //   2. BL,n (medium, ±256KB)
+        //   3. LDIL+LDO (long, any 32-bit address) — no trampoline needed
+        // GetAddress uses R_PARISC_DIR32 — a 52-byte ss_load_imm pattern
+        // patched with the symbol's absolute address.
         for func in &ordered_functions {
             let func_base = *func_offsets.get(&func.name).unwrap_or(&padded_header_size);
             for reloc in &func.relocations {
@@ -6812,7 +6806,7 @@ impl Backend for HppaBackend {
                     all_code[abs_offset + 48..abs_offset + 52].copy_from_slice(&ldo2);
                     continue;
                 }
-                if abs_offset + 32 > all_code.len() {
+                if abs_offset + 80 > all_code.len() {
                     continue;
                 }
                 let target_offset = func_offsets
@@ -6834,77 +6828,11 @@ impl Backend for HppaBackend {
 
         // ── Emit trampolines for out-of-range calls ──
         // Each trampoline loads the absolute target address using ss_load_imm
-        // and branches via BV. The call site is patched to branch to the
-        // trampoline using the 32-byte pattern's 4-LDO approach.
-        // Since 4 LDOs can reach 32764 bytes, and trampolines are at the end
-        // of the code, this should cover all practical binary sizes.
-        let mut trampoline_offsets: Vec<usize> = Vec::new();
-        for (_call_offset, target_offset) in &trampolines {
-            // Align trampoline to 16 bytes
-            while !all_code.len().is_multiple_of(16) {
-                all_code.extend_from_slice(&encode_nop());
-            }
-            let trampoline_start = all_code.len();
-
-            // Load absolute target address into R1 using ss_load_imm.
-            // text_offset = ((52 + 4*32) + 15) & !15 = 192
-            // BASE_ADDR = 0x10000
-            let target_vaddr = (0x10000u64 + 192 + *target_offset as u64) as i64;
-            all_code.extend(ss_load_imm(R1, target_vaddr));
-            // BV R0(R1) — branch to target
-            all_code.extend_from_slice(&encode_bv_real(R1));
-            all_code.extend_from_slice(&encode_nop()); // delay slot
-
-            trampoline_offsets.push(trampoline_start);
-        }
-
-        // Patch the original call sites to branch to their trampolines.
-        // The call site is a 32-byte pattern. We use the multi-LDO approach
-        // (up to 4 LDOs) to reach the trampoline.
-        for ((call_offset, _target_offset), trampoline_start) in
-            trampolines.iter().zip(trampoline_offsets.iter())
-        {
-            let tramp_disp = (*trampoline_start as i64) - (*call_offset as i64) - 8;
-            if tramp_disp.abs() <= 4 * 8191 {
-                // 4-LDO approach can reach the trampoline.
-                let nop = encode_nop();
-                let mut remaining = tramp_disp;
-                let ldo_positions = [12usize, 16, 20, 24];
-                for &pos in &ldo_positions {
-                    if remaining == 0 {
-                        all_code[*call_offset + pos..*call_offset + pos + 4].copy_from_slice(&nop);
-                    } else {
-                        let chunk = remaining.clamp(-8191, 8191);
-                        let ldo = encode_ldo_raw(R1, chunk as i16, R1);
-                        all_code[*call_offset + pos..*call_offset + pos + 4].copy_from_slice(&ldo);
-                        remaining -= chunk;
-                    }
-                }
-                // BV,n R0(R1) at +28 (nullify +32 = next instruction)
-                let bv_n = 0xE820C002u32 | ((R1 as u32) << 21);
-                all_code[*call_offset + 28..*call_offset + 32].copy_from_slice(&bv_n.to_be_bytes());
-            } else {
-                // 4 LDOs can't reach the trampoline. Use BL directly to
-                // branch to the trampoline (±256KB range).
-                // [K15A-hppa-large-payload] The previous fallback wrote
-                // LDO 0(R1),R1 (no-op), causing an infinite loop.
-                let bl_disp = (tramp_disp - 12) as i32;
-                if bl_disp.abs() <= 262140 && bl_disp % 4 == 0 {
-                    let bl = encode_bl(bl_disp);
-                    let nop = encode_nop();
-                    all_code[*call_offset + 12..*call_offset + 16].copy_from_slice(&bl);
-                    for off in [16, 20, 24, 28].iter() {
-                        let o = *call_offset + off;
-                        all_code[o..o + 4].copy_from_slice(&nop);
-                    }
-                } else {
-                    // Beyond BL range too — leave as LDO 0 (will crash,
-                    // but this requires a binary > 512KB which is unheard of).
-                    let ldo = encode_ldo_raw(R1, 0, R1);
-                    all_code[*call_offset + 12..*call_offset + 16].copy_from_slice(&ldo);
-                }
-            }
-        }
+        // W4-hppa: The old trampoline system is no longer needed.
+        // patch_call_site now uses LDIL+LDO for long calls, which can reach
+        // any 32-bit address without trampolines. The `trampolines` vec is
+        // kept for API compatibility but should always be empty.
+        // (No code emitted here — trampolines are never used.)
 
         // ── Build ELF ──
         let text_offset: u32 = ((52 + 4 * 32) + 15) & !15; // ELF32 header + 4 phdrs, 16-byte aligned
@@ -6940,10 +6868,15 @@ impl Backend for HppaBackend {
         elf.extend_from_slice(&0x1000u32.to_be_bytes()); // p_align
 
         // Phdr 2: LOAD (data, RW)
+        // W4-hppa: Place data segment AFTER text, page-aligned.
+        // Previous vaddr (BASE_ADDR + 0x10000 = 0x20000) overlapped with
+        // the text segment when text_filesz > 0x10000 (64KB), zeroing
+        // out code in the 0x20000-0x21000 region and causing SIGSEGV.
+        let data_vaddr = ((BASE_ADDR + text_filesz as u64 + 0xFFF) & !0xFFF) as u32;
         elf.extend_from_slice(&1u32.to_be_bytes()); // p_type = PT_LOAD
         elf.extend_from_slice(&0u32.to_be_bytes()); // p_offset
-        elf.extend_from_slice(&((BASE_ADDR + 0x10000) as u32).to_be_bytes()); // p_vaddr
-        elf.extend_from_slice(&((BASE_ADDR + 0x10000) as u32).to_be_bytes()); // p_paddr
+        elf.extend_from_slice(&data_vaddr.to_be_bytes()); // p_vaddr
+        elf.extend_from_slice(&data_vaddr.to_be_bytes()); // p_paddr
         elf.extend_from_slice(&0u32.to_be_bytes()); // p_filesz
         elf.extend_from_slice(&0x1000u32.to_be_bytes()); // p_memsz
         elf.extend_from_slice(&6u32.to_be_bytes()); // p_flags = PF_R | PF_W
