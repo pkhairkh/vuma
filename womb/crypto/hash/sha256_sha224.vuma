@@ -95,6 +95,56 @@ layout Sha224W = { w: [u32; 64] }
 // SHA-256's compression constants verbatim.
 layout Sha224K = { k: [u32; 64] }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// SHA-256 (W1-C2 — Wave A-1).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// SHA-256 is SHA-224 with a different IV (FIPS-180-4 §5.3.3) and a
+// non-truncated 32-byte output (all 8 state words, BE per §5.1.2). The
+// 64-round compression function, the K[0..63] round-constants table, the
+// σ/Σ/Ch/Maj helper transforms, the §5.1.1 padding, and the streaming
+// update/final shape are IDENTICAL to SHA-224 (and reuse the same
+// rotr32/ch32/maj32/bsig0_32/bsig1_32/ssig0_32/ssig1_32 helpers above).
+//
+// Canonical FIPS-180-4 §B test vectors:
+//   SHA-256("")    = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+//   SHA-256("abc") = ba7816bf8e01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+//
+// ── Decimal SHA-256 IV bytes (little-endian, FIPS-180-4 §5.3.3) ──────────
+//   Word 0: 0x6a09e667 = 1779033703 → LE bytes 67 e6 09 6a → 103 230 9 106
+//   Word 1: 0xbb67ae85 = 3144134277 → LE bytes 85 ae 67 bb → 133 174 103 187
+//   Word 2: 0x3c6ef372 = 1013904242 → LE bytes 72 f3 6e 3c → 114 243 110 60
+//   Word 3: 0xa54ff53a = 2773480762 → LE bytes 3a f5 4f a5 →  58 245 79 165
+//   Word 4: 0x510e527f = 1359893119 → LE bytes 7f 52 0e 51 → 127  82 14  81
+//   Word 5: 0x9b05688c = 2600822924 → LE bytes 8c 68 05 9b → 140 104  5 155
+//   Word 6: 0x1f83d9ab =  528734635 → LE bytes ab d9 83 1f → 171 217 131 31
+//   Word 7: 0x5be0cd19 = 1541459225 → LE bytes 19 cd e0 5b →  25 205 224  91
+
+// SHA-256 context: 32-byte hash state (8 × 4-byte IV words, stored as
+// little-endian bytes), 64-byte input buffer (SHA-256's block size),
+// in-buffer byte count, and total-bytes-processed counter.
+// (Identical shape to Sha224Ctx — only the IV differs.)
+layout Sha256Ctx = {
+    state: [u8; 32],   // 8 * 4 bytes (hash state, stored as LE bytes)
+    buf: [u8; 64],     // input buffer (one SHA-256 block)
+    len: u32,          // bytes in buffer
+    total: u64,        // total bytes processed
+}
+
+// SHA-256 input data wrapper (64 bytes — one full SHA-256 block).
+layout Sha256Data = { data: [u8; 64] }
+
+// SHA-256 digest output (32 bytes — eight 32-bit hash words serialized
+// big-endian per FIPS-180-4 §5.1.2; NOT truncated like SHA-224's 28).
+layout Sha256Digest = { data: [u8; 32] }
+
+// SHA-256 message schedule (64 × u32 words). (Identical shape to Sha224W.)
+layout Sha256W = { w: [u32; 64] }
+
+// SHA-256 round-constants table (64 × u32 — the SHA-256 K table,
+// FIPS-180-4 §4.2.2; identical values to Sha224K).
+layout Sha256K = { k: [u32; 64] }
+
 // 32-bit mask. VUMA's default integer literal type widens u32 arithmetic
 // to u64; the explicit & MASK32 keeps each round's additions within
 // 32-bit range, matching FIPS-180-4's mod-2^32 arithmetic.
@@ -435,6 +485,301 @@ transform sha224_oneshot(ctx: State<Sha224Ctx>, data: State<Sha224Data>, len: u6
     sha224_init(ctx);
     sha224_update(ctx, data, len);
     sha224_final(ctx, out);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// SHA-256 round-constants loader + state load/store helpers.
+// ────────────────────────────────────────────────────────────────────────────
+// (Mirrors the SHA-224 helpers above but typed for Sha256Ctx / Sha256K so
+// the VUMA param-dispatch picks the SHA-256 overloads. The K[i] values and
+// the LE byte<->u32 word conversions are bit-identical to SHA-224's.)
+
+// sha256_load_k: fill K.k[0..63] with the 64 FIPS-180-4 §4.2.2 round
+// constants (the SHA-256 K table — identical to SHA-224's, repeated here
+// so SHA-256 has a self-contained K layout/transform pair).
+transform sha256_load_k(K: State<Sha256K>) {
+    K.k[0] = 1116352408;
+    K.k[1] = 1899447441;
+    K.k[2] = 3049323471;
+    K.k[3] = 3921009573;
+    K.k[4] = 961987163;
+    K.k[5] = 1508970993;
+    K.k[6] = 2453635748;
+    K.k[7] = 2870763221;
+    K.k[8] = 3624381080;
+    K.k[9] = 310598401;
+    K.k[10] = 607225278;
+    K.k[11] = 1426881987;
+    K.k[12] = 1925078388;
+    K.k[13] = 2162078206;
+    K.k[14] = 2614888103;
+    K.k[15] = 3248222580;
+    K.k[16] = 3835390401;
+    K.k[17] = 4022224774;
+    K.k[18] = 264347078;
+    K.k[19] = 604807628;
+    K.k[20] = 770255983;
+    K.k[21] = 1249150122;
+    K.k[22] = 1555081692;
+    K.k[23] = 1996064986;
+    K.k[24] = 2554220882;
+    K.k[25] = 2821834349;
+    K.k[26] = 2952996808;
+    K.k[27] = 3210313671;
+    K.k[28] = 3336571891;
+    K.k[29] = 3584528711;
+    K.k[30] = 113926993;
+    K.k[31] = 338241895;
+    K.k[32] = 666307205;
+    K.k[33] = 773529912;
+    K.k[34] = 1294757372;
+    K.k[35] = 1396182291;
+    K.k[36] = 1695183700;
+    K.k[37] = 1986661051;
+    K.k[38] = 2177026350;
+    K.k[39] = 2456956037;
+    K.k[40] = 2730485921;
+    K.k[41] = 2820302411;
+    K.k[42] = 3259730800;
+    K.k[43] = 3345764771;
+    K.k[44] = 3516065817;
+    K.k[45] = 3600352804;
+    K.k[46] = 4094571909;
+    K.k[47] = 275423344;
+    K.k[48] = 430227734;
+    K.k[49] = 506948616;
+    K.k[50] = 659060556;
+    K.k[51] = 883997877;
+    K.k[52] = 958139571;
+    K.k[53] = 1322822218;
+    K.k[54] = 1537002063;
+    K.k[55] = 1747873779;
+    K.k[56] = 1955562222;
+    K.k[57] = 2024104815;
+    K.k[58] = 2227730452;
+    K.k[59] = 2361852424;
+    K.k[60] = 2428436474;
+    K.k[61] = 2756734187;
+    K.k[62] = 3204031479;
+    K.k[63] = 3329325298;
+}
+
+// load_state_le_256: read 4 LE bytes from ctx.state[base..base+3] as a u32.
+transform load_state_le_256(ctx: State<Sha256Ctx>, base: u64) -> u32 {
+    let b0 = ctx.state[base] as u32;
+    let b1 = ctx.state[base + 1] as u32;
+    let b2 = ctx.state[base + 2] as u32;
+    let b3 = ctx.state[base + 3] as u32;
+    return (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & MASK32;
+}
+
+// add_state_word_256: fold a working-variable value into the running state.
+// new_state[base..base+3] (LE) = old_state[base..base+3] (LE) + val
+// (mod 2^32). Used by sha256_compress step 4 (H[i] += working[i]).
+transform add_state_word_256(ctx: State<Sha256Ctx>, base: u64, val: u32) {
+    let old = load_state_le_256(ctx, base);
+    let acc = (val + old) & MASK32;
+    ctx.state[base] = (acc & 255) as u8;
+    ctx.state[base + 1] = ((acc >> 8) & 255) as u8;
+    ctx.state[base + 2] = ((acc >> 16) & 255) as u8;
+    ctx.state[base + 3] = ((acc >> 24) & 255) as u8;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// SHA-256 API functions (FIPS-180-4 §6.2).
+// ────────────────────────────────────────────────────────────────────────────
+// Compression / update / final mirror the SHA-224 transforms above (the
+// compression function, message schedule, padding, and σ/Σ/Ch/Maj helpers
+// are identical between SHA-224 and SHA-256). ONLY the IV (§5.3.3) and
+// the digest output length (32 bytes vs 28) differ.
+
+// sha256_init: seed the SHA-256 initial hash state (FIPS-180-4 §5.3.3)
+// into ctx. Writes ALL 8 SHA-256 IV words (byte-by-byte, little-endian)
+// into ctx.state[0..31], sets ctx.len = ctx.total = 0.
+transform sha256_init(ctx: State<Sha256Ctx>) {
+    // H0 = 0x6a09e667 → LE bytes: 67 e6 09 6a.
+    ctx.state[0] = 103; ctx.state[1] = 230; ctx.state[2] = 9; ctx.state[3] = 106;
+    // H1 = 0xbb67ae85 → LE: 85 ae 67 bb.
+    ctx.state[4] = 133; ctx.state[5] = 174; ctx.state[6] = 103; ctx.state[7] = 187;
+    // H2 = 0x3c6ef372 → LE: 72 f3 6e 3c.
+    ctx.state[8] = 114; ctx.state[9] = 243; ctx.state[10] = 110; ctx.state[11] = 60;
+    // H3 = 0xa54ff53a → LE: 3a f5 4f a5.
+    ctx.state[12] = 58; ctx.state[13] = 245; ctx.state[14] = 79; ctx.state[15] = 165;
+    // H4 = 0x510e527f → LE: 7f 52 0e 51.
+    ctx.state[16] = 127; ctx.state[17] = 82; ctx.state[18] = 14; ctx.state[19] = 81;
+    // H5 = 0x9b05688c → LE: 8c 68 05 9b.
+    ctx.state[20] = 140; ctx.state[21] = 104; ctx.state[22] = 5; ctx.state[23] = 155;
+    // H6 = 0x1f83d9ab → LE: ab d9 83 1f.
+    ctx.state[24] = 171; ctx.state[25] = 217; ctx.state[26] = 131; ctx.state[27] = 31;
+    // H7 = 0x5be0cd19 → LE: 19 cd e0 5b.
+    ctx.state[28] = 25; ctx.state[29] = 205; ctx.state[30] = 224; ctx.state[31] = 91;
+    ctx.len = 0;
+    ctx.total = 0;
+}
+
+// sha256_compress: fold one 64-byte block (ctx.buf) into ctx.state via
+// the FIPS-180-4 §6.2.2 64-round SHA-256 compression. IDENTICAL algorithm
+// to sha224_compress (same K constants, same σ/Σ/Ch/Maj helpers) — only
+// the type annotations differ (Sha256Ctx / Sha256W / Sha256K).
+transform sha256_compress(ctx: State<Sha256Ctx>) {
+    let W = state_new(Sha256W);
+    let K = state_new(Sha256K);
+    sha256_load_k(K);
+
+    // Step 1: build the 64-word message schedule.
+    // W[0..15] = big-endian load of ctx.buf[i*4..i*4+3] (§5.1.2).
+    let i = 0;
+    while i < 16 {
+        let off = i * 4;
+        let b0 = ctx.buf[off] as u32;
+        let b1 = ctx.buf[off + 1] as u32;
+        let b2 = ctx.buf[off + 2] as u32;
+        let b3 = ctx.buf[off + 3] as u32;
+        W.w[i] = ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) & MASK32;
+        i = i + 1;
+    }
+    // W[16..63] = W[i-16] + ssig0(W[i-15]) + W[i-7] + ssig1(W[i-2])  (§6.2.2).
+    i = 16;
+    while i < 64 {
+        let w15 = W.w[i - 15];
+        let w2 = W.w[i - 2];
+        let w7 = W.w[i - 7];
+        let w16 = W.w[i - 16];
+        W.w[i] = (w16 + ssig0_32(w15) + w7 + ssig1_32(w2)) & MASK32;
+        i = i + 1;
+    }
+
+    // Step 2: initialize working variables a..h from ctx.state (LE load).
+    let a = load_state_le_256(ctx, 0);
+    let b = load_state_le_256(ctx, 4);
+    let c = load_state_le_256(ctx, 8);
+    let d = load_state_le_256(ctx, 12);
+    let e = load_state_le_256(ctx, 16);
+    let f = load_state_le_256(ctx, 20);
+    let g = load_state_le_256(ctx, 24);
+    let h = load_state_le_256(ctx, 28);
+
+    // Step 3: 64 SHA-256 rounds (FIPS-180-4 §6.2.2).
+    let r = 0;
+    while r < 64 {
+        let ki = K.k[r];
+        let wi = W.w[r];
+        let t1 = (h + bsig1_32(e) + ch32(e, f, g) + ki + wi) & MASK32;
+        let t2 = (bsig0_32(a) + maj32(a, b, c)) & MASK32;
+        h = g;
+        g = f;
+        f = e;
+        e = (d + t1) & MASK32;
+        d = c;
+        c = b;
+        b = a;
+        a = (t1 + t2) & MASK32;
+        r = r + 1;
+    }
+
+    // Step 4: fold a..h back into ctx.state (H[i] += working[i] mod 2^32).
+    add_state_word_256(ctx, 0, a);
+    add_state_word_256(ctx, 4, b);
+    add_state_word_256(ctx, 8, c);
+    add_state_word_256(ctx, 12, d);
+    add_state_word_256(ctx, 16, e);
+    add_state_word_256(ctx, 20, f);
+    add_state_word_256(ctx, 24, g);
+    add_state_word_256(ctx, 28, h);
+}
+
+// sha256_update: absorb `len` bytes of data into the hash state.
+// Identical streaming logic to sha224_update (SHA-256 and SHA-224 share
+// the 64-byte block size + 0x80/length padding scheme).
+transform sha256_update(ctx: State<Sha256Ctx>, data: State<Sha256Data>, len: u64) {
+    let i = 0;
+    while i < len {
+        if ctx.len < 64 {
+            ctx.buf[ctx.len] = data.data[i];
+            ctx.len = ctx.len + 1;
+            if ctx.len == 64 {
+                sha256_compress(ctx);
+                ctx.len = 0;
+            }
+        }
+        i = i + 1;
+    }
+    ctx.total = ctx.total + len;
+}
+
+// sha256_final: emit the 32-byte SHA-256 digest into `out`.
+//
+// Same padding as sha224_final (FIPS-180-4 §5.1.1) but serializes ALL 8
+// state words as 32 big-endian bytes (FIPS-180-4 §5.1.2) — SHA-256 does
+// NOT truncate (no §6.2.3 step 3).
+transform sha256_final(ctx: State<Sha256Ctx>, out: State<Sha256Digest>) {
+    let total_bits = ctx.total * 8;
+
+    // Step 1: append the 0x80 padding bit at ctx.buf[ctx.len].
+    ctx.buf[ctx.len] = 128;
+    let pos = ctx.len + 1;
+
+    // Step 2: zero-pad to offset 56 (mod 64). Single-block when pos <= 56
+    // (the 0x80 lands at offset <= 55, leaving exactly 8 bytes 56..63 for
+    // the bit-count suffix). Two-block when pos > 56.
+    if pos <= 56 {
+        let p = pos;
+        while p < 56 {
+            ctx.buf[p] = 0;
+            p = p + 1;
+        }
+    } else {
+        let p = pos;
+        while p < 64 {
+            ctx.buf[p] = 0;
+            p = p + 1;
+        }
+        ctx.len = 64;
+        sha256_compress(ctx);
+        ctx.len = 0;
+        let q = 0;
+        while q < 56 {
+            ctx.buf[q] = 0;
+            q = q + 1;
+        }
+    }
+
+    // Step 3: 64-bit big-endian bit count at ctx.buf[56..63].
+    ctx.buf[56] = ((total_bits >> 56) & 255) as u8;
+    ctx.buf[57] = ((total_bits >> 48) & 255) as u8;
+    ctx.buf[58] = ((total_bits >> 40) & 255) as u8;
+    ctx.buf[59] = ((total_bits >> 32) & 255) as u8;
+    ctx.buf[60] = ((total_bits >> 24) & 255) as u8;
+    ctx.buf[61] = ((total_bits >> 16) & 255) as u8;
+    ctx.buf[62] = ((total_bits >> 8) & 255) as u8;
+    ctx.buf[63] = (total_bits & 255) as u8;
+
+    // Step 4: final compression (the second compression in the overflow
+    // case — the first was done in step 2's else branch).
+    ctx.len = 64;
+    sha256_compress(ctx);
+
+    // Step 5: serialize ALL 8 state words as 32 big-endian bytes
+    // (FIPS-180-4 §5.1.2 — NO truncation, unlike SHA-224).
+    let i = 0;
+    while i < 8 {
+        let base = i * 4;
+        let word = load_state_le_256(ctx, base);
+        out.data[base] = ((word >> 24) & 255) as u8;
+        out.data[base + 1] = ((word >> 16) & 255) as u8;
+        out.data[base + 2] = ((word >> 8) & 255) as u8;
+        out.data[base + 3] = (word & 255) as u8;
+        i = i + 1;
+    }
+}
+
+// sha256_oneshot: convenience wrapper — init a fresh context, absorb
+// `len` bytes of `data`, finalise into `out`. (Mirrors sha224_oneshot;
+// the caller allocates ctx/data/out.)
+transform sha256_oneshot(ctx: State<Sha256Ctx>, data: State<Sha256Data>, len: u64, out: State<Sha256Digest>) {
+    sha256_init(ctx);
+    sha256_update(ctx, data, len);
+    sha256_final(ctx, out);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
