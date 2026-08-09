@@ -6563,25 +6563,32 @@ impl Backend for Arm32Backend {
                         let dst_id = dst.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
                         let mut code = Vec::new();
-                        let is_64bit = matches!(ty, Some(crate::ir::IRType::I64) | Some(crate::ir::IRType::U64));
+                        // Treat ty:None as 64-bit (matches BinOp handler policy).
+                        // Safe because 32-bit values have high=0, so ADD+ADC
+                        // of high words is 0+0+carry=carry, which is 0 for
+                        // non-overflowing 32-bit adds.
+                        let is_64bit = matches!(ty, Some(crate::ir::IRType::I64) | Some(crate::ir::IRType::U64))
+                            || ty.is_none();
                         let is_move = matches!(rhs, crate::ir::IRValue::Immediate(0));
-                        if is_move && (is_64bit || ty.is_none()) {
-                            // 64-bit move: copy both words of lhs to dst
-                            code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, lhs, &vreg_stack_slots));
-                            code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
-                        } else if is_64bit {
-                            // 64-bit add with carry
-                            code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, lhs, &vreg_stack_slots));
-                            code.extend(ss_load_value_64(Gpr::R1, Gpr::R3, rhs, &vreg_stack_slots));
-                            code.extend_from_slice(&encode_dp_reg(
-                                Condition::Al, DP_ADD, true,
-                                Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
-                            ));
-                            code.extend_from_slice(&encode_dp_reg(
-                                Condition::Al, DP_ADC, true,
-                                Gpr::R2.encoding(), Gpr::R2.encoding(), Gpr::R3.encoding(),
-                            ));
-                            code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
+                        if is_64bit {
+                            if is_move {
+                                // 64-bit move: copy both words of lhs to dst
+                                code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, lhs, &vreg_stack_slots));
+                                code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
+                            } else {
+                                // 64-bit add with carry
+                                code.extend(ss_load_value_64(Gpr::R0, Gpr::R2, lhs, &vreg_stack_slots));
+                                code.extend(ss_load_value_64(Gpr::R1, Gpr::R3, rhs, &vreg_stack_slots));
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Al, DP_ADD, true,
+                                    Gpr::R0.encoding(), Gpr::R0.encoding(), Gpr::R1.encoding(),
+                                ));
+                                code.extend_from_slice(&encode_dp_reg(
+                                    Condition::Al, DP_ADC, true,
+                                    Gpr::R2.encoding(), Gpr::R2.encoding(), Gpr::R3.encoding(),
+                                ));
+                                code.extend(ss_store_64(Gpr::R0, Gpr::R2, dst_offset));
+                            }
                         } else {
                             // 32-bit add: operate on low word only, zero high word
                             code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
@@ -7332,22 +7339,24 @@ impl Backend for Arm32Backend {
                                 code.extend(ss_store_64(Gpr::R0, Gpr::R1, dst_offset));
                             }
                             _ => {
-                                // Default: 32-bit word load
+                                // Default: treat as 64-bit load (matches x86_32 policy).
+                                // For ty:None, we don't know if the value is 32-bit or
+                                // 64-bit, so we load both words. This is safe because:
+                                // - Stack slots are 8 bytes, so reading 8 bytes is in-bounds.
+                                // - For 32-bit values, the high word was zeroed by the
+                                //   previous store, so loading it as 0 is correct.
+                                // - For 64-bit values, both words are loaded correctly.
+                                // LDR R0, [R3, #0]  (low word)
                                 code.extend_from_slice(&encode_ls_imm(
                                     Condition::Al, true, true, false, false, true,
                                     Gpr::R3.encoding(), Gpr::R0.encoding(), 0,
-                                )); // LDR R0, [R3, #0]
-                                code.extend(ss_store_32_zero(Gpr::R0, dst_offset, fs));
-                                // Zero the high word — loads produce 32-bit results,
-                                // but stack slots are 8 bytes. Without zeroing, the
-                                // high word contains garbage from a previous value.
-                                // When a 64-bit operation (e.g. Shl) later loads
-                                // both words via ss_load_value_64, the garbage high
-                                // word corrupts the result.
-                                code.extend_from_slice(&encode_dp_imm(
-                                    Condition::Al, DP_MOV, false, 0, Gpr::R1.encoding(), 0, 0,
-                                )); // MOV R1, #0
-                                code.extend(ss_store_to_slot(Gpr::R1, dst_offset + 4));
+                                ));
+                                // LDR R1, [R3, #4]  (high word)
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, false, false, true,
+                                    Gpr::R3.encoding(), Gpr::R1.encoding(), 4,
+                                ));
+                                code.extend(ss_store_64(Gpr::R0, Gpr::R1, dst_offset));
                             }
                         }
                         code
@@ -7411,10 +7420,20 @@ impl Backend for Arm32Backend {
                                 ));
                             }
                             _ => {
+                                // Default: treat as 64-bit store (matches x86_32 policy).
+                                // For ty:None, store both words to be safe.
+                                // ss_load_value_64 loads lo into R0, hi into R1.
+                                code.extend(ss_load_value_64(Gpr::R0, Gpr::R1, value, &vreg_stack_slots));
+                                // STR R0, [R3, #0]  (low word)
                                 code.extend_from_slice(&encode_ls_imm(
                                     Condition::Al, true, true, false, false, false,
                                     Gpr::R3.encoding(), Gpr::R0.encoding(), 0,
-                                )); // STR R0, [R3, #0]
+                                ));
+                                // STR R1, [R3, #4]  (high word)
+                                code.extend_from_slice(&encode_ls_imm(
+                                    Condition::Al, true, true, false, false, false,
+                                    Gpr::R3.encoding(), Gpr::R1.encoding(), 4,
+                                ));
                             }
                         }
                         code

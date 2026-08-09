@@ -1,0 +1,12 @@
+// Minimal u64 add test: (0x123456789ABCDEF0 + 0x0FEDCBA987654321) >> 56
+// Expected: 0x22 = 34
+
+transform main() -> i32 {
+    let a: u64 = 0x123456789ABCDEF0;
+    let b: u64 = 0x0FEDCBA987654321;
+    let c = a + b;
+    // c = 0x2222222212222221
+    // c >> 56 = 0x22 = 34
+    let d = c >> 56;
+    return d as i32;
+}

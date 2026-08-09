@@ -1,0 +1,10 @@
+// Test SHA-384 initial value pattern: (2147483648 << 32) | lower
+// H0I = (2147483648 << 32) | 5457128399485378264
+// Expected: 0xcbbb9d5dc1059ed8
+// Top byte (>> 56) = 0xcb = 203
+
+transform main() -> i32 {
+    let h0i: u64 = (2147483648 << 32) | 5457128399485378264;
+    let top = h0i >> 56;
+    return top as i32;
+}

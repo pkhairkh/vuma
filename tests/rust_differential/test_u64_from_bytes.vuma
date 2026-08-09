@@ -1,0 +1,33 @@
+// Test: build u64 from bytes (SHA-512 pattern)
+// bytes = [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0]
+// Expected u64 = 0x123456789ABCDEF0
+// Top byte (>> 56) = 0x12 = 18
+
+layout Buf = { b: [u8; 8] }
+
+transform main() -> i32 {
+    let buf = state_new(Buf);
+    buf.b[0] = 18;   // 0x12
+    buf.b[1] = 52;   // 0x34
+    buf.b[2] = 86;   // 0x56
+    buf.b[3] = 120;  // 0x78
+    buf.b[4] = 154;  // 0x9A
+    buf.b[5] = 188;  // 0xBC
+    buf.b[6] = 222;  // 0xDE
+    buf.b[7] = 240;  // 0xF0
+
+    let b0 = buf.b[0] as u64;
+    let b1 = buf.b[1] as u64;
+    let b2 = buf.b[2] as u64;
+    let b3 = buf.b[3] as u64;
+    let b4 = buf.b[4] as u64;
+    let b5 = buf.b[5] as u64;
+    let b6 = buf.b[6] as u64;
+    let b7 = buf.b[7] as u64;
+
+    let val = (b0 << 56) | (b1 << 48) | (b2 << 40) | (b3 << 32)
+            | (b4 << 24) | (b5 << 16) | (b6 << 8) | b7;
+
+    let top = val >> 56;
+    return top as i32;
+}

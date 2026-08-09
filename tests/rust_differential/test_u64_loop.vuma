@@ -1,0 +1,25 @@
+// u64 add in a loop: sum 0x10000 ten times, return top byte
+// 0x10000 * 10 = 0xA0000
+// Starting from 0xFF00FF00FF00FF00:
+// 0xFF00FF00FF00FF00 + 0xA0000 = 0xFF00FF00FF0A0000 (approximately)
+// Let's just do: start=0, add 0x123456789ABCDEF0 ten times
+// 10 * 0x123456789ABCDEF0 = 0xB333333332B333338 (approx, with overflow)
+// Actually: 0x123456789ABCDEF0 * 10 = 0x0B0A0B0A0B0A0B0A0 (overflows u64)
+// Let's just return (sum >> 56) to get the top byte
+
+transform main() -> i32 {
+    let sum: u64 = 0;
+    let i = 0;
+    while i < 10 {
+        sum = sum + 0x123456789ABCDEF0;
+        i = i + 1;
+    }
+    // 10 * 0x123456789ABCDEF0 = 0xB3333333352B33338 (overflows)
+    // Low 64 bits: (0x123456789ABCDEF0 * 10) mod 2^64
+    // = 0x123456789ABCDEF0 * 10 = 1311768467463790320 * 10 = 13117684674637903200
+    // 13117684674637903200 mod 2^64 = 13117684674637903200 - 0 = 13117684674637903200
+    // hex: 0xB615A4D2E2589760
+    // >> 56 = 0xB6 = 182
+    let top = sum >> 56;
+    return top as i32;
+}

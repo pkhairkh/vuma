@@ -1,0 +1,28 @@
+// u64 array access test
+// Load a u64 from an array, return top byte
+
+layout K = { k: [u64; 4] }
+
+transform main() -> i32 {
+    let k = state_new(K);
+    k.k[0] = 0x123456789ABCDEF0;
+    k.k[1] = 0xFEDCBA9876543210;
+    k.k[2] = 0x0F0F0F0F0F0F0F0F;
+    k.k[3] = 0xFF00FF00FF00FF00;
+
+    let sum: u64 = 0;
+    let i = 0;
+    while i < 4 {
+        sum = sum + k.k[i];
+        i = i + 1;
+    }
+    // sum = 0x123456789ABCDEF0 + 0xFEDCBA9876543210 + 0x0F0F0F0F0F0F0F0F + 0xFF00FF00FF00FF00
+    // = 0x2FFFFFFFFFFFFFFF (with carry)
+    // Let me compute: 
+    // 0x123456789ABCDEF0 + 0xFEDCBA9876543210 = 0x11111111111111100 (overflow, low=0x1111111111111100)
+    // + 0x0F0F0F0F0F0F0F0F = 0x2020202020202020F (overflow, low=0x020202020202020F)
+    // + 0xFF00FF00FF00FF00 = 0x10103010103010110F (overflow, low=0x010303010303010F)
+    // Top byte (>> 56) = 0x01 = 1
+    let top = sum >> 56;
+    return top as i32;
+}

@@ -1,0 +1,14 @@
+// u64 ROTR test: ROTR(0x123456789ABCDEF0, 32) = 0x9ABCDEF012345678
+// Return top byte: 0x9A = 154
+
+transform main() -> i32 {
+    let x: u64 = 0x123456789ABCDEF0;
+    // ROTR(x, 32) = (x >> 32) | (x << 32)
+    let hi = x >> 32;
+    let lo = x << 32;
+    let r = hi | lo;
+    // r = 0x9ABCDEF012345678
+    // top byte = 0x9A = 154
+    let top = r >> 56;
+    return top as i32;
+}
