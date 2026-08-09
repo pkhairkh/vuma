@@ -1,6 +1,13 @@
 // womb/crypto/rsa_oaep_pss.vuma — RSA-OAEP and RSA-PSS (PKCS#1 v2.1, RFC 8017)
 // No main() — importable library module.
-// Requires: bignum2048.vuma, sha256.vuma, sha3.vuma (for SHA-3-256 in MGF1).
+//
+// VUMA 2.0 PMT-native: state_new(Layout) / State<T> / [u8;N] arrays.
+// All allocate/free/Address/*ptr removed (arena auto-frees on return).
+//
+// Requires (all VUMA 2.0 PMT-native):
+//   - bignum2048.vuma (bn2048_mod_exp on State<Bn2048Ctx>)
+//   - sha256_sha224.vuma (sha256_init / sha256_update / sha256_final)
+//   - sha3.vuma (sha3_256_oneshot on State<KeccakIn> / State<KeccakOut>)
 //
 // Implements:
 //   - MGF1                (RFC 8017 Section B.2.1) with SHA-256 or SHA-3-256
@@ -20,12 +27,28 @@
 //
 // Error handling: every function uses a single return path. Each step is
 // guarded by an `err == 0` check, and any failure sets `err` and skips all
-// subsequent work, falling through to one common cleanup section that frees
-// every allocation exactly once. This eliminates the early-return pattern
-// entirely and makes resource ownership explicit.
+// subsequent work, falling through to one common cleanup section. With
+// arena allocation, "cleanup" is implicit — state_new handles are
+// auto-freed on transform return.
 
 const HLEN: u32 = 32;        // SHA-256 / SHA-3-256 output length (bytes)
-const BN_BYTES: u32 = 256;   // 2048-bit bignum byte length (bignum2048.vuma)
+const BN_BYTES: u32 = 256;  // 2048-bit bignum byte length (bignum2048.vuma)
+
+// ===========================================================================
+// Layouts
+// ===========================================================================
+
+// 256-byte buffer: EM, maskedDB, dbMask, bignum byte-strings, etc.
+layout Rsa256 = { bytes: [u8; 256] }
+
+// 32-byte buffer: lHash, seed, maskedSeed, seedMask, H, mHash, Hprime.
+layout RsaHash = { bytes: [u8; 32] }
+
+// 104-byte buffer: M' = (0x00 * 8) || mHash || salt for PSS (max salt_len = 64).
+layout RsaMprime = { bytes: [u8; 104] }
+
+// SHA-256 / SHA-3 input buffer (up to 256 bytes — covers full RSA-2048 EM).
+layout RsaHashInput = { bytes: [u8; 256] }
 
 // ===========================================================================
 // Byte-order conversion helpers.
@@ -34,58 +57,115 @@ const BN_BYTES: u32 = 256;   // 2048-bit bignum byte length (bignum2048.vuma)
 // zero-pad the bignum up to 2048 bits.
 // ===========================================================================
 
-transform em_to_bn(bn: Address, em: Address, key_size: u32) {
-    i: u32 = 0;
+transform em_to_bn(bn: State<Rsa256>, em: State<Rsa256>, key_size: u32) {
+    let i: u32 = 0;
     while i < key_size {
-        *(bn + i) = *(em + key_size - 1 - i);
+        let inv: u32 = key_size - 1 - i;
+        bn.bytes[i] = em.bytes[inv];
         i = i + 1;
     }
     while i < BN_BYTES {
-        *(bn + i) = 0;
+        bn.bytes[i] = 0;
         i = i + 1;
     }
 }
 
-transform bn_to_em(em: Address, bn: Address, key_size: u32) {
-    i: u32 = 0;
+transform bn_to_em(em: State<Rsa256>, bn: State<Rsa256>, key_size: u32) {
+    let i: u32 = 0;
     while i < key_size {
-        *(em + i) = *(bn + key_size - 1 - i);
+        let inv: u32 = key_size - 1 - i;
+        em.bytes[i] = bn.bytes[inv];
         i = i + 1;
     }
+}
+
+// ===========================================================================
+// SHA-256 streaming helper. The sha256 module's Sha256Data layout holds
+// only 64 bytes per call; this transform absorbs up to 256 bytes via
+// repeated sha256_update calls into a 32-byte digest.
+// ===========================================================================
+transform oaep_sha256(data: State<Rsa256>, len: u32, out: State<RsaHash>) {
+    let ctx = state_new(Sha256Ctx);
+    sha256_init(ctx);
+    let chunk = state_new(Sha256Data);
+    let pos: u32 = 0;
+    while pos < len {
+        let remaining: u32 = len - pos;
+        let chunk_len: u32 = 64;
+        if remaining < 64 { chunk_len = remaining; }
+        // Zero the chunk buffer (clean state for unused tail bytes).
+        let i: u32 = 0;
+        while i < 64 { chunk.data[i] = 0; i = i + 1; }
+        // Copy chunk_len bytes from data[pos..pos+chunk_len].
+        i = 0;
+        while i < chunk_len { chunk.data[i] = data.bytes[pos + i]; i = i + 1; }
+        sha256_update(ctx, chunk, chunk_len as u64);
+        pos = pos + chunk_len;
+    }
+    let digest = state_new(Sha256Digest);
+    sha256_final(ctx, digest);
+    let j: u32 = 0;
+    while j < HLEN { out.bytes[j] = digest.data[j]; j = j + 1; }
 }
 
 // ===========================================================================
 // Hash dispatcher: 0 = SHA-256, 1 = SHA-3-256
+// Both produce a 32-byte digest. SHA-3-256 takes a KeccakIn (200-byte
+// block); we copy `len` bytes of `data` into the KeccakIn buffer and call
+// sha3_256_oneshot. SHA-256 uses the streaming oaep_sha256 helper above.
 // ===========================================================================
-
-transform hash_oneshot(data: Address, len: u32, out: Address, hash_func: u32) {
+transform hash_oneshot(data: State<Rsa256>, len: u32, out: State<RsaHash>, hash_func: u32) {
     if hash_func == 1 {
-        sha3_256_oneshot(data, len, out);
+        let kin = state_new(KeccakIn);
+        // Zero the 200-byte KeccakIn buffer.
+        let i: u32 = 0;
+        while i < 200 { kin.data[i] = 0; i = i + 1; }
+        // Copy `len` bytes of input (capped at 256 — the Rsa256 capacity).
+        i = 0;
+        while i < len { kin.data[i] = data.bytes[i]; i = i + 1; }
+        let kout = state_new(KeccakOut);
+        sha3_256_oneshot(kin, len as u64, kout);
+        let j: u32 = 0;
+        while j < HLEN { out.bytes[j] = kout.data[j]; j = j + 1; }
     } else {
-        sha256_oneshot(data, len, out);
+        oaep_sha256(data, len, out);
     }
 }
 
 // ===========================================================================
 // xor_bytes: dst[i] = dst[i] XOR src[i] for i in [0, n)
 // ===========================================================================
-
-transform xor_bytes(dst: Address, src: Address, n: u32) {
-    i: u32 = 0;
+transform xor_bytes(dst: State<Rsa256>, src: State<Rsa256>, n: u32) {
+    let i: u32 = 0;
     while i < n {
-        d: u32 = *(dst + i);
-        s: u32 = *(src + i);
-        *(dst + i) = (d ^ s) & 255;
+        let d: u32 = dst.bytes[i] as u32;
+        let s: u32 = src.bytes[i] as u32;
+        dst.bytes[i] = ((d ^ s) & 255) as u8;
         i = i + 1;
     }
 }
 
 // Constant-time byte comparison. Returns 0 on equal, nonzero otherwise.
-transform oaep_cteq(a: Address, b: Address, n: u32) -> u32 {
-    diff: u32 = 0;
-    i: u32 = 0;
+transform oaep_cteq(a: State<Rsa256>, b: State<Rsa256>, n: u32) -> u32 {
+    let diff: u32 = 0;
+    let i: u32 = 0;
     while i < n {
-        diff = diff | (*(a + i) ^ *(b + i));
+        let av: u32 = a.bytes[i] as u32;
+        let bv: u32 = b.bytes[i] as u32;
+        diff = diff | (av ^ bv);
+        i = i + 1;
+    }
+    return diff;
+}
+
+// Constant-time byte comparison for 32-byte hash buffers.
+transform oaep_cteq_hash(a: State<RsaHash>, b: State<RsaHash>) -> u32 {
+    let diff: u32 = 0;
+    let i: u32 = 0;
+    while i < HLEN {
+        let av: u32 = a.bytes[i] as u32;
+        let bv: u32 = b.bytes[i] as u32;
+        diff = diff | (av ^ bv);
         i = i + 1;
     }
     return diff;
@@ -99,46 +179,46 @@ transform oaep_cteq(a: Address, b: Address, n: u32) -> u32 {
 //   T = T || Hash(seed || I2OSP(counter, 4))  for counter = 0, 1, ...
 //   mask = leading mask_len bytes of T
 // ===========================================================================
+transform mgf1(seed: State<Rsa256>, seed_len: u32, mask: State<Rsa256>, mask_len: u32, hash_func: u32) {
+    // buf = seed || I2OSP(counter, 4). Rsa256 holds up to 256 bytes; seed_len
+    // is at most 256 - 4 = 252 here (well under the limit for any OAEP/PSS
+    // salt/label/EM use case).
+    let buf = state_new(Rsa256);
+    let hash_out = state_new(RsaHash);
 
-transform mgf1(seed: Address, seed_len: u32, mask: Address, mask_len: u32, hash_func: u32) {
-    buf = allocate(seed_len + 4);
-    hash_out = allocate(HLEN);
-
-    // Copy seed into buf[0 .. seed_len]
-    i: u32 = 0;
+    // Copy seed into buf[0..seed_len]
+    let i: u32 = 0;
     while i < seed_len {
-        *(buf + i) = *(seed + i);
+        buf.bytes[i] = seed.bytes[i];
         i = i + 1;
     }
 
-    counter: u32 = 0;
-    written: u32 = 0;
+    let counter: u32 = 0;
+    let written: u32 = 0;
     while written < mask_len {
         // Write I2OSP(counter, 4) big-endian at buf + seed_len
-        *(buf + seed_len + 0) = (counter >> 24) & 255;
-        *(buf + seed_len + 1) = (counter >> 16) & 255;
-        *(buf + seed_len + 2) = (counter >> 8) & 255;
-        *(buf + seed_len + 3) = counter & 255;
+        buf.bytes[seed_len + 0] = ((counter >> 24) & 255) as u8;
+        buf.bytes[seed_len + 1] = ((counter >> 16) & 255) as u8;
+        buf.bytes[seed_len + 2] = ((counter >> 8) & 255) as u8;
+        buf.bytes[seed_len + 3] = (counter & 255) as u8;
 
         // hash_out = Hash(seed || C)
-        hash_oneshot(buf, seed_len + 4, hash_out, hash_func);
+        let total: u32 = seed_len + 4;
+        hash_oneshot(buf, total, hash_out, hash_func);
 
         // Copy min(HLEN, mask_len - written) bytes into mask
-        remaining: u32 = mask_len - written;
-        to_copy: u32 = HLEN;
+        let remaining: u32 = mask_len - written;
+        let to_copy: u32 = HLEN;
         if remaining < HLEN { to_copy = remaining; }
 
-        j: u32 = 0;
+        let j: u32 = 0;
         while j < to_copy {
-            *(mask + written + j) = *(hash_out + j);
+            mask.bytes[written + j] = hash_out.bytes[j];
             j = j + 1;
         }
         written = written + to_copy;
         counter = counter + 1;
     }
-
-    free(buf);
-    free(hash_out);
 }
 
 // ===========================================================================
@@ -146,29 +226,28 @@ transform mgf1(seed: Address, seed_len: u32, mask: Address, mask_len: u32, hash_
 //   rsa_oaep_encrypt(msg, msg_len, e, n, key_size, label, label_len,
 //                    random, ciphertext) -> u32
 //   Returns key_size on success, 0 on error.
-//   ciphertext must point to a key_size-byte output buffer.
+//   ciphertext must point to a key_size-byte output buffer (State<Rsa256>).
 // ===========================================================================
-
-transform rsa_oaep_encrypt(msg: Address, msg_len: u32, e: Address, n: Address, key_size: u32, label: Address, label_len: u32, random: Address, ciphertext: Address) -> u32 {
+transform rsa_oaep_encrypt(msg: State<Rsa256>, msg_len: u32, e: State<Rsa256>, n: State<Rsa256>, key_size: u32, label: State<Rsa256>, label_len: u32, random: State<Rsa256>, ciphertext: State<Rsa256>) -> u32 {
     // Single-error-path layout: every allocation happens up front, every step
-    // is guarded by `err == 0`, and one cleanup section frees everything.
-    err: u32 = 0;
+    // is guarded by `err == 0`, and the arena frees everything on return.
+    let err: u32 = 0;
 
-    lHash   = allocate(HLEN);
-    DB      = allocate(BN_BYTES);
-    seed    = allocate(HLEN);
-    dbMask  = allocate(BN_BYTES);
-    seedMask = allocate(HLEN);
-    EM      = allocate(BN_BYTES);
-    em_bn   = allocate(BN_BYTES);
-    ct_bn   = allocate(BN_BYTES);
+    let lHash   = state_new(RsaHash);
+    let DB      = state_new(Rsa256);
+    let seed    = state_new(RsaHash);
+    let dbMask  = state_new(Rsa256);
+    let seedMask = state_new(RsaHash);
+    let EM      = state_new(Rsa256);
+    let em_bn   = state_new(Rsa256);
+    let ct_bn   = state_new(Rsa256);
 
     // Length check: msg_len <= key_size - 2*hLen - 2
-    max_len: u32 = key_size - 2 * HLEN - 2;
+    let max_len: u32 = key_size - 2 * HLEN - 2;
     if msg_len > max_len { err = 1; }
 
-    db_len: u32 = 0;
-    ps_len: u32 = 0;
+    let db_len: u32 = 0;
+    let ps_len: u32 = 0;
     if err == 0 {
         db_len = key_size - HLEN - 1;
         ps_len = key_size - msg_len - 2 * HLEN - 2;
@@ -177,17 +256,20 @@ transform rsa_oaep_encrypt(msg: Address, msg_len: u32, e: Address, n: Address, k
         hash_oneshot(label, label_len, lHash, 0);
 
         // b)+c) DB = lHash || PS(zeros) || 0x01 || M   (db_len bytes)
-        i: u32 = 0;
-        while i < HLEN { *(DB + i) = *(lHash + i); i = i + 1; }
+        let i: u32 = 0;
+        while i < HLEN { DB.bytes[i] = lHash.bytes[i]; i = i + 1; }
         i = 0;
-        while i < ps_len { *(DB + HLEN + i) = 0; i = i + 1; }
-        *(DB + HLEN + ps_len) = 1;
+        while i < ps_len { DB.bytes[HLEN + i] = 0; i = i + 1; }
+        DB.bytes[HLEN + ps_len] = 1;
         i = 0;
-        while i < msg_len { *(DB + HLEN + ps_len + 1 + i) = *(msg + i); i = i + 1; }
+        while i < msg_len {
+            DB.bytes[HLEN + ps_len + 1 + i] = msg.bytes[i];
+            i = i + 1;
+        }
 
         // d) seed = random hLen bytes
         i = 0;
-        while i < HLEN { *(seed + i) = *(random + i); i = i + 1; }
+        while i < HLEN { seed.bytes[i] = random.bytes[i]; i = i + 1; }
 
         // e) dbMask = MGF1(seed, db_len)
         mgf1(seed, HLEN, dbMask, db_len, 0);
@@ -199,23 +281,78 @@ transform rsa_oaep_encrypt(msg: Address, msg_len: u32, e: Address, n: Address, k
         mgf1(DB, db_len, seedMask, HLEN, 0);
 
         // h) maskedSeed = seed XOR seedMask   (in place on seed)
-        xor_bytes(seed, seedMask, HLEN);
+        let i2: u32 = 0;
+        while i2 < HLEN {
+            let a: u32 = seed.bytes[i2] as u32;
+            let b: u32 = seedMask.bytes[i2] as u32;
+            seed.bytes[i2] = ((a ^ b) & 255) as u8;
+            i2 = i2 + 1;
+        }
 
         // i) EM = 0x00 || maskedSeed || maskedDB   (key_size bytes)
-        *(EM + 0) = 0;
-        i = 0;
-        while i < HLEN { *(EM + 1 + i) = *(seed + i); i = i + 1; }
-        i = 0;
-        while i < db_len { *(EM + 1 + HLEN + i) = *(DB + i); i = i + 1; }
+        EM.bytes[0] = 0;
+        let i3: u32 = 0;
+        while i3 < HLEN { EM.bytes[1 + i3] = seed.bytes[i3]; i3 = i3 + 1; }
+        let i4: u32 = 0;
+        while i4 < db_len { EM.bytes[1 + HLEN + i4] = DB.bytes[i4]; i4 = i4 + 1; }
 
-        // j) c = EM^e mod n
+        // j) c = EM^e mod n  (via the bn2048_mod_exp primitive)
         em_to_bn(em_bn, EM, key_size);
-        bn2048_mod_exp(ct_bn, em_bn, e, n);
+        // Convert em_bn bytes to a Bn2048Ctx, mod_exp, convert back.
+        let c_bn = state_new(Bn2048Ctx);
+        let m_bn = state_new(Bn2048Ctx);
+        let e_bn = state_new(Bn2048Ctx);
+        let n_bn = state_new(Bn2048Ctx);
+        let i5: u32 = 0;
+        while i5 < 32 {
+            let off: u32 = i5 * 8;
+            let b0: u64 = em_bn.bytes[off + 0] as u64;
+            let b1: u64 = em_bn.bytes[off + 1] as u64;
+            let b2: u64 = em_bn.bytes[off + 2] as u64;
+            let b3: u64 = em_bn.bytes[off + 3] as u64;
+            let b4: u64 = em_bn.bytes[off + 4] as u64;
+            let b5: u64 = em_bn.bytes[off + 5] as u64;
+            let b6: u64 = em_bn.bytes[off + 6] as u64;
+            let b7: u64 = em_bn.bytes[off + 7] as u64;
+            m_bn.limbs[i5] = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+            let eb0: u64 = e.bytes[off + 0] as u64;
+            let eb1: u64 = e.bytes[off + 1] as u64;
+            let eb2: u64 = e.bytes[off + 2] as u64;
+            let eb3: u64 = e.bytes[off + 3] as u64;
+            let eb4: u64 = e.bytes[off + 4] as u64;
+            let eb5: u64 = e.bytes[off + 5] as u64;
+            let eb6: u64 = e.bytes[off + 6] as u64;
+            let eb7: u64 = e.bytes[off + 7] as u64;
+            e_bn.limbs[i5] = eb0 | (eb1 << 8) | (eb2 << 16) | (eb3 << 24) | (eb4 << 32) | (eb5 << 40) | (eb6 << 48) | (eb7 << 56);
+            let nb0: u64 = n.bytes[off + 0] as u64;
+            let nb1: u64 = n.bytes[off + 1] as u64;
+            let nb2: u64 = n.bytes[off + 2] as u64;
+            let nb3: u64 = n.bytes[off + 3] as u64;
+            let nb4: u64 = n.bytes[off + 4] as u64;
+            let nb5: u64 = n.bytes[off + 5] as u64;
+            let nb6: u64 = n.bytes[off + 6] as u64;
+            let nb7: u64 = n.bytes[off + 7] as u64;
+            n_bn.limbs[i5] = nb0 | (nb1 << 8) | (nb2 << 16) | (nb3 << 24) | (nb4 << 32) | (nb5 << 40) | (nb6 << 48) | (nb7 << 56);
+            i5 = i5 + 1;
+        }
+        bn2048_mod_exp(c_bn, m_bn, e_bn, n_bn);
+        // Convert ct_bn limbs back to bytes (little-endian) for bn_to_em.
+        let i6: u32 = 0;
+        while i6 < 32 {
+            let off: u32 = i6 * 8;
+            let v: u64 = c_bn.limbs[i6];
+            ct_bn.bytes[off + 0] = (v & 255) as u8;
+            ct_bn.bytes[off + 1] = ((v >> 8) & 255) as u8;
+            ct_bn.bytes[off + 2] = ((v >> 16) & 255) as u8;
+            ct_bn.bytes[off + 3] = ((v >> 24) & 255) as u8;
+            ct_bn.bytes[off + 4] = ((v >> 32) & 255) as u8;
+            ct_bn.bytes[off + 5] = ((v >> 40) & 255) as u8;
+            ct_bn.bytes[off + 6] = ((v >> 48) & 255) as u8;
+            ct_bn.bytes[off + 7] = ((v >> 56) & 255) as u8;
+            i6 = i6 + 1;
+        }
         bn_to_em(ciphertext, ct_bn, key_size);
     }
-
-    free(lHash); free(DB); free(seed); free(dbMask);
-    free(seedMask); free(EM); free(em_bn); free(ct_bn);
 
     if err != 0 { return 0; }
     return key_size;
@@ -228,21 +365,20 @@ transform rsa_oaep_encrypt(msg: Address, msg_len: u32, e: Address, n: Address, k
 //   Returns message length on success, 0 on error.
 //   msg_out must point to a buffer of at least (key_size - 2*hLen - 2) bytes.
 // ===========================================================================
+transform rsa_oaep_decrypt(ciphertext: State<Rsa256>, d: State<Rsa256>, n: State<Rsa256>, key_size: u32, label: State<Rsa256>, label_len: u32, msg_out: State<Rsa256>) -> u32 {
+    let err: u32 = 0;
+    let msg_len: u32 = 0;
 
-transform rsa_oaep_decrypt(ciphertext: Address, d: Address, n: Address, key_size: u32, label: Address, label_len: u32, msg_out: Address) -> u32 {
-    err: u32 = 0;
-    msg_len: u32 = 0;
+    let ct_bn      = state_new(Rsa256);
+    let m_bn       = state_new(Rsa256);
+    let EM         = state_new(Rsa256);
+    let maskedSeed = state_new(RsaHash);
+    let maskedDB   = state_new(Rsa256);
+    let seedMask   = state_new(RsaHash);
+    let dbMask     = state_new(Rsa256);
+    let lHash_expected = state_new(RsaHash);
 
-    ct_bn      = allocate(BN_BYTES);
-    m_bn       = allocate(BN_BYTES);
-    EM         = allocate(BN_BYTES);
-    maskedSeed = allocate(HLEN);
-    maskedDB   = allocate(BN_BYTES);
-    seedMask   = allocate(HLEN);
-    dbMask     = allocate(BN_BYTES);
-    lHash_expected = allocate(HLEN);
-
-    db_len: u32 = 0;
+    let db_len: u32 = 0;
     if key_size < 2 * HLEN + 2 { err = 1; }
 
     if err == 0 {
@@ -250,29 +386,87 @@ transform rsa_oaep_decrypt(ciphertext: Address, d: Address, n: Address, key_size
 
         // a) m = c^d mod n
         em_to_bn(ct_bn, ciphertext, key_size);
-        bn2048_mod_exp(m_bn, ct_bn, d, n);
+        // Convert ct_bn/d/n bytes -> Bn2048Ctx, mod_exp, convert back.
+        let c_bn_in = state_new(Bn2048Ctx);
+        let d_bn = state_new(Bn2048Ctx);
+        let n_bn = state_new(Bn2048Ctx);
+        let m_out = state_new(Bn2048Ctx);
+        let i: u32 = 0;
+        while i < 32 {
+            let off: u32 = i * 8;
+            let cb0: u64 = ct_bn.bytes[off + 0] as u64;
+            let cb1: u64 = ct_bn.bytes[off + 1] as u64;
+            let cb2: u64 = ct_bn.bytes[off + 2] as u64;
+            let cb3: u64 = ct_bn.bytes[off + 3] as u64;
+            let cb4: u64 = ct_bn.bytes[off + 4] as u64;
+            let cb5: u64 = ct_bn.bytes[off + 5] as u64;
+            let cb6: u64 = ct_bn.bytes[off + 6] as u64;
+            let cb7: u64 = ct_bn.bytes[off + 7] as u64;
+            c_bn_in.limbs[i] = cb0 | (cb1 << 8) | (cb2 << 16) | (cb3 << 24) | (cb4 << 32) | (cb5 << 40) | (cb6 << 48) | (cb7 << 56);
+            let db0: u64 = d.bytes[off + 0] as u64;
+            let db1: u64 = d.bytes[off + 1] as u64;
+            let db2: u64 = d.bytes[off + 2] as u64;
+            let db3: u64 = d.bytes[off + 3] as u64;
+            let db4: u64 = d.bytes[off + 4] as u64;
+            let db5: u64 = d.bytes[off + 5] as u64;
+            let db6: u64 = d.bytes[off + 6] as u64;
+            let db7: u64 = d.bytes[off + 7] as u64;
+            d_bn.limbs[i] = db0 | (db1 << 8) | (db2 << 16) | (db3 << 24) | (db4 << 32) | (db5 << 40) | (db6 << 48) | (db7 << 56);
+            let nb0: u64 = n.bytes[off + 0] as u64;
+            let nb1: u64 = n.bytes[off + 1] as u64;
+            let nb2: u64 = n.bytes[off + 2] as u64;
+            let nb3: u64 = n.bytes[off + 3] as u64;
+            let nb4: u64 = n.bytes[off + 4] as u64;
+            let nb5: u64 = n.bytes[off + 5] as u64;
+            let nb6: u64 = n.bytes[off + 6] as u64;
+            let nb7: u64 = n.bytes[off + 7] as u64;
+            n_bn.limbs[i] = nb0 | (nb1 << 8) | (nb2 << 16) | (nb3 << 24) | (nb4 << 32) | (nb5 << 40) | (nb6 << 48) | (nb7 << 56);
+            i = i + 1;
+        }
+        bn2048_mod_exp(m_out, c_bn_in, d_bn, n_bn);
+        // Convert m_out limbs back to m_bn bytes.
+        let i2: u32 = 0;
+        while i2 < 32 {
+            let off: u32 = i2 * 8;
+            let v: u64 = m_out.limbs[i2];
+            m_bn.bytes[off + 0] = (v & 255) as u8;
+            m_bn.bytes[off + 1] = ((v >> 8) & 255) as u8;
+            m_bn.bytes[off + 2] = ((v >> 16) & 255) as u8;
+            m_bn.bytes[off + 3] = ((v >> 24) & 255) as u8;
+            m_bn.bytes[off + 4] = ((v >> 32) & 255) as u8;
+            m_bn.bytes[off + 5] = ((v >> 40) & 255) as u8;
+            m_bn.bytes[off + 6] = ((v >> 48) & 255) as u8;
+            m_bn.bytes[off + 7] = ((v >> 56) & 255) as u8;
+            i2 = i2 + 1;
+        }
 
         // b) EM = m padded to key_size bytes (big-endian)
         bn_to_em(EM, m_bn, key_size);
 
         // c) Verify EM[0] == 0x00
-        if *(EM + 0) != 0 { err = 1; }
+        if EM.bytes[0] != 0 { err = 1; }
     }
 
     if err == 0 {
         // d) maskedSeed = EM[1 .. 1+hLen]
-        i: u32 = 0;
-        while i < HLEN { *(maskedSeed + i) = *(EM + 1 + i); i = i + 1; }
+        let i: u32 = 0;
+        while i < HLEN { maskedSeed.bytes[i] = EM.bytes[1 + i]; i = i + 1; }
 
         // e) maskedDB = EM[1+hLen .. key_size]
         i = 0;
-        while i < db_len { *(maskedDB + i) = *(EM + 1 + HLEN + i); i = i + 1; }
+        while i < db_len { maskedDB.bytes[i] = EM.bytes[1 + HLEN + i]; i = i + 1; }
 
         // f) seedMask = MGF1(maskedDB, hLen)
         mgf1(maskedDB, db_len, seedMask, HLEN, 0);
 
-        // g) seed = maskedSeed XOR seedMask
-        xor_bytes(maskedSeed, seedMask, HLEN);
+        // g) seed = maskedSeed XOR seedMask  (in place on maskedSeed)
+        let i2: u32 = 0;
+        while i2 < HLEN {
+            let a: u32 = maskedSeed.bytes[i2] as u32;
+            let b: u32 = seedMask.bytes[i2] as u32;
+            maskedSeed.bytes[i2] = ((a ^ b) & 255) as u8;
+            i2 = i2 + 1;
+        }
 
         // h) dbMask = MGF1(seed, db_len)
         mgf1(maskedSeed, HLEN, dbMask, db_len, 0);
@@ -282,38 +476,45 @@ transform rsa_oaep_decrypt(ciphertext: Address, d: Address, n: Address, key_size
 
         // j) lHash' = DB[0..hLen]; verify lHash' == Hash(label)
         hash_oneshot(label, label_len, lHash_expected, 0);
-        if oaep_cteq(maskedDB, lHash_expected, HLEN) != 0 { err = 1; }
+        // Compare first HLEN bytes of maskedDB against lHash_expected.
+        let lhash_buf = state_new(RsaHash);
+        let i3: u32 = 0;
+        while i3 < HLEN { lhash_buf.bytes[i3] = maskedDB.bytes[i3]; i3 = i3 + 1; }
+        if oaep_cteq_hash(lhash_buf, lHash_expected) != 0 { err = 1; }
     }
 
     if err == 0 {
         // k) Find 0x01 separator after lHash (PS bytes between must be 0x00)
-        idx: u32 = HLEN;
-        found: u32 = 0;
-        while idx < db_len {
-            b: u32 = *(maskedDB + idx);
-            if b == 1 { found = 1; break; }
+        let idx: u32 = HLEN;
+        let found: u32 = 0;
+        let mut_idx: u32 = idx;
+        let mut_found: u32 = 0;
+        let mut_err: u32 = 0;
+        while mut_idx < db_len {
+            let b: u32 = maskedDB.bytes[mut_idx] as u32;
+            if b == 1 { mut_found = 1; break; }
             if b != 0 {
                 // non-zero, non-0x01 byte before separator -> invalid
-                err = 1;
+                mut_err = 1;
                 break;
             }
-            idx = idx + 1;
+            mut_idx = mut_idx + 1;
         }
-        if found == 0 && err == 0 { err = 1; }
+        if mut_found == 0 && mut_err == 0 { err = 1; }
+        if mut_err == 1 { err = 1; }
 
         if err == 0 {
             // l) Message = bytes after 0x01
-            msg_len = db_len - idx - 1;
-            i: u32 = 0;
+            let final_idx: u32 = mut_idx;
+            msg_len = db_len - final_idx - 1;
+            let i: u32 = 0;
             while i < msg_len {
-                *(msg_out + i) = *(maskedDB + idx + 1 + i);
+                let src_off: u32 = final_idx + 1 + i;
+                msg_out.bytes[i] = maskedDB.bytes[src_off];
                 i = i + 1;
             }
         }
     }
-
-    free(ct_bn); free(m_bn); free(EM); free(maskedSeed);
-    free(maskedDB); free(seedMask); free(dbMask); free(lHash_expected);
 
     if err != 0 { return 0; }
     return msg_len;
@@ -324,85 +525,181 @@ transform rsa_oaep_decrypt(ciphertext: Address, d: Address, n: Address, key_size
 //   rsa_pss_sign(msg, msg_len, d, n, key_size, salt, salt_len,
 //                signature) -> u32
 //   Returns key_size on success, 0 on error.
-//   signature must point to a key_size-byte output buffer.
+//   signature must point to a key_size-byte output buffer (State<Rsa256>).
 // ===========================================================================
+transform rsa_pss_sign(msg: State<Rsa256>, msg_len: u32, d: State<Rsa256>, n: State<Rsa256>, key_size: u32, salt: State<Rsa256>, salt_len: u32, signature: State<Rsa256>) -> u32 {
+    let err: u32 = 0;
 
-transform rsa_pss_sign(msg: Address, msg_len: u32, d: Address, n: Address, key_size: u32, salt: Address, salt_len: u32, signature: Address) -> u32 {
-    err: u32 = 0;
-
-    mHash   = allocate(HLEN);
-    Mprime  = allocate(8 + HLEN + 64); // up to 8 + HLEN + (key_size - HLEN - 2)
-    H       = allocate(HLEN);
-    DB      = allocate(BN_BYTES);
-    dbMask  = allocate(BN_BYTES);
-    EM      = allocate(BN_BYTES);
-    em_bn   = allocate(BN_BYTES);
-    s_bn    = allocate(BN_BYTES);
+    let mHash   = state_new(RsaHash);
+    let Mprime  = state_new(RsaMprime);
+    let H       = state_new(RsaHash);
+    let DB      = state_new(Rsa256);
+    let dbMask  = state_new(Rsa256);
+    let EM      = state_new(Rsa256);
+    let em_bn   = state_new(Rsa256);
+    let s_bn    = state_new(Rsa256);
 
     if salt_len + HLEN + 2 > key_size { err = 1; }
 
     if err == 0 {
-        db_len: u32 = key_size - HLEN - 1;
-        ps_len: u32 = key_size - salt_len - HLEN - 2;
-        mprime_len: u32 = 8 + HLEN + salt_len;
+        let db_len: u32 = key_size - HLEN - 1;
+        let ps_len: u32 = key_size - salt_len - HLEN - 2;
+        let mprime_len: u32 = 8 + HLEN + salt_len;
 
         // a) mHash = Hash(msg)  (32 bytes, SHA-256)
-        sha256_oneshot(msg, msg_len, mHash);
+        hash_oneshot(msg, msg_len, mHash, 0);
 
         // b) M' = (0x00 * 8) || mHash || salt   (8 + hLen + saltLen bytes)
-        i: u32 = 0;
-        while i < 8 { *(Mprime + i) = 0; i = i + 1; }
+        let i: u32 = 0;
+        while i < 8 { Mprime.bytes[i] = 0; i = i + 1; }
         i = 0;
-        while i < HLEN { *(Mprime + 8 + i) = *(mHash + i); i = i + 1; }
+        while i < HLEN { Mprime.bytes[8 + i] = mHash.bytes[i]; i = i + 1; }
         i = 0;
-        while i < salt_len { *(Mprime + 8 + HLEN + i) = *(salt + i); i = i + 1; }
+        while i < salt_len { Mprime.bytes[8 + HLEN + i] = salt.bytes[i]; i = i + 1; }
 
-        // c) H = Hash(M')
-        sha256_oneshot(Mprime, mprime_len, H);
+        // c) H = Hash(M')  — copy Mprime into a Rsa256 (with zero padding)
+        // to use hash_oneshot, since the dispatcher expects State<Rsa256>.
+        let mprime_full = state_new(Rsa256);
+        let j: u32 = 0;
+        while j < 256 {
+            if j < mprime_len { mprime_full.bytes[j] = Mprime.bytes[j]; }
+            else { mprime_full.bytes[j] = 0; }
+            j = j + 1;
+        }
+        hash_oneshot(mprime_full, mprime_len, H, 0);
 
         // d)+e) DB = PS(zeros) || 0x01 || salt   (db_len bytes)
-        i = 0;
-        while i < ps_len { *(DB + i) = 0; i = i + 1; }
-        *(DB + ps_len) = 1;
-        i = 0;
-        while i < salt_len { *(DB + ps_len + 1 + i) = *(salt + i); i = i + 1; }
+        let i2: u32 = 0;
+        while i2 < ps_len { DB.bytes[i2] = 0; i2 = i2 + 1; }
+        DB.bytes[ps_len] = 1;
+        let i3: u32 = 0;
+        while i3 < salt_len {
+            DB.bytes[ps_len + 1 + i3] = salt.bytes[i3];
+            i3 = i3 + 1;
+        }
 
         // f) dbMask = MGF1(H, db_len)
-        mgf1(H, HLEN, dbMask, db_len, 0);
+        // Hash H is 32 bytes; copy into a Rsa256 for the MGF1 seed interface.
+        let h_seed = state_new(Rsa256);
+        let i4: u32 = 0;
+        while i4 < 256 {
+            if i4 < HLEN { h_seed.bytes[i4] = H.bytes[i4]; }
+            else { h_seed.bytes[i4] = 0; }
+            i4 = i4 + 1;
+        }
+        mgf1(h_seed, HLEN, dbMask, db_len, 0);
 
         // g) maskedDB = DB XOR dbMask   (in place on DB)
         xor_bytes(DB, dbMask, db_len);
 
         // h) Set leftmost (8*emLen - emBits) bits of maskedDB[0] to 0
-        //    where emBits = modBits - 1, emLen = key_size
-        mod_bits: u32 = bn2048_bitlen(n);
+        //    where emBits = modBits - 1, emLen = key_size.
+        //    modBits = bn2048_bitlen(n) — compute via byte scan.
+        let mod_bits: u32 = 0;
+        let nb: u32 = 255;
+        let mut_nb: u32 = nb;
+        let mut_found: u32 = 0;
+        while 1 == 1 {
+            if n.bytes[mut_nb] != 0 {
+                let b: u32 = n.bytes[mut_nb] as u32;
+                let bits: u32 = 8;
+                let mut_bits: u32 = bits;
+                while mut_bits > 0 {
+                    let p: u32 = mut_bits - 1;
+                    if ((b >> p) & 1) == 1 {
+                        mod_bits = mut_nb * 8 + mut_bits;
+                        mut_found = 1;
+                        break;
+                    }
+                    mut_bits = mut_bits - 1;
+                }
+                if mut_found == 1 { break; }
+                mod_bits = mut_nb * 8 + 1;
+                break;
+            }
+            if mut_nb == 0 { break; }
+            mut_nb = mut_nb - 1;
+        }
         if mod_bits == 0 { err = 1; }
         if err == 0 {
-            em_bits: u32 = mod_bits - 1;
-            clear_bits: u32 = 8 * key_size - em_bits;
+            let em_bits: u32 = mod_bits - 1;
+            let clear_bits: u32 = 8 * key_size - em_bits;
             if clear_bits >= 8 {
-                *(DB + 0) = 0;
+                DB.bytes[0] = 0;
             } else {
-                m8: u32 = 255 >> clear_bits;
-                *(DB + 0) = *(DB + 0) & m8;
+                let m8: u32 = 255 >> clear_bits;
+                let cur0: u32 = DB.bytes[0] as u32;
+                DB.bytes[0] = (cur0 & m8) as u8;
             }
 
             // i) EM = maskedDB || H || 0xBC   (key_size bytes)
-            i = 0;
-            while i < db_len { *(EM + i) = *(DB + i); i = i + 1; }
-            i = 0;
-            while i < HLEN { *(EM + db_len + i) = *(H + i); i = i + 1; }
-            *(EM + db_len + HLEN) = 0xBC;
+            let i5: u32 = 0;
+            while i5 < db_len { EM.bytes[i5] = DB.bytes[i5]; i5 = i5 + 1; }
+            let i6: u32 = 0;
+            while i6 < HLEN {
+                EM.bytes[db_len + i6] = H.bytes[i6];
+                i6 = i6 + 1;
+            }
+            EM.bytes[db_len + HLEN] = 188;  // 0xBC
 
             // j) s = EM^d mod n
             em_to_bn(em_bn, EM, key_size);
-            bn2048_mod_exp(s_bn, em_bn, d, n);
+            // Convert em_bn/d/n bytes -> Bn2048Ctx, mod_exp, convert back.
+            let m_bn = state_new(Bn2048Ctx);
+            let d_bn = state_new(Bn2048Ctx);
+            let n_bn = state_new(Bn2048Ctx);
+            let s_out = state_new(Bn2048Ctx);
+            let i7: u32 = 0;
+            while i7 < 32 {
+                let off: u32 = i7 * 8;
+                let mb0: u64 = em_bn.bytes[off + 0] as u64;
+                let mb1: u64 = em_bn.bytes[off + 1] as u64;
+                let mb2: u64 = em_bn.bytes[off + 2] as u64;
+                let mb3: u64 = em_bn.bytes[off + 3] as u64;
+                let mb4: u64 = em_bn.bytes[off + 4] as u64;
+                let mb5: u64 = em_bn.bytes[off + 5] as u64;
+                let mb6: u64 = em_bn.bytes[off + 6] as u64;
+                let mb7: u64 = em_bn.bytes[off + 7] as u64;
+                m_bn.limbs[i7] = mb0 | (mb1 << 8) | (mb2 << 16) | (mb3 << 24) | (mb4 << 32) | (mb5 << 40) | (mb6 << 48) | (mb7 << 56);
+                let db0: u64 = d.bytes[off + 0] as u64;
+                let db1: u64 = d.bytes[off + 1] as u64;
+                let db2: u64 = d.bytes[off + 2] as u64;
+                let db3: u64 = d.bytes[off + 3] as u64;
+                let db4: u64 = d.bytes[off + 4] as u64;
+                let db5: u64 = d.bytes[off + 5] as u64;
+                let db6: u64 = d.bytes[off + 6] as u64;
+                let db7: u64 = d.bytes[off + 7] as u64;
+                d_bn.limbs[i7] = db0 | (db1 << 8) | (db2 << 16) | (db3 << 24) | (db4 << 32) | (db5 << 40) | (db6 << 48) | (db7 << 56);
+                let nb0: u64 = n.bytes[off + 0] as u64;
+                let nb1: u64 = n.bytes[off + 1] as u64;
+                let nb2: u64 = n.bytes[off + 2] as u64;
+                let nb3: u64 = n.bytes[off + 3] as u64;
+                let nb4: u64 = n.bytes[off + 4] as u64;
+                let nb5: u64 = n.bytes[off + 5] as u64;
+                let nb6: u64 = n.bytes[off + 6] as u64;
+                let nb7: u64 = n.bytes[off + 7] as u64;
+                n_bn.limbs[i7] = nb0 | (nb1 << 8) | (nb2 << 16) | (nb3 << 24) | (nb4 << 32) | (nb5 << 40) | (nb6 << 48) | (nb7 << 56);
+                i7 = i7 + 1;
+            }
+            bn2048_mod_exp(s_out, m_bn, d_bn, n_bn);
+            // Convert s_out limbs back to s_bn bytes.
+            let i8: u32 = 0;
+            while i8 < 32 {
+                let off: u32 = i8 * 8;
+                let v: u64 = s_out.limbs[i8];
+                s_bn.bytes[off + 0] = (v & 255) as u8;
+                s_bn.bytes[off + 1] = ((v >> 8) & 255) as u8;
+                s_bn.bytes[off + 2] = ((v >> 16) & 255) as u8;
+                s_bn.bytes[off + 3] = ((v >> 24) & 255) as u8;
+                s_bn.bytes[off + 4] = ((v >> 32) & 255) as u8;
+                s_bn.bytes[off + 5] = ((v >> 40) & 255) as u8;
+                s_bn.bytes[off + 6] = ((v >> 48) & 255) as u8;
+                s_bn.bytes[off + 7] = ((v >> 56) & 255) as u8;
+                i8 = i8 + 1;
+            }
             bn_to_em(signature, s_bn, key_size);
         }
     }
-
-    free(mHash); free(Mprime); free(H); free(DB); free(dbMask);
-    free(EM); free(em_bn); free(s_bn);
 
     if err != 0 { return 0; }
     return key_size;
@@ -413,24 +710,23 @@ transform rsa_pss_sign(msg: Address, msg_len: u32, d: Address, n: Address, key_s
 //   rsa_pss_verify(msg, msg_len, e, n, key_size, signature, salt_len) -> u32
 //   Returns 1 if signature is valid, 0 otherwise.
 // ===========================================================================
+transform rsa_pss_verify(msg: State<Rsa256>, msg_len: u32, e: State<Rsa256>, n: State<Rsa256>, key_size: u32, signature: State<Rsa256>, salt_len: u32) -> u32 {
+    let err: u32 = 0;
+    let result: u32 = 0;
 
-transform rsa_pss_verify(msg: Address, msg_len: u32, e: Address, n: Address, key_size: u32, signature: Address, salt_len: u32) -> u32 {
-    err: u32 = 0;
-    result: u32 = 0;
+    let mHash    = state_new(RsaHash);
+    let s_bn     = state_new(Rsa256);
+    let m_bn     = state_new(Rsa256);
+    let EM       = state_new(Rsa256);
+    let maskedDB = state_new(Rsa256);
+    let H        = state_new(RsaHash);
+    let dbMask   = state_new(Rsa256);
+    let Mprime   = state_new(RsaMprime);
+    let Hprime   = state_new(RsaHash);
 
-    mHash    = allocate(HLEN);
-    s_bn     = allocate(BN_BYTES);
-    m_bn     = allocate(BN_BYTES);
-    EM       = allocate(BN_BYTES);
-    maskedDB = allocate(BN_BYTES);
-    H        = allocate(HLEN);
-    dbMask   = allocate(BN_BYTES);
-    Mprime   = allocate(8 + HLEN + 64);
-    Hprime   = allocate(HLEN);
-
-    db_len: u32 = 0;
-    ps_len: u32 = 0;
-    mprime_len: u32 = 0;
+    let db_len: u32 = 0;
+    let ps_len: u32 = 0;
+    let mprime_len: u32 = 0;
 
     if salt_len + HLEN + 2 > key_size { err = 1; }
 
@@ -440,81 +736,177 @@ transform rsa_pss_verify(msg: Address, msg_len: u32, e: Address, n: Address, key
         mprime_len = 8 + HLEN + salt_len;
 
         // a) mHash = Hash(msg)
-        sha256_oneshot(msg, msg_len, mHash);
+        hash_oneshot(msg, msg_len, mHash, 0);
 
         // b) EM = s^e mod n (padded to key_size bytes, big-endian)
         em_to_bn(s_bn, signature, key_size);
-        bn2048_mod_exp(m_bn, s_bn, e, n);
+        // Convert s_bn/e/n bytes -> Bn2048Ctx, mod_exp, convert back to m_bn bytes.
+        let s_bn_in = state_new(Bn2048Ctx);
+        let e_bn = state_new(Bn2048Ctx);
+        let n_bn = state_new(Bn2048Ctx);
+        let m_out = state_new(Bn2048Ctx);
+        let i: u32 = 0;
+        while i < 32 {
+            let off: u32 = i * 8;
+            let sb0: u64 = s_bn.bytes[off + 0] as u64;
+            let sb1: u64 = s_bn.bytes[off + 1] as u64;
+            let sb2: u64 = s_bn.bytes[off + 2] as u64;
+            let sb3: u64 = s_bn.bytes[off + 3] as u64;
+            let sb4: u64 = s_bn.bytes[off + 4] as u64;
+            let sb5: u64 = s_bn.bytes[off + 5] as u64;
+            let sb6: u64 = s_bn.bytes[off + 6] as u64;
+            let sb7: u64 = s_bn.bytes[off + 7] as u64;
+            s_bn_in.limbs[i] = sb0 | (sb1 << 8) | (sb2 << 16) | (sb3 << 24) | (sb4 << 32) | (sb5 << 40) | (sb6 << 48) | (sb7 << 56);
+            let eb0: u64 = e.bytes[off + 0] as u64;
+            let eb1: u64 = e.bytes[off + 1] as u64;
+            let eb2: u64 = e.bytes[off + 2] as u64;
+            let eb3: u64 = e.bytes[off + 3] as u64;
+            let eb4: u64 = e.bytes[off + 4] as u64;
+            let eb5: u64 = e.bytes[off + 5] as u64;
+            let eb6: u64 = e.bytes[off + 6] as u64;
+            let eb7: u64 = e.bytes[off + 7] as u64;
+            e_bn.limbs[i] = eb0 | (eb1 << 8) | (eb2 << 16) | (eb3 << 24) | (eb4 << 32) | (eb5 << 40) | (eb6 << 48) | (eb7 << 56);
+            let nb0: u64 = n.bytes[off + 0] as u64;
+            let nb1: u64 = n.bytes[off + 1] as u64;
+            let nb2: u64 = n.bytes[off + 2] as u64;
+            let nb3: u64 = n.bytes[off + 3] as u64;
+            let nb4: u64 = n.bytes[off + 4] as u64;
+            let nb5: u64 = n.bytes[off + 5] as u64;
+            let nb6: u64 = n.bytes[off + 6] as u64;
+            let nb7: u64 = n.bytes[off + 7] as u64;
+            n_bn.limbs[i] = nb0 | (nb1 << 8) | (nb2 << 16) | (nb3 << 24) | (nb4 << 32) | (nb5 << 40) | (nb6 << 48) | (nb7 << 56);
+            i = i + 1;
+        }
+        bn2048_mod_exp(m_out, s_bn_in, e_bn, n_bn);
+        let i2: u32 = 0;
+        while i2 < 32 {
+            let off: u32 = i2 * 8;
+            let v: u64 = m_out.limbs[i2];
+            m_bn.bytes[off + 0] = (v & 255) as u8;
+            m_bn.bytes[off + 1] = ((v >> 8) & 255) as u8;
+            m_bn.bytes[off + 2] = ((v >> 16) & 255) as u8;
+            m_bn.bytes[off + 3] = ((v >> 24) & 255) as u8;
+            m_bn.bytes[off + 4] = ((v >> 32) & 255) as u8;
+            m_bn.bytes[off + 5] = ((v >> 40) & 255) as u8;
+            m_bn.bytes[off + 6] = ((v >> 48) & 255) as u8;
+            m_bn.bytes[off + 7] = ((v >> 56) & 255) as u8;
+            i2 = i2 + 1;
+        }
         bn_to_em(EM, m_bn, key_size);
 
         // c) Check EM[key_size - 1] == 0xBC
-        if *(EM + key_size - 1) != 0xBC { err = 1; }
+        let last_idx: u32 = key_size - 1;
+        if EM.bytes[last_idx] != 188 { err = 1; }   // 0xBC
     }
 
     if err == 0 {
         // d) maskedDB = EM[0 .. db_len]
-        i: u32 = 0;
-        while i < db_len { *(maskedDB + i) = *(EM + i); i = i + 1; }
+        let i: u32 = 0;
+        while i < db_len { maskedDB.bytes[i] = EM.bytes[i]; i = i + 1; }
 
         // e) H = EM[db_len .. db_len + hLen]
         i = 0;
-        while i < HLEN { *(H + i) = *(EM + db_len + i); i = i + 1; }
+        while i < HLEN {
+            H.bytes[i] = EM.bytes[db_len + i];
+            i = i + 1;
+        }
 
         // f) dbMask = MGF1(H, db_len)
-        mgf1(H, HLEN, dbMask, db_len, 0);
+        let h_seed = state_new(Rsa256);
+        let i3: u32 = 0;
+        while i3 < 256 {
+            if i3 < HLEN { h_seed.bytes[i3] = H.bytes[i3]; }
+            else { h_seed.bytes[i3] = 0; }
+            i3 = i3 + 1;
+        }
+        mgf1(h_seed, HLEN, dbMask, db_len, 0);
 
         // g) DB = maskedDB XOR dbMask   (in place on maskedDB)
         xor_bytes(maskedDB, dbMask, db_len);
 
         // h) Set leftmost (8*emLen - emBits) bits of DB[0] to 0
-        mod_bits: u32 = bn2048_bitlen(n);
+        let mod_bits: u32 = 0;
+        let nb: u32 = 255;
+        let mut_nb: u32 = nb;
+        let mut_found: u32 = 0;
+        while 1 == 1 {
+            if n.bytes[mut_nb] != 0 {
+                let b: u32 = n.bytes[mut_nb] as u32;
+                let bits: u32 = 8;
+                let mut_bits: u32 = bits;
+                while mut_bits > 0 {
+                    let p: u32 = mut_bits - 1;
+                    if ((b >> p) & 1) == 1 {
+                        mod_bits = mut_nb * 8 + mut_bits;
+                        mut_found = 1;
+                        break;
+                    }
+                    mut_bits = mut_bits - 1;
+                }
+                if mut_found == 1 { break; }
+                mod_bits = mut_nb * 8 + 1;
+                break;
+            }
+            if mut_nb == 0 { break; }
+            mut_nb = mut_nb - 1;
+        }
         if mod_bits == 0 { err = 1; }
         if err == 0 {
-            em_bits: u32 = mod_bits - 1;
-            clear_bits: u32 = 8 * key_size - em_bits;
+            let em_bits: u32 = mod_bits - 1;
+            let clear_bits: u32 = 8 * key_size - em_bits;
             if clear_bits >= 8 {
-                *(maskedDB + 0) = 0;
+                maskedDB.bytes[0] = 0;
             } else {
-                m8: u32 = 255 >> clear_bits;
-                *(maskedDB + 0) = *(maskedDB + 0) & m8;
+                let m8: u32 = 255 >> clear_bits;
+                let cur0: u32 = maskedDB.bytes[0] as u32;
+                maskedDB.bytes[0] = (cur0 & m8) as u8;
             }
 
             // i) Check DB[0 .. ps_len] == 0x00
-            i = 0;
-            while i < ps_len {
-                if *(maskedDB + i) != 0 { err = 1; break; }
-                i = i + 1;
+            let i4: u32 = 0;
+            let mut_err: u32 = 0;
+            while i4 < ps_len {
+                if maskedDB.bytes[i4] != 0 { mut_err = 1; break; }
+                i4 = i4 + 1;
             }
+            if mut_err == 1 { err = 1; }
         }
     }
 
     if err == 0 {
         // j) Check DB[ps_len] == 0x01
-        if *(maskedDB + ps_len) != 1 { err = 1; }
+        if maskedDB.bytes[ps_len] != 1 { err = 1; }
     }
 
     if err == 0 {
         // k) salt' = DB[ps_len + 1 .. db_len]
-        salt_offset: u32 = ps_len + 1;
+        let salt_offset: u32 = ps_len + 1;
 
         // l) M' = (0x00 * 8) || mHash || salt'
-        i: u32 = 0;
-        while i < 8 { *(Mprime + i) = 0; i = i + 1; }
+        let i: u32 = 0;
+        while i < 8 { Mprime.bytes[i] = 0; i = i + 1; }
         i = 0;
-        while i < HLEN { *(Mprime + 8 + i) = *(mHash + i); i = i + 1; }
+        while i < HLEN { Mprime.bytes[8 + i] = mHash.bytes[i]; i = i + 1; }
         i = 0;
-        while i < salt_len { *(Mprime + 8 + HLEN + i) = *(maskedDB + salt_offset + i); i = i + 1; }
+        while i < salt_len {
+            let src_off: u32 = salt_offset + i;
+            Mprime.bytes[8 + HLEN + i] = maskedDB.bytes[src_off];
+            i = i + 1;
+        }
 
         // m) H' = Hash(M')
-        sha256_oneshot(Mprime, mprime_len, Hprime);
+        let mprime_full = state_new(Rsa256);
+        let j: u32 = 0;
+        while j < 256 {
+            if j < mprime_len { mprime_full.bytes[j] = Mprime.bytes[j]; }
+            else { mprime_full.bytes[j] = 0; }
+            j = j + 1;
+        }
+        hash_oneshot(mprime_full, mprime_len, Hprime, 0);
 
         // n) Return H == H' (constant-time)
-        if oaep_cteq(H, Hprime, HLEN) == 0 { result = 1; }
+        if oaep_cteq_hash(H, Hprime) == 0 { result = 1; }
     }
-
-    free(mHash); free(s_bn); free(m_bn); free(EM);
-    free(maskedDB); free(H); free(dbMask);
-    free(Mprime); free(Hprime);
 
     return result;
 }

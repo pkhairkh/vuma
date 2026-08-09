@@ -1,10 +1,18 @@
 // womb/crypto/rsa.vuma — RSA-2048 PKCS#1 v1.5 (RFC 8017)
 // 2048-bit RSA: key generation, encrypt/decrypt, sign/verify, CRT private op.
 // No main() — importable library module.
-// Requires: bignum2048.vuma (mod_exp, mod_mul, mod_add, mod_sub, add, sub,
-//           cmp, is_zero, copy, zero, bitlen, get_bit, set_u32),
-//           sha256.vuma (sha256_oneshot),
-//           drbg.vuma (drbg_random for prime search seeding).
+//
+// VUMA 2.0 PMT-native: state_new(Layout) / State<T> / [u8;N] arrays.
+// All allocate/free/Address/*ptr removed (arena auto-frees on return).
+//
+// Requires (all VUMA 2.0 PMT-native):
+//   - bignum2048.vuma (bn2048_mod_exp, bn2048_mod_mul, bn2048_mod, bn2048_mod_inv,
+//                     bn2048_add, bn2048_sub, bn2048_cmp, bn2048_is_zero,
+//                     bn2048_copy, bn2048_zero, bn2048_set_u32, bn2048_bitlen,
+//                     bn2048_get_bit; operates on State<Bn2048Ctx>)
+//   - sha256_sha224.vuma (sha256_init / sha256_update / sha256_final +
+//                        Sha256Ctx / Sha256Data / Sha256Digest layouts)
+//   - drbg.vuma (drbg_init / drbg_generate + DrbgCtx / DrbgData / DrbgOut layouts)
 //
 // Memory layout of an RSA private key (RSA_KEY_BYTES = 8 * 256 = 2048 bytes):
 //   off +    0 : n    (modulus,                256 bytes, little-endian)
@@ -23,96 +31,320 @@ const RSA_PUB_BYTES: u32 = 512;     // public key blob (n || e)
 const EXP_E: u32 = 65537;           // standard public exponent F4
 
 // ===========================================================================
-// Right-shift a 256-byte little-endian bignum by 1 bit (in place semantics
-// through r). Implemented byte-wise so it works on any 2048-bit value.
+// Layouts
 // ===========================================================================
-transform rsa_bn_rshift1(r: Address, a: Address) {
-    i: u32 = 0;
-    while i < 256 {
-        cur: u32 = *(a + i);
-        nxt: u32 = 0;
-        if i + 1 < 256 { nxt = *(a + i + 1); }
-        *(r + i) = ((cur >> 1) | (nxt << 7)) & 255;
+
+// 256-byte buffer: modulus, exponent, ciphertext, signature, padded EM, etc.
+layout Rsa256 = { bytes: [u8; 256] }
+
+// 2048-byte buffer: full private key blob (n || e || d || p || q || dp || dq || qinv).
+layout RsaKey = { bytes: [u8; 2048] }
+
+// 5-byte buffer: Miller-Rabin trial bases.
+layout RsaBases = { bytes: [u8; 5] }
+
+// ===========================================================================
+// Byte <-> limb conversion helpers. RFC 8017 EM is a byte string; the
+// bignum2048 module stores 2048-bit values as 32 little-endian u64 limbs.
+// ===========================================================================
+
+transform rsa_bn_from_bytes(bn: State<Bn2048Ctx>, src: State<Rsa256>) {
+    let i: u32 = 0;
+    while i < 32 {
+        let off: u32 = i * 8;
+        let b0: u64 = src.bytes[off + 0] as u64;
+        let b1: u64 = src.bytes[off + 1] as u64;
+        let b2: u64 = src.bytes[off + 2] as u64;
+        let b3: u64 = src.bytes[off + 3] as u64;
+        let b4: u64 = src.bytes[off + 4] as u64;
+        let b5: u64 = src.bytes[off + 5] as u64;
+        let b6: u64 = src.bytes[off + 6] as u64;
+        let b7: u64 = src.bytes[off + 7] as u64;
+        bn.limbs[i] = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
         i = i + 1;
     }
 }
 
-// Left-shift a 256-byte bignum by 1 bit, used by long division.
-transform bn2048_lshift1_256(r: Address, a: Address) {
-    carry: u32 = 0;
-    i: u32 = 0;
+transform rsa_bn_to_bytes(dst: State<Rsa256>, bn: State<Bn2048Ctx>) {
+    let i: u32 = 0;
+    while i < 32 {
+        let off: u32 = i * 8;
+        let v: u64 = bn.limbs[i];
+        dst.bytes[off + 0] = (v & 255) as u8;
+        dst.bytes[off + 1] = ((v >> 8) & 255) as u8;
+        dst.bytes[off + 2] = ((v >> 16) & 255) as u8;
+        dst.bytes[off + 3] = ((v >> 24) & 255) as u8;
+        dst.bytes[off + 4] = ((v >> 32) & 255) as u8;
+        dst.bytes[off + 5] = ((v >> 40) & 255) as u8;
+        dst.bytes[off + 6] = ((v >> 48) & 255) as u8;
+        dst.bytes[off + 7] = ((v >> 56) & 255) as u8;
+        i = i + 1;
+    }
+}
+
+// ===========================================================================
+// Right-shift a 256-byte little-endian bignum by 1 bit (in place semantics
+// through r). Implemented byte-wise so it works on any 2048-bit value.
+// ===========================================================================
+transform rsa_bn_rshift1(r: State<Rsa256>, a: State<Rsa256>) {
+    let i: u32 = 0;
     while i < 256 {
-        cur: u32 = *(a + i);
-        newv: u32 = (cur << 1) | carry;
-        *(r + i) = newv & 255;
+        let cur: u32 = a.bytes[i] as u32;
+        let nxt: u32 = 0;
+        let ip1: u32 = i + 1;
+        if ip1 < 256 { nxt = a.bytes[ip1] as u32; }
+        r.bytes[i] = ((cur >> 1) | (nxt << 7)) as u8;
+        i = i + 1;
+    }
+}
+
+// Left-shift a 256-byte bignum by 1 bit.
+transform rsa_bn_lshift1_256(r: State<Rsa256>, a: State<Rsa256>) {
+    let carry: u32 = 0;
+    let i: u32 = 0;
+    while i < 256 {
+        let cur: u32 = a.bytes[i] as u32;
+        let newv: u32 = (cur << 1) | carry;
+        r.bytes[i] = (newv & 255) as u8;
         carry = newv >> 8;
         i = i + 1;
     }
 }
 
 // Copy 256 bytes from src to dst.
-transform ka_copy_to(dst: Address, src: Address) {
-    i: u32 = 0;
-    while i < 256 { *(dst + i) = *(src + i); i = i + 1; }
+transform ka_copy_to(dst: State<Rsa256>, src: State<Rsa256>) {
+    let i: u32 = 0;
+    while i < 256 { dst.bytes[i] = src.bytes[i]; i = i + 1; }
 }
 
-// Copy 256 bytes from a blob offset into a standalone bignum buffer.
-transform ka_from_blob(dst: Address, src: Address) {
-    i: u32 = 0;
-    while i < 256 { *(dst + i) = *(src + i); i = i + 1; }
+// Copy 256 bytes from a key-blob offset into a standalone Rsa256 buffer.
+transform ka_from_blob(dst: State<Rsa256>, src: State<RsaKey>, off: u32) {
+    let i: u32 = 0;
+    while i < 256 { dst.bytes[i] = src.bytes[off + i]; i = i + 1; }
+}
+
+// Copy 256 bytes from a standalone Rsa256 buffer into a key-blob offset.
+transform ka_to_blob(dst: State<RsaKey>, off: u32, src: State<Rsa256>) {
+    let i: u32 = 0;
+    while i < 256 { dst.bytes[off + i] = src.bytes[i]; i = i + 1; }
 }
 
 // ===========================================================================
-// Extended-GCD modular inverse for 2048-bit bignums.
-// Computes r = a^(-1) mod m via the binary extended Euclidean algorithm,
-// matching the bn256_mod_inv implementation in bignum.vuma. All intermediate
-// values stay in [0, m) using mod_add / mod_sub semantics on the 256-byte
-// buffers.
+// Byte-wise bignum primitives operating on State<Rsa256>.
+// These wrap the corresponding bn2048_* transforms by converting between
+// byte-oriented RFC 8017 EM buffers and Bn2048Ctx limb arrays.
 // ===========================================================================
-transform rsa_bn_mod_inv(r: Address, a: Address, m: Address) {
-    u = allocate(256);
-    v = allocate(256);
-    x1 = allocate(256);
-    x2 = allocate(256);
-    bn2048_copy(u, a);
-    bn2048_copy(v, m);
-    bn2048_zero(x2);
-    bn2048_set_u32(x1, 1);
 
-    while bn2048_is_zero(u) == 0 {
+transform rsa_bn_copy(r: State<Rsa256>, a: State<Rsa256>) {
+    let i: u32 = 0;
+    while i < 256 { r.bytes[i] = a.bytes[i]; i = i + 1; }
+}
+
+transform rsa_bn_zero(r: State<Rsa256>) {
+    let i: u32 = 0;
+    while i < 256 { r.bytes[i] = 0; i = i + 1; }
+}
+
+transform rsa_bn_set_u32(r: State<Rsa256>, v: u32) {
+    rsa_bn_zero(r);
+    // Store v little-endian into bytes 0..4
+    r.bytes[0] = (v & 255) as u8;
+    r.bytes[1] = ((v >> 8) & 255) as u8;
+    r.bytes[2] = ((v >> 16) & 255) as u8;
+    r.bytes[3] = ((v >> 24) & 255) as u8;
+}
+
+transform rsa_bn_is_zero(a: State<Rsa256>) -> u32 {
+    let i: u32 = 0;
+    while i < 256 {
+        if a.bytes[i] != 0 { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// Three-way compare (byte-wise). 1 if a>b, -1 if a<b, 0 if equal.
+transform rsa_bn_cmp(a: State<Rsa256>, b: State<Rsa256>) -> i32 {
+    let i: u32 = 255;
+    while 1 == 1 {
+        let av: u32 = a.bytes[i] as u32;
+        let bv: u32 = b.bytes[i] as u32;
+        if av > bv { return 1; }
+        if av < bv { return -1; }
+        if i == 0 { break; }
+        i = i - 1;
+    }
+    return 0;
+}
+
+transform rsa_bn_get_bit(a: State<Rsa256>, bit: u32) -> u32 {
+    let byte_idx: u32 = bit / 8;
+    if byte_idx >= 256 { return 0; }
+    let pos: u32 = bit % 8;
+    let v: u32 = a.bytes[byte_idx] as u32;
+    return (v >> pos) & 1;
+}
+
+transform rsa_bn_bitlen(a: State<Rsa256>) -> u32 {
+    let i: u32 = 255;
+    while 1 == 1 {
+        if a.bytes[i] != 0 {
+            let b: u32 = a.bytes[i] as u32;
+            let bits: u32 = 8;
+            while bits > 0 {
+                let p: u32 = bits - 1;
+                if ((b >> p) & 1) == 1 { return i * 8 + bits; }
+                bits = bits - 1;
+            }
+            return i * 8 + 1;
+        }
+        if i == 0 { break; }
+        i = i - 1;
+    }
+    return 0;
+}
+
+// r = a + b. Returns carry-out (0 or 1).
+transform rsa_bn_add(r: State<Rsa256>, a: State<Rsa256>, b: State<Rsa256>) -> u32 {
+    let carry: u32 = 0;
+    let i: u32 = 0;
+    while i < 256 {
+        let av: u32 = a.bytes[i] as u32;
+        let bv: u32 = b.bytes[i] as u32;
+        let sum: u32 = av + bv + carry;
+        r.bytes[i] = (sum & 255) as u8;
+        carry = sum >> 8;
+        i = i + 1;
+    }
+    return carry;
+}
+
+// r = a - b. Returns borrow-out (0 or 1).
+transform rsa_bn_sub(r: State<Rsa256>, a: State<Rsa256>, b: State<Rsa256>) -> u32 {
+    let borrow: u32 = 0;
+    let i: u32 = 0;
+    while i < 256 {
+        let av: u32 = a.bytes[i] as u32;
+        let bv: u32 = b.bytes[i] as u32;
+        let diff: i64 = (av as i64) - (bv as i64) - (borrow as i64);
+        if diff < 0 {
+            r.bytes[i] = ((diff + 256) & 255) as u8;
+            borrow = 1;
+        } else {
+            r.bytes[i] = (diff & 255) as u8;
+            borrow = 0;
+        }
+        i = i + 1;
+    }
+    return borrow;
+}
+
+// ===========================================================================
+// 1024-bit * 1024-bit schoolbook multiply into a 2048-bit (256-byte) result.
+// Operates on 256-byte buffers but only the low 128 bytes of each input are
+// significant (i.e. 1024-bit operands). Result occupies all 256 bytes.
+// ===========================================================================
+transform rsa_mul_2048(r: State<Rsa256>, a: State<Rsa256>, b: State<Rsa256>) {
+    // Zero result
+    let i: u32 = 0;
+    while i < 256 { r.bytes[i] = 0; i = i + 1; }
+
+    let ai: u32 = 0;
+    while ai < 128 {
+        let a_val: u32 = a.bytes[ai] as u32;
+        if a_val != 0 {
+            let bi: u32 = 0;
+            while bi < 128 {
+                let b_val: u32 = b.bytes[bi] as u32;
+                if b_val != 0 {
+                    // 16-bit product, add into r at offset ai+bi
+                    let prod: u32 = a_val * b_val;
+                    let off: u32 = ai + bi;
+                    // Add low byte of prod with carry propagation
+                    let cur0: u32 = r.bytes[off + 0] as u32;
+                    let newv0: u32 = cur0 + (prod & 255);
+                    r.bytes[off + 0] = (newv0 & 255) as u8;
+                    let mut_carry: u32 = newv0 >> 8;
+                    // Add high byte of prod with carry propagation
+                    let mut_remaining: u32 = (prod >> 8) + mut_carry;
+                    let k: u32 = 1;
+                    let k_local: u32 = k;
+                    // Unrolled first iteration (k == 1) since prod has at most
+                    // 16 bits => remaining fits in 17 bits, propagated in <=2 steps.
+                    if off + k_local < 256 {
+                        if mut_remaining != 0 {
+                            let cur1: u32 = r.bytes[off + k_local] as u32;
+                            let newv1: u32 = cur1 + (mut_remaining & 255);
+                            r.bytes[off + k_local] = (newv1 & 255) as u8;
+                            let rem2: u32 = (mut_remaining >> 8) + (newv1 >> 8);
+                            let k2: u32 = k_local + 1;
+                            if off + k2 < 256 {
+                                if rem2 != 0 {
+                                    let cur2: u32 = r.bytes[off + k2] as u32;
+                                    let newv2: u32 = cur2 + (rem2 & 255);
+                                    r.bytes[off + k2] = (newv2 & 255) as u8;
+                                    // prod is 16 bits, so no further carry possible
+                                }
+                            }
+                        }
+                    }
+                }
+                bi = bi + 1;
+            }
+        }
+        ai = ai + 1;
+    }
+}
+
+// ===========================================================================
+// Extended-GCD modular inverse for 2048-bit bignums (byte-wise).
+// Computes r = a^(-1) mod m via the binary extended Euclidean algorithm.
+// All intermediate values stay in [0, m) using mod_add / mod_sub semantics
+// on the 256-byte buffers.
+// ===========================================================================
+transform rsa_bn_mod_inv(r: State<Rsa256>, a: State<Rsa256>, m: State<Rsa256>) {
+    let u = state_new(Rsa256);
+    let v = state_new(Rsa256);
+    let x1 = state_new(Rsa256);
+    let x2 = state_new(Rsa256);
+    rsa_bn_copy(u, a);
+    rsa_bn_copy(v, m);
+    rsa_bn_zero(x2);
+    rsa_bn_set_u32(x1, 1);
+
+    while rsa_bn_is_zero(u) == 0 {
         // Strip factors of 2 from u, adjusting x1 = x1/2 mod m
-        while bn2048_get_bit(u, 0) == 0 {
+        while rsa_bn_get_bit(u, 0) == 0 {
             rsa_bn_rshift1(u, u);
-            if bn2048_get_bit(x1, 0) == 0 {
+            if rsa_bn_get_bit(x1, 0) == 0 {
                 rsa_bn_rshift1(x1, x1);
             } else {
-                bn2048_add(x1, x1, m);
+                rsa_bn_add(x1, x1, m);
                 rsa_bn_rshift1(x1, x1);
             }
         }
         // Strip factors of 2 from v, adjusting x2 = x2/2 mod m
-        while bn2048_get_bit(v, 0) == 0 {
+        while rsa_bn_get_bit(v, 0) == 0 {
             rsa_bn_rshift1(v, v);
-            if bn2048_get_bit(x2, 0) == 0 {
+            if rsa_bn_get_bit(x2, 0) == 0 {
                 rsa_bn_rshift1(x2, x2);
             } else {
-                bn2048_add(x2, x2, m);
+                rsa_bn_add(x2, x2, m);
                 rsa_bn_rshift1(x2, x2);
             }
         }
         // Reduce the larger of u, v; subtract the smaller; same for x1, x2
-        if bn2048_cmp(u, v) >= 0 {
-            bn2048_sub(u, u, v);
-            borrow: u32 = bn2048_sub(x1, x1, x2);
-            if borrow == 1 { bn2048_add(x1, x1, m); }
+        if rsa_bn_cmp(u, v) >= 0 {
+            rsa_bn_sub(u, u, v);
+            let borrow: u32 = rsa_bn_sub(x1, x1, x2);
+            if borrow == 1 { rsa_bn_add(x1, x1, m); }
         } else {
-            bn2048_sub(v, v, u);
-            borrow2: u32 = bn2048_sub(x2, x2, x1);
-            if borrow2 == 1 { bn2048_add(x2, x2, m); }
+            rsa_bn_sub(v, v, u);
+            let borrow2: u32 = rsa_bn_sub(x2, x2, x1);
+            if borrow2 == 1 { rsa_bn_add(x2, x2, m); }
         }
     }
-    bn2048_copy(r, x2);
-    free(u); free(v); free(x1); free(x2);
+    rsa_bn_copy(r, x2);
 }
 
 // ===========================================================================
@@ -120,71 +352,80 @@ transform rsa_bn_mod_inv(r: Address, a: Address, m: Address) {
 // Both inputs and output are 256-byte little-endian bignums. Works for any
 // 0 <= a, m < 2^2048 (m != 0).
 // ===========================================================================
-transform rsa_bn_mod(r: Address, a: Address, m: Address) {
-    rem = allocate(256);
-    bn2048_zero(rem);
-    bits: u32 = bn2048_bitlen(a);
-    i: u32 = bits;
+transform rsa_bn_mod(r: State<Rsa256>, a: State<Rsa256>, m: State<Rsa256>) {
+    let rem = state_new(Rsa256);
+    rsa_bn_zero(rem);
+    let bits: u32 = rsa_bn_bitlen(a);
+    let i: u32 = bits;
     while i > 0 {
-        i = i - 1;
+        let im1: u32 = i - 1;
         // rem = rem << 1
-        bn2048_lshift1_256(rem, rem);
-        // rem.bit0 = a.bit(i)
-        if bn2048_get_bit(a, i) == 1 {
-            *(rem + 0) = *(rem + 0) | 1;
+        rsa_bn_lshift1_256(rem, rem);
+        // rem.bit0 = a.bit(i-1)
+        if rsa_bn_get_bit(a, im1) == 1 {
+            rem.bytes[0] = (rem.bytes[0] as u32 | 1) as u8;
         }
         // if rem >= m: rem -= m
-        if bn2048_cmp(rem, m) >= 0 {
-            bn2048_sub(rem, rem, m);
+        if rsa_bn_cmp(rem, m) >= 0 {
+            rsa_bn_sub(rem, rem, m);
         }
+        i = im1;
     }
-    bn2048_copy(r, rem);
-    free(rem);
+    rsa_bn_copy(r, rem);
 }
 
 // ===========================================================================
-// 2048-bit = 1024-bit * 1024-bit schoolbook multiply into a 256-byte result.
-// Operates on 256-byte buffers but only the low 128 bytes of each input are
-// significant (i.e. 1024-bit operands). Result occupies all 256 bytes.
+// Wrapper: r = a^exp mod m via the bn2048_mod_exp primitive. Converts the
+// byte-oriented operands into Bn2048Ctx limbs and back.
 // ===========================================================================
-transform rsa_mul_2048(r: Address, a: Address, b: Address) {
-    // Zero result
-    i: u32 = 0;
-    while i < 256 { *(r + i) = 0; i = i + 1; }
+transform rsa_bn_mod_exp(c: State<Rsa256>, m: State<Rsa256>, e: State<Rsa256>, n: State<Rsa256>) {
+    let c_bn = state_new(Bn2048Ctx);
+    let m_bn = state_new(Bn2048Ctx);
+    let e_bn = state_new(Bn2048Ctx);
+    let n_bn = state_new(Bn2048Ctx);
+    rsa_bn_from_bytes(m_bn, m);
+    rsa_bn_from_bytes(e_bn, e);
+    rsa_bn_from_bytes(n_bn, n);
+    bn2048_mod_exp(c_bn, m_bn, e_bn, n_bn);
+    rsa_bn_to_bytes(c, c_bn);
+}
 
-    ai: u32 = 0;
-    while ai < 128 {
-        a_val: u32 = *(a + ai);
-        if a_val == 0 { ai = ai + 1; continue; }
-        bi: u32 = 0;
-        while bi < 128 {
-            b_val: u32 = *(b + bi);
-            if b_val == 0 { bi = bi + 1; continue; }
-            // 16-bit product, add into r at offset ai+bi
-            prod: u32 = a_val * b_val;
-            off: u32 = ai + bi;
-            // Add low byte of prod with carry propagation
-            cur0: u32 = *(r + off + 0);
-            newv0: u32 = cur0 + (prod & 255);
-            *(r + off + 0) = newv0 & 255;
-            carry: u32 = newv0 >> 8;
-            // Add high byte of prod with carry propagation, plus any further
-            // carries that result from the addition itself.
-            k: u32 = 1;
-            remaining: u32 = (prod >> 8) + carry;
-            while k < 16 {
-                if off + k >= 256 { break; }
-                if remaining == 0 { break; }
-                cur: u32 = *(r + off + k);
-                newv: u32 = cur + (remaining & 255);
-                *(r + off + k) = newv & 255;
-                remaining = (remaining >> 8) + (newv >> 8);
-                k = k + 1;
-            }
-            bi = bi + 1;
-        }
-        ai = ai + 1;
+transform rsa_bn_mod_mul(r: State<Rsa256>, a: State<Rsa256>, b: State<Rsa256>, m: State<Rsa256>) {
+    let r_bn = state_new(Bn2048Ctx);
+    let a_bn = state_new(Bn2048Ctx);
+    let b_bn = state_new(Bn2048Ctx);
+    let m_bn = state_new(Bn2048Ctx);
+    rsa_bn_from_bytes(a_bn, a);
+    rsa_bn_from_bytes(b_bn, b);
+    rsa_bn_from_bytes(m_bn, m);
+    bn2048_mod_mul(r_bn, a_bn, b_bn, m_bn);
+    rsa_bn_to_bytes(r, r_bn);
+}
+
+// ===========================================================================
+// SHA-256 helper: hash up to 256 bytes of input into a 32-byte digest.
+// The sha256 module's Sha256Data layout only holds 64 bytes per call, so
+// multi-block inputs are streamed via init + update + final.
+// ===========================================================================
+transform rsa_sha256_hash(msg: State<Rsa256>, msg_len: u32, out: State<Sha256Digest>) {
+    let ctx = state_new(Sha256Ctx);
+    sha256_init(ctx);
+    let chunk = state_new(Sha256Data);
+    let pos: u32 = 0;
+    while pos < msg_len {
+        let remaining: u32 = msg_len - pos;
+        let chunk_len: u32 = 64;
+        if remaining < 64 { chunk_len = remaining; }
+        // Zero the chunk buffer (clean state for unused tail bytes).
+        let i: u32 = 0;
+        while i < 64 { chunk.data[i] = 0; i = i + 1; }
+        // Copy chunk_len bytes from msg[pos..pos+chunk_len].
+        i = 0;
+        while i < chunk_len { chunk.data[i] = msg.bytes[pos + i]; i = i + 1; }
+        sha256_update(ctx, chunk, chunk_len as u64);
+        pos = pos + chunk_len;
     }
+    sha256_final(ctx, out);
 }
 
 // ===========================================================================
@@ -193,85 +434,95 @@ transform rsa_mul_2048(r: Address, a: Address, b: Address) {
 // (2, 3, 5, 7, 11) — sufficient for randomly generated 1024-bit candidates
 // in practical key generation.
 // ===========================================================================
-transform rsa_is_probably_prime(n: Address) -> u32 {
-    if bn2048_is_zero(n) == 1 { return 0; }
-    n_low: u32 = *(n + 0);
+transform rsa_is_probably_prime(n: State<Rsa256>) -> u32 {
+    if rsa_bn_is_zero(n) == 1 { return 0; }
+    let n_low: u32 = n.bytes[0] as u32;
     if n_low == 2 { return 1; }
     if n_low == 3 { return 1; }
     if (n_low & 1) == 0 { return 0; }
 
     // Write n-1 = d * 2^r with d odd
-    nm1 = allocate(256);
-    bn2048_set_u32(nm1, 1);
-    bn2048_sub(nm1, n, nm1);
-    r: u32 = 0;
-    d = allocate(256);
-    bn2048_copy(d, nm1);
-    while bn2048_get_bit(d, 0) == 0 {
+    let nm1 = state_new(Rsa256);
+    rsa_bn_set_u32(nm1, 1);
+    rsa_bn_sub(nm1, n, nm1);
+    let mut_r: u32 = 0;
+    let d = state_new(Rsa256);
+    rsa_bn_copy(d, nm1);
+    while rsa_bn_get_bit(d, 0) == 0 {
         rsa_bn_rshift1(d, d);
-        r = r + 1;
+        mut_r = mut_r + 1;
     }
+    let r: u32 = mut_r;
 
-    bases = allocate(5);
-    *(bases + 0) = 2;
-    *(bases + 1) = 3;
-    *(bases + 2) = 5;
-    *(bases + 3) = 7;
-    *(bases + 4) = 11;
+    let bases = state_new(RsaBases);
+    bases.bytes[0] = 2;
+    bases.bytes[1] = 3;
+    bases.bytes[2] = 5;
+    bases.bytes[3] = 7;
+    bases.bytes[4] = 11;
 
-    one = allocate(256);
-    bn2048_set_u32(one, 1);
+    let one = state_new(Rsa256);
+    rsa_bn_set_u32(one, 1);
 
-    result: u32 = 1;
-    bi: u32 = 0;
+    let result: u32 = 1;
+    let bi: u32 = 0;
     while bi < 5 {
         if result == 0 { break; }
-        a = allocate(256);
-        bn2048_set_u32(a, *(bases + bi));
+        let a = state_new(Rsa256);
+        rsa_bn_set_u32(a, bases.bytes[bi] as u32);
+
+        let skip: u32 = 0;
         // If a >= n, skip (only matters for tiny n)
-        if bn2048_cmp(a, n) >= 0 { free(a); bi = bi + 1; continue; }
+        if rsa_bn_cmp(a, n) >= 0 { skip = 1; }
 
-        // x = a^d mod n
-        x = allocate(256);
-        bn2048_mod_exp(x, a, d, n);
+        if skip == 0 {
+            // x = a^d mod n
+            let x = state_new(Rsa256);
+            rsa_bn_mod_exp(x, a, d, n);
 
-        cont: u32 = 0;
-        if bn2048_cmp(x, one) == 0 { cont = 1; }
-        if cont == 0 {
-            if bn2048_cmp(x, nm1) == 0 { cont = 1; }
+            let cont: u32 = 0;
+            if rsa_bn_cmp(x, one) == 0 { cont = 1; }
+            if cont == 0 {
+                if rsa_bn_cmp(x, nm1) == 0 { cont = 1; }
+            }
+
+            let ri: u32 = 0;
+            let mut_cont: u32 = cont;
+            let mut_result: u32 = result;
+            while mut_cont == 0 && ri + 1 < r {
+                let x2 = state_new(Rsa256);
+                rsa_bn_mod_mul(x2, x, x, n);
+                rsa_bn_copy(x, x2);
+                if rsa_bn_cmp(x, one) == 0 { mut_result = 0; break; }
+                if rsa_bn_cmp(x, nm1) == 0 { mut_cont = 1; break; }
+                ri = ri + 1;
+            }
+            result = mut_result;
+            if mut_cont == 0 && result == 1 { result = 0; }
         }
-
-        ri: u32 = 0;
-        while cont == 0 && ri + 1 < r {
-            x2 = allocate(256);
-            bn2048_mod_mul(x2, x, x, n);
-            bn2048_copy(x, x2);
-            free(x2);
-            if bn2048_cmp(x, one) == 0 { result = 0; break; }
-            if bn2048_cmp(x, nm1) == 0 { cont = 1; break; }
-            ri = ri + 1;
-        }
-        if cont == 0 && result == 1 { result = 0; }
-
-        free(a); free(x);
         bi = bi + 1;
     }
 
-    free(nm1); free(d); free(bases); free(one);
     return result;
 }
 
 // ===========================================================================
-// Random 256-byte bignum seeded from the DRBG. The two highest bits and the
+// Random 256-byte bignum from the DRBG. The two highest bits and the
 // lowest bit are forced to 1 so that p, q are exactly 1024 bits and odd.
+// The caller supplies a DrbgCtx; the keygen driver is responsible for
+// instantiating/reseeding it before calling this primitive.
 // ===========================================================================
-transform rsa_random_1024bit_odd(out: Address) {
-    drbg_random(out, 128);
-    *(out + 0) = *(out + 0) | 1;            // force odd
-    *(out + 127) = *(out + 127) | 192;      // set top two bits -> 1024-bit
-    // Zero out bytes 128..255 so bn2048_cmp sees a 1024-bit value
-    i: u32 = 128;
-    while i < 256 { *(out + i) = 0; i = i + 1; }
+transform rsa_random_1024bit_odd(out: State<Rsa256>, drbg: State<DrbgCtx>) {
+    let rand = state_new(DrbgOut);
+    drbg_generate(drbg, rand, 128);
+    // Copy 128 random bytes into out[0..128]
+    let i: u32 = 0;
+    while i < 128 { out.bytes[i] = rand.bytes[i]; i = i + 1; }
+    // Zero out bytes 128..255 so bn2048 sees a 1024-bit value
+    i = 128;
+    while i < 256 { out.bytes[i] = 0; i = i + 1; }
+    out.bytes[0] = (out.bytes[0] as u32 | 1) as u8;       // force odd
+    out.bytes[127] = (out.bytes[127] as u32 | 192) as u8; // set top two bits -> 1024-bit
 }
 
 // ===========================================================================
@@ -279,29 +530,30 @@ transform rsa_random_1024bit_odd(out: Address) {
 // Search starts from a random odd 1024-bit integer and increments by 2 until
 // Miller-Rabin accepts the candidate.
 // ===========================================================================
-transform rsa_generate_prime(out: Address) {
-    rsa_random_1024bit_odd(out);
-    attempts: u32 = 0;
+transform rsa_generate_prime(out: State<Rsa256>, drbg: State<DrbgCtx>) {
+    rsa_random_1024bit_odd(out, drbg);
+    let attempts: u32 = 0;
     while attempts < 100000 {
         // Reject p if (p mod EXP_E) == 1 (i.e. gcd(p-1, e) != 1)
-        acc: u32 = 0;
-        i: u32 = 128;
+        let acc: u32 = 0;
+        let i: u32 = 128;
         while i > 0 {
-            i = i - 1;
-            acc = ((acc << 8) | *(out + i)) % 65537;
+            let im1: u32 = i - 1;
+            acc = ((acc << 8) | (out.bytes[im1] as u32)) % 65537;
+            i = im1;
         }
         if acc != 1 {
             if rsa_is_probably_prime(out) == 1 { return; }
         }
         // Increment by 2 (preserve oddness); carry propagates upward
-        i = 0;
-        carry: u32 = 2;
-        while i < 128 && carry > 0 {
-            cur: u32 = *(out + i);
-            newv: u32 = cur + carry;
-            *(out + i) = newv & 255;
-            carry = newv >> 8;
-            i = i + 1;
+        let ii: u32 = 0;
+        let mut_carry: u32 = 2;
+        while ii < 128 && mut_carry > 0 {
+            let cur: u32 = out.bytes[ii] as u32;
+            let newv: u32 = cur + mut_carry;
+            out.bytes[ii] = (newv & 255) as u8;
+            mut_carry = newv >> 8;
+            ii = ii + 1;
         }
         attempts = attempts + 1;
     }
@@ -309,38 +561,39 @@ transform rsa_generate_prime(out: Address) {
 
 // ===========================================================================
 // Generate an RSA-2048 keypair.
-//   key_out : RSA_KEY_BYTES-byte buffer to receive the full private key blob
+//   key_out : State<RsaKey> to receive the full private key blob
 //             (n || e || d || p || q || dp || dq || qinv)
+//   drbg    : caller-supplied HMAC-DRBG context (must be initialised).
 // Returns 1 on success, 0 on failure.
 // ===========================================================================
-transform rsa_keygen(key_out: Address) -> u32 {
-    p  = allocate(256);
-    q  = allocate(256);
-    n  = allocate(256);
-    e  = allocate(256);
-    d  = allocate(256);
-    p1 = allocate(256);
-    q1 = allocate(256);
-    phi = allocate(256);
-    dp = allocate(256);
-    dq = allocate(256);
-    qinv = allocate(256);
+transform rsa_keygen(key_out: State<RsaKey>, drbg: State<DrbgCtx>) -> u32 {
+    let p  = state_new(Rsa256);
+    let q  = state_new(Rsa256);
+    let n  = state_new(Rsa256);
+    let e  = state_new(Rsa256);
+    let d  = state_new(Rsa256);
+    let p1 = state_new(Rsa256);
+    let q1 = state_new(Rsa256);
+    let phi = state_new(Rsa256);
+    let dp = state_new(Rsa256);
+    let dq = state_new(Rsa256);
+    let qinv = state_new(Rsa256);
 
-    rsa_generate_prime(p);
-    rsa_generate_prime(q);
-    if bn2048_cmp(p, q) == 0 {
-        rsa_generate_prime(q);
+    rsa_generate_prime(p, drbg);
+    rsa_generate_prime(q, drbg);
+    if rsa_bn_cmp(p, q) == 0 {
+        rsa_generate_prime(q, drbg);
     }
 
     // n = p * q
     rsa_mul_2048(n, p, q);
 
     // e = 65537
-    bn2048_set_u32(e, EXP_E);
+    rsa_bn_set_u32(e, EXP_E);
 
     // phi = (p-1) * (q-1)
-    bn2048_set_u32(p1, 1); bn2048_sub(p1, p, p1);
-    bn2048_set_u32(q1, 1); bn2048_sub(q1, q, q1);
+    rsa_bn_set_u32(p1, 1); rsa_bn_sub(p1, p, p1);
+    rsa_bn_set_u32(q1, 1); rsa_bn_sub(q1, q, q1);
     rsa_mul_2048(phi, p1, q1);
 
     // d = e^-1 mod phi
@@ -351,29 +604,27 @@ transform rsa_keygen(key_out: Address) -> u32 {
     rsa_bn_mod(dq,  d, q1);
     rsa_bn_mod_inv(qinv, q, p);
 
-    ka_copy_to(key_out + 0,    n);
-    ka_copy_to(key_out + 256,  e);
-    ka_copy_to(key_out + 512,  d);
-    ka_copy_to(key_out + 768,  p);
-    ka_copy_to(key_out + 1024, q);
-    ka_copy_to(key_out + 1280, dp);
-    ka_copy_to(key_out + 1536, dq);
-    ka_copy_to(key_out + 1792, qinv);
+    ka_to_blob(key_out,    0, n);
+    ka_to_blob(key_out,  256, e);
+    ka_to_blob(key_out,  512, d);
+    ka_to_blob(key_out,  768, p);
+    ka_to_blob(key_out, 1024, q);
+    ka_to_blob(key_out, 1280, dp);
+    ka_to_blob(key_out, 1536, dq);
+    ka_to_blob(key_out, 1792, qinv);
 
-    free(p); free(q); free(n); free(e); free(d);
-    free(p1); free(q1); free(phi); free(dp); free(dq); free(qinv);
     return 1;
 }
 
 // ===========================================================================
 // Core RSA primitive: c = m^e mod n (public op) and m = c^d mod n (private op)
 // ===========================================================================
-transform rsa_public_op(c: Address, m: Address, e: Address, n: Address) {
-    bn2048_mod_exp(c, m, e, n);
+transform rsa_public_op(c: State<Rsa256>, m: State<Rsa256>, e: State<Rsa256>, n: State<Rsa256>) {
+    rsa_bn_mod_exp(c, m, e, n);
 }
 
-transform rsa_private_op(m: Address, c: Address, d: Address, n: Address) {
-    bn2048_mod_exp(m, c, d, n);
+transform rsa_private_op(m: State<Rsa256>, c: State<Rsa256>, d: State<Rsa256>, n: State<Rsa256>) {
+    rsa_bn_mod_exp(m, c, d, n);
 }
 
 // CRT-accelerated private operation: m = c^d mod n = CRT(c^dp mod p, c^dq mod q).
@@ -383,177 +634,182 @@ transform rsa_private_op(m: Address, c: Address, d: Address, n: Address) {
 //   m = m2 + h * q
 // Inputs: key blob (full private key, RSA_KEY_BYTES), ciphertext c (256 bytes),
 //         output m (256 bytes).
-transform rsa_private_op_crt(m: Address, c: Address, key: Address) {
-    p = allocate(256); q = allocate(256);
-    dp = allocate(256); dq = allocate(256); qinv = allocate(256);
-    n = allocate(256);
-    ka_from_blob(p,  key + 768);
-    ka_from_blob(q,  key + 1024);
-    ka_from_blob(dp, key + 1280);
-    ka_from_blob(dq, key + 1536);
-    ka_from_blob(qinv, key + 1792);
-    ka_from_blob(n,  key + 0);
+transform rsa_private_op_crt(m: State<Rsa256>, c: State<Rsa256>, key: State<RsaKey>) {
+    let p = state_new(Rsa256); let q = state_new(Rsa256);
+    let dp = state_new(Rsa256); let dq = state_new(Rsa256); let qinv = state_new(Rsa256);
+    let n = state_new(Rsa256);
+    ka_from_blob(p,  key, 768);
+    ka_from_blob(q,  key, 1024);
+    ka_from_blob(dp, key, 1280);
+    ka_from_blob(dq, key, 1536);
+    ka_from_blob(qinv, key, 1792);
+    ka_from_blob(n,  key, 0);
 
     // Reduce c modulo p and q so the exponentiation operands fit in p, q
-    cp = allocate(256); cq = allocate(256);
+    let cp = state_new(Rsa256); let cq = state_new(Rsa256);
     rsa_bn_mod(cp, c, p);
     rsa_bn_mod(cq, c, q);
 
-    m1 = allocate(256); m2 = allocate(256);
-    bn2048_mod_exp(m1, cp, dp, p);
-    bn2048_mod_exp(m2, cq, dq, q);
+    let m1 = state_new(Rsa256); let m2 = state_new(Rsa256);
+    rsa_bn_mod_exp(m1, cp, dp, p);
+    rsa_bn_mod_exp(m2, cq, dq, q);
 
     // h = qinv * (m1 - m2) mod p
-    diff = allocate(256);
-    borrow: u32 = bn2048_sub(diff, m1, m2);
-    if borrow == 1 { bn2048_add(diff, diff, p); }
-    t = allocate(256);
-    bn2048_mod_mul(t, qinv, diff, p);
+    let diff = state_new(Rsa256);
+    let borrow: u32 = rsa_bn_sub(diff, m1, m2);
+    if borrow == 1 { rsa_bn_add(diff, diff, p); }
+    let t = state_new(Rsa256);
+    rsa_bn_mod_mul(t, qinv, diff, p);
 
     // m = m2 + t * q
-    tq = allocate(256);
+    let tq = state_new(Rsa256);
     rsa_mul_2048(tq, t, q);
-    bn2048_add(m, m2, tq);
+    rsa_bn_add(m, m2, tq);
 
     // Reduce m mod n in case t*q produced a carry into the high half
-    rsa_bn_mod(m, m, n);
-
-    free(p); free(q); free(dp); free(dq); free(qinv); free(n);
-    free(cp); free(cq); free(m1); free(m2); free(diff); free(t); free(tq);
+    let m_red = state_new(Rsa256);
+    rsa_bn_mod(m_red, m, n);
+    rsa_bn_copy(m, m_red);
 }
 
 // ===========================================================================
 // PKCS#1 v1.5 padding for encryption: EM = 0x00 || 0x02 || PS || 0x00 || M
 // PS is random non-zero bytes, length = key_size - msg_len - 3.
 // ===========================================================================
-transform rsa_pkcs1_v15_pad_encrypt(msg: Address, msg_len: u32, key_size: u32, random: Address, padded: Address) -> u32 {
+transform rsa_pkcs1_v15_pad_encrypt(msg: State<Rsa256>, msg_len: u32, key_size: u32, random: State<Rsa256>, padded: State<Rsa256>) -> u32 {
     if msg_len > key_size - 11 { return 0; }
-    ps_len: u32 = key_size - msg_len - 3;
-    *(padded + 0) = 0;
-    *(padded + 1) = 2;
-    i: u32 = 0;
+    let ps_len: u32 = key_size - msg_len - 3;
+    padded.bytes[0] = 0;
+    padded.bytes[1] = 2;
+    let i: u32 = 0;
     while i < ps_len {
-        r: u32 = *(random + i);
-        if r == 0 { r = 1; }  // PS bytes must be non-zero
-        *(padded + 2 + i) = r;
+        let r: u32 = random.bytes[i] as u32;
+        let mut_r: u32 = r;
+        if r == 0 { mut_r = 1; }  // PS bytes must be non-zero
+        padded.bytes[2 + i] = mut_r as u8;
         i = i + 1;
     }
-    *(padded + 2 + ps_len) = 0;
+    padded.bytes[2 + ps_len] = 0;
     i = 0;
-    while i < msg_len { *(padded + 3 + ps_len + i) = *(msg + i); i = i + 1; }
+    while i < msg_len { padded.bytes[3 + ps_len + i] = msg.bytes[i]; i = i + 1; }
     return key_size;
 }
 
 // PKCS#1 v1.5 padding for signatures: EM = 0x00 || 0x01 || PS || 0x00 || T
 // PS is 0xFF bytes, T is the DigestInfo prefix || hash.
-transform rsa_pkcs1_v15_pad_sign(hash: Address, hash_len: u32, key_size: u32, padded: Address) -> u32 {
-    di_len: u32 = 19;
-    t_len: u32 = di_len + hash_len;
+transform rsa_pkcs1_v15_pad_sign(hash: State<Sha256Digest>, hash_len: u32, key_size: u32, padded: State<Rsa256>) -> u32 {
+    let di_len: u32 = 19;
+    let t_len: u32 = di_len + hash_len;
     if t_len > key_size - 11 { return 0; }
-    ps_len: u32 = key_size - t_len - 3;
-    *(padded + 0) = 0;
-    *(padded + 1) = 1;
-    i: u32 = 0;
-    while i < ps_len { *(padded + 2 + i) = 255; i = i + 1; }
-    *(padded + 2 + ps_len) = 0;
+    let ps_len: u32 = key_size - t_len - 3;
+    padded.bytes[0] = 0;
+    padded.bytes[1] = 1;
+    let i: u32 = 0;
+    while i < ps_len { padded.bytes[2 + i] = 255; i = i + 1; }
+    padded.bytes[2 + ps_len] = 0;
     // DigestInfo prefix for SHA-256 (RFC 8017 Section 9.2)
-    *(padded + 3 + ps_len +  0) = 0x30; *(padded + 3 + ps_len +  1) = 0x31;
-    *(padded + 3 + ps_len +  2) = 0x30; *(padded + 3 + ps_len +  3) = 0x0D;
-    *(padded + 3 + ps_len +  4) = 0x06; *(padded + 3 + ps_len +  5) = 0x09;
-    *(padded + 3 + ps_len +  6) = 0x60; *(padded + 3 + ps_len +  7) = 0x86;
-    *(padded + 3 + ps_len +  8) = 0x48; *(padded + 3 + ps_len +  9) = 0x01;
-    *(padded + 3 + ps_len + 10) = 0x65; *(padded + 3 + ps_len + 11) = 0x03;
-    *(padded + 3 + ps_len + 12) = 0x04; *(padded + 3 + ps_len + 13) = 0x02;
-    *(padded + 3 + ps_len + 14) = 0x01; *(padded + 3 + ps_len + 15) = 0x05;
-    *(padded + 3 + ps_len + 16) = 0x00; *(padded + 3 + ps_len + 17) = 0x04;
-    *(padded + 3 + ps_len + 18) = 0x20;
-    i = 0;
-    while i < hash_len { *(padded + 3 + ps_len + di_len + i) = *(hash + i); i = i + 1; }
+    let base: u32 = 3 + ps_len;
+    padded.bytes[base +  0] = 48;  padded.bytes[base +  1] = 49;
+    padded.bytes[base +  2] = 48;  padded.bytes[base +  3] = 13;
+    padded.bytes[base +  4] = 6;   padded.bytes[base +  5] = 9;
+    padded.bytes[base +  6] = 96;  padded.bytes[base +  7] = 134;
+    padded.bytes[base +  8] = 72;  padded.bytes[base +  9] = 1;
+    padded.bytes[base + 10] = 101; padded.bytes[base + 11] = 3;
+    padded.bytes[base + 12] = 4;   padded.bytes[base + 13] = 2;
+    padded.bytes[base + 14] = 1;   padded.bytes[base + 15] = 5;
+    padded.bytes[base + 16] = 0;   padded.bytes[base + 17] = 4;
+    padded.bytes[base + 18] = 32;
+    let i2: u32 = 0;
+    while i2 < hash_len { padded.bytes[3 + ps_len + di_len + i2] = hash.data[i2]; i2 = i2 + 1; }
     return key_size;
 }
 
 // ===========================================================================
 // PKCS#1 v1.5 encrypt: pad, then c = m^e mod n
 // ===========================================================================
-transform rsa_pkcs1_v15_encrypt(msg: Address, msg_len: u32, e: Address, n: Address, key_size: u32, random: Address, ciphertext: Address) -> u32 {
-    padded = allocate(key_size);
-    pad_len: u32 = rsa_pkcs1_v15_pad_encrypt(msg, msg_len, key_size, random, padded);
-    if pad_len == 0 { free(padded); return 0; }
+transform rsa_pkcs1_v15_encrypt(msg: State<Rsa256>, msg_len: u32, e: State<Rsa256>, n: State<Rsa256>, key_size: u32, random: State<Rsa256>, ciphertext: State<Rsa256>) -> u32 {
+    let padded = state_new(Rsa256);
+    let pad_len: u32 = rsa_pkcs1_v15_pad_encrypt(msg, msg_len, key_size, random, padded);
+    if pad_len == 0 { return 0; }
     rsa_public_op(ciphertext, padded, e, n);
-    free(padded);
     return key_size;
 }
 
 // ===========================================================================
 // PKCS#1 v1.5 decrypt: m = c^d mod n, then strip padding
 // ===========================================================================
-transform rsa_pkcs1_v15_decrypt(ciphertext: Address, d: Address, n: Address, key_size: u32, msg: Address) -> u32 {
-    padded = allocate(key_size);
+transform rsa_pkcs1_v15_decrypt(ciphertext: State<Rsa256>, d: State<Rsa256>, n: State<Rsa256>, key_size: u32, msg: State<Rsa256>) -> u32 {
+    let padded = state_new(Rsa256);
     rsa_private_op(padded, ciphertext, d, n);
-    if *(padded + 0) != 0 { free(padded); return 0; }
-    if *(padded + 1) != 2 { free(padded); return 0; }
-    i: u32 = 2;
-    while i < key_size {
-        if *(padded + i) == 0 { break; }
-        i = i + 1;
+    if padded.bytes[0] != 0 { return 0; }
+    if padded.bytes[1] != 2 { return 0; }
+    let mut_i: u32 = 2;
+    let mut_found: u32 = 0;
+    while mut_i < key_size {
+        if padded.bytes[mut_i] == 0 { mut_found = 1; break; }
+        mut_i = mut_i + 1;
     }
-    if i == key_size { free(padded); return 0; }
-    if i < 10 { free(padded); return 0; }  // PS must be at least 8 bytes
-    msg_len: u32 = key_size - i - 1;
-    j: u32 = 0;
-    while j < msg_len { *(msg + j) = *(padded + i + 1 + j); j = j + 1; }
-    free(padded);
+    if mut_found == 0 { return 0; }
+    if mut_i == key_size { return 0; }
+    if mut_i < 10 { return 0; }  // PS must be at least 8 bytes
+    let i: u32 = mut_i;
+    let msg_len: u32 = key_size - i - 1;
+    let j: u32 = 0;
+    while j < msg_len {
+        let ip1: u32 = i + 1 + j;
+        msg.bytes[j] = padded.bytes[ip1];
+        j = j + 1;
+    }
     return msg_len;
 }
 
 // ===========================================================================
 // PKCS#1 v1.5 sign: hash, pad with DigestInfo, then s = m^d mod n
 // ===========================================================================
-transform rsa_pkcs1_v15_sign(msg: Address, msg_len: u32, d: Address, n: Address, key_size: u32, signature: Address) -> u32 {
-    hash = allocate(32);
-    sha256_oneshot(msg, msg_len, hash);
-    padded = allocate(key_size);
-    pad_len: u32 = rsa_pkcs1_v15_pad_sign(hash, 32, key_size, padded);
-    if pad_len == 0 { free(hash); free(padded); return 0; }
+transform rsa_pkcs1_v15_sign(msg: State<Rsa256>, msg_len: u32, d: State<Rsa256>, n: State<Rsa256>, key_size: u32, signature: State<Rsa256>) -> u32 {
+    let hash = state_new(Sha256Digest);
+    rsa_sha256_hash(msg, msg_len, hash);
+    let padded = state_new(Rsa256);
+    let pad_len: u32 = rsa_pkcs1_v15_pad_sign(hash, 32, key_size, padded);
+    if pad_len == 0 { return 0; }
     rsa_private_op(signature, padded, d, n);
-    free(hash); free(padded);
     return key_size;
 }
 
 // ===========================================================================
 // PKCS#1 v1.5 verify: hash, re-pad, compare with s^e mod n in constant time
 // ===========================================================================
-transform rsa_pkcs1_v15_verify(msg: Address, msg_len: u32, e: Address, n: Address, key_size: u32, signature: Address) -> u32 {
-    hash = allocate(32);
-    sha256_oneshot(msg, msg_len, hash);
-    decrypted = allocate(key_size);
+transform rsa_pkcs1_v15_verify(msg: State<Rsa256>, msg_len: u32, e: State<Rsa256>, n: State<Rsa256>, key_size: u32, signature: State<Rsa256>) -> u32 {
+    let hash = state_new(Sha256Digest);
+    rsa_sha256_hash(msg, msg_len, hash);
+    let decrypted = state_new(Rsa256);
     rsa_public_op(decrypted, signature, e, n);
-    expected = allocate(key_size);
-    pad_len: u32 = rsa_pkcs1_v15_pad_sign(hash, 32, key_size, expected);
-    if pad_len == 0 { free(hash); free(decrypted); free(expected); return 0; }
+    let expected = state_new(Rsa256);
+    let pad_len: u32 = rsa_pkcs1_v15_pad_sign(hash, 32, key_size, expected);
+    if pad_len == 0 { return 0; }
     // Constant-time compare
-    diff: u32 = 0;
-    i: u32 = 0;
+    let diff: u32 = 0;
+    let i: u32 = 0;
     while i < key_size {
-        diff = diff | (*(decrypted + i) ^ *(expected + i));
+        let di: u32 = decrypted.bytes[i] as u32;
+        let ei: u32 = expected.bytes[i] as u32;
+        diff = diff | (di ^ ei);
         i = i + 1;
     }
-    result: u32 = 0;
+    let result: u32 = 0;
     if diff == 0 { result = 1; }
-    free(hash); free(decrypted); free(expected);
     return result;
 }
 
 // ===========================================================================
 // CRT-accelerated sign variant that takes the full private key blob.
 // ===========================================================================
-transform rsa_pkcs1_v15_sign_crt(msg: Address, msg_len: u32, key: Address, key_size: u32, signature: Address) -> u32 {
-    hash = allocate(32);
-    sha256_oneshot(msg, msg_len, hash);
-    padded = allocate(key_size);
-    pad_len: u32 = rsa_pkcs1_v15_pad_sign(hash, 32, key_size, padded);
-    if pad_len == 0 { free(hash); free(padded); return 0; }
+transform rsa_pkcs1_v15_sign_crt(msg: State<Rsa256>, msg_len: u32, key: State<RsaKey>, key_size: u32, signature: State<Rsa256>) -> u32 {
+    let hash = state_new(Sha256Digest);
+    rsa_sha256_hash(msg, msg_len, hash);
+    let padded = state_new(Rsa256);
+    let pad_len: u32 = rsa_pkcs1_v15_pad_sign(hash, 32, key_size, padded);
+    if pad_len == 0 { return 0; }
     rsa_private_op_crt(signature, padded, key);
-    free(hash); free(padded);
     return key_size;
 }
