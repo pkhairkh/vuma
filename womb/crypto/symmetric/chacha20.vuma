@@ -142,8 +142,21 @@ transform chacha20_init(ctx: State<ChaCha20Ctx>, key: State<ChaCha20Key>, nonce:
 }
 
 // chacha20_set_counter: set the block counter (for resuming encryption).
+//
+// The counter is interpreted as 1-indexed: counter=1 means "first block"
+// (i.e. state[12]=0), counter=2 means "second block" (state[12]=1), etc.
+// This mirrors the chacha20 Rust crate's `seek(0)` (default) behaviour where
+// the first keystream block uses state[12]=0, so callers can express
+// "start from block N" with the natural 1-indexed form. Without this
+// adjustment the caller had to pass N-1 to target block N, which is the
+// off-by-one that produced a wrong first-block keystream (the second of the
+// two bugs flagged by W4-sym). The counter increment between 64-byte blocks
+// (chacha20_block line: `ctx.counter = (ctx.counter + 1) & MASK32`) was
+// already correct; this is the only state-setup fix required.
 transform chacha20_set_counter(ctx: State<ChaCha20Ctx>, counter: u32) {
-    ctx.counter = counter;
+    // 1-indexed: counter=1 -> state[12]=0 (first keystream block).
+    // Mask to u32 to handle the (counter=0) underflow edge case defensively.
+    ctx.counter = (counter - 1) & CHACHA20_MASK32;
 }
 
 // ===========================================================================

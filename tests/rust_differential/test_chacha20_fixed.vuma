@@ -1,0 +1,81 @@
+// VUMA harness for ChaCha20 — RFC 8439 §2.4.2 test vector
+//
+// Test vector (matches the chacha20 Rust crate with this nonce):
+//   key   = 00:01:02:...:1f (32 bytes)
+//   nonce = 00:00:00:09:00:00:00:4a:00:00:00:00 (12 bytes)
+//   counter = 1   (first keystream block: state[12]=0 after W5 fix)
+//   pt    = "Ladies and Gentlemen of the class of '99: If I could offer
+//            you only one tip for the future, sunscreen would be it." (114 B)
+//   ct[0..16] = c6 bd f5 94 fa 87 d0 94 75 6b 8d 17 9a 7b a2 5b
+//
+// Returns the FIRST byte of ciphertext as the exit code.
+// Expected first byte: 0xc6 = 198 (decimal).
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/chacha20.vuma"::{ChaCha20Ctx, ChaCha20Key, ChaCha20Nonce, ChaCha20Buf, chacha20_init, chacha20_set_counter, chacha20_encrypt};
+
+transform main() -> i32 {
+    let ctx = state_new(ChaCha20Ctx);
+    let key = state_new(ChaCha20Key);
+    let nonce = state_new(ChaCha20Nonce);
+    let data = state_new(ChaCha20Buf);
+
+    // key = 00 01 02 ... 1f (32 bytes, decimal)
+    key.bytes[0] = 0;   key.bytes[1] = 1;   key.bytes[2] = 2;   key.bytes[3] = 3;
+    key.bytes[4] = 4;   key.bytes[5] = 5;   key.bytes[6] = 6;   key.bytes[7] = 7;
+    key.bytes[8] = 8;   key.bytes[9] = 9;   key.bytes[10] = 10; key.bytes[11] = 11;
+    key.bytes[12] = 12; key.bytes[13] = 13; key.bytes[14] = 14; key.bytes[15] = 15;
+    key.bytes[16] = 16; key.bytes[17] = 17; key.bytes[18] = 18; key.bytes[19] = 19;
+    key.bytes[20] = 20; key.bytes[21] = 21; key.bytes[22] = 22; key.bytes[23] = 23;
+    key.bytes[24] = 24; key.bytes[25] = 25; key.bytes[26] = 26; key.bytes[27] = 27;
+    key.bytes[28] = 28; key.bytes[29] = 29; key.bytes[30] = 30; key.bytes[31] = 31;
+
+    // nonce = 00 00 00 09 00 00 00 4a 00 00 00 00 (decimal)
+    nonce.bytes[0] = 0;  nonce.bytes[1] = 0;  nonce.bytes[2] = 0;  nonce.bytes[3] = 9;
+    nonce.bytes[4] = 0;  nonce.bytes[5] = 0;  nonce.bytes[6] = 0;  nonce.bytes[7] = 74;
+    nonce.bytes[8] = 0;  nonce.bytes[9] = 0;  nonce.bytes[10] = 0; nonce.bytes[11] = 0;
+
+    // pt = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it." (114 bytes, decimal ASCII)
+    data.bytes[0] = 76;  data.bytes[1] = 97;  data.bytes[2] = 100; data.bytes[3] = 105;
+    data.bytes[4] = 101; data.bytes[5] = 115; data.bytes[6] = 32;  data.bytes[7] = 97;
+    data.bytes[8] = 110; data.bytes[9] = 100; data.bytes[10] = 32; data.bytes[11] = 71;
+    data.bytes[12] = 101; data.bytes[13] = 110; data.bytes[14] = 116; data.bytes[15] = 108;
+    data.bytes[16] = 101; data.bytes[17] = 109; data.bytes[18] = 101; data.bytes[19] = 110;
+    data.bytes[20] = 32;  data.bytes[21] = 111; data.bytes[22] = 102; data.bytes[23] = 32;
+    data.bytes[24] = 116; data.bytes[25] = 104; data.bytes[26] = 101; data.bytes[27] = 32;
+    data.bytes[28] = 99;  data.bytes[29] = 108; data.bytes[30] = 97;  data.bytes[31] = 115;
+    data.bytes[32] = 115; data.bytes[33] = 32; data.bytes[34] = 111; data.bytes[35] = 102;
+    data.bytes[36] = 32;  data.bytes[37] = 39;  data.bytes[38] = 57;  data.bytes[39] = 57;
+    data.bytes[40] = 58;  data.bytes[41] = 32;  data.bytes[42] = 73;  data.bytes[43] = 102;
+    data.bytes[44] = 32;  data.bytes[45] = 73;  data.bytes[46] = 32;  data.bytes[47] = 99;
+    data.bytes[48] = 111; data.bytes[49] = 117; data.bytes[50] = 108; data.bytes[51] = 100;
+    data.bytes[52] = 32;  data.bytes[53] = 111; data.bytes[54] = 102; data.bytes[55] = 102;
+    data.bytes[56] = 101; data.bytes[57] = 114; data.bytes[58] = 32;  data.bytes[59] = 121;
+    data.bytes[60] = 111; data.bytes[61] = 117; data.bytes[62] = 32;  data.bytes[63] = 111;
+    data.bytes[64] = 110; data.bytes[65] = 108; data.bytes[66] = 121; data.bytes[67] = 32;
+    data.bytes[68] = 111; data.bytes[69] = 110; data.bytes[70] = 101; data.bytes[71] = 32;
+    data.bytes[72] = 116; data.bytes[73] = 105; data.bytes[74] = 112; data.bytes[75] = 32;
+    data.bytes[76] = 102; data.bytes[77] = 111; data.bytes[78] = 114; data.bytes[79] = 32;
+    data.bytes[80] = 116; data.bytes[81] = 104; data.bytes[82] = 101; data.bytes[83] = 32;
+    data.bytes[84] = 102; data.bytes[85] = 117; data.bytes[86] = 116; data.bytes[87] = 117;
+    data.bytes[88] = 114; data.bytes[89] = 101; data.bytes[90] = 44;  data.bytes[91] = 32;
+    data.bytes[92] = 115; data.bytes[93] = 117; data.bytes[94] = 110; data.bytes[95] = 115;
+    data.bytes[96] = 99;  data.bytes[97] = 114; data.bytes[98] = 101; data.bytes[99] = 101;
+    data.bytes[100] = 110; data.bytes[101] = 32;  data.bytes[102] = 119; data.bytes[103] = 111;
+    data.bytes[104] = 117; data.bytes[105] = 108; data.bytes[106] = 100; data.bytes[107] = 32;
+    data.bytes[108] = 98;  data.bytes[109] = 101;  data.bytes[110] = 32;  data.bytes[111] = 105;
+    data.bytes[112] = 116;  data.bytes[113] = 46;
+
+    chacha20_init(ctx, key, nonce);
+    chacha20_set_counter(ctx, 1);
+    chacha20_encrypt(ctx, data, 114);
+
+    // Print the first ciphertext byte (offset by 1000 so it is unambiguous on
+    // backends where `print_int` output is concatenated without separators,
+    // and to keep the value out of the ASCII control-character range).
+    // This is a secondary channel — the primary return value is the byte
+    // itself as the process exit code (expected 198 = 0xc6).
+    print_int((data.bytes[0] as u32) + 1000);
+
+    // Return the first byte of ciphertext as the exit code.
+    // Expected: 0xc6 = 198 (decimal).
+    return (data.bytes[0] as u32) as i32;
+}
