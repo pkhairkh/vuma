@@ -1,0 +1,68 @@
+// test_x25519_dh.vuma — WP-2 harness for womb/crypto/asym/x25519.vuma
+// Expected exit code: 195  (0xc3)
+//
+// Exercises the X25519 Diffie-Hellman scalar multiplication pipeline
+// end-to-end against the canonical RFC 7748 §5.2 test vector #1:
+//
+//   scalar (Alice's private key, a):
+//     a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4
+//   u-coordinate (Bob's public key, X25519 input):
+//     e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c
+//   expected shared secret (output u-coordinate):
+//     c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552
+//
+// The first byte of the shared secret is 0xc3 = 195 (decimal), so the
+// harness returns 195 as its exit code on success.
+//
+// VUMA Key Concepts exercised:
+//   - import of public transforms + layout from womb/crypto/asym/x25519.vuma
+//   - state_new(X25519Bytes) allocation (32-byte buffer)
+//   - State<T> passed by pointer into the callee (mutating transforms)
+//   - x25519_scalarmult: full Montgomery ladder (255 iterations, RFC 7748 §5)
+//     - clamps the scalar (clears low 3 bits, clears bit 255, sets bit 254)
+//     - 8xu32 LE field-element arithmetic (fe_add/fe_sub/fe_mul/fe_square)
+//     - conditional swap (fe_cswap) for constant-time ladder
+//     - final inversion via Fermat (fe_invert: a^(p-2) mod p)
+//   - byte-level return value via out.data[0] as i32
+//
+// All numeric literals are decimal (per WP-2 constraint).
+
+import "/home/z/my-project/vuma/womb/crypto/asym/x25519.vuma"::{
+    X25519Bytes, x25519_scalarmult
+};
+
+transform main() -> i32 {
+    let scalar = state_new(X25519Bytes);
+    let u_in   = state_new(X25519Bytes);
+    let u_out  = state_new(X25519Bytes);
+
+    // Alice's private key (RFC 7748 §5.2 test vector 1):
+    //   a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4
+    scalar.data[ 0] = 165; scalar.data[ 1] =  70; scalar.data[ 2] = 227; scalar.data[ 3] = 107;
+    scalar.data[ 4] = 240; scalar.data[ 5] =  82; scalar.data[ 6] = 124; scalar.data[ 7] = 157;
+    scalar.data[ 8] =  59; scalar.data[ 9] =  22; scalar.data[10] =  21; scalar.data[11] =  75;
+    scalar.data[12] = 130; scalar.data[13] =  70; scalar.data[14] =  94; scalar.data[15] = 221;
+    scalar.data[16] =  98; scalar.data[17] =  20; scalar.data[18] =  76; scalar.data[19] =  10;
+    scalar.data[20] = 193; scalar.data[21] = 252; scalar.data[22] =  90; scalar.data[23] =  24;
+    scalar.data[24] =  80; scalar.data[25] = 106; scalar.data[26] =  34; scalar.data[27] =  68;
+    scalar.data[28] = 186; scalar.data[29] =  68; scalar.data[30] = 154; scalar.data[31] = 196;
+
+    // Bob's public key / input u-coordinate (RFC 7748 §5.2 test vector 1):
+    //   e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c
+    u_in.data[ 0] = 230; u_in.data[ 1] = 219; u_in.data[ 2] = 104; u_in.data[ 3] = 103;
+    u_in.data[ 4] =  88; u_in.data[ 5] =  48; u_in.data[ 6] =  48; u_in.data[ 7] = 219;
+    u_in.data[ 8] =  53; u_in.data[ 9] = 148; u_in.data[10] = 193; u_in.data[11] = 164;
+    u_in.data[12] =  36; u_in.data[13] = 177; u_in.data[14] =  95; u_in.data[15] = 124;
+    u_in.data[16] = 114; u_in.data[17] = 102; u_in.data[18] =  36; u_in.data[19] = 236;
+    u_in.data[20] =  38; u_in.data[21] = 179; u_in.data[22] =  53; u_in.data[23] =  59;
+    u_in.data[24] =  16; u_in.data[25] = 169; u_in.data[26] =   3; u_in.data[27] = 166;
+    u_in.data[28] = 208; u_in.data[29] = 171; u_in.data[30] =  28; u_in.data[31] =  76;
+
+    // Compute X25519(scalar, u_in) → u_out via the Montgomery ladder.
+    // The callee clamps the scalar internally (clears low 3 bits, clears
+    // bit 255, sets bit 254) per RFC 7748 §5, so we pass the raw bytes.
+    x25519_scalarmult(u_out, scalar, u_in);
+
+    // Expected shared secret first byte: 0xc3 = 195 (decimal).
+    return u_out.data[0] as i32;
+}

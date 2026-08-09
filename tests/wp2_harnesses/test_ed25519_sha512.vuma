@@ -1,0 +1,68 @@
+// test_ed25519_sha512.vuma — WP-2 harness for womb/crypto/asym/ed25519.vuma
+// Expected exit code: 53  (0x35)
+//
+// Exercises the SHA-512 streaming wrapper inside the Ed25519 module
+// (ed25519_sha512_hash) using the RFC 8032 §7.1 TEST 1 secret key as
+// input. The full ed25519_sign / ed25519_keygen transforms trigger a
+// known compiler limitation ("state_new() outside let-binding in
+// flatten_expr; using 0" warnings leading to SIGSEGV at runtime —
+// documented in tests/wp3_harnesses/README.md for ML-KEM/ML-DSA), so
+// this harness tests the simpler SHA-512 wrapper primitive which
+// compiles and runs cleanly.
+//
+// Reference (Python):
+//   import hashlib
+//   sk = bytes([157,97,177,157,239,253,90,96,186,132,74,244,146,236,44,196,
+//               68,73,197,105,123,50,105,25,112,59,172,3,28,174,127,96])
+//   hashlib.sha512(sk).hexdigest()
+//     = 357c83864f2833cb427a2ef1c00a013cfdff2768d980c0a3a520f006904de90f
+//       9b4f0afe280b746a778684e75442502057b7473a03f08f96f5a38e9287e01f8f
+//
+//   → first byte = 0x35 = 53 (decimal)
+//
+// VUMA Key Concepts exercised:
+//   - import of public transforms + layouts from womb/crypto/asym/ed25519.vuma
+//   - state_new(B256) (input buffer) + state_new(B64) (output digest)
+//   - SHA-512 streaming pipeline (sha512_init + sha512_update + sha512_final)
+//     wrapped by ed25519_sha512_hash (chunked 128-byte blocks)
+//   - cross-module symbol resolution (ed25519.vuma references Sha512Ctx /
+//     Sha512Data / Sha512Digest layouts defined in sha512.vuma — those
+//     must be explicitly imported by the harness so the compiler resolves
+//     them when inlining ed25519_sha512_hash's body)
+//
+// All numeric literals are decimal (per WP-2 constraint).
+
+import "/home/z/my-project/vuma/womb/crypto/asym/ed25519.vuma"::{
+    B32, B256, B64, ed25519_sha512_hash
+};
+// ed25519_sha512_hash internally calls state_new(Sha512Ctx) /
+// state_new(Sha512Data) / state_new(Sha512Digest) — those layouts are
+// defined in sha512.vuma. ed25519.vuma does not explicitly `import` them,
+// so the harness must do so for the symbols to resolve.
+import "/home/z/my-project/vuma/womb/crypto/hash/sha512.vuma"::{
+    Sha512Ctx, Sha512Data, Sha512Digest,
+    sha512_init, sha512_update, sha512_final
+};
+
+transform main() -> i32 {
+    let buf = state_new(B256);
+    let out = state_new(B64);
+
+    // RFC 8032 §7.1 TEST 1 secret key (32 bytes, decimal):
+    //   9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60
+    buf.bytes[ 0] = 157; buf.bytes[ 1] =  97; buf.bytes[ 2] = 177; buf.bytes[ 3] = 157;
+    buf.bytes[ 4] = 239; buf.bytes[ 5] = 253; buf.bytes[ 6] =  90; buf.bytes[ 7] =  96;
+    buf.bytes[ 8] = 186; buf.bytes[ 9] = 132; buf.bytes[10] =  74; buf.bytes[11] = 244;
+    buf.bytes[12] = 146; buf.bytes[13] = 236; buf.bytes[14] =  44; buf.bytes[15] = 196;
+    buf.bytes[16] =  68; buf.bytes[17] =  73; buf.bytes[18] = 197; buf.bytes[19] = 105;
+    buf.bytes[20] = 123; buf.bytes[21] =  50; buf.bytes[22] = 105; buf.bytes[23] =  25;
+    buf.bytes[24] = 112; buf.bytes[25] =  59; buf.bytes[26] = 172; buf.bytes[27] =   3;
+    buf.bytes[28] =  28; buf.bytes[29] = 174; buf.bytes[30] = 127; buf.bytes[31] =  96;
+
+    let total_len: u32 = 32;
+
+    ed25519_sha512_hash(buf, total_len, out);
+
+    // Expected SHA-512 first byte: 0x35 = 53 (decimal).
+    return out.bytes[0] as i32;
+}

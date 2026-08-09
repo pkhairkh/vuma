@@ -1,0 +1,75 @@
+// test_ed25519_sign.vuma — WP-2 harness for womb/crypto/asym/ed25519.vuma
+// Expected exit code: 229  (0xe5)
+//
+// Exercises the Ed25519 signature pipeline end-to-end against the
+// canonical RFC 8032 §7.1 TEST 1 vector:
+//
+//   secret key (32-byte seed):
+//     9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60
+//   public key (A = s·B):
+//     d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
+//   message: empty (0 bytes)
+//   expected signature (R || S, 64 bytes):
+//     e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155
+//     5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b
+//
+// The first byte of the expected signature is 0xe5 = 229 (decimal), so
+// the harness returns 229 as its exit code on success.
+//
+// VUMA Key Concepts exercised:
+//   - import of public transforms + layouts from womb/crypto/asym/ed25519.vuma
+//   - state_new(B32) / state_new(B64) / state_new(B256) allocations
+//   - Ed25519 sign pipeline (RFC 8032 §5.1.6):
+//       1. h = SHA-512(seed)        → ed25519_sha512_hash
+//       2. clamp a = h[0..31]      → (clear low 3 bits, clear bit 255, set bit 254)
+//       3. prefix = h[32..63]
+//       4. A = a·B (pubkey point)  → ed25519_scalar_mul (Montgomery ladder)
+//       5. r = SHA-512(prefix||msg) mod L  → ed25519_mod_l
+//       6. R = r·B                  → ed25519_scalar_mul
+//       7. k = SHA-512(R||A||msg) mod L    → ed25519_mod_l
+//       8. S = (r + k·a) mod L      → bn256_mod_mul + bn256_mod_add
+//       9. sig = R || S (64 bytes)
+//   - byte-level return value via sig.bytes[0] as i32
+//
+// All numeric literals are decimal (per WP-2 constraint).
+
+import "/home/z/my-project/vuma/womb/crypto/asym/ed25519.vuma"::{
+    B32, B64, B256, ed25519_sign
+};
+// ed25519_sign internally uses state_new(Sha512Ctx), state_new(Sha512Data),
+// state_new(Sha512Digest), and state_new(Bn256Ctx). These layouts are
+// defined in sha512.vuma and bignum.vuma respectively, but ed25519.vuma
+// does not explicitly `import` them. We import them here so the compiler
+// resolves the cross-module symbols when inlining ed25519_sign's body.
+import "/home/z/my-project/vuma/womb/crypto/hash/sha512.vuma"::{
+    Sha512Ctx, Sha512Data, Sha512Digest, sha512_init, sha512_update, sha512_final
+};
+import "/home/z/my-project/vuma/womb/crypto/bignum/bignum.vuma"::{
+    Bn256Ctx, bn256_set_u32, bn256_mod_mul, bn256_mod_add, bn256_cmp
+};
+
+transform main() -> i32 {
+    let privkey = state_new(B32);
+    let msg     = state_new(B256);
+    let sig     = state_new(B64);
+
+    // RFC 8032 §7.1 TEST 1 secret key (32 bytes, decimal):
+    //   9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60
+    privkey.bytes[ 0] = 157; privkey.bytes[ 1] =  97; privkey.bytes[ 2] = 177; privkey.bytes[ 3] = 157;
+    privkey.bytes[ 4] = 239; privkey.bytes[ 5] = 253; privkey.bytes[ 6] =  90; privkey.bytes[ 7] =  96;
+    privkey.bytes[ 8] = 186; privkey.bytes[ 9] = 132; privkey.bytes[10] =  74; privkey.bytes[11] = 244;
+    privkey.bytes[12] = 146; privkey.bytes[13] = 236; privkey.bytes[14] =  44; privkey.bytes[15] = 196;
+    privkey.bytes[16] =  68; privkey.bytes[17] =  73; privkey.bytes[18] = 197; privkey.bytes[19] = 105;
+    privkey.bytes[20] = 123; privkey.bytes[21] =  50; privkey.bytes[22] = 105; privkey.bytes[23] =  25;
+    privkey.bytes[24] = 112; privkey.bytes[25] =  59; privkey.bytes[26] = 172; privkey.bytes[27] =   3;
+    privkey.bytes[28] =  28; privkey.bytes[29] = 174; privkey.bytes[30] = 127; privkey.bytes[31] =  96;
+
+    // Message: empty (msg_len = 0). The msg buffer is left zeroed.
+    let msg_len: u32 = 0;
+
+    // Compute Ed25519 signature.
+    ed25519_sign(privkey, msg, msg_len, sig);
+
+    // Expected signature first byte: 0xe5 = 229 (decimal).
+    return sig.bytes[0] as i32;
+}
