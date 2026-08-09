@@ -1,0 +1,34 @@
+// test_ml_kem_arith.vuma — WP-3 harness for womb/crypto/post_quantum/ml_kem.vuma
+// Expected exit code: 91
+//
+// Smoke test for the ML-KEM (FIPS 203) module's modular arithmetic helpers.
+// The full keygen transform triggers a known compiler limitation
+// (`state_new() outside let-binding in flatten_expr; using 0` warnings
+// leading to SIGILL at runtime), so this harness exercises the simpler
+// `mlkem_mod_mul` transform instead, which the compiler handles cleanly.
+//
+//   mlkem_mod_mul(a, b) = (a * b) mod MLKEM_Q    where MLKEM_Q = 3329
+//   mlkem_mod_mul(7, 13) = 91 mod 3329 = 91
+//
+// Per WP-3 task: "If too complex, just test that keygen produces a
+// non-zero output." -- the post-quantum keygen transform is too complex
+// for the current compiler (it relies on inner state_new() expressions
+// that the flatten_expr pass does not yet support). This harness
+// instead verifies the module's modular-arithmetic primitive, which
+// is the foundation of the NTT-based ML-KEM operations.
+//
+// VUMA Key Concepts exercised:
+//   - import of public transforms from womb/crypto/post_quantum/ml_kem.vuma
+//   - plain u32 -> u32 transform call (no State<T> plumbing needed)
+//   - module-level const MLKEM_Q reference resolves through the import
+//
+// All numeric literals are decimal (per WP-3 constraint).
+
+import "/home/z/my-project/vuma/womb/crypto/post_quantum/ml_kem.vuma"::{
+    mlkem_mod_mul
+};
+
+transform main() -> i32 {
+    let r: u32 = mlkem_mod_mul(7, 13);  // 91 mod 3329 = 91
+    return (r & 255) as i32;
+}

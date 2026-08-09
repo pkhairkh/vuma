@@ -1,0 +1,53 @@
+// test_ml_dsa_polyadd.vuma — WP-3 harness for womb/crypto/post_quantum/ml_dsa.vuma
+// Expected exit code: 12
+//
+// Smoke test for the ML-DSA (FIPS 204) module's polynomial addition helper.
+// The full ml_dsa_keygen transform triggers the same compiler limitation
+// as ml_kem_keygen (`state_new() outside let-binding in flatten_expr; using 0`
+// warnings causing SIGILL at runtime), so this harness exercises the
+// poly_add_at primitive instead -- the foundation of ML-DSA signing.
+//
+// Setup:
+//   a = polynomial with coefficient[0] = 5, rest = 0
+//   b = polynomial with coefficient[0] = 7, rest = 0
+//   poly_add_at(r, 0, a, 0, b, 0)  -> r[0] = (5 + 7) mod MLDSA_Q = 12
+//
+// Returns r[0] & 255 = 12.
+//
+// Per WP-3 task: "If too complex, just test that keygen produces a
+// non-zero output." -- the ML-DSA keygen transform is too complex for
+// the current compiler; this harness verifies the module's polynomial
+// arithmetic primitive is callable and produces correct results.
+//
+// VUMA Key Concepts exercised:
+//   - import of public transforms from womb/crypto/post_quantum/ml_dsa.vuma
+//   - state_new(MlDsaBuf) 8192-byte byte-array carrier State
+//   - state.bytes[i] indexed byte write (initialization)
+//   - poly_add_at loop: 256 coefficient iterations of load+add+store
+//
+// All numeric literals are decimal (per WP-3 constraint).
+
+import "/home/z/my-project/vuma/womb/crypto/post_quantum/ml_dsa.vuma"::{
+    poly_zero_at, store_u32_le_at, load_u32_le_at, poly_add_at
+};
+
+transform main() -> i32 {
+    let a = state_new(MlDsaBuf);
+    let b = state_new(MlDsaBuf);
+    let r = state_new(MlDsaBuf);
+
+    // Zero all three polynomials (256 coefficients x 4 bytes = 1024 bytes).
+    poly_zero_at(a, 0);
+    poly_zero_at(b, 0);
+    poly_zero_at(r, 0);
+
+    // a[0] = 5, b[0] = 7  (little-endian u32 at byte offset 0).
+    store_u32_le_at(a, 0, 5);
+    store_u32_le_at(b, 0, 7);
+
+    // r = a + b (mod MLDSA_Q = 8380417). r[0] should be 12.
+    poly_add_at(r, 0, a, 0, b, 0);
+
+    let v: u32 = load_u32_le_at(r, 0);
+    return (v & 255) as i32;
+}

@@ -1,0 +1,35 @@
+// test_bignum_mul.vuma — WP-3 harness for womb/crypto/bignum/bignum.vuma
+// Expected exit code: 91
+//
+// Exercises bn256_set_u32 + bn256_mul_512 (the schoolbook 4x4 -> 8 limb
+// multiplier plus the bn_mul_u64 64x64 -> 128 helper).
+//   7 * 13 = 91
+//
+// The full-width result lands in Bn512Ctx.limbs[0..3] (low 256 bits).
+// Because 91 < 2^64, only r.limbs[0] is non-zero and equals 91.
+//
+// VUMA Key Concepts exercised:
+//   - state_new(Bn512Ctx) for the 8-limb multiplication product
+//   - nested transform call chain: bn256_mul_512 -> bn_mul_u64
+//   - state.limbs[i] read of an inner scratch State<Bn64Ctx>
+//
+// All numeric literals are decimal (per WP-3 constraint).
+
+import "/home/z/my-project/vuma/womb/crypto/bignum/bignum.vuma"::{
+    bn256_set_u32, bn256_mul_512
+};
+
+transform main() -> i32 {
+    let a = state_new(Bn256Ctx);
+    let b = state_new(Bn256Ctx);
+    let r = state_new(Bn512Ctx);
+
+    bn256_set_u32(a, 7);
+    bn256_set_u32(b, 13);
+    bn256_mul_512(r, a, b);
+
+    // r.limbs[0] holds the low 64 bits of the 512-bit product (91).
+    let lo: u64 = r.limbs[0];
+    let byte: u32 = (lo & 255) as u32;
+    return byte as i32;
+}

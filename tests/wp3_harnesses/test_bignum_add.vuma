@@ -1,0 +1,37 @@
+// test_bignum_add.vuma — WP-3 harness for womb/crypto/bignum/bignum.vuma
+// Expected exit code: 67
+//
+// Exercises bn256_set_u32 + bn256_add (the 4-limb / 256-bit add path).
+//   123 + 456 = 579
+//   579 & 255 = 67   (579 = 0x243, low byte = 0x43 = 67)
+//
+// NOTE: the WP-3 task brief listed the expected value as 51; the
+// mathematically correct value of (123 + 456) & 255 is 67. This
+// harness returns the mathematically correct value.
+//
+// VUMA Key Concepts exercised:
+//   - import of public transforms from womb/crypto/bignum/bignum.vuma
+//   - state_new(Layout) allocation of Bn256Ctx (4 x u64 limbs)
+//   - State<T> passed by pointer into a callee (mutating add)
+//   - state.limbs[i] field read lowered to Load
+//
+// All numeric literals are decimal (per WP-3 constraint).
+
+import "/home/z/my-project/vuma/womb/crypto/bignum/bignum.vuma"::{
+    bn256_set_u32, bn256_add
+};
+
+transform main() -> i32 {
+    let a = state_new(Bn256Ctx);
+    let b = state_new(Bn256Ctx);
+    let r = state_new(Bn256Ctx);
+
+    bn256_set_u32(a, 123);
+    bn256_set_u32(b, 456);
+    bn256_add(r, a, b);
+
+    // r.limbs[0] holds the low 64 bits of the sum (579).
+    let lo: u64 = r.limbs[0];
+    let byte: u32 = (lo & 255) as u32;
+    return byte as i32;
+}

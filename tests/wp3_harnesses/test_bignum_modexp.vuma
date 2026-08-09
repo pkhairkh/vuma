@@ -1,0 +1,39 @@
+// test_bignum_modexp.vuma — WP-3 harness for womb/crypto/bignum/bignum.vuma
+// Expected exit code: 24
+//
+// Exercises the modular exponentiation pipeline end-to-end:
+//   bn256_mod_exp(r, a, exp, m)
+//     -> bn256_mod        (reduce a mod m)
+//     -> bn256_mod_mul    (square-and-multiply)
+//        -> bn256_mul_512 + bn256_divmod_512
+//
+//   2^10 mod 1000 = 1024 mod 1000 = 24
+//
+// VUMA Key Concepts exercised:
+//   - 4-deep call chain reaching bn256_divmod_512 (binary long division)
+//   - arena-allocated temporaries (state_new inside callees)
+//   - bn256_get_bit / bn256_bitlen (bit inspection of a State<T>)
+//
+// All numeric literals are decimal (per WP-3 constraint).
+
+import "/home/z/my-project/vuma/womb/crypto/bignum/bignum.vuma"::{
+    bn256_set_u32, bn256_mod_exp
+};
+
+transform main() -> i32 {
+    let base = state_new(Bn256Ctx);
+    let exp  = state_new(Bn256Ctx);
+    let m    = state_new(Bn256Ctx);
+    let r    = state_new(Bn256Ctx);
+
+    bn256_set_u32(base, 2);
+    bn256_set_u32(exp,  10);
+    bn256_set_u32(m,    1000);
+
+    bn256_mod_exp(r, base, exp, m);
+
+    // r holds (base^exp mod m) = 24, fits in low limb.
+    let lo: u64 = r.limbs[0];
+    let byte: u32 = (lo & 255) as u32;
+    return byte as i32;
+}
