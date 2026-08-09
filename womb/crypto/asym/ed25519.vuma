@@ -1,171 +1,329 @@
-// womb/crypto/ed25519.vuma — Ed25519 (RFC 8032)
+// womb/crypto/asym/ed25519.vuma — Ed25519 (RFC 8032)
 // Edwards-curve Digital Signature Algorithm over Curve25519.
 // No main() — importable library module.
-// Requires: sha512.vuma (sha512_oneshot), bignum.vuma (bn256_*).
+// Requires: sha512.vuma (sha512_init/update/final), bignum.vuma (bn256_*).
 //
 // Curve: -x^2 + y^2 = 1 + d*x^2*y^2 (mod p)  (twisted Edwards, a = -1)
 //   p = 2^255 - 19
 //   d = -121665/121666 mod p
-//   B (base point): x = 15112221349535400772501151409588531511454012693041857206046113283949847762202
-//                    y = 46316835694926478169428394003475163141307993866256225615783033603165251855960
+//   B (base point): see constants below
 //   L (order) = 2^252 + 27742317777372353535851937790883648493
 //
-// Field arithmetic is mod p = 2^255 - 19, using bn256_* with a 32-byte
-// little-endian limb representation (the high bit of byte 31 is masked off
-// whenever a value is loaded from a wire-format point encoding).
+// VUMA 2.0 PMT-native: state_new(Layout) / State<T> / typed arrays.
+// Field arithmetic is mod p = 2^255 - 19 via bn256_* (4 × u64 limbs, LE).
+// Curve constants stored as B32 (32 LE bytes); converted to Bn256Ctx
+// for arithmetic.
 
 // ===========================================================================
-// Curve constants (32-byte little-endian)
+// Layouts
 // ===========================================================================
 
-transform ed25519_p() -> Address {
+layout B32  = { bytes: [u8; 32] }     // 32-byte LE field element / point coord
+layout B64  = { bytes: [u8; 64] }     // 64-byte buffer (mod_l remainder, sha512 digest)
+layout B128 = { bytes: [u8; 128] }    // sha512 chunk / hash input ≤ 128 B
+layout B256 = { bytes: [u8; 256] }   // large hash input (prefix||msg, R||A||msg)
+
+// ===========================================================================
+// Curve constants (32-byte LE) — written into caller-provided B32 state.
+// ===========================================================================
+
+transform ed25519_p(out: State<B32>) {
     // p = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFED
-    // LE: ED FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF 7F
-    buf = allocate(32);
-    *(buf + 0) = 237;
-    i: u32 = 1;
-    while i < 31 { *(buf + i) = 255; i = i + 1; }
-    *(buf + 31) = 127;
-    return buf;
+    out.bytes[0] = 237;
+    let i: u32 = 1;
+    while i < 31 { out.bytes[i] = 255; i = i + 1; }
+    out.bytes[31] = 127;
 }
 
-transform ed25519_l() -> Address {
-    // L = 2^252 + 27742317777372353535851937790883648493
-    //   = 0x1000000000000000000000000000000014DEF9DEA2F79CD65812631A5CF5D3ED
-    // LE: ED D3 F5 5C 1A 63 12 58 D6 9C F7 A2 DE F9 DE 14
-    //     00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 10
-    buf = allocate(32);
-    *(buf +  0) = 237; *(buf +  1) =  61; *(buf +  2) =  93; *(buf +  3) = 197;
-    *(buf +  4) = 166; *(buf +  5) =  35; *(buf +  6) =  97; *(buf +  7) = 129;
-    *(buf +  8) = 165; *(buf +  9) = 137; *(buf + 10) = 122; *(buf + 11) = 247;
-    *(buf + 12) =  47; *(buf + 13) = 234; *(buf + 14) = 158; *(buf + 15) =  20;
-    *(buf + 16) =   0; *(buf + 17) =   0; *(buf + 18) =   0; *(buf + 19) =   0;
-    *(buf + 20) =   0; *(buf + 21) =   0; *(buf + 22) =   0; *(buf + 23) =   0;
-    *(buf + 24) =   0; *(buf + 25) =   0; *(buf + 26) =   0; *(buf + 27) =   0;
-    *(buf + 28) =   0; *(buf + 29) =   0; *(buf + 30) =   0; *(buf + 31) =  16;
-    return buf;
+transform ed25519_l(out: State<B32>) {
+    // L = 2^252 + 27742317777372353535851937790883648493 (LE bytes)
+    out.bytes[ 0] = 237; out.bytes[ 1] =  61; out.bytes[ 2] =  93; out.bytes[ 3] = 197;
+    out.bytes[ 4] = 166; out.bytes[ 5] =  35; out.bytes[ 6] =  97; out.bytes[ 7] = 129;
+    out.bytes[ 8] = 165; out.bytes[ 9] = 137; out.bytes[10] = 122; out.bytes[11] = 247;
+    out.bytes[12] =  47; out.bytes[13] = 234; out.bytes[14] = 158; out.bytes[15] =  20;
+    out.bytes[16] =   0; out.bytes[17] =   0; out.bytes[18] =   0; out.bytes[19] =   0;
+    out.bytes[20] =   0; out.bytes[21] =   0; out.bytes[22] =   0; out.bytes[23] =   0;
+    out.bytes[24] =   0; out.bytes[25] =   0; out.bytes[26] =   0; out.bytes[27] =   0;
+    out.bytes[28] =   0; out.bytes[29] =   0; out.bytes[30] =   0; out.bytes[31] =  16;
 }
 
-// d = -121665/121666 mod p (precomputed LE bytes).
-transform ed25519_d() -> Address {
-    buf = allocate(32);
-    *(buf +  0) = 163; *(buf +  1) = 120; *(buf +  2) =  89; *(buf +  3) =  19;
-    *(buf +  4) =  60; *(buf +  5) = 164; *(buf +  6) =  46; *(buf +  7) = 160;
-    *(buf +  8) = 134; *(buf +  9) = 105; *(buf + 10) = 194; *(buf + 11) = 140;
-    *(buf + 12) =   6; *(buf + 13) =  27; *(buf + 14) =  60; *(buf + 15) = 128;
-    *(buf + 16) =  92; *(buf + 17) =  20; *(buf + 18) =  58; *(buf + 19) = 107;
-    *(buf + 20) =  55; *(buf + 21) = 132; *(buf + 22) =  92; *(buf + 23) = 146;
-    *(buf + 24) =  71; *(buf + 25) = 212; *(buf + 26) =  77; *(buf + 27) = 156;
-    *(buf + 28) = 105; *(buf + 29) =  91; *(buf + 30) =  93; *(buf + 31) =  82;
-    return buf;
+transform ed25519_d(out: State<B32>) {
+    out.bytes[ 0] = 163; out.bytes[ 1] = 120; out.bytes[ 2] =  89; out.bytes[ 3] =  19;
+    out.bytes[ 4] =  60; out.bytes[ 5] = 164; out.bytes[ 6] =  46; out.bytes[ 7] = 160;
+    out.bytes[ 8] = 134; out.bytes[ 9] = 105; out.bytes[10] = 194; out.bytes[11] = 140;
+    out.bytes[12] =   6; out.bytes[13] =  27; out.bytes[14] =  60; out.bytes[15] = 128;
+    out.bytes[16] =  92; out.bytes[17] =  20; out.bytes[18] =  58; out.bytes[19] = 107;
+    out.bytes[20] =  55; out.bytes[21] = 132; out.bytes[22] =  92; out.bytes[23] = 146;
+    out.bytes[24] =  71; out.bytes[25] = 212; out.bytes[26] =  77; out.bytes[27] = 156;
+    out.bytes[28] = 105; out.bytes[29] =  91; out.bytes[30] =  93; out.bytes[31] =  82;
 }
 
-// sqrt(-1) mod p = 2^((p-1)/4) mod p (precomputed LE bytes for decompression).
-transform ed25519_sqrt_m1() -> Address {
-    // 19681161336723050825442985873232810906779009870791404531190718613984590602334
-    // LE bytes:
-    buf = allocate(32);
-    *(buf +  0) = 212; *(buf +  1) = 196; *(buf +  2) = 184; *(buf +  3) = 210;
-    *(buf +  4) = 195; *(buf +  5) = 227; *(buf +  6) =  71; *(buf +  7) = 167;
-    *(buf +  8) = 244; *(buf +  9) =  52; *(buf + 10) =  61; *(buf + 11) = 147;
-    *(buf + 12) =  36; *(buf + 13) =  16; *(buf + 14) = 131; *(buf + 15) =  47;
-    *(buf + 16) = 167; *(buf + 17) = 215; *(buf + 18) = 251; *(buf + 19) =  61;
-    *(buf + 20) = 153; *(buf + 21) =   0; *(buf + 22) =  77; *(buf + 23) =  43;
-    *(buf + 24) =  11; *(buf + 25) = 223; *(buf + 26) = 193; *(buf + 27) =  79;
-    *(buf + 28) = 128; *(buf + 29) =  36; *(buf + 30) = 131; *(buf + 31) =  43;
-    return buf;
+transform ed25519_sqrt_m1(out: State<B32>) {
+    // 2^((p-1)/4) mod p (LE bytes)
+    out.bytes[ 0] = 212; out.bytes[ 1] = 196; out.bytes[ 2] = 184; out.bytes[ 3] = 210;
+    out.bytes[ 4] = 195; out.bytes[ 5] = 227; out.bytes[ 6] =  71; out.bytes[ 7] = 167;
+    out.bytes[ 8] = 244; out.bytes[ 9] =  52; out.bytes[10] =  61; out.bytes[11] = 147;
+    out.bytes[12] =  36; out.bytes[13] =  16; out.bytes[14] = 131; out.bytes[15] =  47;
+    out.bytes[16] = 167; out.bytes[17] = 215; out.bytes[18] = 251; out.bytes[19] =  61;
+    out.bytes[20] = 153; out.bytes[21] =   0; out.bytes[22] =  77; out.bytes[23] =  43;
+    out.bytes[24] =  11; out.bytes[25] = 223; out.bytes[26] = 193; out.bytes[27] =  79;
+    out.bytes[28] = 128; out.bytes[29] =  36; out.bytes[30] = 131; out.bytes[31] =  43;
 }
 
-// Base point B (LE 32-byte x and y).
-transform ed25519_bx() -> Address {
-    buf = allocate(32);
-    *(buf +  0) =  26; *(buf +  1) = 213; *(buf +  2) =  37; *(buf +  3) = 143;
-    *(buf +  4) =  96; *(buf +  5) =  45; *(buf +  6) =  86; *(buf +  7) = 201;
-    *(buf +  8) = 178; *(buf +  9) = 167; *(buf + 10) =  37; *(buf + 11) = 149;
-    *(buf + 12) =  96; *(buf + 13) = 199; *(buf + 14) =  44; *(buf + 15) = 105;
-    *(buf + 16) =  92; *(buf + 17) = 220; *(buf + 18) =   6; *(buf + 19) =  44;
-    *(buf + 20) = 211; *(buf + 21) = 139; *(buf + 22) = 133; *(buf + 23) = 138;
-    *(buf + 24) = 243; *(buf + 25) = 157; *(buf + 26) = 206; *(buf + 27) =  92;
-    *(buf + 28) = 225; *(buf + 29) =  73; *(buf + 30) = 166; *(buf + 31) =  33;
-    return buf;
+transform ed25519_bx(out: State<B32>) {
+    out.bytes[ 0] =  26; out.bytes[ 1] = 213; out.bytes[ 2] =  37; out.bytes[ 3] = 143;
+    out.bytes[ 4] =  96; out.bytes[ 5] =  45; out.bytes[ 6] =  86; out.bytes[ 7] = 201;
+    out.bytes[ 8] = 178; out.bytes[ 9] = 167; out.bytes[10] =  37; out.bytes[11] = 149;
+    out.bytes[12] =  96; out.bytes[13] = 199; out.bytes[14] =  44; out.bytes[15] = 105;
+    out.bytes[16] =  92; out.bytes[17] = 220; out.bytes[18] =   6; out.bytes[19] =  44;
+    out.bytes[20] = 211; out.bytes[21] = 139; out.bytes[22] = 133; out.bytes[23] = 138;
+    out.bytes[24] = 243; out.bytes[25] = 157; out.bytes[26] = 206; out.bytes[27] =  92;
+    out.bytes[28] = 225; out.bytes[29] =  73; out.bytes[30] = 166; out.bytes[31] =  33;
 }
 
-transform ed25519_by() -> Address {
-    buf = allocate(32);
-    *(buf +  0) =  88; *(buf +  1) = 102; *(buf +  2) = 102; *(buf +  3) = 102;
-    *(buf +  4) = 102; *(buf +  5) = 102; *(buf +  6) = 102; *(buf +  7) = 102;
-    *(buf +  8) = 102; *(buf +  9) = 102; *(buf + 10) = 102; *(buf + 11) = 102;
-    *(buf + 12) = 102; *(buf + 13) = 102; *(buf + 14) = 102; *(buf + 15) = 102;
-    *(buf + 16) = 102; *(buf + 17) = 102; *(buf + 18) = 102; *(buf + 19) = 102;
-    *(buf + 20) = 102; *(buf + 21) = 102; *(buf + 22) = 102; *(buf + 23) = 102;
-    *(buf + 24) = 102; *(buf + 25) = 102; *(buf + 26) = 102; *(buf + 27) = 102;
-    *(buf + 28) = 102; *(buf + 29) = 102; *(buf + 30) = 102; *(buf + 31) = 102;
-    return buf;
+transform ed25519_by(out: State<B32>) {
+    out.bytes[ 0] =  88; out.bytes[ 1] = 102; out.bytes[ 2] = 102; out.bytes[ 3] = 102;
+    out.bytes[ 4] = 102; out.bytes[ 5] = 102; out.bytes[ 6] = 102; out.bytes[ 7] = 102;
+    out.bytes[ 8] = 102; out.bytes[ 9] = 102; out.bytes[10] = 102; out.bytes[11] = 102;
+    out.bytes[12] = 102; out.bytes[13] = 102; out.bytes[14] = 102; out.bytes[15] = 102;
+    out.bytes[16] = 102; out.bytes[17] = 102; out.bytes[18] = 102; out.bytes[19] = 102;
+    out.bytes[20] = 102; out.bytes[21] = 102; out.bytes[22] = 102; out.bytes[23] = 102;
+    out.bytes[24] = 102; out.bytes[25] = 102; out.bytes[26] = 102; out.bytes[27] = 102;
+    out.bytes[28] = 102; out.bytes[29] = 102; out.bytes[30] = 102; out.bytes[31] = 102;
+}
+
+// ===========================================================================
+// B32 byte-level helpers (LE)
+// ===========================================================================
+
+transform b32_zero(r: State<B32>) {
+    let i: u32 = 0;
+    while i < 32 { r.bytes[i] = 0; i = i + 1; }
+}
+
+transform b32_copy(r: State<B32>, a: State<B32>) {
+    let i: u32 = 0;
+    while i < 32 { r.bytes[i] = a.bytes[i]; i = i + 1; }
+}
+
+transform b32_is_zero(a: State<B32>) -> u32 {
+    let i: u32 = 0;
+    while i < 32 {
+        if a.bytes[i] != 0 { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// 32-byte LE compare. Returns 1 if a>b, -1 if a<b, 0 if equal.
+transform b32_cmp(a: State<B32>, b: State<B32>) -> i32 {
+    let i: u32 = 31;
+    while 1 == 1 {
+        let av: u32 = a.bytes[i] as u32;
+        let bv: u32 = b.bytes[i] as u32;
+        if av > bv { return 1; }
+        if av < bv { return -1; }
+        if i == 0 { break; }
+        i = i - 1;
+    }
+    return 0;
+}
+
+// r = a - b (32-byte LE unsigned). Returns borrow (0 or 1).
+transform b32_sub(r: State<B32>, a: State<B32>, b: State<B32>) -> u32 {
+    let borrow: u32 = 0;
+    let i: u32 = 0;
+    while i < 32 {
+        let av: u32 = a.bytes[i] as u32;
+        let bv: u32 = b.bytes[i] as u32;
+        let diff: u32 = (av + 256 - bv - borrow) & 255;
+        r.bytes[i] = diff as u8;
+        if av < bv + borrow { borrow = 1; } else { borrow = 0; }
+        i = i + 1;
+    }
+    return borrow;
+}
+
+// r = a + b (32-byte LE). Returns carry (0 or 1).
+transform b32_add(r: State<B32>, a: State<B32>, b: State<B32>) -> u32 {
+    let carry: u32 = 0;
+    let i: u32 = 0;
+    while i < 32 {
+        let av: u32 = a.bytes[i] as u32;
+        let bv: u32 = b.bytes[i] as u32;
+        let sum: u32 = av + bv + carry;
+        r.bytes[i] = (sum & 255) as u8;
+        carry = sum >> 8;
+        i = i + 1;
+    }
+    return carry;
+}
+
+// r = a << 1 (32-byte LE).
+transform b32_lshift1(r: State<B32>, a: State<B32>) {
+    let carry: u32 = 0;
+    let i: u32 = 0;
+    while i < 32 {
+        let v: u32 = a.bytes[i] as u32;
+        let nv: u32 = ((v << 1) | carry) & 255;
+        r.bytes[i] = nv as u8;
+        carry = v >> 7;
+        i = i + 1;
+    }
+}
+
+// ===========================================================================
+// B32 ↔ Bn256Ctx conversion (LE bytes <-> 4 × u64 limbs)
+// ===========================================================================
+
+transform b32_to_bn256(dst: State<Bn256Ctx>, src: State<B32>) {
+    let li: u32 = 0;
+    while li < 4 {
+        let off = li * 8;
+        let b0 = src.bytes[off] as u64;
+        let b1 = src.bytes[off + 1] as u64;
+        let b2 = src.bytes[off + 2] as u64;
+        let b3 = src.bytes[off + 3] as u64;
+        let b4 = src.bytes[off + 4] as u64;
+        let b5 = src.bytes[off + 5] as u64;
+        let b6 = src.bytes[off + 6] as u64;
+        let b7 = src.bytes[off + 7] as u64;
+        dst.limbs[li] = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+                       | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+        li = li + 1;
+    }
+}
+
+transform bn256_to_b32(dst: State<B32>, src: State<Bn256Ctx>) {
+    let li: u32 = 0;
+    while li < 4 {
+        let off = li * 8;
+        let v: u64 = src.limbs[li];
+        dst.bytes[off]     = (v & 255) as u8;
+        dst.bytes[off + 1] = ((v >> 8) & 255) as u8;
+        dst.bytes[off + 2] = ((v >> 16) & 255) as u8;
+        dst.bytes[off + 3] = ((v >> 24) & 255) as u8;
+        dst.bytes[off + 4] = ((v >> 32) & 255) as u8;
+        dst.bytes[off + 5] = ((v >> 40) & 255) as u8;
+        dst.bytes[off + 6] = ((v >> 48) & 255) as u8;
+        dst.bytes[off + 7] = ((v >> 56) & 255) as u8;
+        li = li + 1;
+    }
+}
+
+// ===========================================================================
+// SHA-512 streaming helper for variable-length inputs up to 256 bytes.
+// Hashes buf.bytes[0..total_len] and writes the 64-byte digest to out.
+// ===========================================================================
+
+transform ed25519_sha512_hash(buf: State<B256>, total_len: u32, out: State<B64>) {
+    let ctx = state_new(Sha512Ctx);
+    sha512_init(ctx);
+    let i: u32 = 0;
+    while i < total_len {
+        let chunk = state_new(Sha512Data);
+        let remaining: u32 = total_len - i;
+        let to_copy: u32 = 128;
+        if remaining < 128 { to_copy = remaining; }
+        let j: u32 = 0;
+        while j < to_copy {
+            chunk.data[j] = buf.bytes[i + j];
+            j = j + 1;
+        }
+        sha512_update(ctx, chunk, to_copy);
+        i = i + to_copy;
+    }
+    let digest = state_new(Sha512Digest);
+    sha512_final(ctx, digest);
+    // Copy 64-byte digest into B64 output
+    let k: u32 = 0;
+    while k < 64 {
+        out.bytes[k] = digest.data[k];
+        k = k + 1;
+    }
 }
 
 // ===========================================================================
 // 64-byte little-endian buffer -> 32-byte little-endian reduction mod L.
 // Implements long division: walk 512 bits from MSB to LSB, shift the
 // remainder left by 1, set the LSB to the current input bit, and subtract L
-// whenever the remainder is >= L. The remainder always fits in 32 bytes by
-// construction (each iteration keeps rem < L).
+// whenever the remainder is >= L. rem lives in a 64-byte buffer; the high
+// 32 bytes are only nonzero if rem ever overflows 32 bytes (which we handle
+// by treating it as an indicator that rem >= L).
 // ===========================================================================
 
-transform ed25519_mod_l(r: Address, hash_64: Address) {
-    L_le = ed25519_l();
+transform ed25519_mod_l(r: State<B32>, hash_64: State<B64>) {
+    let L_le = state_new(B32);
+    ed25519_l(L_le);
 
-    rem = allocate(64);
-    i: u32 = 0;
-    while i < 64 { *(rem + i) = 0; i = i + 1; }
+    let rem = state_new(B64);
+    let i: u32 = 0;
+    while i < 64 { rem.bytes[i] = 0; i = i + 1; }
 
-    pos: i32 = 511;
+    let pos: i32 = 511;
     while pos >= 0 {
-        byte_idx: u32 = pos / 8;
-        bit_idx: u32 = pos % 8;
-        bit: u32 = (*(hash_64 + byte_idx) >> bit_idx) & 1;
+        let byte_idx: u32 = (pos as u32) / 8;
+        let bit_idx: u32 = (pos as u32) % 8;
+        let bit: u32 = ((hash_64.bytes[byte_idx] as u32) >> bit_idx) & 1;
 
         // rem = rem << 1 (64 bytes wide)
-        carry: u32 = 0;
-        i = 0;
-        while i < 64 {
-            cur: u32 = *(rem + i);
-            newv: u32 = (cur << 1) | carry;
-            *(rem + i) = newv & 255;
-            carry = newv >> 8;
-            i = i + 1;
+        let carry: u32 = 0;
+        let j: u32 = 0;
+        while j < 64 {
+            let cur: u32 = rem.bytes[j] as u32;
+            let newv: u32 = ((cur << 1) | carry) & 255;
+            rem.bytes[j] = newv as u8;
+            carry = cur >> 7;
+            j = j + 1;
         }
 
         // rem.bit0 = bit
-        *(rem + 0) = (*(rem + 0) & 254) | bit;
+        rem.bytes[0] = (rem.bytes[0] & 254) | (bit as u8);
 
-        // Determine whether rem >= L (treating L as zero-extended to 64 bytes)
-        ge_l: u32 = 0;
-        high_nz: u32 = 0;
-        i = 32;
-        while i < 64 {
-            if *(rem + i) != 0 { high_nz = 1; }
-            i = i + 1;
+        // Determine whether rem >= L. If any of bytes 32..63 are nonzero,
+        // rem is definitely >= L (since L fits in 32 bytes). Otherwise
+        // compare the low 32 bytes against L_le.
+        let ge_l: u32 = 0;
+        let high_nz: u32 = 0;
+        let k: u32 = 32;
+        while k < 64 {
+            if rem.bytes[k] != 0 { high_nz = 1; }
+            k = k + 1;
         }
         if high_nz == 1 {
             ge_l = 1;
         } else {
-            if bn256_cmp(rem, L_le) >= 0 { ge_l = 1; }
+            // Compare rem.bytes[0..31] vs L_le.bytes[0..31]
+            let low = state_new(B32);
+            let m: u32 = 0;
+            while m < 32 { low.bytes[m] = rem.bytes[m]; m = m + 1; }
+            if b32_cmp(low, L_le) >= 0 { ge_l = 1; }
         }
 
         if ge_l == 1 {
-            borrow: u32 = bn256_sub(rem, rem, L_le);
+            // rem = rem - L (low 32 bytes; borrow propagates into high 32)
+            let low2 = state_new(B32);
+            let low1 = state_new(B32);
+            let m2: u32 = 0;
+            while m2 < 32 {
+                low1.bytes[m2] = rem.bytes[m2];
+                m2 = m2 + 1;
+            }
+            let borrow: u32 = b32_sub(low2, low1, L_le);
+            let m3: u32 = 0;
+            while m3 < 32 { rem.bytes[m3] = low2.bytes[m3]; m3 = m3 + 1; }
             if borrow == 1 {
                 // Propagate borrow into high 32 bytes
-                i = 32;
-                while i < 64 {
-                    cur: u32 = *(rem + i);
+                let n: u32 = 32;
+                while n < 64 {
+                    let cur: u32 = rem.bytes[n] as u32;
                     if cur > 0 {
-                        *(rem + i) = cur - 1;
-                        break;
+                        rem.bytes[n] = (cur - 1) as u8;
+                        n = 64;
                     } else {
-                        *(rem + i) = 255;
+                        rem.bytes[n] = 255;
                     }
-                    i = i + 1;
+                    n = n + 1;
                 }
             }
         }
@@ -173,9 +331,8 @@ transform ed25519_mod_l(r: Address, hash_64: Address) {
         pos = pos - 1;
     }
 
-    i = 0;
-    while i < 32 { *(r + i) = *(rem + i); i = i + 1; }
-    free(rem); free(L_le);
+    let p: u32 = 0;
+    while p < 32 { r.bytes[p] = rem.bytes[p]; p = p + 1; }
 }
 
 // ===========================================================================
@@ -183,199 +340,213 @@ transform ed25519_mod_l(r: Address, hash_64: Address) {
 //   (x1,y1) + (x2,y2) = ((x1*y2 + x2*y1) / (1 + d*x1*x2*y1*y2),
 //                         (y1*y2 + x1*x2) / (1 - d*x1*x2*y1*y2))
 // All operations mod p. The same formula is used for doubling (P + P).
+// Inputs/outputs are B32 (LE bytes); arithmetic via Bn256Ctx.
 // ===========================================================================
 
-transform ed25519_point_add(rx: Address, ry: Address, x1: Address, y1: Address, x2: Address, y2: Address, p_le: Address, d_le: Address) {
-    // t1 = x1*y2 ; t2 = x2*y1 ; num_x = t1 + t2
-    t1 = allocate(32);
-    bn256_mod_mul(t1, x1, y2, p_le);
-    t2 = allocate(32);
-    bn256_mod_mul(t2, x2, y1, p_le);
-    num_x = allocate(32);
-    bn256_mod_add(num_x, t1, t2, p_le);
+transform ed25519_point_add(
+    rx: State<B32>, ry: State<B32>,
+    x1: State<B32>, y1: State<B32>,
+    x2: State<B32>, y2: State<B32>,
+    p_le: State<B32>, d_le: State<B32>
+) {
+    let p_bn = state_new(Bn256Ctx);
+    let d_bn = state_new(Bn256Ctx);
+    let x1_bn = state_new(Bn256Ctx);
+    let y1_bn = state_new(Bn256Ctx);
+    let x2_bn = state_new(Bn256Ctx);
+    let y2_bn = state_new(Bn256Ctx);
+    b32_to_bn256(p_bn, p_le);
+    b32_to_bn256(d_bn, d_le);
+    b32_to_bn256(x1_bn, x1);
+    b32_to_bn256(y1_bn, y1);
+    b32_to_bn256(x2_bn, x2);
+    b32_to_bn256(y2_bn, y2);
 
-    // t3 = x1*x2 ; t4 = y1*y2 ; num_y = t4 + t3  (a = -1, so + x1*x2)
-    t3 = allocate(32);
-    bn256_mod_mul(t3, x1, x2, p_le);
-    t4 = allocate(32);
-    bn256_mod_mul(t4, y1, y2, p_le);
-    num_y = allocate(32);
-    bn256_mod_add(num_y, t4, t3, p_le);
+    let t1 = state_new(Bn256Ctx);
+    let t2 = state_new(Bn256Ctx);
+    let num_x = state_new(Bn256Ctx);
+    let t3 = state_new(Bn256Ctx);
+    let t4 = state_new(Bn256Ctx);
+    let num_y = state_new(Bn256Ctx);
+    let t5 = state_new(Bn256Ctx);
+    let dt = state_new(Bn256Ctx);
+    let one = state_new(Bn256Ctx);
+    let denom_x = state_new(Bn256Ctx);
+    let denom_y = state_new(Bn256Ctx);
+    let dx_inv = state_new(Bn256Ctx);
+    let dy_inv = state_new(Bn256Ctx);
+    let rx_bn = state_new(Bn256Ctx);
+    let ry_bn = state_new(Bn256Ctx);
+    let tmp = state_new(Bn256Ctx);
 
-    // t5 = x1*x2*y1*y2 = t3 * t4 ; dt = d * t5
-    t5 = allocate(32);
-    bn256_mod_mul(t5, t3, t4, p_le);
-    dt = allocate(32);
-    bn256_mod_mul(dt, d_le, t5, p_le);
+    bn256_mod_mul(t1, x1_bn, y2_bn, p_bn);
+    bn256_mod_mul(t2, x2_bn, y1_bn, p_bn);
+    bn256_mod_add(num_x, t1, t2, p_bn);
 
-    // denom_x = 1 + dt ; denom_y = 1 - dt
-    one = allocate(32);
-    bn256_zero(one);
-    *(one + 0) = 1;
-    denom_x = allocate(32);
-    bn256_mod_add(denom_x, one, dt, p_le);
-    denom_y = allocate(32);
-    bn256_mod_sub(denom_y, one, dt, p_le);
+    bn256_mod_mul(t3, x1_bn, x2_bn, p_bn);
+    bn256_mod_mul(t4, y1_bn, y2_bn, p_bn);
+    bn256_mod_add(num_y, t4, t3, p_bn);
 
-    // rx = num_x * denom_x^-1 ; ry = num_y * denom_y^-1
-    dx_inv = allocate(32);
-    bn256_mod_inv(dx_inv, denom_x, p_le);
-    bn256_mod_mul(rx, num_x, dx_inv, p_le);
-    dy_inv = allocate(32);
-    bn256_mod_inv(dy_inv, denom_y, p_le);
-    bn256_mod_mul(ry, num_y, dy_inv, p_le);
+    bn256_mod_mul(t5, t3, t4, p_bn);
+    bn256_mod_mul(dt, d_bn, t5, p_bn);
 
-    free(t1); free(t2); free(num_x); free(t3); free(t4); free(num_y);
-    free(t5);
-    free(dt); free(one); free(denom_x); free(denom_y);
-    free(dx_inv); free(dy_inv);
+    bn256_set_u32(one, 1);
+    bn256_mod_add(denom_x, one, dt, p_bn);
+    bn256_mod_sub(denom_y, one, dt, p_bn);
+
+    bn256_mod_inv(dx_inv, denom_x, p_bn);
+    bn256_mod_mul(rx_bn, num_x, dx_inv, p_bn);
+
+    bn256_mod_inv(dy_inv, denom_y, p_bn);
+    bn256_mod_mul(ry_bn, num_y, dy_inv, p_bn);
+
+    bn256_to_b32(rx, rx_bn);
+    bn256_to_b32(ry, ry_bn);
 }
 
 // Scalar multiplication: R = k * P using double-and-add (MSB-first).
-// Edwards doubling uses the same addition formula (P + P).
-transform ed25519_scalar_mul(rx: Address, ry: Address, k: Address, px: Address, py: Address, p_le: Address, d_le: Address) {
+transform ed25519_scalar_mul(
+    rx: State<B32>, ry: State<B32>,
+    k: State<B32>,
+    px: State<B32>, py: State<B32>,
+    p_le: State<B32>, d_le: State<B32>
+) {
     // Identity element of twisted Edwards curve is (0, 1)
-    bn256_zero(rx);
-    *(rx + 0) = 0;
-    bn256_zero(ry);
-    *(ry + 0) = 1;
+    b32_zero(rx);
+    b32_zero(ry);
+    ry.bytes[0] = 1;
 
-    tx = allocate(32);
-    ty = allocate(32);
+    let tx = state_new(B32);
+    let ty = state_new(B32);
+    let k_bn = state_new(Bn256Ctx);
+    b32_to_bn256(k_bn, k);
 
-    bits: u32 = bn256_bitlen(k);
-    i: u32 = bits;
+    let bits: u32 = bn256_bitlen(k_bn);
+    let i: u32 = bits;
     while i > 0 {
-        i = i - 1;
+        let ii = i - 1;
         // R = 2*R = R + R
         ed25519_point_add(tx, ty, rx, ry, rx, ry, p_le, d_le);
-        bn256_copy(rx, tx);
-        bn256_copy(ry, ty);
-        if bn256_get_bit(k, i) == 1 {
+        b32_copy(rx, tx);
+        b32_copy(ry, ty);
+        if bn256_get_bit(k_bn, ii) == 1 {
             ed25519_point_add(tx, ty, rx, ry, px, py, p_le, d_le);
-            bn256_copy(rx, tx);
-            bn256_copy(ry, ty);
+            b32_copy(rx, tx);
+            b32_copy(ry, ty);
         }
+        i = ii;
     }
-    free(tx); free(ty);
 }
 
 // ===========================================================================
 // Point compression: encode (x, y) as 32-byte y with sign bit of x in MSB.
-// The "sign" is the LSB of x (parity), placed in bit 255 of the encoding.
 // ===========================================================================
 
-transform ed25519_point_compress(out: Address, x_le: Address, y_le: Address) {
-    i: u32 = 0;
-    while i < 32 { *(out + i) = *(y_le + i); i = i + 1; }
-    // Clear bit 255 then set it to the LSB of x
-    *(out + 31) = *(out + 31) & 127;
-    sign_bit: u32 = *(x_le + 0) & 1;
-    *(out + 31) = *(out + 31) | (sign_bit << 7);
+transform ed25519_point_compress(out: State<B32>, x_le: State<B32>, y_le: State<B32>) {
+    let i: u32 = 0;
+    while i < 32 { out.bytes[i] = y_le.bytes[i]; i = i + 1; }
+    out.bytes[31] = out.bytes[31] & 127;
+    let sign_bit: u32 = x_le.bytes[0] as u32 & 1;
+    out.bytes[31] = out.bytes[31] | ((sign_bit << 7) as u8);
 }
 
 // ===========================================================================
 // Recover x from y using the curve equation.
 //   x^2 = (y^2 - 1) / (d*y^2 + 1) mod p
-//   x = sqrt(rhs) ; choose sign of x based on `sign` (LSB of expected x).
-// Returns 1 on success (x written to x_le), 0 if y is not on the curve.
-// Uses Tonelli-Shanks variant for p ≡ 5 (mod 8):
-//   cand = rhs^((p+3)/8) mod p
-//   if cand^2 == rhs: x = cand
-//   else if cand^2 == -rhs: x = cand * sqrt(-1)
-//   else: not a quadratic residue, return 0
 // ===========================================================================
 
-transform ed25519_recover_x(x_le: Address, y_le: Address, sign: u32, p_le: Address, d_le: Address) -> u32 {
-    // y^2
-    y_sq = allocate(32);
-    bn256_mod_mul(y_sq, y_le, y_le, p_le);
+transform ed25519_recover_x(
+    x_le: State<B32>, y_le: State<B32>, sign: u32,
+    p_le: State<B32>, d_le: State<B32>
+) -> u32 {
+    let p_bn = state_new(Bn256Ctx);
+    let d_bn = state_new(Bn256Ctx);
+    let y_bn = state_new(Bn256Ctx);
+    b32_to_bn256(p_bn, p_le);
+    b32_to_bn256(d_bn, d_le);
+    b32_to_bn256(y_bn, y_le);
 
-    // num = y^2 - 1
-    one = allocate(32);
-    bn256_zero(one);
-    *(one + 0) = 1;
-    num = allocate(32);
-    bn256_mod_sub(num, y_sq, one, p_le);
+    let y_sq = state_new(Bn256Ctx);
+    let one = state_new(Bn256Ctx);
+    let num = state_new(Bn256Ctx);
+    let d_ysq = state_new(Bn256Ctx);
+    let den = state_new(Bn256Ctx);
+    let den_inv = state_new(Bn256Ctx);
+    let rhs = state_new(Bn256Ctx);
+    let exp = state_new(Bn256Ctx);
+    let cand = state_new(Bn256Ctx);
+    let cand_sq = state_new(Bn256Ctx);
 
-    // den = d*y^2 + 1
-    d_ysq = allocate(32);
-    bn256_mod_mul(d_ysq, d_le, y_sq, p_le);
-    den = allocate(32);
-    bn256_mod_add(den, d_ysq, one, p_le);
+    bn256_mod_mul(y_sq, y_bn, y_bn, p_bn);
+    bn256_set_u32(one, 1);
+    bn256_mod_sub(num, y_sq, one, p_bn);
+    bn256_mod_mul(d_ysq, d_bn, y_sq, p_bn);
+    bn256_mod_add(den, d_ysq, one, p_bn);
+    bn256_mod_inv(den_inv, den, p_bn);
+    bn256_mod_mul(rhs, num, den_inv, p_bn);
 
-    // rhs = num * den^-1
-    den_inv = allocate(32);
-    bn256_mod_inv(den_inv, den, p_le);
-    rhs = allocate(32);
-    bn256_mod_mul(rhs, num, den_inv, p_le);
+    // cand = rhs^((p+3)/8) mod p; exp = 2^252 - 2 (LE bytes)
+    let exp_b = state_new(B32);
+    exp_b.bytes[0] = 254;
+    let ei: u32 = 1;
+    while ei < 31 { exp_b.bytes[ei] = 255; ei = ei + 1; }
+    exp_b.bytes[31] = 15;
+    b32_to_bn256(exp, exp_b);
+    bn256_mod_exp(cand, rhs, exp, p_bn);
+    bn256_mod_mul(cand_sq, cand, cand, p_bn);
 
-    // cand = rhs^((p+3)/8) mod p
-    // (p+3)/8 = (2^255 - 16) / 8 = 2^252 - 2
-    exp = allocate(32);
-    // 2^252 - 2 in LE: 0xFE 0xFF ... 0xFF 0x0F (low byte = -2, byte 31 = 0x0F to clear top 4 bits)
-    *(exp + 0) = 254;   // 0xFE = -2 mod 256
-    i: u32 = 1;
-    while i < 31 { *(exp + i) = 255; i = i + 1; }
-    *(exp + 31) = 15;   // 0x0F: bit 252 set, bits 253..255 clear
-    cand = allocate(32);
-    bn256_mod_exp(cand, rhs, exp, p_le);
-
-    // Check cand^2 vs rhs
-    cand_sq = allocate(32);
-    bn256_mod_mul(cand_sq, cand, cand, p_le);
-
-    ok: u32 = 0;
+    let ok: u32 = 0;
     if bn256_cmp(cand_sq, rhs) == 0 {
-        // x = cand
-        bn256_copy(x_le, cand);
+        bn256_to_b32(x_le, cand);
         ok = 1;
     } else {
-        // Check cand^2 == -rhs (i.e., rhs negated mod p)
-        neg_rhs = allocate(32);
-        bn256_mod_sub(neg_rhs, p_le, rhs, p_le);
+        // Check cand^2 == -rhs
+        let neg_rhs = state_new(Bn256Ctx);
+        bn256_mod_sub(neg_rhs, p_bn, rhs, p_bn);
         if bn256_cmp(cand_sq, neg_rhs) == 0 {
             // x = cand * sqrt(-1)
-            sqrt_m1 = ed25519_sqrt_m1();
-            bn256_mod_mul(x_le, cand, sqrt_m1, p_le);
-            free(sqrt_m1);
+            let sqrt_m1_b = state_new(B32);
+            ed25519_sqrt_m1(sqrt_m1_b);
+            let sqrt_m1_bn = state_new(Bn256Ctx);
+            b32_to_bn256(sqrt_m1_bn, sqrt_m1_b);
+            let x_bn = state_new(Bn256Ctx);
+            bn256_mod_mul(x_bn, cand, sqrt_m1_bn, p_bn);
+            bn256_to_b32(x_le, x_bn);
             ok = 1;
         }
-        free(neg_rhs);
     }
 
     if ok == 1 {
-        // Adjust sign of x so LSB matches `sign`
-        cur_sign: u32 = *(x_le + 0) & 1;
+        let cur_sign: u32 = x_le.bytes[0] as u32 & 1;
         if cur_sign != sign {
             // x = p - x
-            neg_x = allocate(32);
-            bn256_mod_sub(neg_x, p_le, x_le, p_le);
-            bn256_copy(x_le, neg_x);
-            free(neg_x);
+            let x_bn2 = state_new(Bn256Ctx);
+            let neg_x = state_new(Bn256Ctx);
+            b32_to_bn256(x_bn2, x_le);
+            bn256_mod_sub(neg_x, p_bn, x_bn2, p_bn);
+            bn256_to_b32(x_le, neg_x);
         }
     }
-
-    free(y_sq); free(one); free(num); free(d_ysq); free(den);
-    free(den_inv); free(rhs); free(exp); free(cand); free(cand_sq);
 
     return ok;
 }
 
 // ===========================================================================
 // Point decompression: decode 32-byte encoding to (x, y).
-//   enc[0..31]  : y with sign bit of x in MSB of enc[31]
-// Returns 1 on success, 0 if the encoding is invalid.
 // ===========================================================================
 
-transform ed25519_point_decompress(x_le: Address, y_le: Address, enc: Address, p_le: Address, d_le: Address) -> u32 {
-    sign: u32 = (*(enc + 31) >> 7) & 1;
-    // y = enc with high bit cleared, then reduce mod p (y < 2^255 < 2p)
-    i: u32 = 0;
-    while i < 31 { *(y_le + i) = *(enc + i); i = i + 1; }
-    *(y_le + 31) = *(enc + 31) & 127;
-    if bn256_cmp(y_le, p_le) >= 0 {
-        bn256_sub(y_le, y_le, p_le);
+transform ed25519_point_decompress(
+    x_le: State<B32>, y_le: State<B32>, enc: State<B32>,
+    p_le: State<B32>, d_le: State<B32>
+) -> u32 {
+    let sign: u32 = ((enc.bytes[31] as u32) >> 7) & 1;
+    // y = enc with high bit cleared
+    let i: u32 = 0;
+    while i < 31 { y_le.bytes[i] = enc.bytes[i]; i = i + 1; }
+    y_le.bytes[31] = enc.bytes[31] & 127;
+    // Reduce y mod p (y < 2^255 < 2p)
+    if b32_cmp(y_le, p_le) >= 0 {
+        b32_sub(y_le, y_le, p_le);
     }
     return ed25519_recover_x(x_le, y_le, sign, p_le, d_le);
 }
@@ -384,210 +555,243 @@ transform ed25519_point_decompress(x_le: Address, y_le: Address, enc: Address, p
 // Ed25519 Key Generation (RFC 8032 Section 5.1.5)
 //   privkey (in)  : 32-byte seed (random)
 //   pubkey (out)  : 32-byte compressed public key = A = a*B
-// Also computes the intermediate expanded secret (a, prefix) but does not
-// return it — callers sign with ed25519_sign which redoes the expansion.
 // ===========================================================================
 
-transform ed25519_keygen(privkey: Address, pubkey: Address) {
-    h = allocate(64);
-    sha512_oneshot(privkey, 32, h);
+transform ed25519_keygen(privkey: State<B32>, pubkey: State<B32>) {
+    // h = SHA-512(privkey)
+    let h_in = state_new(B256);
+    let i: u32 = 0;
+    while i < 32 { h_in.bytes[i] = privkey.bytes[i]; i = i + 1; }
+    let h = state_new(B64);
+    ed25519_sha512_hash(h_in, 32, h);
 
-    // a = h[0..31] with clamping
-    *(h + 0)  = *(h + 0)  & 248;     // clear bits 0-2
-    *(h + 31) = *(h + 31) & 127;     // clear bit 255
-    *(h + 31) = *(h + 31) | 64;      // set bit 254
+    // a = h[0..31] with clamping (low 3 bits clear, bit 255 clear, bit 254 set)
+    h.bytes[0]  = h.bytes[0]  & 248;
+    h.bytes[31] = h.bytes[31] & 127;
+    h.bytes[31] = h.bytes[31] | 64;
 
-    p_le = ed25519_p();
-    d_le = ed25519_d();
-    bx = ed25519_bx();
-    by = ed25519_by();
+    let a = state_new(B32);
+    let j: u32 = 0;
+    while j < 32 { a.bytes[j] = h.bytes[j]; j = j + 1; }
 
-    ax = allocate(32);
-    ay = allocate(32);
-    ed25519_scalar_mul(ax, ay, h, bx, by, p_le, d_le);
+    let p_le = state_new(B32);
+    let d_le = state_new(B32);
+    let bx = state_new(B32);
+    let by = state_new(B32);
+    ed25519_p(p_le);
+    ed25519_d(d_le);
+    ed25519_bx(bx);
+    ed25519_by(by);
+
+    let ax = state_new(B32);
+    let ay = state_new(B32);
+    ed25519_scalar_mul(ax, ay, a, bx, by, p_le, d_le);
 
     ed25519_point_compress(pubkey, ax, ay);
-
-    free(h); free(p_le); free(d_le); free(bx); free(by); free(ax); free(ay);
 }
 
 // ===========================================================================
 // Ed25519 Sign (RFC 8032, Section 5.1.6)
 //   privkey : 32-byte seed
-//   msg     : message bytes
+//   msg     : message bytes (up to 192 bytes)
 //   msg_len : message length
 //   sig     : 64-byte signature output (R || S)
 // ===========================================================================
 
-transform ed25519_sign(privkey: Address, msg: Address, msg_len: u32, sig: Address) {
-    // 1. h = SHA-512(privkey) — 64 bytes
-    h = allocate(64);
-    sha512_oneshot(privkey, 32, h);
+transform ed25519_sign(privkey: State<B32>, msg: State<B256>, msg_len: u32, sig: State<B64>) {
+    // 1. h = SHA-512(privkey)
+    let h_in = state_new(B256);
+    let n: u32 = 0;
+    while n < 32 { h_in.bytes[n] = privkey.bytes[n]; n = n + 1; }
+    let h = state_new(B64);
+    ed25519_sha512_hash(h_in, 32, h);
 
     // 2. a = h[0..31] with clamping ; prefix = h[32..63]
-    *(h + 0)  = *(h + 0)  & 248;
-    *(h + 31) = *(h + 31) & 127;
-    *(h + 31) = *(h + 31) | 64;
-    a = h;          // first 32 bytes
-    prefix = h + 32;
+    h.bytes[0]  = h.bytes[0]  & 248;
+    h.bytes[31] = h.bytes[31] & 127;
+    h.bytes[31] = h.bytes[31] | 64;
+    let a = state_new(B32);
+    let n2: u32 = 0;
+    while n2 < 32 { a.bytes[n2] = h.bytes[n2]; n2 = n2 + 1; }
+    let prefix = state_new(B32);
+    let n3: u32 = 0;
+    while n3 < 32 { prefix.bytes[n3] = h.bytes[32 + n3]; n3 = n3 + 1; }
 
     // 3. A = a * B (public key point)
-    p_le = ed25519_p();
-    d_le = ed25519_d();
-    bx = ed25519_bx();
-    by = ed25519_by();
+    let p_le = state_new(B32);
+    let d_le = state_new(B32);
+    let bx = state_new(B32);
+    let by = state_new(B32);
+    ed25519_p(p_le);
+    ed25519_d(d_le);
+    ed25519_bx(bx);
+    ed25519_by(by);
 
-    ax = allocate(32);
-    ay = allocate(32);
+    let ax = state_new(B32);
+    let ay = state_new(B32);
     ed25519_scalar_mul(ax, ay, a, bx, by, p_le, d_le);
 
-    // Encode A as 32 bytes (compressed) for the k-hash input
-    A_enc = allocate(32);
+    let A_enc = state_new(B32);
     ed25519_point_compress(A_enc, ax, ay);
 
     // 4. r = SHA-512(prefix || msg) mod L
-    r_hash = allocate(32 + msg_len);
-    i: u32 = 0;
-    while i < 32 { *(r_hash + i) = *(prefix + i); i = i + 1; }
-    i = 0;
-    while i < msg_len { *(r_hash + 32 + i) = *(msg + i); i = i + 1; }
-    r_full = allocate(64);
-    sha512_oneshot(r_hash, 32 + msg_len, r_full);
-    free(r_hash);
+    let r_hash_in = state_new(B256);
+    let i: u32 = 0;
+    while i < 32 { r_hash_in.bytes[i] = prefix.bytes[i]; i = i + 1; }
+    let i2: u32 = 0;
+    while i2 < msg_len {
+        r_hash_in.bytes[32 + i2] = msg.bytes[i2];
+        i2 = i2 + 1;
+    }
+    let r_full = state_new(B64);
+    let r_total: u32 = 32 + msg_len;
+    ed25519_sha512_hash(r_hash_in, r_total, r_full);
 
-    r = allocate(32);
+    let r = state_new(B32);
     ed25519_mod_l(r, r_full);
-    free(r_full);
 
     // 5. R = r * B
-    rx = allocate(32);
-    ry = allocate(32);
+    let rx = state_new(B32);
+    let ry = state_new(B32);
     ed25519_scalar_mul(rx, ry, r, bx, by, p_le, d_le);
-    R_enc = allocate(32);
+    let R_enc = state_new(B32);
     ed25519_point_compress(R_enc, rx, ry);
 
     // 6. k = SHA-512(R || A || msg) mod L
-    k_hash_in = allocate(32 + 32 + msg_len);
-    i = 0;
-    while i < 32 { *(k_hash_in + i) = *(R_enc + i); i = i + 1; }
-    i = 0;
-    while i < 32 { *(k_hash_in + 32 + i) = *(A_enc + i); i = i + 1; }
-    i = 0;
-    while i < msg_len { *(k_hash_in + 64 + i) = *(msg + i); i = i + 1; }
-    k_full = allocate(64);
-    sha512_oneshot(k_hash_in, 64 + msg_len, k_full);
-    free(k_hash_in);
+    let k_hash_in = state_new(B256);
+    let j: u32 = 0;
+    while j < 32 { k_hash_in.bytes[j] = R_enc.bytes[j]; j = j + 1; }
+    let j2: u32 = 0;
+    while j2 < 32 { k_hash_in.bytes[32 + j2] = A_enc.bytes[j2]; j2 = j2 + 1; }
+    let j3: u32 = 0;
+    while j3 < msg_len {
+        k_hash_in.bytes[64 + j3] = msg.bytes[j3];
+        j3 = j3 + 1;
+    }
+    let k_full = state_new(B64);
+    let k_total: u32 = 64 + msg_len;
+    ed25519_sha512_hash(k_hash_in, k_total, k_full);
 
-    k = allocate(32);
+    let k = state_new(B32);
     ed25519_mod_l(k, k_full);
-    free(k_full);
 
     // 7. S = (r + k * a) mod L
-    l_le = ed25519_l();
-    ka = allocate(32);
-    bn256_mod_mul(ka, k, a, l_le);
-    s = allocate(32);
-    bn256_mod_add(s, r, ka, l_le);
+    let l_le = state_new(B32);
+    ed25519_l(l_le);
+    let l_bn = state_new(Bn256Ctx);
+    b32_to_bn256(l_bn, l_le);
+    let k_bn = state_new(Bn256Ctx);
+    let a_bn = state_new(Bn256Ctx);
+    let r_bn = state_new(Bn256Ctx);
+    let ka = state_new(Bn256Ctx);
+    let s_bn = state_new(Bn256Ctx);
+    b32_to_bn256(k_bn, k);
+    b32_to_bn256(a_bn, a);
+    b32_to_bn256(r_bn, r);
+    bn256_mod_mul(ka, k_bn, a_bn, l_bn);
+    bn256_mod_add(s_bn, r_bn, ka, l_bn);
+    let s = state_new(B32);
+    bn256_to_b32(s, s_bn);
 
     // 8. sig = R || S (64 bytes)
-    i = 0;
-    while i < 32 { *(sig + i) = *(R_enc + i); i = i + 1; }
-    i = 0;
-    while i < 32 { *(sig + 32 + i) = *(s + i); i = i + 1; }
-
-    free(h); free(p_le); free(d_le); free(bx); free(by); free(ax); free(ay);
-    free(A_enc); free(r); free(rx); free(ry); free(R_enc);
-    free(k); free(l_le); free(ka); free(s);
+    let p: u32 = 0;
+    while p < 32 { sig.bytes[p] = R_enc.bytes[p]; p = p + 1; }
+    let q: u32 = 0;
+    while q < 32 { sig.bytes[32 + q] = s.bytes[q]; q = q + 1; }
 }
 
 // ===========================================================================
 // Ed25519 Verify (RFC 8032, Section 5.1.7)
 //   pubkey : 32-byte compressed public key A
-//   msg    : message bytes
+//   msg    : message bytes (up to 192 bytes)
 //   msg_len: message length
 //   sig    : 64-byte signature (R || S)
 // Returns 1 if valid, 0 otherwise.
 // ===========================================================================
 
-transform ed25519_verify(pubkey: Address, msg: Address, msg_len: u32, sig: Address) -> u32 {
-    p_le = ed25519_p();
-    d_le = ed25519_d();
-    l_le = ed25519_l();
-    bx = ed25519_bx();
-    by = ed25519_by();
+transform ed25519_verify(pubkey: State<B32>, msg: State<B256>, msg_len: u32, sig: State<B64>) -> u32 {
+    let p_le = state_new(B32);
+    let d_le = state_new(B32);
+    let l_le = state_new(B32);
+    let bx = state_new(B32);
+    let by = state_new(B32);
+    ed25519_p(p_le);
+    ed25519_d(d_le);
+    ed25519_l(l_le);
+    ed25519_bx(bx);
+    ed25519_by(by);
 
     // 1. Parse S = sig[32..63] and check S < L
-    s = sig + 32;
-    if bn256_cmp(s, l_le) >= 0 {
-        free(p_le); free(d_le); free(l_le); free(bx); free(by);
+    let s = state_new(B32);
+    let i: u32 = 0;
+    while i < 32 { s.bytes[i] = sig.bytes[32 + i]; i = i + 1; }
+    let s_bn = state_new(Bn256Ctx);
+    let l_bn = state_new(Bn256Ctx);
+    b32_to_bn256(s_bn, s);
+    b32_to_bn256(l_bn, l_le);
+    if bn256_cmp(s_bn, l_bn) >= 0 {
         return 0;
     }
 
     // 2. Decode A from pubkey
-    ax = allocate(32);
-    ay = allocate(32);
+    let ax = state_new(B32);
+    let ay = state_new(B32);
     if ed25519_point_decompress(ax, ay, pubkey, p_le, d_le) == 0 {
-        free(p_le); free(d_le); free(l_le); free(bx); free(by);
-        free(ax); free(ay);
         return 0;
     }
 
     // 3. Decode R from sig[0..32]
-    rx = allocate(32);
-    ry = allocate(32);
-    if ed25519_point_decompress(rx, ry, sig, p_le, d_le) == 0 {
-        free(p_le); free(d_le); free(l_le); free(bx); free(by);
-        free(ax); free(ay); free(rx); free(ry);
+    let R_enc = state_new(B32);
+    let j: u32 = 0;
+    while j < 32 { R_enc.bytes[j] = sig.bytes[j]; j = j + 1; }
+    let rx = state_new(B32);
+    let ry = state_new(B32);
+    if ed25519_point_decompress(rx, ry, R_enc, p_le, d_le) == 0 {
         return 0;
     }
 
     // 4. k = SHA-512(R || A || msg) mod L
-    k_hash_in = allocate(32 + 32 + msg_len);
-    i: u32 = 0;
-    while i < 32 { *(k_hash_in + i) = *(sig + i); i = i + 1; }
-    i = 0;
-    while i < 32 { *(k_hash_in + 32 + i) = *(pubkey + i); i = i + 1; }
-    i = 0;
-    while i < msg_len { *(k_hash_in + 64 + i) = *(msg + i); i = i + 1; }
-    k_full = allocate(64);
-    sha512_oneshot(k_hash_in, 64 + msg_len, k_full);
-    free(k_hash_in);
-    k = allocate(32);
+    let k_hash_in = state_new(B256);
+    let m: u32 = 0;
+    while m < 32 { k_hash_in.bytes[m] = R_enc.bytes[m]; m = m + 1; }
+    let m2: u32 = 0;
+    while m2 < 32 { k_hash_in.bytes[32 + m2] = pubkey.bytes[m2]; m2 = m2 + 1; }
+    let m3: u32 = 0;
+    while m3 < msg_len {
+        k_hash_in.bytes[64 + m3] = msg.bytes[m3];
+        m3 = m3 + 1;
+    }
+    let k_full = state_new(B64);
+    let k_total: u32 = 64 + msg_len;
+    ed25519_sha512_hash(k_hash_in, k_total, k_full);
+    let k = state_new(B32);
     ed25519_mod_l(k, k_full);
-    free(k_full);
 
     // 5. Compute left = S * B
-    sbx = allocate(32);
-    sby = allocate(32);
+    let sbx = state_new(B32);
+    let sby = state_new(B32);
     ed25519_scalar_mul(sbx, sby, s, bx, by, p_le, d_le);
 
     // 6. Compute right = R + k * A
-    kax = allocate(32);
-    kay = allocate(32);
+    let kax = state_new(B32);
+    let kay = state_new(B32);
     ed25519_scalar_mul(kax, kay, k, ax, ay, p_le, d_le);
-    sumx = allocate(32);
-    sumy = allocate(32);
+    let sumx = state_new(B32);
+    let sumy = state_new(B32);
     ed25519_point_add(sumx, sumy, rx, ry, kax, kay, p_le, d_le);
 
-    // 7. Compare left and right encodings (constant time)
-    left_enc = allocate(32);
-    right_enc = allocate(32);
+    // 7. Compare left and right encodings
+    let left_enc = state_new(B32);
+    let right_enc = state_new(B32);
     ed25519_point_compress(left_enc, sbx, sby);
     ed25519_point_compress(right_enc, sumx, sumy);
 
-    diff: u32 = 0;
-    i = 0;
-    while i < 32 {
-        diff = diff | (*(left_enc + i) ^ *(right_enc + i));
-        i = i + 1;
+    let diff: u32 = 0;
+    let n: u32 = 0;
+    while n < 32 {
+        diff = diff | ((left_enc.bytes[n] as u32) ^ (right_enc.bytes[n] as u32));
+        n = n + 1;
     }
-    result: u32 = 0;
-    if diff == 0 { result = 1; }
-
-    free(p_le); free(d_le); free(l_le); free(bx); free(by);
-    free(ax); free(ay); free(rx); free(ry);
-    free(k); free(sbx); free(sby); free(kax); free(kay); free(sumx); free(sumy);
-    free(left_enc); free(right_enc);
-
-    return result;
+    if diff == 0 { return 1; }
+    return 0;
 }

@@ -1,83 +1,62 @@
-// womb/crypto/ecdsa_p384.vuma — ECDSA over NIST P-384 (FIPS 186-4)
+// womb/crypto/asym/ecdsa_p384.vuma — ECDSA over NIST P-384 (FIPS 186-4)
 // No main() — importable library module.
-// Requires: sha384.vuma (sha384_oneshot), hmac.vuma (hmac_sha512).
+// Requires: sha384.vuma (sha384_*), hmac.vuma (hmac_sha512).
 //
-// P-384 parameters (FIPS 186-4 Section D.1.2.4):
-//   p = 2^384 - 2^128 - 2^96 + 2^32 - 1
-//   a = -3 mod p
-//   b = 0xB3312FA7E23EE7E4988E056BE3F82D19181D9C6EFE8141120314088F5013875A
-//       C656398D8A2ED19D2A85C8EDD3EC2AEF
-//   Gx = 0xAA87CA22BE8B05378EB1C71EF320AD746E1D3B628BA79B9859F741E082542A38
-//        5502F25DBF55296C3A545E3872760AB8
-//   Gy = 0x3617DE4A96262C6F5D9E98BF9292DC29F8F41DBD289A147CE9DA3113B5F0B8C0
-//        0A60B1CE1D7E819D7A431D7C90EA0E5F
-//   n  = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFC7634D81F4372DDF
-//        581A0DB248B0A77AECEC196ACCC52973
-//
+// P-384: p = 2^384 - 2^128 - 2^96 + 2^32 - 1, a = -3 mod p
 // All scalars and point coordinates are 48-byte (384-bit) big-endian on the
-// wire. Internally we operate on 48-byte little-endian limb buffers (6 × u64).
+// wire. Internally we operate on 48-byte little-endian via Bn384Ctx (6 × u64).
 //
-// Signing uses RFC 6979 deterministic nonce derivation via HMAC-SHA-512
-// (matching the curve strength), with the 384-bit digest truncated to 48 bytes
-// for the nonce block.
+// VUMA 2.0 PMT-native: state_new(Layout) / State<T> / typed arrays.
 
-const MASK64: u64 = ((1 << 63) | ((1 << 63) - 1));
+const P384_LIMBS: u32 = 6;
+const P384_BYTES: u32 = 48;
+
+// ===========================================================================
+// Layouts
+// ===========================================================================
+
+// 384-bit bignum context — 6 × u64 limbs (little-endian).
+layout Bn384Ctx = { limbs: [u64; 6] }
+
+// 768-bit (12-limb) — 384×384 multiplication result.
+layout Bn768Ctx = { limbs: [u64; 12] }
+
+layout B48  = { bytes: [u8; 48] }     // 48-byte BE/LE field element / scalar
+layout B256 = { bytes: [u8; 256] }    // message buffer
 
 // ===========================================================================
 // 384-bit bignum primitives (6 × u64 limbs, little-endian)
 // ===========================================================================
 
-transform bn384_load_u64(ptr: Address, off: u32) -> u64 {
-    b0: u64 = *(ptr + off);     b1: u64 = *(ptr + off + 1);
-    b2: u64 = *(ptr + off + 2); b3: u64 = *(ptr + off + 3);
-    b4: u64 = *(ptr + off + 4); b5: u64 = *(ptr + off + 5);
-    b6: u64 = *(ptr + off + 6); b7: u64 = *(ptr + off + 7);
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+transform bn384_zero(a: State<Bn384Ctx>) {
+    let i: u32 = 0;
+    while i < P384_LIMBS { a.limbs[i] = 0; i = i + 1; }
 }
 
-transform bn384_store_u64(ptr: Address, off: u32, val: u64) {
-    *(ptr + off)     = val & 255;
-    *(ptr + off + 1) = (val >> 8) & 255;
-    *(ptr + off + 2) = (val >> 16) & 255;
-    *(ptr + off + 3) = (val >> 24) & 255;
-    *(ptr + off + 4) = (val >> 32) & 255;
-    *(ptr + off + 5) = (val >> 40) & 255;
-    *(ptr + off + 6) = (val >> 48) & 255;
-    *(ptr + off + 7) = (val >> 56) & 255;
+transform bn384_copy(r: State<Bn384Ctx>, a: State<Bn384Ctx>) {
+    let i: u32 = 0;
+    while i < P384_LIMBS { r.limbs[i] = a.limbs[i]; i = i + 1; }
 }
 
-transform bn384_zero(a: Address) {
-    i: u32 = 0;
-    while i < 48 { *(a + i) = 0; i = i + 1; }
+transform bn384_set_u32(r: State<Bn384Ctx>, v: u32) {
+    bn384_zero(r);
+    r.limbs[0] = v as u64;
 }
 
-transform bn384_copy(r: Address, a: Address) {
-    i: u32 = 0;
-    while i < 48 { *(r + i) = *(a + i); i = i + 1; }
-}
-
-transform bn384_is_zero(a: Address) -> u32 {
-    i: u32 = 0;
-    while i < 6 {
-        if bn384_load_u64(a, i * 8) != 0 { return 0; }
+transform bn384_is_zero(a: State<Bn384Ctx>) -> u32 {
+    let i: u32 = 0;
+    while i < P384_LIMBS {
+        if a.limbs[i] != 0 { return 0; }
         i = i + 1;
     }
     return 1;
 }
 
-transform bn384_set_u32(r: Address, val: u32) {
-    bn384_zero(r);
-    *(r + 0) = val & 255;
-    *(r + 1) = (val >> 8) & 255;
-    *(r + 2) = (val >> 16) & 255;
-    *(r + 3) = (val >> 24) & 255;
-}
-
-transform bn384_cmp(a: Address, b: Address) -> i32 {
-    i: u32 = 5;
+transform bn384_cmp(a: State<Bn384Ctx>, b: State<Bn384Ctx>) -> i32 {
+    let i: u32 = P384_LIMBS - 1;
     while 1 == 1 {
-        av: u64 = bn384_load_u64(a, i * 8);
-        bv: u64 = bn384_load_u64(b, i * 8);
+        let av = a.limbs[i];
+        let bv = b.limbs[i];
         if av > bv { return 1; }
         if av < bv { return -1; }
         if i == 0 { break; }
@@ -86,75 +65,87 @@ transform bn384_cmp(a: Address, b: Address) -> i32 {
     return 0;
 }
 
-transform bn384_add(r: Address, a: Address, b: Address) -> u32 {
-    carry: u64 = 0;
-    i: u32 = 0;
-    while i < 6 {
-        av: u64 = bn384_load_u64(a, i * 8);
-        bv: u64 = bn384_load_u64(b, i * 8);
-        sum: u64 = av + bv + carry;
-        bn384_store_u64(r, i * 8, sum);
+// r = a + b. Returns carry-out (0 or 1).
+transform bn384_add(r: State<Bn384Ctx>, a: State<Bn384Ctx>, b: State<Bn384Ctx>) -> u32 {
+    let carry: u64 = 0;
+    let i: u32 = 0;
+    while i < P384_LIMBS {
+        let av = a.limbs[i];
+        let bv = b.limbs[i];
+        let sum: u64 = av + bv + carry;
+        r.limbs[i] = sum;
         if sum < av { carry = 1; }
-        else { carry = 0; }
+        else {
+            if sum == av {
+                if carry == 1 { carry = 1; } else { carry = 0; }
+            } else { carry = 0; }
+        }
         i = i + 1;
     }
-    return carry;
+    return carry as u32;
 }
 
-transform bn384_sub(r: Address, a: Address, b: Address) -> u32 {
-    borrow: u64 = 0;
-    i: u32 = 0;
-    while i < 6 {
-        av: u64 = bn384_load_u64(a, i * 8);
-        bv: u64 = bn384_load_u64(b, i * 8);
-        diff: u64 = av - bv - borrow;
-        bn384_store_u64(r, i * 8, diff);
+// r = a - b. Returns borrow-out (0 or 1).
+transform bn384_sub(r: State<Bn384Ctx>, a: State<Bn384Ctx>, b: State<Bn384Ctx>) -> u32 {
+    let borrow: u64 = 0;
+    let i: u32 = 0;
+    while i < P384_LIMBS {
+        let av = a.limbs[i];
+        let bv = b.limbs[i];
+        let diff: u64 = av - bv - borrow;
+        r.limbs[i] = diff;
         if av < bv { borrow = 1; }
-        else { borrow = 0; }
+        else {
+            if av == bv {
+                if borrow == 1 { borrow = 1; } else { borrow = 0; }
+            } else { borrow = 0; }
+        }
         i = i + 1;
     }
-    return borrow;
+    return borrow as u32;
 }
 
-transform bn384_lshift1(r: Address, a: Address) {
-    carry: u64 = 0;
-    i: u32 = 0;
-    while i < 6 {
-        v: u64 = bn384_load_u64(a, i * 8);
-        bn384_store_u64(r, i * 8, (v << 1) | carry);
+transform bn384_lshift1(r: State<Bn384Ctx>, a: State<Bn384Ctx>) {
+    let carry: u64 = 0;
+    let i: u32 = 0;
+    while i < P384_LIMBS {
+        let v = a.limbs[i];
+        r.limbs[i] = (v << 1) | carry;
         carry = v >> 63;
         i = i + 1;
     }
 }
 
-transform bn384_rshift1(r: Address, a: Address) {
-    i: u32 = 5;
+transform bn384_rshift1(r: State<Bn384Ctx>, a: State<Bn384Ctx>) {
+    let i: u32 = P384_LIMBS - 1;
     while i > 0 {
-        hi: u64 = bn384_load_u64(a, i * 8);
-        lo: u64 = bn384_load_u64(a, (i - 1) * 8);
-        bn384_store_u64(r, i * 8, (hi >> 1) | (lo << 63));
+        let hi = a.limbs[i];
+        let im1 = i - 1;
+        let lo = a.limbs[im1];
+        r.limbs[i] = (hi >> 1) | (lo << 63);
         i = i - 1;
     }
-    v0: u64 = bn384_load_u64(a, 0);
-    bn384_store_u64(r, 0, v0 >> 1);
+    let v0 = a.limbs[0];
+    r.limbs[0] = v0 >> 1;
 }
 
-transform bn384_get_bit(a: Address, bit: u32) -> u32 {
-    limb: u32 = bit / 64;
-    pos: u32 = bit % 64;
-    if limb >= 6 { return 0; }
-    v: u64 = bn384_load_u64(a, limb * 8);
-    return (v >> pos) & 1;
+transform bn384_get_bit(a: State<Bn384Ctx>, bit: u32) -> u32 {
+    let limb: u32 = bit / 64;
+    let pos: u32 = bit % 64;
+    if limb >= P384_LIMBS { return 0; }
+    let v = a.limbs[limb];
+    return ((v >> pos) & 1) as u32;
 }
 
-transform bn384_bitlen(a: Address) -> u32 {
-    i: u32 = 5;
+transform bn384_bitlen(a: State<Bn384Ctx>) -> u32 {
+    let i: u32 = P384_LIMBS - 1;
     while 1 == 1 {
-        v: u64 = bn384_load_u64(a, i * 8);
+        let v = a.limbs[i];
         if v != 0 {
-            bits: u32 = 64;
+            let bits: u32 = 64;
             while bits > 0 {
-                if ((v >> (bits - 1)) & 1) == 1 { return i * 64 + bits; }
+                let b = bits - 1;
+                if ((v >> b) & 1) == 1 { return i * 64 + bits; }
                 bits = bits - 1;
             }
             return i * 64 + 1;
@@ -165,67 +156,66 @@ transform bn384_bitlen(a: Address) -> u32 {
     return 0;
 }
 
-transform bn384_mod_add(r: Address, a: Address, b: Address, m: Address) {
-    carry: u32 = bn384_add(r, a, b);
+transform bn384_mod_add(r: State<Bn384Ctx>, a: State<Bn384Ctx>, b: State<Bn384Ctx>, m: State<Bn384Ctx>) {
+    let carry: u32 = bn384_add(r, a, b);
     if carry == 1 { bn384_sub(r, r, m); }
     else {
         if bn384_cmp(r, m) >= 0 { bn384_sub(r, r, m); }
     }
 }
 
-transform bn384_mod_sub(r: Address, a: Address, b: Address, m: Address) {
-    borrow: u32 = bn384_sub(r, a, b);
+transform bn384_mod_sub(r: State<Bn384Ctx>, a: State<Bn384Ctx>, b: State<Bn384Ctx>, m: State<Bn384Ctx>) {
+    let borrow: u32 = bn384_sub(r, a, b);
     if borrow == 1 { bn384_add(r, r, m); }
 }
 
-transform bn384_mod_mul(r: Address, a: Address, b: Address, m: Address) {
+// r = (a * b) mod m. Slow schoolbook: double-and-add via mod_add.
+transform bn384_mod_mul(r: State<Bn384Ctx>, a: State<Bn384Ctx>, b: State<Bn384Ctx>, m: State<Bn384Ctx>) {
     bn384_zero(r);
-    temp = allocate(48);
+    let temp = state_new(Bn384Ctx);
     bn384_copy(temp, a);
-    bits: u32 = bn384_bitlen(b);
-    i: u32 = 0;
+    let bits: u32 = bn384_bitlen(b);
+    let i: u32 = 0;
     while i < bits {
         if bn384_get_bit(b, i) == 1 {
             bn384_mod_add(r, r, temp, m);
         }
-        // temp = 2 * temp mod m
         bn384_mod_add(temp, temp, temp, m);
         i = i + 1;
     }
-    free(temp);
 }
 
-transform bn384_mod_exp(r: Address, a: Address, exp: Address, m: Address) {
+transform bn384_mod_exp(r: State<Bn384Ctx>, a: State<Bn384Ctx>, exp: State<Bn384Ctx>, m: State<Bn384Ctx>) {
     bn384_zero(r);
-    *(r + 0) = 1;
-    base = allocate(48);
+    r.limbs[0] = 1;
+    let base = state_new(Bn384Ctx);
     bn384_copy(base, a);
-    bits: u32 = bn384_bitlen(exp);
-    i: u32 = 0;
+    let bits: u32 = bn384_bitlen(exp);
+    let i: u32 = 0;
     while i < bits {
         if bn384_get_bit(exp, i) == 1 {
-            tmp = allocate(48);
+            let tmp = state_new(Bn384Ctx);
             bn384_mod_mul(tmp, r, base, m);
             bn384_copy(r, tmp);
-            free(tmp);
         }
-        tmp2 = allocate(48);
+        let tmp2 = state_new(Bn384Ctx);
         bn384_mod_mul(tmp2, base, base, m);
         bn384_copy(base, tmp2);
-        free(tmp2);
         i = i + 1;
     }
-    free(base);
 }
 
-// Binary extended GCD modular inverse: r = a^(-1) mod m.
-transform bn384_mod_inv(r: Address, a: Address, m: Address) {
-    u = allocate(48); v = allocate(48);
-    x1 = allocate(48); x2 = allocate(48);
+// r = a^(-1) mod m via binary extended GCD.
+transform bn384_mod_inv(r: State<Bn384Ctx>, a: State<Bn384Ctx>, m: State<Bn384Ctx>) {
+    let u = state_new(Bn384Ctx);
+    let v = state_new(Bn384Ctx);
+    let x1 = state_new(Bn384Ctx);
+    let x2 = state_new(Bn384Ctx);
     bn384_copy(u, a);
     bn384_copy(v, m);
-    bn384_zero(x2);
     bn384_set_u32(x1, 1);
+    bn384_zero(x2);
+
     while bn384_is_zero(u) == 0 {
         while bn384_get_bit(u, 0) == 0 {
             bn384_rshift1(u, u);
@@ -247,148 +237,211 @@ transform bn384_mod_inv(r: Address, a: Address, m: Address) {
         }
         if bn384_cmp(u, v) >= 0 {
             bn384_sub(u, u, v);
-            borrow: u32 = bn384_sub(x1, x1, x2);
+            let borrow: u32 = bn384_sub(x1, x1, x2);
             if borrow == 1 { bn384_add(x1, x1, m); }
         } else {
             bn384_sub(v, v, u);
-            borrow2: u32 = bn384_sub(x2, x2, x1);
+            let borrow2: u32 = bn384_sub(x2, x2, x1);
             if borrow2 == 1 { bn384_add(x2, x2, m); }
         }
     }
     bn384_copy(r, x2);
-    free(u); free(v); free(x1); free(x2);
+}
+
+// ===========================================================================
+// B48 ↔ Bn384Ctx conversion (LE bytes <-> 6 × u64 limbs)
+// ===========================================================================
+
+transform b48_to_bn384(dst: State<Bn384Ctx>, src: State<B48>) {
+    let li: u32 = 0;
+    while li < P384_LIMBS {
+        let off = li * 8;
+        let b0 = src.bytes[off] as u64;
+        let b1 = src.bytes[off + 1] as u64;
+        let b2 = src.bytes[off + 2] as u64;
+        let b3 = src.bytes[off + 3] as u64;
+        let b4 = src.bytes[off + 4] as u64;
+        let b5 = src.bytes[off + 5] as u64;
+        let b6 = src.bytes[off + 6] as u64;
+        let b7 = src.bytes[off + 7] as u64;
+        dst.limbs[li] = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+                       | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+        li = li + 1;
+    }
+}
+
+transform bn384_to_b48(dst: State<B48>, src: State<Bn384Ctx>) {
+    let li: u32 = 0;
+    while li < P384_LIMBS {
+        let off = li * 8;
+        let v: u64 = src.limbs[li];
+        dst.bytes[off]     = (v & 255) as u8;
+        dst.bytes[off + 1] = ((v >> 8) & 255) as u8;
+        dst.bytes[off + 2] = ((v >> 16) & 255) as u8;
+        dst.bytes[off + 3] = ((v >> 24) & 255) as u8;
+        dst.bytes[off + 4] = ((v >> 32) & 255) as u8;
+        dst.bytes[off + 5] = ((v >> 40) & 255) as u8;
+        dst.bytes[off + 6] = ((v >> 48) & 255) as u8;
+        dst.bytes[off + 7] = ((v >> 56) & 255) as u8;
+        li = li + 1;
+    }
+}
+
+transform swap_endian_48(dst: State<B48>, src: State<B48>) {
+    let tmp = state_new(B48);
+    let i: u32 = 0;
+    while i < P384_BYTES { tmp.bytes[i] = src.bytes[47 - i]; i = i + 1; }
+    let j: u32 = 0;
+    while j < P384_BYTES { dst.bytes[j] = tmp.bytes[j]; j = j + 1; }
+}
+
+transform be48_to_bn384(dst: State<Bn384Ctx>, src: State<B48>) {
+    let le = state_new(B48);
+    swap_endian_48(le, src);
+    b48_to_bn384(dst, le);
+}
+
+transform bn384_to_be48(dst: State<B48>, src: State<Bn384Ctx>) {
+    let le = state_new(B48);
+    bn384_to_b48(le, src);
+    swap_endian_48(dst, le);
 }
 
 // ===========================================================================
 // P-384 curve constants (big-endian, 48 bytes each)
 // ===========================================================================
 
-transform p384_p_be() -> Address {
-    // p = 2^384 - 2^128 - 2^96 + 2^32 - 1
-    buf = allocate(48);
-    *(buf +  0) = 255; *(buf +  1) = 255; *(buf +  2) = 255; *(buf +  3) = 255;
-    *(buf +  4) = 255; *(buf +  5) = 255; *(buf +  6) = 255; *(buf +  7) = 255;
-    *(buf +  8) = 255; *(buf +  9) = 255; *(buf + 10) = 255; *(buf + 11) = 255;
-    *(buf + 12) = 255; *(buf + 13) = 255; *(buf + 14) = 255; *(buf + 15) = 255;
-    *(buf + 16) = 255; *(buf + 17) = 255; *(buf + 18) = 255; *(buf + 19) = 255;
-    *(buf + 20) = 255; *(buf + 21) = 255; *(buf + 22) = 255; *(buf + 23) = 255;
-    *(buf + 24) = 255; *(buf + 25) = 255; *(buf + 26) = 255; *(buf + 27) = 255;
-    *(buf + 28) = 255; *(buf + 29) = 255; *(buf + 30) = 255; *(buf + 31) = 254;
-    *(buf + 32) = 255; *(buf + 33) = 255; *(buf + 34) = 255; *(buf + 35) = 255;
-    *(buf + 36) =   0; *(buf + 37) =   0; *(buf + 38) =   0; *(buf + 39) =   0;
-    *(buf + 40) =   0; *(buf + 41) =   0; *(buf + 42) =   0; *(buf + 43) =   0;
-    *(buf + 44) = 255; *(buf + 45) = 255; *(buf + 46) = 255; *(buf + 47) = 255;
-    return buf;
+transform p384_p_be(out: State<B48>) {
+    out.bytes[ 0] = 255; out.bytes[ 1] = 255; out.bytes[ 2] = 255; out.bytes[ 3] = 255;
+    out.bytes[ 4] = 255; out.bytes[ 5] = 255; out.bytes[ 6] = 255; out.bytes[ 7] = 255;
+    out.bytes[ 8] = 255; out.bytes[ 9] = 255; out.bytes[10] = 255; out.bytes[11] = 255;
+    out.bytes[12] = 255; out.bytes[13] = 255; out.bytes[14] = 255; out.bytes[15] = 255;
+    out.bytes[16] = 255; out.bytes[17] = 255; out.bytes[18] = 255; out.bytes[19] = 255;
+    out.bytes[20] = 255; out.bytes[21] = 255; out.bytes[22] = 255; out.bytes[23] = 255;
+    out.bytes[24] = 255; out.bytes[25] = 255; out.bytes[26] = 255; out.bytes[27] = 255;
+    out.bytes[28] = 255; out.bytes[29] = 255; out.bytes[30] = 255; out.bytes[31] = 254;
+    out.bytes[32] = 255; out.bytes[33] = 255; out.bytes[34] = 255; out.bytes[35] = 255;
+    out.bytes[36] =   0; out.bytes[37] =   0; out.bytes[38] =   0; out.bytes[39] =   0;
+    out.bytes[40] =   0; out.bytes[41] =   0; out.bytes[42] =   0; out.bytes[43] =   0;
+    out.bytes[44] = 255; out.bytes[45] = 255; out.bytes[46] = 255; out.bytes[47] = 255;
 }
 
-transform p384_n_be() -> Address {
-    buf = allocate(48);
-    *(buf +  0) = 255; *(buf +  1) = 255; *(buf +  2) = 255; *(buf +  3) = 255;
-    *(buf +  4) = 255; *(buf +  5) = 255; *(buf +  6) = 255; *(buf +  7) = 255;
-    *(buf +  8) = 255; *(buf +  9) = 255; *(buf + 10) = 255; *(buf + 11) = 255;
-    *(buf + 12) = 255; *(buf + 13) = 255; *(buf + 14) = 255; *(buf + 15) = 255;
-    *(buf + 16) = 255; *(buf + 17) = 255; *(buf + 18) = 255; *(buf + 19) = 255;
-    *(buf + 20) = 255; *(buf + 21) = 255; *(buf + 22) = 255; *(buf + 23) = 255;
-    *(buf + 24) = 255; *(buf + 25) = 255; *(buf + 26) = 255; *(buf + 27) = 255;
-    *(buf + 28) = 199; *(buf + 29) =  99; *(buf + 30) =  77; *(buf + 31) = 129;
-    *(buf + 32) = 244; *(buf + 33) =  55; *(buf + 34) =  45; *(buf + 35) = 223;
-    *(buf + 36) =  88; *(buf + 37) =  26; *(buf + 38) =  13; *(buf + 39) = 178;
-    *(buf + 40) =  72; *(buf + 41) = 176; *(buf + 42) = 167; *(buf + 43) = 122;
-    *(buf + 44) = 236; *(buf + 45) = 236; *(buf + 46) =  25; *(buf + 47) = 115;
-    return buf;
+transform p384_n_be(out: State<B48>) {
+    out.bytes[ 0] = 255; out.bytes[ 1] = 255; out.bytes[ 2] = 255; out.bytes[ 3] = 255;
+    out.bytes[ 4] = 255; out.bytes[ 5] = 255; out.bytes[ 6] = 255; out.bytes[ 7] = 255;
+    out.bytes[ 8] = 255; out.bytes[ 9] = 255; out.bytes[10] = 255; out.bytes[11] = 255;
+    out.bytes[12] = 255; out.bytes[13] = 255; out.bytes[14] = 255; out.bytes[15] = 255;
+    out.bytes[16] = 255; out.bytes[17] = 255; out.bytes[18] = 255; out.bytes[19] = 255;
+    out.bytes[20] = 255; out.bytes[21] = 255; out.bytes[22] = 255; out.bytes[23] = 255;
+    out.bytes[24] = 255; out.bytes[25] = 255; out.bytes[26] = 255; out.bytes[27] = 255;
+    out.bytes[28] = 199; out.bytes[29] =  99; out.bytes[30] =  77; out.bytes[31] = 129;
+    out.bytes[32] = 244; out.bytes[33] =  55; out.bytes[34] =  45; out.bytes[35] = 223;
+    out.bytes[36] =  88; out.bytes[37] =  26; out.bytes[38] =  13; out.bytes[39] = 178;
+    out.bytes[40] =  72; out.bytes[41] = 176; out.bytes[42] = 167; out.bytes[43] = 122;
+    out.bytes[44] = 236; out.bytes[45] = 236; out.bytes[46] =  25; out.bytes[47] = 115;
 }
 
-transform p384_b_be() -> Address {
-    buf = allocate(48);
-    *(buf +  0) = 179; *(buf +  1) =  49; *(buf +  2) =  47; *(buf +  3) = 167;
-    *(buf +  4) = 226; *(buf +  5) =  62; *(buf +  6) = 231; *(buf +  7) = 228;
-    *(buf +  8) = 152; *(buf +  9) = 142; *(buf + 10) =   5; *(buf + 11) = 107;
-    *(buf + 12) = 227; *(buf + 13) = 248; *(buf + 14) =  45; *(buf + 15) =  25;
-    *(buf + 16) =  24; *(buf + 17) =  29; *(buf + 18) = 156; *(buf + 19) = 110;
-    *(buf + 20) = 254; *(buf + 21) = 129; *(buf + 22) =  65; *(buf + 23) =  18;
-    *(buf + 24) =   3; *(buf + 25) =  20; *(buf + 26) =   8; *(buf + 27) = 143;
-    *(buf + 28) =  80; *(buf + 29) =  19; *(buf + 30) =  56; *(buf + 31) = 117;
-    *(buf + 32) =  90; *(buf + 33) = 198; *(buf + 34) =  86; *(buf + 35) =  57;
-    *(buf + 36) = 141; *(buf + 37) = 216; *(buf + 38) = 162; *(buf + 39) = 237;
-    *(buf + 40) =  25; *(buf + 41) = 209; *(buf + 42) =  42; *(buf + 43) = 133;
-    *(buf + 44) = 200; *(buf + 45) = 237; *(buf + 46) = 211; *(buf + 47) = 236;
-    *(buf + 44) =  62; *(buf + 45) = 194; *(buf + 46) = 174; *(buf + 47) = 239;
-    return buf;
+transform p384_b_be(out: State<B48>) {
+    out.bytes[ 0] = 179; out.bytes[ 1] =  49; out.bytes[ 2] =  47; out.bytes[ 3] = 167;
+    out.bytes[ 4] = 226; out.bytes[ 5] =  62; out.bytes[ 6] = 231; out.bytes[ 7] = 228;
+    out.bytes[ 8] = 152; out.bytes[ 9] = 142; out.bytes[10] =   5; out.bytes[11] = 107;
+    out.bytes[12] = 227; out.bytes[13] = 248; out.bytes[14] =  45; out.bytes[15] =  25;
+    out.bytes[16] =  24; out.bytes[17] =  29; out.bytes[18] = 156; out.bytes[19] = 110;
+    out.bytes[20] = 254; out.bytes[21] = 129; out.bytes[22] =  65; out.bytes[23] =  18;
+    out.bytes[24] =   3; out.bytes[25] =  20; out.bytes[26] =   8; out.bytes[27] = 143;
+    out.bytes[28] =  80; out.bytes[29] =  19; out.bytes[30] =  56; out.bytes[31] = 117;
+    out.bytes[32] =  90; out.bytes[33] = 198; out.bytes[34] =  86; out.bytes[35] =  57;
+    out.bytes[36] = 141; out.bytes[37] = 216; out.bytes[38] = 162; out.bytes[39] = 237;
+    out.bytes[40] =  25; out.bytes[41] = 209; out.bytes[42] =  42; out.bytes[43] = 133;
+    out.bytes[44] = 200; out.bytes[45] = 237; out.bytes[46] = 211; out.bytes[47] = 236;
+    out.bytes[44] =  62; out.bytes[45] = 194; out.bytes[46] = 174; out.bytes[47] = 239;
 }
 
-transform p384_gx_be() -> Address {
-    buf = allocate(48);
-    *(buf +  0) = 170; *(buf +  1) = 135; *(buf +  2) = 202; *(buf +  3) =  34;
-    *(buf +  4) = 190; *(buf +  5) = 139; *(buf +  6) =   5; *(buf +  7) =  55;
-    *(buf +  8) = 142; *(buf +  9) = 177; *(buf + 10) = 199; *(buf + 11) =  30;
-    *(buf + 12) = 243; *(buf + 13) =  32; *(buf + 14) = 173; *(buf + 15) = 116;
-    *(buf + 16) = 110; *(buf + 17) =  29; *(buf + 18) =  59; *(buf + 19) =  98;
-    *(buf + 20) = 139; *(buf + 21) = 167; *(buf + 22) = 155; *(buf + 23) = 152;
-    *(buf + 24) =  89; *(buf + 25) = 247; *(buf + 26) =  65; *(buf + 27) = 224;
-    *(buf + 28) = 130; *(buf + 29) =  37; *(buf + 30) =  66; *(buf + 31) = 163;
-    *(buf + 32) = 130; *(buf + 33) =   2; *(buf + 34) = 242; *(buf + 35) =  93;
-    *(buf + 36) = 191; *(buf + 37) =  85; *(buf + 38) =  41; *(buf + 39) = 108;
-    *(buf + 40) =  59; *(buf + 41) = 165; *(buf + 42) =  69; *(buf + 43) = 227;
-    *(buf + 44) = 248; *(buf + 45) = 114; *(buf + 46) = 118; *(buf + 47) =  10;
-    *(buf + 44) = 184; *(buf + 45) =   0; *(buf + 46) = 171; *(buf + 47) = 184;
-    return buf;
+transform p384_gx_be(out: State<B48>) {
+    out.bytes[ 0] = 170; out.bytes[ 1] = 135; out.bytes[ 2] = 202; out.bytes[ 3] =  34;
+    out.bytes[ 4] = 190; out.bytes[ 5] = 139; out.bytes[ 6] =   5; out.bytes[ 7] =  55;
+    out.bytes[ 8] = 142; out.bytes[ 9] = 177; out.bytes[10] = 199; out.bytes[11] =  30;
+    out.bytes[12] = 243; out.bytes[13] =  32; out.bytes[14] = 173; out.bytes[15] = 116;
+    out.bytes[16] = 110; out.bytes[17] =  29; out.bytes[18] =  59; out.bytes[19] =  98;
+    out.bytes[20] = 139; out.bytes[21] = 167; out.bytes[22] = 155; out.bytes[23] = 152;
+    out.bytes[24] =  89; out.bytes[25] = 247; out.bytes[26] =  65; out.bytes[27] = 224;
+    out.bytes[28] = 130; out.bytes[29] =  37; out.bytes[30] =  66; out.bytes[31] = 163;
+    out.bytes[32] = 130; out.bytes[33] =   2; out.bytes[34] = 242; out.bytes[35] =  93;
+    out.bytes[36] = 191; out.bytes[37] =  85; out.bytes[38] =  41; out.bytes[39] = 108;
+    out.bytes[40] =  59; out.bytes[41] = 165; out.bytes[42] =  69; out.bytes[43] = 227;
+    out.bytes[44] = 248; out.bytes[45] = 114; out.bytes[46] = 118; out.bytes[47] =  10;
+    out.bytes[44] = 184; out.bytes[45] =   0; out.bytes[46] = 171; out.bytes[47] = 184;
 }
 
-transform p384_gy_be() -> Address {
-    buf = allocate(48);
-    *(buf +  0) =  54; *(buf +  1) =  23; *(buf +  2) = 222; *(buf +  3) =  74;
-    *(buf +  4) = 150; *(buf +  5) =  38; *(buf +  6) =  44; *(buf +  7) = 111;
-    *(buf +  8) =  93; *(buf +  9) = 158; *(buf + 10) = 152; *(buf + 11) = 191;
-    *(buf + 12) = 146; *(buf + 13) = 146; *(buf + 14) = 220; *(buf + 15) =  41;
-    *(buf + 16) = 248; *(buf + 17) = 244; *(buf + 18) =  29; *(buf + 19) = 189;
-    *(buf + 20) =  40; *(buf + 21) = 154; *(buf + 22) =  20; *(buf + 23) = 124;
-    *(buf + 24) = 233; *(buf + 25) = 218; *(buf + 26) =  49; *(buf + 27) =  17;
-    *(buf + 28) =  59; *(buf + 29) =  95; *(buf + 30) = 240; *(buf + 31) = 184;
-    *(buf + 32) = 192; *(buf + 33) =  10; *(buf + 34) =  96; *(buf + 35) = 177;
-    *(buf + 36) = 206; *(buf + 37) =  29; *(buf + 38) = 126; *(buf + 39) = 129;
-    *(buf + 40) = 157; *(buf + 41) = 122; *(buf + 42) =  67; *(buf + 43) =  29;
-    *(buf + 44) = 124; *(buf + 45) = 144; *(buf + 46) = 234; *(buf + 47) =  14;
-    *(buf + 44) =  95; *(buf + 45) = 224; *(buf + 46) = 229; *(buf + 47) = 244;
-    return buf;
+transform p384_gy_be(out: State<B48>) {
+    out.bytes[ 0] =  54; out.bytes[ 1] =  23; out.bytes[ 2] = 222; out.bytes[ 3] =  74;
+    out.bytes[ 4] = 150; out.bytes[ 5] =  38; out.bytes[ 6] =  44; out.bytes[ 7] = 111;
+    out.bytes[ 8] =  93; out.bytes[ 9] = 158; out.bytes[10] = 152; out.bytes[11] = 191;
+    out.bytes[12] = 146; out.bytes[13] = 146; out.bytes[14] = 220; out.bytes[15] =  41;
+    out.bytes[16] = 248; out.bytes[17] = 244; out.bytes[18] =  29; out.bytes[19] = 189;
+    out.bytes[20] =  40; out.bytes[21] = 154; out.bytes[22] =  20; out.bytes[23] = 124;
+    out.bytes[24] = 233; out.bytes[25] = 218; out.bytes[26] =  49; out.bytes[27] =  17;
+    out.bytes[28] =  59; out.bytes[29] =  95; out.bytes[30] = 240; out.bytes[31] = 184;
+    out.bytes[32] = 192; out.bytes[33] =  10; out.bytes[34] =  96; out.bytes[35] = 177;
+    out.bytes[36] = 206; out.bytes[37] =  29; out.bytes[38] = 126; out.bytes[39] = 129;
+    out.bytes[40] = 157; out.bytes[41] = 122; out.bytes[42] =  67; out.bytes[43] =  29;
+    out.bytes[44] = 124; out.bytes[45] = 144; out.bytes[46] = 234; out.bytes[47] =  14;
+    out.bytes[44] =  95; out.bytes[45] = 224; out.bytes[46] = 229; out.bytes[47] = 244;
 }
 
-transform swap_endian_48(dst: Address, src: Address) {
-    i: u32 = 0;
-    while i < 48 {
-        *(dst + i) = *(src + 47 - i);
-        i = i + 1;
+// ===========================================================================
+// SHA-384 streaming helper for variable-length messages up to 256 bytes.
+// ===========================================================================
+
+transform p384_sha384_hash(msg: State<B256>, msg_len: u32, out: State<B48>) {
+    let ctx = state_new(Sha384Ctx);
+    sha384_init(ctx);
+    let i: u32 = 0;
+    while i < msg_len {
+        let chunk = state_new(Sha384Data);
+        let remaining: u32 = msg_len - i;
+        let to_copy: u32 = 128;
+        if remaining < 128 { to_copy = remaining; }
+        let j: u32 = 0;
+        while j < to_copy {
+            chunk.data[j] = msg.bytes[i + j];
+            j = j + 1;
+        }
+        sha384_update(ctx, chunk, to_copy);
+        i = i + to_copy;
     }
+    let digest = state_new(Sha384Digest);
+    sha384_final(ctx, digest);
+    let k: u32 = 0;
+    while k < 48 { out.bytes[k] = digest.data[k]; k = k + 1; }
 }
 
 // ===========================================================================
-// Point operations (affine, mod p)
+// Point operations (affine, mod p) — all in Bn384Ctx.
 // ===========================================================================
 
-transform p384_is_on_curve(px: Address, py: Address, p_le: Address, b_le: Address) -> u32 {
-    y_sq = allocate(48);
-    bn384_mod_mul(y_sq, py, py, p_le);
-    x_sq = allocate(48);
-    bn384_mod_mul(x_sq, px, px, p_le);
-    x_cubed = allocate(48);
-    bn384_mod_mul(x_cubed, x_sq, px, p_le);
-    three_x = allocate(48);
-    bn384_mod_add(three_x, px, px, p_le);
-    bn384_mod_add(three_x, three_x, px, p_le);
-    neg_3x = allocate(48);
-    bn384_mod_sub(neg_3x, p_le, three_x, p_le);
-    rhs = allocate(48);
-    bn384_mod_add(rhs, x_cubed, neg_3x, p_le);
-    bn384_mod_add(rhs, rhs, b_le, p_le);
+transform p384_is_on_curve_bn(px: State<Bn384Ctx>, py: State<Bn384Ctx>, p_bn: State<Bn384Ctx>, b_bn: State<Bn384Ctx>) -> u32 {
+    let y_sq = state_new(Bn384Ctx);
+    let x_sq = state_new(Bn384Ctx);
+    let x_cubed = state_new(Bn384Ctx);
+    let three_x = state_new(Bn384Ctx);
+    let neg_3x = state_new(Bn384Ctx);
+    let rhs = state_new(Bn384Ctx);
 
-    result: u32 = 0;
-    if bn384_cmp(y_sq, rhs) == 0 { result = 1; }
+    bn384_mod_mul(y_sq, py, py, p_bn);
+    bn384_mod_mul(x_sq, px, px, p_bn);
+    bn384_mod_mul(x_cubed, x_sq, px, p_bn);
+    bn384_mod_add(three_x, px, px, p_bn);
+    bn384_mod_add(three_x, three_x, px, p_bn);
+    bn384_mod_sub(neg_3x, p_bn, three_x, p_bn);
+    bn384_mod_add(rhs, x_cubed, neg_3x, p_bn);
+    bn384_mod_add(rhs, rhs, b_bn, p_bn);
 
-    free(y_sq); free(x_sq); free(x_cubed); free(three_x);
-    free(neg_3x); free(rhs);
-    return result;
+    if bn384_cmp(y_sq, rhs) == 0 { return 1; }
+    return 0;
 }
 
-transform p384_point_double(rx: Address, ry: Address, px: Address, py: Address, p_le: Address) {
+transform p384_point_double_bn(rx: State<Bn384Ctx>, ry: State<Bn384Ctx>, px: State<Bn384Ctx>, py: State<Bn384Ctx>, p_bn: State<Bn384Ctx>) {
     if bn384_is_zero(px) == 1 {
         if bn384_is_zero(py) == 1 {
             bn384_zero(rx);
@@ -396,43 +449,40 @@ transform p384_point_double(rx: Address, ry: Address, px: Address, py: Address, 
             return;
         }
     }
-    // a = p - 3
-    a_val = allocate(48);
-    bn384_copy(a_val, p_le);
-    a_lo: u64 = bn384_load_u64(a_val, 0);
-    bn384_store_u64(a_val, 0, a_lo - 3);
+    let a_val = state_new(Bn384Ctx);
+    bn384_copy(a_val, p_bn);
+    let lo = a_val.limbs[0];
+    a_val.limbs[0] = lo - 3;
 
-    t1 = allocate(48);
-    bn384_mod_mul(t1, px, px, p_le);
-    t2 = allocate(48);
-    bn384_mod_add(t2, t1, t1, p_le);
-    bn384_mod_add(t2, t2, t1, p_le);
-    bn384_mod_add(t2, t2, a_val, p_le);
+    let t1 = state_new(Bn384Ctx);
+    let t2 = state_new(Bn384Ctx);
+    let t3 = state_new(Bn384Ctx);
+    let t3_inv = state_new(Bn384Ctx);
+    let slope = state_new(Bn384Ctx);
+    let slope_sq = state_new(Bn384Ctx);
+    let two_x = state_new(Bn384Ctx);
+    let x_minus_rx = state_new(Bn384Ctx);
+    let slope_x = state_new(Bn384Ctx);
 
-    t3 = allocate(48);
-    bn384_mod_add(t3, py, py, p_le);
-    t3_inv = allocate(48);
-    bn384_mod_inv(t3_inv, t3, p_le);
-    slope = allocate(48);
-    bn384_mod_mul(slope, t2, t3_inv, p_le);
+    bn384_mod_mul(t1, px, px, p_bn);
+    bn384_mod_add(t2, t1, t1, p_bn);
+    bn384_mod_add(t2, t2, t1, p_bn);
+    bn384_mod_add(t2, t2, a_val, p_bn);
 
-    slope_sq = allocate(48);
-    bn384_mod_mul(slope_sq, slope, slope, p_le);
-    two_x = allocate(48);
-    bn384_mod_add(two_x, px, px, p_le);
-    bn384_mod_sub(rx, slope_sq, two_x, p_le);
+    bn384_mod_add(t3, py, py, p_bn);
+    bn384_mod_inv(t3_inv, t3, p_bn);
+    bn384_mod_mul(slope, t2, t3_inv, p_bn);
 
-    x_minus_rx = allocate(48);
-    bn384_mod_sub(x_minus_rx, px, rx, p_le);
-    slope_x = allocate(48);
-    bn384_mod_mul(slope_x, slope, x_minus_rx, p_le);
-    bn384_mod_sub(ry, slope_x, py, p_le);
+    bn384_mod_mul(slope_sq, slope, slope, p_bn);
+    bn384_mod_add(two_x, px, px, p_bn);
+    bn384_mod_sub(rx, slope_sq, two_x, p_bn);
 
-    free(a_val); free(t1); free(t2); free(t3); free(t3_inv);
-    free(slope); free(slope_sq); free(two_x); free(x_minus_rx); free(slope_x);
+    bn384_mod_sub(x_minus_rx, px, rx, p_bn);
+    bn384_mod_mul(slope_x, slope, x_minus_rx, p_bn);
+    bn384_mod_sub(ry, slope_x, py, p_bn);
 }
 
-transform p384_point_add(rx: Address, ry: Address, px: Address, py: Address, qx: Address, qy: Address, p_le: Address) {
+transform p384_point_add_bn(rx: State<Bn384Ctx>, ry: State<Bn384Ctx>, px: State<Bn384Ctx>, py: State<Bn384Ctx>, qx: State<Bn384Ctx>, qy: State<Bn384Ctx>, p_bn: State<Bn384Ctx>) {
     if bn384_is_zero(px) == 1 {
         if bn384_is_zero(py) == 1 {
             bn384_copy(rx, qx);
@@ -449,7 +499,7 @@ transform p384_point_add(rx: Address, ry: Address, px: Address, py: Address, qx:
     }
     if bn384_cmp(px, qx) == 0 {
         if bn384_cmp(py, qy) == 0 {
-            p384_point_double(rx, ry, px, py, p_le);
+            p384_point_double_bn(rx, ry, px, py, p_bn);
             return;
         } else {
             bn384_zero(rx);
@@ -458,325 +508,347 @@ transform p384_point_add(rx: Address, ry: Address, px: Address, py: Address, qx:
         }
     }
 
-    dy = allocate(48); bn384_mod_sub(dy, qy, py, p_le);
-    dx = allocate(48); bn384_mod_sub(dx, qx, px, p_le);
-    dx_inv = allocate(48); bn384_mod_inv(dx_inv, dx, p_le);
-    slope = allocate(48); bn384_mod_mul(slope, dy, dx_inv, p_le);
+    let dy = state_new(Bn384Ctx);
+    let dx = state_new(Bn384Ctx);
+    let dx_inv = state_new(Bn384Ctx);
+    let slope = state_new(Bn384Ctx);
+    let slope_sq = state_new(Bn384Ctx);
+    let temp = state_new(Bn384Ctx);
+    let x_diff = state_new(Bn384Ctx);
+    let slope_x = state_new(Bn384Ctx);
 
-    slope_sq = allocate(48); bn384_mod_mul(slope_sq, slope, slope, p_le);
-    temp = allocate(48); bn384_mod_sub(temp, slope_sq, px, p_le);
-    bn384_mod_sub(rx, temp, qx, p_le);
+    bn384_mod_sub(dy, qy, py, p_bn);
+    bn384_mod_sub(dx, qx, px, p_bn);
+    bn384_mod_inv(dx_inv, dx, p_bn);
+    bn384_mod_mul(slope, dy, dx_inv, p_bn);
 
-    x_diff = allocate(48); bn384_mod_sub(x_diff, px, rx, p_le);
-    slope_x = allocate(48); bn384_mod_mul(slope_x, slope, x_diff, p_le);
-    bn384_mod_sub(ry, slope_x, py, p_le);
+    bn384_mod_mul(slope_sq, slope, slope, p_bn);
+    bn384_mod_sub(temp, slope_sq, px, p_bn);
+    bn384_mod_sub(rx, temp, qx, p_bn);
 
-    free(dy); free(dx); free(dx_inv); free(slope);
-    free(slope_sq); free(temp); free(x_diff); free(slope_x);
+    bn384_mod_sub(x_diff, px, rx, p_bn);
+    bn384_mod_mul(slope_x, slope, x_diff, p_bn);
+    bn384_mod_sub(ry, slope_x, py, p_bn);
 }
 
-transform p384_scalar_mul(rx: Address, ry: Address, k: Address, px: Address, py: Address, p_le: Address) {
+transform p384_scalar_mul_bn(rx: State<Bn384Ctx>, ry: State<Bn384Ctx>, k: State<Bn384Ctx>, px: State<Bn384Ctx>, py: State<Bn384Ctx>, p_bn: State<Bn384Ctx>) {
     bn384_zero(rx);
     bn384_zero(ry);
-    tx = allocate(48); ty = allocate(48);
-    bits: u32 = bn384_bitlen(k);
-    if bits == 0 { free(tx); free(ty); return; }
-    i: u32 = bits;
+    let tx = state_new(Bn384Ctx);
+    let ty = state_new(Bn384Ctx);
+    let bits: u32 = bn384_bitlen(k);
+    if bits == 0 { return; }
+    let i: u32 = bits;
     while i > 0 {
-        i = i - 1;
-        p384_point_double(tx, ty, rx, ry, p_le);
+        let ii = i - 1;
+        p384_point_double_bn(tx, ty, rx, ry, p_bn);
         bn384_copy(rx, tx);
         bn384_copy(ry, ty);
-        if bn384_get_bit(k, i) == 1 {
-            p384_point_add(tx, ty, rx, ry, px, py, p_le);
+        if bn384_get_bit(k, ii) == 1 {
+            p384_point_add_bn(tx, ty, rx, ry, px, py, p_bn);
             bn384_copy(rx, tx);
             bn384_copy(ry, ty);
         }
+        i = ii;
     }
-    free(tx); free(ty);
 }
 
 // ===========================================================================
 // RFC 6979 deterministic nonce for P-384 using HMAC-SHA-512 (hlen = 64).
-// The 64-byte HMAC output is reduced mod n with rejection.
 // ===========================================================================
 
-transform rfc6979_p384_k(x_be: Address, h_be: Address, n_le: Address, k_le: Address) {
-    hlen: u32 = 64;
-    qlen: u32 = 48;
+transform rfc6979_p384_k(x_be: State<B48>, h_be: State<B48>, n_le: State<B48>, k_le: State<B48>) {
+    let hlen: u32 = 64;
+    let qlen: u32 = 48;
 
-    V = allocate(hlen);
-    K = allocate(hlen);
-    i: u32 = 0;
-    while i < hlen { *(V + i) = 1; *(K + i) = 0; i = i + 1; }
+    let V = state_new(HmacMsg);
+    let K = state_new(HmacKey);
+    let i: u32 = 0;
+    while i < hlen { V.bytes[i] = 1; K.bytes[i] = 0; i = i + 1; }
 
     // bits2octets(h): h is 48 bytes already; reduce mod n
-    h_le = allocate(48);
+    let h_le = state_new(B48);
     swap_endian_48(h_le, h_be);
-    if bn384_cmp(h_le, n_le) >= 0 {
-        bn384_sub(h_le, h_le, n_le);
-    }
-    h_be_canon = allocate(48);
-    swap_endian_48(h_be_canon, h_le);
-    free(h_le);
+    let h_bn = state_new(Bn384Ctx);
+    let n_bn = state_new(Bn384Ctx);
+    b48_to_bn384(h_bn, h_le);
+    b48_to_bn384(n_bn, n_le);
+    if bn384_cmp(h_bn, n_bn) >= 0 { bn384_sub(h_bn, h_bn, n_bn); }
+    let h_be_canon = state_new(B48);
+    bn384_to_be48(h_be_canon, h_bn);
 
-    // x is 48 bytes already
-    x_be_canon = allocate(48);
-    bn384_copy(x_be_canon, x_be);
+    let x_be_canon = state_new(B48);
+    let j: u32 = 0;
+    while j < 48 { x_be_canon.bytes[j] = x_be.bytes[j]; j = j + 1; }
 
-    // K = HMAC_K(V || 0x00 || x || h)
-    buf1 = allocate(hlen + 1 + 48 + 48);
-    i = 0;
-    while i < hlen { *(buf1 + i) = *(V + i); i = i + 1; }
-    *(buf1 + hlen) = 0;
-    i = 0;
-    while i < 48 { *(buf1 + hlen + 1 + i) = *(x_be_canon + i); i = i + 1; }
-    i = 0;
-    while i < 48 { *(buf1 + hlen + 1 + 48 + i) = *(h_be_canon + i); i = i + 1; }
-    hmac_sha512(K, hlen, buf1, hlen + 1 + 96, V);
-    i = 0;
-    while i < hlen { *(K + i) = *(V + i); i = i + 1; }
-    hmac_sha512(K, hlen, buf1, hlen + 1 + 96, K);
-    hmac_sha512(K, hlen, V, hlen, V);
-    free(buf1);
+    let buf1_len: u32 = hlen + 1 + 96;
+    let buf1 = state_new(HmacMsg);
+    let p1: u32 = 0;
+    while p1 < hlen { buf1.bytes[p1] = V.bytes[p1]; p1 = p1 + 1; }
+    buf1.bytes[hlen] = 0;
+    let p2: u32 = 0;
+    while p2 < 48 { buf1.bytes[hlen + 1 + p2] = x_be_canon.bytes[p2]; p2 = p2 + 1; }
+    let p3: u32 = 0;
+    while p3 < 48 { buf1.bytes[hlen + 1 + 48 + p3] = h_be_canon.bytes[p3]; p3 = p3 + 1; }
 
-    // K = HMAC_K(V || 0x01 || x || h)
-    buf2 = allocate(hlen + 1 + 48 + 48);
-    i = 0;
-    while i < hlen { *(buf2 + i) = *(V + i); i = i + 1; }
-    *(buf2 + hlen) = 1;
-    i = 0;
-    while i < 48 { *(buf2 + hlen + 1 + i) = *(x_be_canon + i); i = i + 1; }
-    i = 0;
-    while i < 48 { *(buf2 + hlen + 1 + 48 + i) = *(h_be_canon + i); i = i + 1; }
-    hmac_sha512(K, hlen, buf2, hlen + 1 + 96, K);
-    hmac_sha512(K, hlen, V, hlen, V);
-    free(buf2);
+    let tmp_out = state_new(HmacOut);
+    hmac_sha512(K, hlen, buf1, buf1_len, tmp_out);   // V <- HMAC_K(buf1)
+    let c1: u32 = 0;
+    while c1 < hlen { V.bytes[c1] = tmp_out.bytes[c1]; c1 = c1 + 1; }
+    hmac_sha512(K, hlen, buf1, buf1_len, tmp_out);   // K <- HMAC_K(buf1)
+    let c2: u32 = 0;
+    while c2 < hlen { K.bytes[c2] = tmp_out.bytes[c2]; c2 = c2 + 1; }
+    hmac_sha512(K, hlen, V, hlen, tmp_out);          // V <- HMAC_K(V)
+    let c3: u32 = 0;
+    while c3 < hlen { V.bytes[c3] = tmp_out.bytes[c3]; c3 = c3 + 1; }
 
-    // Generate k by concatenating V-blocks until we have qlen bytes
-    T = allocate(qlen);
-    have: u32 = 0;
-    while have < qlen {
-        hmac_sha512(K, hlen, V, hlen, V);
-        to_copy: u32 = hlen;
-        remaining: u32 = qlen - have;
-        if remaining < to_copy { to_copy = remaining; }
-        i = 0;
-        while i < to_copy { *(T + have + i) = *(V + i); i = i + 1; }
-        have = have + to_copy;
-    }
+    // buf2 = V || 0x01 || x || h
+    let buf2 = state_new(HmacMsg);
+    let q1: u32 = 0;
+    while q1 < hlen { buf2.bytes[q1] = V.bytes[q1]; q1 = q1 + 1; }
+    buf2.bytes[hlen] = 1;
+    let q2: u32 = 0;
+    while q2 < 48 { buf2.bytes[hlen + 1 + q2] = x_be_canon.bytes[q2]; q2 = q2 + 1; }
+    let q3: u32 = 0;
+    while q3 < 48 { buf2.bytes[hlen + 1 + 48 + q3] = h_be_canon.bytes[q3]; q3 = q3 + 1; }
 
+    hmac_sha512(K, hlen, buf2, buf1_len, tmp_out);   // K <- HMAC_K(buf2)
+    let d1: u32 = 0;
+    while d1 < hlen { K.bytes[d1] = tmp_out.bytes[d1]; d1 = d1 + 1; }
+    hmac_sha512(K, hlen, V, hlen, tmp_out);          // V <- HMAC_K(V)
+    let d2: u32 = 0;
+    while d2 < hlen { V.bytes[d2] = tmp_out.bytes[d2]; d2 = d2 + 1; }
+
+    // Generate T = first qlen bytes of V (one block is enough; hlen=64 >= qlen=48)
+    let T = state_new(B48);
+    let e1: u32 = 0;
+    while e1 < qlen { T.bytes[e1] = V.bytes[e1]; e1 = e1 + 1; }
     swap_endian_48(k_le, T);
-    // Reduce k mod n; reject if k == 0 or k >= n
-    accepted: u32 = 0;
-    attempts: u32 = 0;
-    while accepted == 0 && attempts < 32 {
-        if bn384_cmp(k_le, n_le) >= 0 {
-            bn384_sub(k_le, k_le, n_le);
-        }
-        if bn384_is_zero(k_le) == 0 {
-            accepted = 1;
-        } else {
-            buf3 = allocate(hlen + 1);
-            i = 0;
-            while i < hlen { *(buf3 + i) = *(V + i); i = i + 1; }
-            *(buf3 + hlen) = 0;
-            hmac_sha512(K, hlen, buf3, hlen + 1, K);
-            hmac_sha512(K, hlen, V, hlen, V);
-            free(buf3);
-            // Regenerate T
-            have = 0;
-            while have < qlen {
-                hmac_sha512(K, hlen, V, hlen, V);
-                to_copy: u32 = hlen;
-                remaining: u32 = qlen - have;
-                if remaining < to_copy { to_copy = remaining; }
-                i = 0;
-                while i < to_copy { *(T + have + i) = *(V + i); i = i + 1; }
-                have = have + to_copy;
+
+    let accepted: u32 = 0;
+    let attempts: u32 = 0;
+    while accepted == 0 {
+        if attempts >= 32 { accepted = 1; }
+        if accepted == 0 {
+            let k_bn = state_new(Bn384Ctx);
+            b48_to_bn384(k_bn, k_le);
+            if bn384_cmp(k_bn, n_bn) >= 0 { bn384_sub(k_bn, k_bn, n_bn); }
+            bn384_to_b48(k_le, k_bn);
+            if bn384_is_zero(k_bn) == 0 {
+                accepted = 1;
+            } else {
+                let buf3 = state_new(HmacMsg);
+                let f1: u32 = 0;
+                while f1 < hlen { buf3.bytes[f1] = V.bytes[f1]; f1 = f1 + 1; }
+                buf3.bytes[hlen] = 0;
+                hmac_sha512(K, hlen, buf3, hlen + 1, tmp_out);
+                let g1: u32 = 0;
+                while g1 < hlen { K.bytes[g1] = tmp_out.bytes[g1]; g1 = g1 + 1; }
+                hmac_sha512(K, hlen, V, hlen, tmp_out);
+                let g2: u32 = 0;
+                while g2 < hlen { V.bytes[g2] = tmp_out.bytes[g2]; g2 = g2 + 1; }
+                // Regenerate T from V
+                let e2: u32 = 0;
+                while e2 < qlen { T.bytes[e2] = V.bytes[e2]; e2 = e2 + 1; }
+                swap_endian_48(k_le, T);
             }
-            swap_endian_48(k_le, T);
         }
         attempts = attempts + 1;
     }
-
-    free(V); free(K); free(h_be_canon); free(x_be_canon); free(T);
 }
 
 // ===========================================================================
 // ECDSA P-384 Key Generation: Q = d * G
-//   privkey_be (in/out) : 48-byte big-endian private scalar (reduced mod n)
-//   pubkey_x_be (out)   : 48-byte big-endian Q.x
-//   pubkey_y_be (out)   : 48-byte big-endian Q.y
 // ===========================================================================
 
-transform ecdsa_p384_keygen(privkey_be: Address, pubkey_x_be: Address, pubkey_y_be: Address) {
-    n_be = p384_n_be();
-    n_le = allocate(48);
-    swap_endian_48(n_le, n_be);
-    free(n_be);
+transform ecdsa_p384_keygen(privkey_be: State<B48>, pubkey_x_be: State<B48>, pubkey_y_be: State<B48>) {
+    let n_be = state_new(B48);
+    p384_n_be(n_be);
+    let n_bn = state_new(Bn384Ctx);
+    be48_to_bn384(n_bn, n_be);
 
-    d_le = allocate(48);
-    swap_endian_48(d_le, privkey_be);
-    if bn384_cmp(d_le, n_le) >= 0 {
-        bn384_sub(d_le, d_le, n_le);
-    }
-    if bn384_is_zero(d_le) == 1 {
-        bn384_zero(d_le);
-        *(d_le + 0) = 1;
-    }
+    let d_bn = state_new(Bn384Ctx);
+    be48_to_bn384(d_bn, privkey_be);
+    if bn384_cmp(d_bn, n_bn) >= 0 { bn384_sub(d_bn, d_bn, n_bn); }
+    if bn384_is_zero(d_bn) == 1 { bn384_set_u32(d_bn, 1); }
 
-    gx_be = p384_gx_be(); gy_be = p384_gy_be();
-    gx_le = allocate(48); gy_le = allocate(48);
-    swap_endian_48(gx_le, gx_be);
-    swap_endian_48(gy_le, gy_be);
-    free(gx_be); free(gy_be);
+    let gx_be = state_new(B48);
+    let gy_be = state_new(B48);
+    p384_gx_be(gx_be);
+    p384_gy_be(gy_be);
+    let gx_bn = state_new(Bn384Ctx);
+    let gy_bn = state_new(Bn384Ctx);
+    be48_to_bn384(gx_bn, gx_be);
+    be48_to_bn384(gy_bn, gy_be);
 
-    p_be = p384_p_be();
-    p_le = allocate(48);
-    swap_endian_48(p_le, p_be);
-    free(p_be);
+    let p_be = state_new(B48);
+    p384_p_be(p_be);
+    let p_bn = state_new(Bn384Ctx);
+    be48_to_bn384(p_bn, p_be);
 
-    qx_le = allocate(48); qy_le = allocate(48);
-    p384_scalar_mul(qx_le, qy_le, d_le, gx_le, gy_le, p_le);
+    let qx_bn = state_new(Bn384Ctx);
+    let qy_bn = state_new(Bn384Ctx);
+    p384_scalar_mul_bn(qx_bn, qy_bn, d_bn, gx_bn, gy_bn, p_bn);
 
-    swap_endian_48(pubkey_x_be, qx_le);
-    swap_endian_48(pubkey_y_be, qy_le);
-    swap_endian_48(privkey_be, d_le);
-
-    free(n_le); free(d_le); free(gx_le); free(gy_le); free(p_le);
-    free(qx_le); free(qy_le);
+    bn384_to_be48(pubkey_x_be, qx_bn);
+    bn384_to_be48(pubkey_y_be, qy_bn);
+    bn384_to_be48(privkey_be, d_bn);
 }
 
 // ===========================================================================
 // ECDSA P-384 Sign (uses SHA-384 to match curve strength)
 // ===========================================================================
 
-transform ecdsa_p384_sign(msg: Address, msg_len: u32, privkey_be: Address, r_out: Address, s_out: Address) {
-    h = allocate(48);
-    sha384_oneshot(msg, msg_len, h);
+transform ecdsa_p384_sign(msg: State<B256>, msg_len: u32, privkey_be: State<B48>, r_out: State<B48>, s_out: State<B48>) {
+    let h_be = state_new(B48);
+    p384_sha384_hash(msg, msg_len, h_be);
 
-    h_le = allocate(48);
-    swap_endian_48(h_le, h);
-    d_le = allocate(48);
-    swap_endian_48(d_le, privkey_be);
+    let h_bn = state_new(Bn384Ctx);
+    let d_bn = state_new(Bn384Ctx);
+    be48_to_bn384(h_bn, h_be);
+    be48_to_bn384(d_bn, privkey_be);
 
-    p_be = p384_p_be(); n_be = p384_n_be();
-    gx_be = p384_gx_be(); gy_be = p384_gy_be();
-    p_le = allocate(48); n_le = allocate(48);
-    gx_le = allocate(48); gy_le = allocate(48);
-    swap_endian_48(p_le, p_be);
+    let p_be = state_new(B48);
+    let n_be = state_new(B48);
+    let gx_be = state_new(B48);
+    let gy_be = state_new(B48);
+    p384_p_be(p_be);
+    p384_n_be(n_be);
+    p384_gx_be(gx_be);
+    p384_gy_be(gy_be);
+    let p_bn = state_new(Bn384Ctx);
+    let n_bn = state_new(Bn384Ctx);
+    let gx_bn = state_new(Bn384Ctx);
+    let gy_bn = state_new(Bn384Ctx);
+    be48_to_bn384(p_bn, p_be);
+    be48_to_bn384(n_bn, n_be);
+    be48_to_bn384(gx_bn, gx_be);
+    be48_to_bn384(gy_bn, gy_be);
+
+    if bn384_cmp(d_bn, n_bn) >= 0 { bn384_sub(d_bn, d_bn, n_bn); }
+    if bn384_cmp(h_bn, n_bn) >= 0 { bn384_sub(h_bn, h_bn, n_bn); }
+
+    let n_le = state_new(B48);
     swap_endian_48(n_le, n_be);
-    swap_endian_48(gx_le, gx_be);
-    swap_endian_48(gy_le, gy_be);
-    free(p_be); free(n_be); free(gx_be); free(gy_be);
+    let k_le = state_new(B48);
+    rfc6979_p384_k(privkey_be, h_be, n_le, k_le);
+    let k_bn = state_new(Bn384Ctx);
+    b48_to_bn384(k_bn, k_le);
 
-    if bn384_cmp(d_le, n_le) >= 0 { bn384_sub(d_le, d_le, n_le); }
-    if bn384_cmp(h_le, n_le) >= 0 { bn384_sub(h_le, h_le, n_le); }
+    let rx = state_new(Bn384Ctx);
+    let ry = state_new(Bn384Ctx);
+    p384_scalar_mul_bn(rx, ry, k_bn, gx_bn, gy_bn, p_bn);
 
-    k_le = allocate(48);
-    rfc6979_p384_k(privkey_be, h, n_le, k_le);
+    let r_bn = state_new(Bn384Ctx);
+    bn384_copy(r_bn, rx);
+    if bn384_cmp(r_bn, n_bn) >= 0 { bn384_sub(r_bn, r_bn, n_bn); }
 
-    rx = allocate(48); ry = allocate(48);
-    p384_scalar_mul(rx, ry, k_le, gx_le, gy_le, p_le);
+    let k_inv = state_new(Bn384Ctx);
+    let rd = state_new(Bn384Ctx);
+    let h_rd = state_new(Bn384Ctx);
+    let s_bn = state_new(Bn384Ctx);
+    bn384_mod_inv(k_inv, k_bn, n_bn);
+    bn384_mod_mul(rd, r_bn, d_bn, n_bn);
+    bn384_mod_add(h_rd, h_bn, rd, n_bn);
+    bn384_mod_mul(s_bn, k_inv, h_rd, n_bn);
 
-    r_le = allocate(48);
-    bn384_copy(r_le, rx);
-    if bn384_cmp(r_le, n_le) >= 0 { bn384_sub(r_le, r_le, n_le); }
-
-    k_inv = allocate(48); bn384_mod_inv(k_inv, k_le, n_le);
-    rd = allocate(48); bn384_mod_mul(rd, r_le, d_le, n_le);
-    h_rd = allocate(48); bn384_mod_add(h_rd, h_le, rd, n_le);
-    s_le = allocate(48); bn384_mod_mul(s_le, k_inv, h_rd, n_le);
-
-    swap_endian_48(r_out, r_le);
-    swap_endian_48(s_out, s_le);
-
-    free(h); free(h_le); free(d_le); free(p_le); free(n_le);
-    free(gx_le); free(gy_le); free(k_le); free(rx); free(ry);
-    free(r_le); free(k_inv); free(rd); free(h_rd); free(s_le);
+    bn384_to_be48(r_out, r_bn);
+    bn384_to_be48(s_out, s_bn);
 }
 
 // ===========================================================================
 // ECDSA P-384 Verify
 // ===========================================================================
 
-transform ecdsa_p384_verify(msg: Address, msg_len: u32, pubkey_x_be: Address, pubkey_y_be: Address, r_be: Address, s_be: Address) -> u32 {
-    n_be = p384_n_be();
-    n_le = allocate(48);
-    swap_endian_48(n_le, n_be);
-    free(n_be);
+transform ecdsa_p384_verify(msg: State<B256>, msg_len: u32, pubkey_x_be: State<B48>, pubkey_y_be: State<B48>, r_be: State<B48>, s_be: State<B48>) -> u32 {
+    let n_be = state_new(B48);
+    p384_n_be(n_be);
+    let n_bn = state_new(Bn384Ctx);
+    be48_to_bn384(n_bn, n_be);
 
-    r_le = allocate(48); s_le = allocate(48);
-    swap_endian_48(r_le, r_be);
-    swap_endian_48(s_le, s_be);
+    let r_bn = state_new(Bn384Ctx);
+    let s_bn = state_new(Bn384Ctx);
+    be48_to_bn384(r_bn, r_be);
+    be48_to_bn384(s_bn, s_be);
 
-    if bn384_is_zero(r_le) == 1 { free(n_le); free(r_le); free(s_le); return 0; }
-    if bn384_is_zero(s_le) == 1 { free(n_le); free(r_le); free(s_le); return 0; }
-    if bn384_cmp(r_le, n_le) >= 0 { free(n_le); free(r_le); free(s_le); return 0; }
-    if bn384_cmp(s_le, n_le) >= 0 { free(n_le); free(r_le); free(s_le); return 0; }
+    if bn384_is_zero(r_bn) == 1 { return 0; }
+    if bn384_is_zero(s_bn) == 1 { return 0; }
+    if bn384_cmp(r_bn, n_bn) >= 0 { return 0; }
+    if bn384_cmp(s_bn, n_bn) >= 0 { return 0; }
 
-    h = allocate(48);
-    sha384_oneshot(msg, msg_len, h);
-    h_le = allocate(48);
-    swap_endian_48(h_le, h);
-    free(h);
-    if bn384_cmp(h_le, n_le) >= 0 { bn384_sub(h_le, h_le, n_le); }
+    let h_be = state_new(B48);
+    p384_sha384_hash(msg, msg_len, h_be);
+    let h_bn = state_new(Bn384Ctx);
+    be48_to_bn384(h_bn, h_be);
+    if bn384_cmp(h_bn, n_bn) >= 0 { bn384_sub(h_bn, h_bn, n_bn); }
 
-    p_be = p384_p_be(); b_be = p384_b_be();
-    gx_be = p384_gx_be(); gy_be = p384_gy_be();
-    p_le = allocate(48); b_le = allocate(48);
-    gx_le = allocate(48); gy_le = allocate(48);
-    swap_endian_48(p_le, p_be);
-    swap_endian_48(b_le, b_be);
-    swap_endian_48(gx_le, gx_be);
-    swap_endian_48(gy_le, gy_be);
-    free(p_be); free(b_be); free(gx_be); free(gy_be);
+    let p_be = state_new(B48);
+    let b_be = state_new(B48);
+    let gx_be = state_new(B48);
+    let gy_be = state_new(B48);
+    p384_p_be(p_be);
+    p384_b_be(b_be);
+    p384_gx_be(gx_be);
+    p384_gy_be(gy_be);
+    let p_bn = state_new(Bn384Ctx);
+    let b_bn = state_new(Bn384Ctx);
+    let gx_bn = state_new(Bn384Ctx);
+    let gy_bn = state_new(Bn384Ctx);
+    be48_to_bn384(p_bn, p_be);
+    be48_to_bn384(b_bn, b_be);
+    be48_to_bn384(gx_bn, gx_be);
+    be48_to_bn384(gy_bn, gy_be);
 
-    qx_le = allocate(48); qy_le = allocate(48);
-    swap_endian_48(qx_le, pubkey_x_be);
-    swap_endian_48(qy_le, pubkey_y_be);
+    let qx_bn = state_new(Bn384Ctx);
+    let qy_bn = state_new(Bn384Ctx);
+    be48_to_bn384(qx_bn, pubkey_x_be);
+    be48_to_bn384(qy_bn, pubkey_y_be);
 
-    if p384_is_on_curve(qx_le, qy_le, p_le, b_le) == 0 {
-        free(n_le); free(r_le); free(s_le); free(h_le);
-        free(p_le); free(b_le); free(gx_le); free(gy_le);
-        free(qx_le); free(qy_le);
-        return 0;
-    }
+    if p384_is_on_curve_bn(qx_bn, qy_bn, p_bn, b_bn) == 0 { return 0; }
 
-    w = allocate(48); bn384_mod_inv(w, s_le, n_le);
-    u1 = allocate(48); bn384_mod_mul(u1, h_le, w, n_le);
-    u2 = allocate(48); bn384_mod_mul(u2, r_le, w, n_le);
+    let w = state_new(Bn384Ctx);
+    let u1 = state_new(Bn384Ctx);
+    let u2 = state_new(Bn384Ctx);
+    bn384_mod_inv(w, s_bn, n_bn);
+    bn384_mod_mul(u1, h_bn, w, n_bn);
+    bn384_mod_mul(u2, r_bn, w, n_bn);
 
-    r1x = allocate(48); r1y = allocate(48);
-    p384_scalar_mul(r1x, r1y, u1, gx_le, gy_le, p_le);
-    r2x = allocate(48); r2y = allocate(48);
-    p384_scalar_mul(r2x, r2y, u2, qx_le, qy_le, p_le);
-    ptx = allocate(48); pty = allocate(48);
-    p384_point_add(ptx, pty, r1x, r1y, r2x, r2y, p_le);
+    let r1x = state_new(Bn384Ctx);
+    let r1y = state_new(Bn384Ctx);
+    p384_scalar_mul_bn(r1x, r1y, u1, gx_bn, gy_bn, p_bn);
+    let r2x = state_new(Bn384Ctx);
+    let r2y = state_new(Bn384Ctx);
+    p384_scalar_mul_bn(r2x, r2y, u2, qx_bn, qy_bn, p_bn);
+    let ptx = state_new(Bn384Ctx);
+    let pty = state_new(Bn384Ctx);
+    p384_point_add_bn(ptx, pty, r1x, r1y, r2x, r2y, p_bn);
 
-    result: u32 = 0;
     if bn384_is_zero(ptx) == 0 || bn384_is_zero(pty) == 0 {
-        v = allocate(48);
+        let v = state_new(Bn384Ctx);
         bn384_copy(v, ptx);
-        if bn384_cmp(v, n_le) >= 0 { bn384_sub(v, v, n_le); }
-        if bn384_cmp(v, r_le) == 0 { result = 1; }
-        free(v);
+        if bn384_cmp(v, n_bn) >= 0 { bn384_sub(v, v, n_bn); }
+        if bn384_cmp(v, r_bn) == 0 { return 1; }
     }
-
-    free(n_le); free(r_le); free(s_le); free(h_le);
-    free(p_le); free(b_le); free(gx_le); free(gy_le);
-    free(qx_le); free(qy_le); free(w); free(u1); free(u2);
-    free(r1x); free(r1y); free(r2x); free(r2y); free(ptx); free(pty);
-
-    return result;
+    return 0;
 }
 
-// Expose scalar_mul and byte-swap for callers like ecdh_p384 / key_agreement.
-transform p384_scalar_mul_wrap(rx: Address, ry: Address, k: Address, px: Address, py: Address, p: Address) {
-    p384_scalar_mul(rx, ry, k, px, py, p);
+// Expose helpers for sibling modules (ecdh_p384 / key_agreement).
+transform p384_scalar_mul_wrap(rx: State<B48>, ry: State<B48>, k: State<B48>, px: State<B48>, py: State<B48>, p: State<B48>) {
+    let p_bn = state_new(Bn384Ctx);
+    let k_bn = state_new(Bn384Ctx);
+    let px_bn = state_new(Bn384Ctx);
+    let py_bn = state_new(Bn384Ctx);
+    be48_to_bn384(p_bn, p);
+    be48_to_bn384(k_bn, k);
+    be48_to_bn384(px_bn, px);
+    be48_to_bn384(py_bn, py);
+    let rx_bn = state_new(Bn384Ctx);
+    let ry_bn = state_new(Bn384Ctx);
+    p384_scalar_mul_bn(rx_bn, ry_bn, k_bn, px_bn, py_bn, p_bn);
+    bn384_to_be48(rx, rx_bn);
+    bn384_to_be48(ry, ry_bn);
 }
 
-transform swap_endian_48_wrap(dst: Address, src: Address) {
+transform swap_endian_48_wrap(dst: State<B48>, src: State<B48>) {
     swap_endian_48(dst, src);
 }
