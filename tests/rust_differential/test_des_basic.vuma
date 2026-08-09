@@ -1,0 +1,31 @@
+// VUMA harness for DES — FIPS-81 Appendix B example
+//   key = 133457799BBCDFF1 (8 bytes)
+//   pt  = 0123456789ABCDEF (8 bytes)
+//   ct  = 85E813540F0AB405 (8 bytes)
+// Output: each ciphertext byte printed as decimal integer on its own line.
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/des.vuma"::{DesCtx, DesKey, DesBlock, des_init, des_encrypt_block};
+
+transform main() -> i32 {
+    let ctx = state_new(DesCtx);
+    let key = state_new(DesKey);
+    let pt = state_new(DesBlock);
+    let ct = state_new(DesBlock);
+
+    // key = 0x133457799BBCDFF1
+    key.data[0] = 19;  key.data[1] = 52;  key.data[2] = 87;  key.data[3] = 121;
+    key.data[4] = 155; key.data[5] = 188; key.data[6] = 223; key.data[7] = 241;
+
+    // pt = 0x0123456789ABCDEF
+    pt.data[0] = 1;   pt.data[1] = 35;  pt.data[2] = 69;  pt.data[3] = 103;
+    pt.data[4] = 137; pt.data[5] = 171; pt.data[6] = 205; pt.data[7] = 239;
+
+    des_init(ctx, key);
+    des_encrypt_block(ctx, pt, ct);
+
+    let i: u32 = 0;
+    while i < 8 {
+        print_int((ct.data[i] as u32) + 1000);
+        i = i + 1;
+    }
+    return 0;
+}

@@ -1,0 +1,38 @@
+// VUMA harness for RC4 — RFC 6229 test vector
+//   key = "Key" (3 bytes), pt = "Plaintext" (9 bytes)
+//   expected ct = bbf316e8d940af0ad3
+// Output: each ciphertext byte printed as decimal integer on its own line.
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/rc4.vuma"::{Rc4Ctx, Rc4Key, Rc4Buf, rc4_init, rc4_crypt};
+
+transform main() -> i32 {
+    let ctx = state_new(Rc4Ctx);
+    let key = state_new(Rc4Key);
+    let data = state_new(Rc4Buf);
+
+    // key = "Key" = [75, 101, 121]
+    key.bytes[0] = 75;
+    key.bytes[1] = 101;
+    key.bytes[2] = 121;
+
+    // pt = "Plaintext" = [80, 108, 97, 105, 110, 116, 101, 120, 116]
+    data.bytes[0] = 80;
+    data.bytes[1] = 108;
+    data.bytes[2] = 97;
+    data.bytes[3] = 105;
+    data.bytes[4] = 110;
+    data.bytes[5] = 116;
+    data.bytes[6] = 101;
+    data.bytes[7] = 120;
+    data.bytes[8] = 116;
+
+    rc4_init(ctx, key, 3);
+    rc4_crypt(ctx, data, 9);
+
+    // Print each ciphertext byte as a decimal integer (one per line).
+    let i: u32 = 0;
+    while i < 9 {
+        print_int((data.bytes[i] as u32) + 1000);
+        i = i + 1;
+    }
+    return 0;
+}

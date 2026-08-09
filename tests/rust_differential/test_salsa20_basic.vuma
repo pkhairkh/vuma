@@ -1,0 +1,42 @@
+// VUMA harness for Salsa20 — Bernstein (DJB) test vector
+//   key   = 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f (32 bytes)
+//   nonce = 000000000000004a (8 bytes)
+//   pt    = 64 zero bytes (so output = keystream block 0)
+//   expected ct (DJB Salsa20/20 keystream):
+//     4dfa5e481da23ea09a310a9fe8de6bc8e9d5d57c73f23e6b0b56292c0e9a8b3d
+//     d9ce4db7b8d49d81728f24719e6f9d3f0821e50e5cc0d0fa6e9c9a33f62c3d53
+// Output: each output byte printed as decimal integer on its own line.
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/salsa20.vuma"::{Salsa20Ctx, Salsa20Key, Salsa20Nonce, Salsa20Buf, salsa20_init, salsa20_encrypt};
+
+transform main() -> i32 {
+    let ctx = state_new(Salsa20Ctx);
+    let key = state_new(Salsa20Key);
+    let nonce = state_new(Salsa20Nonce);
+    let data = state_new(Salsa20Buf);
+    let out = state_new(Salsa20Buf);
+
+    // key = [0..31]
+    key.bytes[0] = 0;   key.bytes[1] = 1;   key.bytes[2] = 2;   key.bytes[3] = 3;
+    key.bytes[4] = 4;   key.bytes[5] = 5;   key.bytes[6] = 6;   key.bytes[7] = 7;
+    key.bytes[8] = 8;   key.bytes[9] = 9;   key.bytes[10] = 10; key.bytes[11] = 11;
+    key.bytes[12] = 12; key.bytes[13] = 13; key.bytes[14] = 14; key.bytes[15] = 15;
+    key.bytes[16] = 16; key.bytes[17] = 17; key.bytes[18] = 18; key.bytes[19] = 19;
+    key.bytes[20] = 20; key.bytes[21] = 21; key.bytes[22] = 22; key.bytes[23] = 23;
+    key.bytes[24] = 24; key.bytes[25] = 25; key.bytes[26] = 26; key.bytes[27] = 27;
+    key.bytes[28] = 28; key.bytes[29] = 29; key.bytes[30] = 30; key.bytes[31] = 31;
+
+    // nonce = 00 00 00 00 00 00 00 4a
+    nonce.bytes[0] = 0;  nonce.bytes[1] = 0;  nonce.bytes[2] = 0;  nonce.bytes[3] = 0;
+    nonce.bytes[4] = 0;  nonce.bytes[5] = 0;  nonce.bytes[6] = 0;  nonce.bytes[7] = 74;
+
+    salsa20_init(ctx, key, nonce);
+    // Encrypt 64 zero bytes — output is the keystream itself.
+    salsa20_encrypt(ctx, data, 64, out, key, nonce);
+
+    let i: u32 = 0;
+    while i < 64 {
+        print_int((out.bytes[i] as u32) + 1000);
+        i = i + 1;
+    }
+    return 0;
+}

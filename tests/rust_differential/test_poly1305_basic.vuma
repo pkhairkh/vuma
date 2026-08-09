@@ -1,0 +1,51 @@
+// VUMA harness for Poly1305 — RFC 8439 §2.5.2 test vector
+//   key = 85d6be7857556d337f4452fe42d50693a3ed8d3b0c7a0c2b1f4e7c5c8e0d0a09
+//   msg = "Cryptographic Forum Research Group"
+//   expected tag = d795e0af355920ca0404c3da8782904a
+// Output: each tag byte printed as decimal integer on its own line.
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/poly1305.vuma"::{Poly1305Ctx, Poly1305Key, Poly1305Tag, poly1305_init, poly1305_update, poly1305_final};
+
+transform main() -> i32 {
+    let ctx = state_new(Poly1305Ctx);
+    let key = state_new(Poly1305Key);
+    let msg = state_new(Poly1305Key);
+    let tag = state_new(Poly1305Tag);
+
+    // key = 32 bytes (decimal of 85d6be7857556d337f4452fe42d50693a3ed8d3b0c7a0c2b1f4e7c5c8e0d0a09)
+    key.bytes[0] = 133;  key.bytes[1] = 214;  key.bytes[2] = 190;  key.bytes[3] = 120;
+    key.bytes[4] = 87;   key.bytes[5] = 85;   key.bytes[6] = 109;  key.bytes[7] = 51;
+    key.bytes[8] = 127;  key.bytes[9] = 68;   key.bytes[10] = 82;  key.bytes[11] = 254;
+    key.bytes[12] = 66;  key.bytes[13] = 213; key.bytes[14] = 6;   key.bytes[15] = 147;
+    key.bytes[16] = 163; key.bytes[17] = 237; key.bytes[18] = 141; key.bytes[19] = 59;
+    key.bytes[20] = 12;  key.bytes[21] = 122; key.bytes[22] = 12;  key.bytes[23] = 43;
+    key.bytes[24] = 31;  key.bytes[25] = 78;  key.bytes[26] = 124; key.bytes[27] = 92;
+    key.bytes[28] = 142; key.bytes[29] = 13;  key.bytes[30] = 10;  key.bytes[31] = 9;
+
+    // msg = "Cryptographic Forum Research Group" (34 bytes) — split into 32 + 2
+    // chunks because Poly1305Key.bytes is only [u8; 32]. The accumulator in
+    // Poly1305Ctx is updated incrementally, so chunked feeding is equivalent.
+    msg.bytes[0] = 67;  msg.bytes[1] = 114; msg.bytes[2] = 121; msg.bytes[3] = 112;
+    msg.bytes[4] = 116; msg.bytes[5] = 111; msg.bytes[6] = 103; msg.bytes[7] = 114;
+    msg.bytes[8] = 97;  msg.bytes[9] = 112; msg.bytes[10] = 104; msg.bytes[11] = 105;
+    msg.bytes[12] = 99; msg.bytes[13] = 32;  msg.bytes[14] = 70;  msg.bytes[15] = 111;
+    msg.bytes[16] = 114; msg.bytes[17] = 117; msg.bytes[18] = 109; msg.bytes[19] = 32;
+    msg.bytes[20] = 82;  msg.bytes[21] = 101; msg.bytes[22] = 115; msg.bytes[23] = 101;
+    msg.bytes[24] = 97;  msg.bytes[25] = 114; msg.bytes[26] = 99;  msg.bytes[27] = 104;
+    msg.bytes[28] = 32;  msg.bytes[29] = 71;  msg.bytes[30] = 114; msg.bytes[31] = 111;
+
+    poly1305_init(ctx, key);
+    poly1305_update(ctx, msg, 32);
+    // Last 2 bytes: 117, 112 ("up" of "Group")
+    msg.bytes[0] = 117;
+    msg.bytes[1] = 112;
+    poly1305_update(ctx, msg, 2);
+    poly1305_final(ctx, tag);
+
+    // Print each tag byte as a decimal integer (one per line).
+    let i: u32 = 0;
+    while i < 16 {
+        print_int((tag.bytes[i] as u32) + 1000);
+        i = i + 1;
+    }
+    return 0;
+}

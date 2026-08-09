@@ -1,0 +1,23 @@
+// W4-hash differential test: SHA-224("abc")
+// Expected Rust reference: 23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha256_sha224.vuma"::{Sha224Ctx, Sha224Data, Sha224Digest, sha224_oneshot};
+
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
+
+transform main() -> i32 {
+    let ctx = state_new(Sha224Ctx);
+    let data = state_new(Sha224Data);
+    let out = state_new(Sha224Digest);
+
+    // "abc" = 97 98 99
+    data.data[0] = 97;
+    data.data[1] = 98;
+    data.data[2] = 99;
+
+    sha224_oneshot(ctx, data, 3, out);
+
+    let n = write(1, out as Address, 28);
+    // Return write's return value so we can see what it returned.
+    return n as i32;
+}

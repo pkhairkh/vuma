@@ -1,0 +1,7 @@
+// Simple test: write a 4-byte literal to stdout.
+extern "C" { transform write(fd: i64, buf: Address, count: i64) -> i64; }
+
+transform main() -> i32 {
+    write(1, "test", 4);
+    return 0;
+}
