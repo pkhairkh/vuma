@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // womb/crypto/symmetric/poly1305.vuma — Poly1305 MAC (RFC 8439 §2.5)
-// PMT-native rewrite (W2-C2).
+// Rewritten with standard 26-bit limb arithmetic (Wave 5 fix).
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // One-time authenticator based on polynomial evaluation over GF(2^130 - 5).
@@ -12,42 +12,33 @@
 // Algorithm:
 //   acc = 0
 //   for each 16-byte block M[i]:
-//     n = M[i] as little-endian integer with 0x01 appended (1 << 128)
+//     n = M[i] as LE integer with 0x01 appended (1 << 128)
 //     acc = (acc + n) mod (2^130 - 5)
 //     acc = (acc * r) mod (2^130 - 5)
 //   tag = (acc + s) mod (2^130 - 5)
-//   output tag as 16 little-endian bytes
+//   output tag as 16 LE bytes
 //
-// Implementation: uses 5 × u32 words to represent 130-bit numbers
-// (5 × 32 = 160 bits, enough for 130-bit values with carry).
-// Multiplication is done via schoolbook multiplication of 5 u32 limbs
-// followed by reduction mod 2^130 - 5.
-//
-// PMT patterns (per W2-C1 chacha20.vuma / W2-D salsa20.vuma / W48 sha.vuma):
-//   - state_new(Layout) for allocations
-//   - State<T> for transform parameters
-//   - [u8; N] and [u32; N] typed arrays with literal/precomputed indices
-//   - NO allocate/free/Address/*ptr
+// Implementation: standard 26-bit limbs (5 × 26 = 130 bits), matching
+// the poly1305-donna reference. Each limb is stored in a u32 but only
+// uses 26 bits. The ×5 reduction (2^130 ≡ 5 mod p) folds the high
+// product limbs back cleanly.
 
-const POLY1305_MASK32: u32 = 4294967295;
-
-// Prime p = 2^130 - 5
-// We represent numbers mod p as 5 × u32 limbs (little-endian):
-//   value = limb[0] + limb[1]*2^32 + limb[2]*2^64 + limb[3]*2^96 + limb[4]*2^128
+const POLY1305_MASK26: u32 = 67108863;   // 0x3FFFFFF (26 bits set)
 
 // ===========================================================================
 // Layouts
 // ===========================================================================
 
 layout Poly1305Ctx = {
-    r: [u32; 5],      // clamped r, 5 limbs (130 bits)
-    s: [u32; 4],      // s, 4 limbs (128 bits)
-    acc: [u32; 5],    // accumulator, 5 limbs (130 bits)
+    r: [u32; 5],      // clamped r, 5 × 26-bit limbs
+    s: [u32; 4],      // s, 4 × 32-bit limbs (128 bits, not reduced)
+    acc: [u32; 5],    // accumulator, 5 × 26-bit limbs
     buf: [u8; 16],    // partial block buffer
     buf_len: u32,     // bytes currently in buf
 }
 
 layout Poly1305Key = { bytes: [u8; 32] }
+layout Poly1305Msg = { bytes: [u8; 256] }
 layout Poly1305Tag = { bytes: [u8; 16] }
 
 // ===========================================================================
@@ -55,38 +46,32 @@ layout Poly1305Tag = { bytes: [u8; 16] }
 // ===========================================================================
 
 transform poly1305_init(ctx: State<Poly1305Ctx>, key: State<Poly1305Key>) {
-    // Load r from key.bytes[0..15], clamp it, store as 5 LE u32 limbs
-    // r = key[0..15] as LE u128, clamped: r &= 0x0ffffffc0fffffff0fffffff0fffffff
-    let r0 = (key.bytes[0] as u32) | ((key.bytes[1] as u32) << 8) | ((key.bytes[2] as u32) << 16) | ((key.bytes[3] as u32) << 24);
-    let r1 = (key.bytes[4] as u32) | ((key.bytes[5] as u32) << 8) | ((key.bytes[6] as u32) << 16) | ((key.bytes[7] as u32) << 24);
-    let r2 = (key.bytes[8] as u32) | ((key.bytes[9] as u32) << 8) | ((key.bytes[10] as u32) << 16) | ((key.bytes[11] as u32) << 24);
-    let r3 = (key.bytes[12] as u32) | ((key.bytes[13] as u32) << 8) | ((key.bytes[14] as u32) << 16) | ((key.bytes[15] as u32) << 24);
+    // Load 16-byte r as 4 u32 LE words, then extract 5 × 26-bit limbs
+    // with RFC 8439 §2.5.1 clamping.
+    let t0 = (key.bytes[0] as u32) | ((key.bytes[1] as u32) << 8) | ((key.bytes[2] as u32) << 16) | ((key.bytes[3] as u32) << 24);
+    let t1 = (key.bytes[4] as u32) | ((key.bytes[5] as u32) << 8) | ((key.bytes[6] as u32) << 16) | ((key.bytes[7] as u32) << 24);
+    let t2 = (key.bytes[8] as u32) | ((key.bytes[9] as u32) << 8) | ((key.bytes[10] as u32) << 16) | ((key.bytes[11] as u32) << 24);
+    let t3 = (key.bytes[12] as u32) | ((key.bytes[13] as u32) << 8) | ((key.bytes[14] as u32) << 16) | ((key.bytes[15] as u32) << 24);
 
-    // Clamp: r0 &= 0x0fffffff, r1 &= 0x0ffffffc, r2 &= 0x0ffffffc, r3 &= 0x0ffffffc
-    // (the top 4 bits of each 32-bit word are cleared, and bits 28-31 of r1,r2,r3
-    //  — actually the clamp is: r &= 0x0ffffffc0fffffff0fffffff0fffffff)
-    // r0: 0x0fffffff = 268435455
-    // r1: 0x0ffffffc = 268435452
-    // r2: 0x0ffffffc = 268435452
-    // r3: 0x0ffffffc = 268435452
-    // r4 (bits 128-129): 0x03 = 3
-    ctx.r[0] = r0 & 268435455;
-    ctx.r[1] = r1 & 268435452;
-    ctx.r[2] = r2 & 268435452;
-    ctx.r[3] = r3 & 268435452;
-    ctx.r[4] = 0;  // r is 128-bit, top 2 bits of limb 4 are 0
+    // 26-bit limb extraction with clamping:
+    // r[0] = t0 & 0x3FFFFFF                         (no clamp needed)
+    // r[1] = ((t0 >> 26) | (t1 << 6)) & 0x3FFFF03   (clamp: clear bits 6-7)
+    // r[2] = ((t1 >> 20) | (t2 << 12)) & 0x3FFC0FF   (clamp: clear bits 12-13)
+    // r[3] = ((t2 >> 14) | (t3 << 18)) & 0x3F03FFF   (clamp: clear bits 18-19)
+    // r[4] = (t3 >> 8) & 0x0FFFFF                     (clamp: clear bits 24+)
+    ctx.r[0] = t0 & 67108863;
+    ctx.r[1] = ((t0 >> 26) | (t1 << 6)) & 67108611;
+    ctx.r[2] = ((t1 >> 20) | (t2 << 12)) & 67092735;
+    ctx.r[3] = ((t2 >> 14) | (t3 << 18)) & 66191359;
+    ctx.r[4] = (t3 >> 8) & 1048575;
 
-    // Load s from key.bytes[16..31] as 4 LE u32 limbs
-    let s0 = (key.bytes[16] as u32) | ((key.bytes[17] as u32) << 8) | ((key.bytes[18] as u32) << 16) | ((key.bytes[19] as u32) << 24);
-    let s1 = (key.bytes[20] as u32) | ((key.bytes[21] as u32) << 8) | ((key.bytes[22] as u32) << 16) | ((key.bytes[23] as u32) << 24);
-    let s2 = (key.bytes[24] as u32) | ((key.bytes[25] as u32) << 8) | ((key.bytes[26] as u32) << 16) | ((key.bytes[27] as u32) << 24);
-    let s3 = (key.bytes[28] as u32) | ((key.bytes[29] as u32) << 8) | ((key.bytes[30] as u32) << 16) | ((key.bytes[31] as u32) << 24);
-    ctx.s[0] = s0;
-    ctx.s[1] = s1;
-    ctx.s[2] = s2;
-    ctx.s[3] = s3;
+    // Load s from key.bytes[16..31] as 4 LE u32 limbs (no clamp)
+    ctx.s[0] = (key.bytes[16] as u32) | ((key.bytes[17] as u32) << 8) | ((key.bytes[18] as u32) << 16) | ((key.bytes[19] as u32) << 24);
+    ctx.s[1] = (key.bytes[20] as u32) | ((key.bytes[21] as u32) << 8) | ((key.bytes[22] as u32) << 16) | ((key.bytes[23] as u32) << 24);
+    ctx.s[2] = (key.bytes[24] as u32) | ((key.bytes[25] as u32) << 8) | ((key.bytes[26] as u32) << 16) | ((key.bytes[27] as u32) << 24);
+    ctx.s[3] = (key.bytes[28] as u32) | ((key.bytes[29] as u32) << 8) | ((key.bytes[30] as u32) << 16) | ((key.bytes[31] as u32) << 24);
 
-    // Zero the accumulator and buffer
+    // Zero accumulator and buffer
     ctx.acc[0] = 0;
     ctx.acc[1] = 0;
     ctx.acc[2] = 0;
@@ -96,132 +81,123 @@ transform poly1305_init(ctx: State<Poly1305Ctx>, key: State<Poly1305Key>) {
 }
 
 // ===========================================================================
-// Core block processing
+// Core block processing (26-bit limbs, poly1305-donna algorithm)
 // ===========================================================================
 
 // poly1305_block: process one 16-byte block.
-// Reads the block from ctx.buf[0..15] (already filled by update).
-// n = buf as LE u128 with high bit (1 << 128) set
-// acc = (acc + n) * r mod p
+// acc = (acc + block_with_high_bit) * r mod p
 transform poly1305_block(ctx: State<Poly1305Ctx>) {
-    // Load the 16-byte block as 5 limbs (n[0..4] = 128 bits + n[4] = 1)
-    let n0 = (ctx.buf[0] as u32) | ((ctx.buf[1] as u32) << 8) | ((ctx.buf[2] as u32) << 16) | ((ctx.buf[3] as u32) << 24);
-    let n1 = (ctx.buf[4] as u32) | ((ctx.buf[5] as u32) << 8) | ((ctx.buf[6] as u32) << 16) | ((ctx.buf[7] as u32) << 24);
-    let n2 = (ctx.buf[8] as u32) | ((ctx.buf[9] as u32) << 8) | ((ctx.buf[10] as u32) << 16) | ((ctx.buf[11] as u32) << 24);
-    let n3 = (ctx.buf[12] as u32) | ((ctx.buf[13] as u32) << 8) | ((ctx.buf[14] as u32) << 16) | ((ctx.buf[15] as u32) << 24);
-    let n4: u32 = 1;  // high bit (1 << 128)
+    // Load 16-byte block as 4 u32 LE words
+    let t0 = (ctx.buf[0] as u32) | ((ctx.buf[1] as u32) << 8) | ((ctx.buf[2] as u32) << 16) | ((ctx.buf[3] as u32) << 24);
+    let t1 = (ctx.buf[4] as u32) | ((ctx.buf[5] as u32) << 8) | ((ctx.buf[6] as u32) << 16) | ((ctx.buf[7] as u32) << 24);
+    let t2 = (ctx.buf[8] as u32) | ((ctx.buf[9] as u32) << 8) | ((ctx.buf[10] as u32) << 16) | ((ctx.buf[11] as u32) << 24);
+    let t3 = (ctx.buf[12] as u32) | ((ctx.buf[13] as u32) << 8) | ((ctx.buf[14] as u32) << 16) | ((ctx.buf[15] as u32) << 24);
 
-    // Step 1: acc = acc + n (160-bit addition, carry propagation)
-    let a0 = ctx.acc[0];
-    let a1 = ctx.acc[1];
-    let a2 = ctx.acc[2];
-    let a3 = ctx.acc[3];
-    let a4 = ctx.acc[4];
+    // Extract 5 × 26-bit limbs, set high bit (1 << 128) at bit 24 of h4
+    let h0 = t0 & 67108863;
+    let h1 = ((t0 >> 26) | (t1 << 6)) & 67108863;
+    let h2 = ((t1 >> 20) | (t2 << 12)) & 67108863;
+    let h3 = ((t2 >> 14) | (t3 << 18)) & 67108863;
+    let h4 = (t3 >> 8) | (1 << 24);
 
-    // Add n to acc with carry
-    let t0 = a0 + n0;
-    let c0: u32 = 0;
-    if t0 < a0 { c0 = 1; }
-    let t1 = a1 + n1;
-    let c1: u32 = 0;
-    if t1 < a1 { c1 = 1; }
-    t1 = t1 + c0;
-    if t1 < c0 { c1 = c1 + 1; }
-    let t2 = a2 + n2;
-    let c2: u32 = 0;
-    if t2 < a2 { c2 = 1; }
-    t2 = t2 + c1;
-    if t2 < c1 { c2 = c2 + 1; }
-    let t3 = a3 + n3;
-    let c3: u32 = 0;
-    if t3 < a3 { c3 = 1; }
-    t3 = t3 + c2;
-    if t3 < c2 { c3 = c3 + 1; }
-    let t4 = a4 + n4;
-    t4 = t4 + c3;
+    // Add h to accumulator (acc += h, with carry propagation in 26-bit limbs)
+    let a0 = ctx.acc[0] + h0;
+    let a1 = ctx.acc[1] + h1;
+    let a2 = ctx.acc[2] + h2;
+    let a3 = ctx.acc[3] + h3;
+    let a4 = ctx.acc[4] + h4;
 
-    // Store acc = t (before multiplication)
-    ctx.acc[0] = t0 & POLY1305_MASK32;
-    ctx.acc[1] = t1 & POLY1305_MASK32;
-    ctx.acc[2] = t2 & POLY1305_MASK32;
-    ctx.acc[3] = t3 & POLY1305_MASK32;
-    ctx.acc[4] = t4 & POLY1305_MASK32;
+    // Carry-propagate the addition (each limb may exceed 26 bits)
+    let c0 = a0 >> 26;
+    let p0 = a0 & 67108863;
+    let a1p = a1 + c0;
+    let c1 = a1p >> 26;
+    let p1 = a1p & 67108863;
+    let a2p = a2 + c1;
+    let c2 = a2p >> 26;
+    let p2 = a2p & 67108863;
+    let a3p = a3 + c2;
+    let c3 = a3p >> 26;
+    let p3 = a3p & 67108863;
+    let a4p = a4 + c3;
+    let c4 = a4p >> 26;
+    let p4 = a4p & 67108863;
+    // Fold final carry via ×5 (2^130 ≡ 5 mod p)
+    let p0f = p0 + (c4 * 5);
+    let cf = p0f >> 26;
+    let p0ff = p0f & 67108863;
+    let p1f = p1 + cf;
 
-    // Step 2: acc = acc * r mod p
-    // Schoolbook multiplication: acc (5 limbs) × r (5 limbs) = up to 10 limbs
-    // Then reduce mod 2^130 - 5.
-    //
-    // For simplicity, we use a simplified reduction:
-    // Since p = 2^130 - 5, we have 2^130 ≡ 5 (mod p).
-    // So any bits above 2^130 can be multiplied by 5 and added back to the low 130 bits.
-    //
-    // Full schoolbook multiplication of 5×5 limbs:
+    // Now (p0ff, p1f, p2, p3, p4) is the accumulator + block value.
+    // Multiply by r using the folded schoolbook method:
+    // d[k] = sum_{i+j=k} h_i * r_j  (for low part, k=0..4)
+    // High products (i+j >= 5) are pre-multiplied by 5 and added to d[k-5].
     let r0 = ctx.r[0];
     let r1 = ctx.r[1];
     let r2 = ctx.r[2];
     let r3 = ctx.r[3];
     let r4 = ctx.r[4];
 
-    // Compute the full product as 10 u32 limbs (h0..h9)
-    // h[i] = sum of a[j] * r[i-j] for j = max(0,i-4)..min(4,i)
-    // We use u64 intermediate accumulation to avoid overflow.
+    let d0: u64 = (p0ff as u64) * (r0 as u64)
+              + 5 * ((p1f as u64) * (r4 as u64))
+              + 5 * ((p2 as u64) * (r3 as u64))
+              + 5 * ((p3 as u64) * (r2 as u64))
+              + 5 * ((p4 as u64) * (r1 as u64));
+    let d1: u64 = (p0ff as u64) * (r1 as u64)
+              + (p1f as u64) * (r0 as u64)
+              + 5 * ((p2 as u64) * (r4 as u64))
+              + 5 * ((p3 as u64) * (r3 as u64))
+              + 5 * ((p4 as u64) * (r2 as u64));
+    let d2: u64 = (p0ff as u64) * (r2 as u64)
+              + (p1f as u64) * (r1 as u64)
+              + (p2 as u64) * (r0 as u64)
+              + 5 * ((p3 as u64) * (r4 as u64))
+              + 5 * ((p4 as u64) * (r3 as u64));
+    let d3: u64 = (p0ff as u64) * (r3 as u64)
+              + (p1f as u64) * (r2 as u64)
+              + (p2 as u64) * (r1 as u64)
+              + (p3 as u64) * (r0 as u64)
+              + 5 * ((p4 as u64) * (r4 as u64));
+    let d4: u64 = (p0ff as u64) * (r4 as u64)
+              + (p1f as u64) * (r3 as u64)
+              + (p2 as u64) * (r2 as u64)
+              + (p3 as u64) * (r1 as u64)
+              + (p4 as u64) * (r0 as u64);
 
-    // For each output limb, accumulate products as u64
-    // h0 = a0*r0
-    let h0_lo: u32 = (a0 & r0) & POLY1305_MASK32;
-    let h0_hi: u32 = ((a0 >> 16) * (r0 >> 16)) >> 0;  // approximate — this is simplified
+    // Carry propagation: reduce d[0..4] to 5 × 26-bit limbs
+    let c0m = d0 >> 26;
+    let m0: u32 = (d0 & 67108863) as u32;
+    let d1p = d1 + c0m;
+    let c1m = d1p >> 26;
+    let m1: u32 = (d1p & 67108863) as u32;
+    let d2p = d2 + c1m;
+    let c2m = d2p >> 26;
+    let m2: u32 = (d2p & 67108863) as u32;
+    let d3p = d3 + c2m;
+    let c3m = d3p >> 26;
+    let m3: u32 = (d3p & 67108863) as u32;
+    let d4p = d4 + c3m;
+    let c4m = d4p >> 26;
+    let m4: u32 = (d4p & 67108863) as u32;
+    // Fold final carry via ×5
+    let m0p = (m0 as u64) + (c4m * 5);
+    let cf2 = m0p >> 26;
+    let m0f: u32 = (m0p & 67108863) as u32;
+    let m1f: u32 = (m1 as u64 + cf2) as u32;
 
-    // Actually, a correct 5-limb × 5-limb multiplication with u32 limbs requires
-    // careful carry handling. This is complex in VUMA's limited integer model.
-    //
-    // ALTERNATIVE APPROACH: Use a byte-by-byte Horner method instead of
-    // schoolbook multiplication. This is slower but simpler and correct.
-    //
-    // Horner: acc = 0
-    //   for each byte b of the block (MSB first):
-    //     acc = acc * 256 + b
-    //     acc = acc mod p
-    // But this is 16 multiplications per block, which is very slow.
-    //
-    // BETTER: Use the 5-limb representation but with a simpler multiply
-    // that processes the accumulator limb-by-limb against the full r.
-    //
-    // For now, implement a CORRECT but simple version:
-    // acc * r = acc * (r0 + r1*2^32 + r2*2^64 + r3*2^96 + r4*2^128)
-    //         = acc*r0 + (acc*r1)<<32 + (acc*r2)<<64 + (acc*r3)<<96 + (acc*r4)<<128
-    //
-    // Each acc*r_i is a 5-limb × 1-limb multiply (produces 6 limbs),
-    // then we shift and add.
-    //
-    // After the full multiply, reduce mod 2^130-5.
-
-    // --- acc * r0 (5-limb × 1-limb) ---
-    let p0_lo = a0 * r0;
-    // ... this is getting too complex for inline VUMA code.
-    //
-    // SIMPLIFIED: implement poly1305 using a byte-oriented approach that
-    // processes the accumulator as a single large number with carry.
-    // This avoids the complex schoolbook multiplication.
-
-    // Actually, let me reset and use a different, simpler approach:
-    // Process the MAC using 32-bit arithmetic with explicit carry tracking.
-    // The key insight: r is clamped to have only 22 significant bits per
-    // 32-bit limb (top 4 bits cleared for r1,r2,r3 and top 4 of r0).
-    // So the product acc*r fits in a manageable number of bits.
-
-    // For now, let's just store the accumulator as-is (the multiplication
-    // is a TODO — the block function adds n to acc but doesn't multiply).
-    // This will produce WRONG output but lets us test the add path.
-
-    // TODO: Implement the full schoolbook multiplication + reduction.
-    // For now, this is a placeholder that only does the addition.
+    // Store result (accumulator is now < 2^131, lazy reduction in final)
+    ctx.acc[0] = m0f;
+    ctx.acc[1] = m1f;
+    ctx.acc[2] = m2;
+    ctx.acc[3] = m3;
+    ctx.acc[4] = m4;
 }
 
 // ===========================================================================
 // Update (absorb message bytes)
 // ===========================================================================
 
-transform poly1305_update(ctx: State<Poly1305Ctx>, msg: State<Poly1305Key>, len: u32) {
+transform poly1305_update(ctx: State<Poly1305Ctx>, msg: State<Poly1305Msg>, len: u32) {
     let i: u32 = 0;
     while i < len {
         ctx.buf[ctx.buf_len] = msg.bytes[i];
@@ -241,107 +217,260 @@ transform poly1305_update(ctx: State<Poly1305Ctx>, msg: State<Poly1305Key>, len:
 transform poly1305_final(ctx: State<Poly1305Ctx>, tag: State<Poly1305Tag>) {
     // Process any remaining bytes in the buffer (partial block)
     if ctx.buf_len > 0 {
-        // Append 0x01 after the last data byte, pad with zeros
+        // Append 0x01 after the last data byte, pad with zeros to 16 bytes
         ctx.buf[ctx.buf_len] = 1;
         let i: u32 = ctx.buf_len + 1;
         while i < 16 {
             ctx.buf[i] = 0;
             i = i + 1;
         }
-        // Process this block (note: the 0x01 is at position buf_len, not at position 16)
-        // For partial blocks, the high bit is at position buf_len*8, not 128.
-        // This requires a different block processing — for simplicity, we
-        // use the full-block path with 0x01 at position buf_len.
-        poly1305_block_partial(ctx, ctx.buf_len);
+        // Process partial block: high bit is at byte position buf_len,
+        // not at bit 128. We set h4 without the (1 << 24) high bit.
+        // Instead, the 0x01 byte at buf_len IS the high bit.
+        poly1305_block_partial(ctx);
         ctx.buf_len = 0;
     }
 
-    // Add s to the accumulator
-    let a0 = ctx.acc[0];
-    let a1 = ctx.acc[1];
-    let a2 = ctx.acc[2];
-    let a3 = ctx.acc[3];
+    // Full carry propagation to reduce acc to < 2^130
+    let c0 = ctx.acc[0] >> 26;
+    ctx.acc[0] = ctx.acc[0] & 67108863;
+    ctx.acc[1] = ctx.acc[1] + c0;
+    let c1 = ctx.acc[1] >> 26;
+    ctx.acc[1] = ctx.acc[1] & 67108863;
+    ctx.acc[2] = ctx.acc[2] + c1;
+    let c2 = ctx.acc[2] >> 26;
+    ctx.acc[2] = ctx.acc[2] & 67108863;
+    ctx.acc[3] = ctx.acc[3] + c2;
+    let c3 = ctx.acc[3] >> 26;
+    ctx.acc[3] = ctx.acc[3] & 67108863;
+    ctx.acc[4] = ctx.acc[4] + c3;
+    let c4 = ctx.acc[4] >> 26;
+    ctx.acc[4] = ctx.acc[4] & 67108863;
+    // Fold final carry via ×5
+    ctx.acc[0] = ctx.acc[0] + (c4 * 5);
+    let cf = ctx.acc[0] >> 26;
+    ctx.acc[0] = ctx.acc[0] & 67108863;
+    ctx.acc[1] = ctx.acc[1] + cf;
 
-    let t0 = a0 + ctx.s[0];
-    let c0: u32 = 0;
-    if t0 < a0 { c0 = 1; }
-    let t1 = a1 + ctx.s[1] + c0;
-    let c1: u32 = 0;
-    if t1 < a1 { c1 = 1; }
-    if t1 < c0 { c1 = c1 + 1; }
-    let t2 = a2 + ctx.s[2] + c1;
-    let c2: u32 = 0;
-    if t2 < a2 { c2 = 1; }
-    if t2 < c1 { c2 = c2 + 1; }
-    let t3 = a3 + ctx.s[3] + c2;
+    // Now acc < 2^131. Subtract p if acc >= p (at most one subtraction).
+    // p = 2^130 - 5. In 26-bit limbs: p = (3, 0, 0, 0, 0x3FFFFFC) — no,
+    // p = 2^130 - 5. Limb 4 is bits 104-129. 2^130 = limb 4 = 4 (bit 2 of
+    // limb 4). So p = (2^130 - 5) = (-5 mod 2^130) = (2^130 - 5).
+    // In limbs: p[0] = 2^26 - 5 = 67108859, p[1..4] = 0, p[4] bit 2 = 4.
+    // Actually: 2^130 = 4 * 2^128 = 4 * 2^(24+104) = 4 * 2^24 * 2^104.
+    // So 2^130 in limbs: limb 4 = 4 (bit 2), limbs 0-3 = 0.
+    // p = 2^130 - 5: limb 0 = 2^26 - 5 = 67108859, limbs 1-3 = 0x3FFFFFF,
+    //   limb 4 = 3 (since 2^130 - 5 = (4-1) * 2^128 + ... borrow).
+    // Actually: 2^130 - 5 = 2^130 - 5. In 26-bit limbs:
+    //   limb 4 = 4 (bit 2 set), limbs 0-3 = 0.
+    //   Subtract 5: limb 0 = 0 - 5 → borrow. limb 0 = 2^26 - 5 = 67108859,
+    //   borrow propagates: limbs 1-3 = 2^26 - 1 = 67108863, limb 4 = 4 - 1 = 3.
+    //   So p = (67108859, 67108863, 67108863, 67108863, 3).
 
-    // Output tag as 16 LE bytes
-    tag.bytes[0]  = (t0 & 255) as u8;
-    tag.bytes[1]  = ((t0 >> 8) & 255) as u8;
-    tag.bytes[2]  = ((t0 >> 16) & 255) as u8;
-    tag.bytes[3]  = ((t0 >> 24) & 255) as u8;
-    tag.bytes[4]  = (t1 & 255) as u8;
-    tag.bytes[5]  = ((t1 >> 8) & 255) as u8;
-    tag.bytes[6]  = ((t1 >> 16) & 255) as u8;
-    tag.bytes[7]  = ((t1 >> 24) & 255) as u8;
-    tag.bytes[8]  = (t2 & 255) as u8;
-    tag.bytes[9]  = ((t2 >> 8) & 255) as u8;
-    tag.bytes[10] = ((t2 >> 16) & 255) as u8;
-    tag.bytes[11] = ((t2 >> 24) & 255) as u8;
-    tag.bytes[12] = (t3 & 255) as u8;
-    tag.bytes[13] = ((t3 >> 8) & 255) as u8;
-    tag.bytes[14] = ((t3 >> 16) & 255) as u8;
-    tag.bytes[15] = ((t3 >> 24) & 255) as u8;
+    // Compute acc + (5 << 26) as a test: if acc + 5 > 2^130, subtract p.
+    // Simpler: compute acc - p and check borrow.
+    // acc >= p iff acc + 5 > 2^130 iff acc + 5 causes bit 130 to be set.
+    // We check: if acc[4] > 3, OR (acc[4] == 3 AND lower limbs >= p's lower).
+    let g0: u32 = ctx.acc[0] + 5;
+    let b0: u32 = 0;
+    if g0 < ctx.acc[0] { b0 = 1; }
+    let g1 = ctx.acc[1] + b0;
+    let b1: u32 = 0;
+    if g1 < ctx.acc[1] { b1 = 1; }
+    let g2 = ctx.acc[2] + b1;
+    let b2: u32 = 0;
+    if g2 < ctx.acc[2] { b2 = 1; }
+    let g3 = ctx.acc[3] + b2;
+    let b3: u32 = 0;
+    if g3 < ctx.acc[3] { b3 = 1; }
+    let g4 = ctx.acc[4] + b3;
+
+    let need_sub: u32 = 0;
+    if g4 > 3 { need_sub = 1; }
+    if g4 == 3 {
+        if g3 == 67108863 {
+            if g2 == 67108863 {
+                if g1 == 67108863 {
+                    if g0 >= 67108859 { need_sub = 1; }
+                }
+            }
+        }
+    }
+
+    let out0: u32;
+    let out1: u32;
+    let out2: u32;
+    let out3: u32;
+    let out4: u32;
+    if need_sub == 1 {
+        // Subtract p = (67108859, 67108863, 67108863, 67108863, 3)
+        let bb0: u32 = 0;
+        if g0 < 67108859 { bb0 = 1; }
+        out0 = g0 - 67108859;
+        let bb1: u32 = bb0;
+        if g1 < 67108863 { bb1 = bb1 + 1; }
+        if g1 < bb0 { bb1 = bb1 + 1; }
+        out1 = g1 - 67108863 - bb0;
+        let bb2: u32 = bb1;
+        if g2 < 67108863 { bb2 = bb2 + 1; }
+        if g2 < bb1 { bb2 = bb2 + 1; }
+        out2 = g2 - 67108863 - bb1;
+        let bb3: u32 = bb2;
+        if g3 < 67108863 { bb3 = bb3 + 1; }
+        if g3 < bb2 { bb3 = bb3 + 1; }
+        out3 = g3 - 67108863 - bb2;
+        out4 = g4 - 3 - bb3;
+    } else {
+        out0 = g0;
+        out1 = g1;
+        out2 = g2;
+        out3 = g3;
+        out4 = g4;
+    }
+
+    // Add s to the reduced accumulator (s is 128 bits = 4 × 32-bit limbs)
+    // acc + s: out is in 26-bit limbs, s is in 32-bit limbs. We need to
+    // convert out to 32-bit representation, add s, then serialize.
+    // Reconstruct the 128-bit value from 26-bit limbs:
+    //   value = out0 + out1*2^26 + out2*2^52 + out3*2^78 + out4*2^104
+    //   (out4 < 4, so bits 104-129 are just 2 bits)
+    // Convert to 4 × 32-bit LE words:
+    let v0: u32 = out0 | (out1 << 26);
+    let v1: u32 = (out1 >> 6) | (out2 << 20);
+    let v2: u32 = (out2 >> 12) | (out3 << 14);
+    let v3: u32 = (out3 >> 18) | (out4 << 8);
+
+    // Add s (4 × 32-bit, with carry)
+    let f0 = v0 + ctx.s[0];
+    let cs0: u32 = 0;
+    if f0 < v0 { cs0 = 1; }
+    let f1 = v1 + ctx.s[1] + cs0;
+    let cs1: u32 = 0;
+    if f1 < v1 { cs1 = 1; }
+    if f1 < cs0 { cs1 = cs1 + 1; }
+    let f2 = v2 + ctx.s[2] + cs1;
+    let cs2: u32 = 0;
+    if f2 < v2 { cs2 = 1; }
+    if f2 < cs1 { cs2 = cs2 + 1; }
+    let f3 = v3 + ctx.s[3] + cs2;
+
+    // Serialize as 16 LE bytes
+    tag.bytes[0]  = (f0 & 255) as u8;
+    tag.bytes[1]  = ((f0 >> 8) & 255) as u8;
+    tag.bytes[2]  = ((f0 >> 16) & 255) as u8;
+    tag.bytes[3]  = ((f0 >> 24) & 255) as u8;
+    tag.bytes[4]  = (f1 & 255) as u8;
+    tag.bytes[5]  = ((f1 >> 8) & 255) as u8;
+    tag.bytes[6]  = ((f1 >> 16) & 255) as u8;
+    tag.bytes[7]  = ((f1 >> 24) & 255) as u8;
+    tag.bytes[8]  = (f2 & 255) as u8;
+    tag.bytes[9]  = ((f2 >> 8) & 255) as u8;
+    tag.bytes[10] = ((f2 >> 16) & 255) as u8;
+    tag.bytes[11] = ((f2 >> 24) & 255) as u8;
+    tag.bytes[12] = (f3 & 255) as u8;
+    tag.bytes[13] = ((f3 >> 8) & 255) as u8;
+    tag.bytes[14] = ((f3 >> 16) & 255) as u8;
+    tag.bytes[15] = ((f3 >> 24) & 255) as u8;
 }
 
-// poly1305_block_partial: process a partial block where the high bit
-// is at position `pad_pos * 8` instead of position 128.
-transform poly1305_block_partial(ctx: State<Poly1305Ctx>, pad_pos: u32) {
-    // Load the 16-byte block as 5 limbs, but set the high bit at pad_pos
-    let n0 = (ctx.buf[0] as u32) | ((ctx.buf[1] as u32) << 8) | ((ctx.buf[2] as u32) << 16) | ((ctx.buf[3] as u32) << 24);
-    let n1 = (ctx.buf[4] as u32) | ((ctx.buf[5] as u32) << 8) | ((ctx.buf[6] as u32) << 16) | ((ctx.buf[7] as u32) << 24);
-    let n2 = (ctx.buf[8] as u32) | ((ctx.buf[9] as u32) << 8) | ((ctx.buf[10] as u32) << 16) | ((ctx.buf[11] as u32) << 24);
-    let n3 = (ctx.buf[12] as u32) | ((ctx.buf[13] as u32) << 8) | ((ctx.buf[14] as u32) << 16) | ((ctx.buf[15] as u32) << 24);
+// poly1305_block_partial: process a partial block where the 0x01 separator
+// is already inside ctx.buf at position buf_len. No extra high bit (1<<128).
+transform poly1305_block_partial(ctx: State<Poly1305Ctx>) {
+    // Load 16-byte block as 4 u32 LE words
+    let t0 = (ctx.buf[0] as u32) | ((ctx.buf[1] as u32) << 8) | ((ctx.buf[2] as u32) << 16) | ((ctx.buf[3] as u32) << 24);
+    let t1 = (ctx.buf[4] as u32) | ((ctx.buf[5] as u32) << 8) | ((ctx.buf[6] as u32) << 16) | ((ctx.buf[7] as u32) << 24);
+    let t2 = (ctx.buf[8] as u32) | ((ctx.buf[9] as u32) << 8) | ((ctx.buf[10] as u32) << 16) | ((ctx.buf[11] as u32) << 24);
+    let t3 = (ctx.buf[12] as u32) | ((ctx.buf[13] as u32) << 8) | ((ctx.buf[14] as u32) << 16) | ((ctx.buf[15] as u32) << 24);
 
-    // Set the high bit at the correct position based on pad_pos
-    // For pad_pos < 16, the bit 0x01 is at ctx.buf[pad_pos] which is already set
-    // The "high bit" is just the byte we set to 0x01
-    // For full blocks (pad_pos=16), we'd set n4 = 1 (bit 128)
-    // For partial blocks, the 0x01 byte is within n0..n3
-    let n4: u32 = 0;
+    // Extract 5 × 26-bit limbs. NO high bit (1 << 24) — the 0x01 byte
+    // at position buf_len IS the high bit, already inside the data.
+    let h0 = t0 & 67108863;
+    let h1 = ((t0 >> 26) | (t1 << 6)) & 67108863;
+    let h2 = ((t1 >> 20) | (t2 << 12)) & 67108863;
+    let h3 = ((t2 >> 14) | (t3 << 18)) & 67108863;
+    let h4 = (t3 >> 8) & 67108863;
 
-    // Add n to acc
-    let a0 = ctx.acc[0];
-    let a1 = ctx.acc[1];
-    let a2 = ctx.acc[2];
-    let a3 = ctx.acc[3];
-    let a4 = ctx.acc[4];
+    // Add h to accumulator
+    let a0 = ctx.acc[0] + h0;
+    let a1 = ctx.acc[1] + h1;
+    let a2 = ctx.acc[2] + h2;
+    let a3 = ctx.acc[3] + h3;
+    let a4 = ctx.acc[4] + h4;
 
-    let t0 = a0 + n0;
-    let c0: u32 = 0;
-    if t0 < a0 { c0 = 1; }
-    let t1 = a1 + n1;
-    let c1: u32 = 0;
-    if t1 < a1 { c1 = 1; }
-    t1 = t1 + c0;
-    if t1 < c0 { c1 = c1 + 1; }
-    let t2 = a2 + n2;
-    let c2: u32 = 0;
-    if t2 < a2 { c2 = 1; }
-    t2 = t2 + c1;
-    if t2 < c1 { c2 = c2 + 1; }
-    let t3 = a3 + n3;
-    let c3: u32 = 0;
-    if t3 < a3 { c3 = 1; }
-    t3 = t3 + c2;
-    if t3 < c2 { c3 = c3 + 1; }
-    let t4 = a4 + n4 + c3;
+    let c0 = a0 >> 26;
+    let p0 = a0 & 67108863;
+    let a1p = a1 + c0;
+    let c1 = a1p >> 26;
+    let p1 = a1p & 67108863;
+    let a2p = a2 + c1;
+    let c2 = a2p >> 26;
+    let p2 = a2p & 67108863;
+    let a3p = a3 + c2;
+    let c3 = a3p >> 26;
+    let p3 = a3p & 67108863;
+    let a4p = a4 + c3;
+    let c4 = a4p >> 26;
+    let p4 = a4p & 67108863;
+    let p0f = p0 + (c4 * 5);
+    let cf = p0f >> 26;
+    let p0ff = p0f & 67108863;
+    let p1f = p1 + cf;
 
-    ctx.acc[0] = t0 & POLY1305_MASK32;
-    ctx.acc[1] = t1 & POLY1305_MASK32;
-    ctx.acc[2] = t2 & POLY1305_MASK32;
-    ctx.acc[3] = t3 & POLY1305_MASK32;
-    ctx.acc[4] = t4 & POLY1305_MASK32;
+    // Multiply by r (same as poly1305_block)
+    let r0 = ctx.r[0];
+    let r1 = ctx.r[1];
+    let r2 = ctx.r[2];
+    let r3 = ctx.r[3];
+    let r4 = ctx.r[4];
 
-    // TODO: multiply acc by r mod p (same as poly1305_block)
+    let d0: u64 = (p0ff as u64) * (r0 as u64)
+              + 5 * ((p1f as u64) * (r4 as u64))
+              + 5 * ((p2 as u64) * (r3 as u64))
+              + 5 * ((p3 as u64) * (r2 as u64))
+              + 5 * ((p4 as u64) * (r1 as u64));
+    let d1: u64 = (p0ff as u64) * (r1 as u64)
+              + (p1f as u64) * (r0 as u64)
+              + 5 * ((p2 as u64) * (r4 as u64))
+              + 5 * ((p3 as u64) * (r3 as u64))
+              + 5 * ((p4 as u64) * (r2 as u64));
+    let d2: u64 = (p0ff as u64) * (r2 as u64)
+              + (p1f as u64) * (r1 as u64)
+              + (p2 as u64) * (r0 as u64)
+              + 5 * ((p3 as u64) * (r4 as u64))
+              + 5 * ((p4 as u64) * (r3 as u64));
+    let d3: u64 = (p0ff as u64) * (r3 as u64)
+              + (p1f as u64) * (r2 as u64)
+              + (p2 as u64) * (r1 as u64)
+              + (p3 as u64) * (r0 as u64)
+              + 5 * ((p4 as u64) * (r4 as u64));
+    let d4: u64 = (p0ff as u64) * (r4 as u64)
+              + (p1f as u64) * (r3 as u64)
+              + (p2 as u64) * (r2 as u64)
+              + (p3 as u64) * (r1 as u64)
+              + (p4 as u64) * (r0 as u64);
+
+    let c0m = d0 >> 26;
+    let m0: u32 = (d0 & 67108863) as u32;
+    let d1p = d1 + c0m;
+    let c1m = d1p >> 26;
+    let m1: u32 = (d1p & 67108863) as u32;
+    let d2p = d2 + c1m;
+    let c2m = d2p >> 26;
+    let m2: u32 = (d2p & 67108863) as u32;
+    let d3p = d3 + c2m;
+    let c3m = d3p >> 26;
+    let m3: u32 = (d3p & 67108863) as u32;
+    let d4p = d4 + c3m;
+    let c4m = d4p >> 26;
+    let m4: u32 = (d4p & 67108863) as u32;
+    let m0p = (m0 as u64) + (c4m * 5);
+    let cf2 = m0p >> 26;
+    let m0f: u32 = (m0p & 67108863) as u32;
+    let m1f: u32 = (m1 as u64 + cf2) as u32;
+
+    ctx.acc[0] = m0f;
+    ctx.acc[1] = m1f;
+    ctx.acc[2] = m2;
+    ctx.acc[3] = m3;
+    ctx.acc[4] = m4;
 }
