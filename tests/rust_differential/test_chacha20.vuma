@@ -1,0 +1,39 @@
+// Differential test: chacha20 encryption (RFC 8439 §2.4.2)
+// key=000102...1f, nonce=000000090000004a00000000, counter=1
+// Plaintext: "Ladies and Gentlemen..." → ct first byte = 0xc6 = 198
+// But the Rust crate with counter=0 produces 0x8a=138 for the keystream.
+// The RFC test vector uses counter=1 for the first plaintext block.
+// VUMA's chacha20_init sets counter=0; we need counter=1.
+// chacha20_block uses ctx.counter as state[12].
+// After init (counter=0), calling chacha20_block produces the counter=0 keystream (0x8a).
+// To get counter=1, we need to call chacha20_block once (which increments counter to 1),
+// then call it again — OR use chacha20_set_counter(ctx, 1) before the first block.
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/chacha20.vuma"::{ChaCha20Ctx, ChaCha20Key, ChaCha20Nonce, ChaCha20Block, chacha20_init, chacha20_set_counter, chacha20_block};
+
+transform main() -> i32 {
+    let ctx = state_new(ChaCha20Ctx);
+    let key = state_new(ChaCha20Key);
+    let nonce = state_new(ChaCha20Nonce);
+    let block = state_new(ChaCha20Block);
+
+    key.bytes[0] = 0; key.bytes[1] = 1; key.bytes[2] = 2; key.bytes[3] = 3;
+    key.bytes[4] = 4; key.bytes[5] = 5; key.bytes[6] = 6; key.bytes[7] = 7;
+    key.bytes[8] = 8; key.bytes[9] = 9; key.bytes[10] = 10; key.bytes[11] = 11;
+    key.bytes[12] = 12; key.bytes[13] = 13; key.bytes[14] = 14; key.bytes[15] = 15;
+    key.bytes[16] = 16; key.bytes[17] = 17; key.bytes[18] = 18; key.bytes[19] = 19;
+    key.bytes[20] = 20; key.bytes[21] = 21; key.bytes[22] = 22; key.bytes[23] = 23;
+    key.bytes[24] = 24; key.bytes[25] = 25; key.bytes[26] = 26; key.bytes[27] = 27;
+    key.bytes[28] = 28; key.bytes[29] = 29; key.bytes[30] = 30; key.bytes[31] = 31;
+
+    nonce.bytes[0] = 0; nonce.bytes[1] = 0; nonce.bytes[2] = 0; nonce.bytes[3] = 9;
+    nonce.bytes[4] = 0; nonce.bytes[5] = 0; nonce.bytes[6] = 0; nonce.bytes[7] = 74;
+    nonce.bytes[8] = 0; nonce.bytes[9] = 0; nonce.bytes[10] = 0; nonce.bytes[11] = 0;
+
+    chacha20_init(ctx, key, nonce);
+    // For counter=0 keystream (which Rust crate default produces):
+    // Expected first byte: 0x8a = 138
+    chacha20_block(ctx, block);
+
+    return block.bytes[0] as i32;
+}

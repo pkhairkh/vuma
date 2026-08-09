@@ -1,0 +1,57 @@
+// Differential test: salsa20
+// Expected first byte: 167 (0xa7)
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/salsa20.vuma"::{Salsa20Ctx, Salsa20Key, Salsa20Nonce, Salsa20Block, salsa20_init, salsa20_block};
+
+transform main() -> i32 {
+    let ctx = state_new(Salsa20Ctx);
+    let key = state_new(Salsa20Key);
+    let nonce = state_new(Salsa20Nonce);
+    let block = state_new(Salsa20Block);
+
+    key.bytes[0] = 0;
+    key.bytes[1] = 1;
+    key.bytes[2] = 2;
+    key.bytes[3] = 3;
+    key.bytes[4] = 4;
+    key.bytes[5] = 5;
+    key.bytes[6] = 6;
+    key.bytes[7] = 7;
+    key.bytes[8] = 8;
+    key.bytes[9] = 9;
+    key.bytes[10] = 10;
+    key.bytes[11] = 11;
+    key.bytes[12] = 12;
+    key.bytes[13] = 13;
+    key.bytes[14] = 14;
+    key.bytes[15] = 15;
+    key.bytes[16] = 16;
+    key.bytes[17] = 17;
+    key.bytes[18] = 18;
+    key.bytes[19] = 19;
+    key.bytes[20] = 20;
+    key.bytes[21] = 21;
+    key.bytes[22] = 22;
+    key.bytes[23] = 23;
+    key.bytes[24] = 24;
+    key.bytes[25] = 25;
+    key.bytes[26] = 26;
+    key.bytes[27] = 27;
+    key.bytes[28] = 28;
+    key.bytes[29] = 29;
+    key.bytes[30] = 30;
+    key.bytes[31] = 31;
+    nonce.bytes[0] = 0;
+    nonce.bytes[1] = 0;
+    nonce.bytes[2] = 0;
+    nonce.bytes[3] = 0;
+    nonce.bytes[4] = 0;
+    nonce.bytes[5] = 0;
+    nonce.bytes[6] = 0;
+    nonce.bytes[7] = 74;
+
+    salsa20_init(ctx, key, nonce);
+    salsa20_block(ctx, key, nonce, 0, block);
+
+    return block.bytes[0] as i32;
+}

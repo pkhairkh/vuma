@@ -1,0 +1,84 @@
+// Differential test: poly1305
+// Expected first byte: 215 (0xd7)
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/poly1305.vuma"::{Poly1305Ctx, Poly1305Key, Poly1305Msg, Poly1305Tag, poly1305_init, poly1305_update, poly1305_final};
+
+transform main() -> i32 {
+    let ctx = state_new(Poly1305Ctx);
+    let key = state_new(Poly1305Key);
+    let msg = state_new(Poly1305Msg);
+    let tag = state_new(Poly1305Tag);
+
+    key.bytes[0] = 133;
+    key.bytes[1] = 214;
+    key.bytes[2] = 190;
+    key.bytes[3] = 120;
+    key.bytes[4] = 87;
+    key.bytes[5] = 85;
+    key.bytes[6] = 109;
+    key.bytes[7] = 51;
+    key.bytes[8] = 127;
+    key.bytes[9] = 68;
+    key.bytes[10] = 82;
+    key.bytes[11] = 254;
+    key.bytes[12] = 66;
+    key.bytes[13] = 213;
+    key.bytes[14] = 6;
+    key.bytes[15] = 147;
+    key.bytes[16] = 163;
+    key.bytes[17] = 237;
+    key.bytes[18] = 141;
+    key.bytes[19] = 59;
+    key.bytes[20] = 12;
+    key.bytes[21] = 122;
+    key.bytes[22] = 12;
+    key.bytes[23] = 43;
+    key.bytes[24] = 31;
+    key.bytes[25] = 78;
+    key.bytes[26] = 124;
+    key.bytes[27] = 92;
+    key.bytes[28] = 142;
+    key.bytes[29] = 13;
+    key.bytes[30] = 10;
+    key.bytes[31] = 9;
+    msg.bytes[0] = 67;
+    msg.bytes[1] = 114;
+    msg.bytes[2] = 121;
+    msg.bytes[3] = 112;
+    msg.bytes[4] = 116;
+    msg.bytes[5] = 111;
+    msg.bytes[6] = 103;
+    msg.bytes[7] = 114;
+    msg.bytes[8] = 97;
+    msg.bytes[9] = 112;
+    msg.bytes[10] = 104;
+    msg.bytes[11] = 105;
+    msg.bytes[12] = 99;
+    msg.bytes[13] = 32;
+    msg.bytes[14] = 70;
+    msg.bytes[15] = 111;
+    msg.bytes[16] = 114;
+    msg.bytes[17] = 117;
+    msg.bytes[18] = 109;
+    msg.bytes[19] = 32;
+    msg.bytes[20] = 82;
+    msg.bytes[21] = 101;
+    msg.bytes[22] = 115;
+    msg.bytes[23] = 101;
+    msg.bytes[24] = 97;
+    msg.bytes[25] = 114;
+    msg.bytes[26] = 99;
+    msg.bytes[27] = 104;
+    msg.bytes[28] = 32;
+    msg.bytes[29] = 71;
+    msg.bytes[30] = 114;
+    msg.bytes[31] = 111;
+    msg.bytes[32] = 117;
+    msg.bytes[33] = 112;
+
+    poly1305_init(ctx, key);
+    poly1305_update(ctx, msg, 34);
+    poly1305_final(ctx, tag);
+
+    return tag.bytes[0] as i32;
+}

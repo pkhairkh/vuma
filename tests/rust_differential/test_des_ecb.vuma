@@ -1,0 +1,32 @@
+// Differential test: des_ecb
+// Expected first byte: 133 (0x85)
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/des.vuma"::{DesCtx, DesKey, DesBlock, des_init, des_encrypt_block};
+
+transform main() -> i32 {
+    let ctx = state_new(DesCtx);
+    let key = state_new(DesKey);
+    let pt = state_new(DesBlock);
+
+    key.bytes[0] = 19;
+    key.bytes[1] = 52;
+    key.bytes[2] = 87;
+    key.bytes[3] = 121;
+    key.bytes[4] = 155;
+    key.bytes[5] = 188;
+    key.bytes[6] = 223;
+    key.bytes[7] = 241;
+    data.data[0] = 1;
+    data.data[1] = 35;
+    data.data[2] = 69;
+    data.data[3] = 103;
+    data.data[4] = 137;
+    data.data[5] = 171;
+    data.data[6] = 205;
+    data.data[7] = 239;
+
+    des_init(ctx, key);
+    des_encrypt_block(ctx, pt, pt);
+
+    return pt.data[0] as i32;
+}

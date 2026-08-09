@@ -1,0 +1,28 @@
+// Differential test: aes128_ecb
+// key=000102030405060708090a0b0c0d0e0f, pt=00112233445566778899aabbccddeeff
+// Expected ct: 69c4e0d86a7b0430d8cdb78070b4c55a
+// First byte: 105 (0x69)
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/aes128.vuma"::{AesCtx, AesKey, AesBlock, aes128_init, aes_encrypt_block};
+
+transform main() -> i32 {
+    let ctx = state_new(AesCtx);
+    let key = state_new(AesKey);
+    let pt = state_new(AesBlock);
+    let ct = state_new(AesBlock);
+
+    key.data[0] = 0; key.data[1] = 1; key.data[2] = 2; key.data[3] = 3;
+    key.data[4] = 4; key.data[5] = 5; key.data[6] = 6; key.data[7] = 7;
+    key.data[8] = 8; key.data[9] = 9; key.data[10] = 10; key.data[11] = 11;
+    key.data[12] = 12; key.data[13] = 13; key.data[14] = 14; key.data[15] = 15;
+
+    pt.data[0] = 0; pt.data[1] = 17; pt.data[2] = 34; pt.data[3] = 51;
+    pt.data[4] = 68; pt.data[5] = 85; pt.data[6] = 102; pt.data[7] = 119;
+    pt.data[8] = 136; pt.data[9] = 153; pt.data[10] = 170; pt.data[11] = 187;
+    pt.data[12] = 204; pt.data[13] = 221; pt.data[14] = 238; pt.data[15] = 255;
+
+    aes128_init(ctx, key);
+    aes_encrypt_block(ctx, pt, ct);
+
+    return ct.data[0] as i32;
+}

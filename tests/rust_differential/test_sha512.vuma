@@ -1,0 +1,14 @@
+// Differential test: sha512("")
+// Expected: cf83e135...
+// First byte: 207 (0xcf)
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha512.vuma"::{Sha512Data, Sha512Digest, sha512_oneshot};
+
+transform main() -> i32 {
+    let data = state_new(Sha512Data);
+    let out = state_new(Sha512Digest);
+
+    sha512_oneshot(data, 0, out);
+
+    return out.data[0] as i32;
+}

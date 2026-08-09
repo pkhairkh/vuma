@@ -1,0 +1,14 @@
+// Differential test: sha384("")
+// Expected: 38b060a7...
+// First byte: 56 (0x38)
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha384.vuma"::{Sha384Data, Sha384Digest, sha384_oneshot};
+
+transform main() -> i32 {
+    let data = state_new(Sha384Data);
+    let out = state_new(Sha384Digest);
+
+    sha384_oneshot(data, 0, out);
+
+    return out.data[0] as i32;
+}

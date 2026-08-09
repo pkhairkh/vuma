@@ -1,0 +1,8 @@
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha512.vuma"::{Sha512Data, Sha512Digest, sha512_oneshot};
+transform main() -> i32 {
+    let data = state_new(Sha512Data);
+    let out = state_new(Sha512Digest);
+    data.data[0] = 97; data.data[1] = 98; data.data[2] = 99;
+    sha512_oneshot(data, 3, out);
+    return out.data[0] as i32;
+}

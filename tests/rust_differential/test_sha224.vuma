@@ -1,0 +1,17 @@
+// Differential test: sha224("")
+// Expected: d14a028c2a3a2bc9476102bb288234c415a2b01f828ea62ac5b3e42f
+// First byte: 209 (0xd1)
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha256_sha224.vuma"::{Sha224Ctx, Sha224Data, Sha224Digest, sha224_oneshot};
+
+transform main() -> i32 {
+let ctx = state_new(Sha224Ctx);
+    let data = state_new(Sha224Data);
+    let out = state_new(Sha224Digest);
+
+
+
+    sha224_oneshot(ctx, data, 0, out);
+
+    return out.data[0] as i32;
+}

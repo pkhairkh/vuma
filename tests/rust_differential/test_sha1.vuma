@@ -1,0 +1,16 @@
+// Differential test: sha1("")
+// Expected: da39a3ee5e6b4b0d3255bfef95601890afd80709
+// First byte: 218 (0xda)
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha1.vuma"::{Sha1Ctx, Sha1Data, Sha1Digest, sha1_oneshot};
+
+transform main() -> i32 {
+let data = state_new(Sha1Data);
+    let out = state_new(Sha1Digest);
+
+
+
+    sha1_oneshot(data, 0, out);
+
+    return out.data[0] as i32;
+}

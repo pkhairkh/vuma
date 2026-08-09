@@ -1,0 +1,8 @@
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha384.vuma"::{Sha384Data, Sha384Digest, sha384_oneshot};
+transform main() -> i32 {
+    let data = state_new(Sha384Data);
+    let out = state_new(Sha384Digest);
+    data.data[0] = 97; data.data[1] = 98; data.data[2] = 99;
+    sha384_oneshot(data, 3, out);
+    return out.data[0] as i32;
+}
