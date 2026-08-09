@@ -1,83 +1,133 @@
-// womb/crypto/drbg_extra.vuma — HASH_DRBG and CTR_DRBG (NIST SP 800-90A)
+// womb/crypto/drbg/drbg_extra.vuma — HASH_DRBG and CTR_DRBG (NIST SP 800-90A)
 // Implements two NIST-approved DRBG mechanisms:
 //   1. HASH_DRBG (Section 10.1.1) with SHA-256, seedlen = 32
 //   2. CTR_DRBG  (Section 10.2.1) with AES-256, seedlen = 48
 // No main().
-// Requires: sha256_oneshot(data, len, out), aes256_encrypt_block(pt, key, ct).
 //
-// Shared state layout (68 bytes total):
-//   [0..31]   V (HASH_DRBG) / K (CTR_DRBG AES-256 key)
-//   [32..63]  C (HASH_DRBG) / V at [32..47], [48..63] unused (CTR_DRBG)
-//   [64..67]  reseed_counter (u32, little-endian)
+// VUMA 2.0 PMT-native: state_new(Layout) / State<T> / [u8;N] arrays.
+// All allocate/free/Address/*ptr removed (arena auto-frees on return).
+//
+// Hash inputs are streamed in 64-byte chunks through Sha256Data. AES block
+// encryption uses aes256_init + aes_encrypt_block (no oneshot block API).
+//
+// Shared state layout (DrbgExtraCtx):
+//   vk[0..31]           V (HASH_DRBG) / K (CTR_DRBG AES-256 key)
+//   cv[0..31]           C (HASH_DRBG) / V at cv[0..15], cv[16..31] unused (CTR_DRBG)
+//   reseed_counter      u32
 
 const SEEDLEN_HASH: u32 = 32;
 const SEEDLEN_CTR: u32 = 48;
-const STATE_VK_OFF: u32 = 0;
-const STATE_CV_OFF: u32 = 32;
-const STATE_RC_OFF: u32 = 64;
-const CTR_V_OFF: u32 = 32;
 const DRBG_RESEED_INTERVAL: u32 = 4294967295;
+
+// ===========================================================================
+// Layouts
+// ===========================================================================
+
+layout DrbgExtraCtx = {
+    vk: [u8; 32],          // V (HASH_DRBG) / K (CTR_DRBG)
+    cv: [u8; 32],          // C (HASH_DRBG) / V (CTR_DRBG, first 16 bytes used)
+    reseed_counter: u32,   // little-endian counter
+}
+
+// Generic byte buffer (entropy / nonce / provided_data / output).
+layout DrbgXBuf = { bytes: [u8; 256] }
+
+// 16-byte AES block buffer.
+layout DrbgBlock = { bytes: [u8; 16] }
+
+// SHA-256 input wrapper for streaming hash (1 + 32 + entropy).
+layout DrbgHashIn = { bytes: [u8; 289] }
+
+// ===========================================================================
+// Streaming SHA-256 (chunked init+update+final). Mirrors hmac_sha256_hash.
+// ===========================================================================
+
+transform drbg_sha256_hash(buf: State<DrbgXBuf>, len: u32, out: State<DrbgXBuf>) {
+    let ctx = state_new(Sha256Ctx);
+    sha256_init(ctx);
+    let chunk = state_new(Sha256Data);
+    let pos: u32 = 0;
+    while pos < len {
+        let remaining: u32 = len - pos;
+        let chunk_len: u32 = 64;
+        if remaining < chunk_len { chunk_len = remaining; }
+        let i: u32 = 0;
+        while i < chunk_len {
+            chunk.data[i] = buf.bytes[pos + i];
+            i = i + 1;
+        }
+        sha256_update(ctx, chunk, chunk_len as u64);
+        pos = pos + chunk_len;
+    }
+    let digest = state_new(Sha256Digest);
+    sha256_final(ctx, digest);
+    let j: u32 = 0;
+    while j < 32 {
+        out.bytes[j] = digest.data[j];
+        j = j + 1;
+    }
+}
 
 // ===========================================================================
 // Common byte-level helpers
 // ===========================================================================
 
-transform load_u32_le(ptr: Address, off: u32) -> u32 {
-    b0: u32 = *(ptr + off);
-    b1: u32 = *(ptr + off + 1);
-    b2: u32 = *(ptr + off + 2);
-    b3: u32 = *(ptr + off + 3);
+transform drbg_load_u32_le(buf: State<DrbgXBuf>, off: u32) -> u32 {
+    let b0: u32 = buf.bytes[off] as u32;
+    let b1: u32 = buf.bytes[off + 1] as u32;
+    let b2: u32 = buf.bytes[off + 2] as u32;
+    let b3: u32 = buf.bytes[off + 3] as u32;
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
-transform store_u32_le(ptr: Address, off: u32, val: u32) {
-    *(ptr + off) = val & 255;
-    *(ptr + off + 1) = (val >> 8) & 255;
-    *(ptr + off + 2) = (val >> 16) & 255;
-    *(ptr + off + 3) = (val >> 24) & 255;
+transform drbg_store_u32_le(buf: State<DrbgXBuf>, off: u32, val: u32) {
+    buf.bytes[off] = (val & 255) as u8;
+    buf.bytes[off + 1] = ((val >> 8) & 255) as u8;
+    buf.bytes[off + 2] = ((val >> 16) & 255) as u8;
+    buf.bytes[off + 3] = ((val >> 24) & 255) as u8;
 }
 
-transform memcpy(dst: Address, src: Address, n: u32) {
-    i: u32 = 0;
+transform drbg_memcpy(dst: State<DrbgXBuf>, dst_off: u32, src: State<DrbgXBuf>, src_off: u32, n: u32) {
+    let i: u32 = 0;
     while i < n {
-        *(dst + i) = *(src + i);
+        dst.bytes[dst_off + i] = src.bytes[src_off + i];
         i = i + 1;
     }
 }
 
-transform memset(dst: Address, val: u32, n: u32) {
-    i: u32 = 0;
+transform drbg_memset(dst: State<DrbgXBuf>, off: u32, val: u32, n: u32) {
+    let i: u32 = 0;
     while i < n {
-        *(dst + i) = val & 255;
+        dst.bytes[off + i] = (val & 255) as u8;
         i = i + 1;
     }
 }
 
 // Big-endian modular add: out = (a + b) mod 2^(8*n). Works in-place when
 // a == out or b == out. Carry never exceeds 1.
-transform add_be(a: Address, b: Address, n: u32, out: Address) {
-    carry: u32 = 0;
-    i: u32 = n;
+transform drbg_add_be(a: State<DrbgXBuf>, b: State<DrbgXBuf>, n: u32, out: State<DrbgXBuf>) {
+    let carry: u32 = 0;
+    let i: u32 = n;
     while i > 0 {
         i = i - 1;
-        av: u32 = *(a + i);
-        bv: u32 = *(b + i);
-        sum: u32 = av + bv + carry;
-        *(out + i) = sum & 255;
+        let av: u32 = a.bytes[i] as u32;
+        let bv: u32 = b.bytes[i] as u32;
+        let sum: u32 = av + bv + carry;
+        out.bytes[i] = (sum & 255) as u8;
         carry = sum >> 8;
     }
 }
 
 // Big-endian modular add of a small delta: out = (a + delta) mod 2^(8*n).
 // Works in-place when a == out. Callers always pass delta = 1.
-transform add_be_small(a: Address, delta: u32, n: u32, out: Address) {
-    carry: u32 = delta;
-    i: u32 = n;
+transform drbg_add_be_small(a: State<DrbgXBuf>, delta: u32, n: u32, out: State<DrbgXBuf>) {
+    let carry: u32 = delta;
+    let i: u32 = n;
     while i > 0 {
         i = i - 1;
-        av: u32 = *(a + i);
-        sum: u32 = av + carry;
-        *(out + i) = sum & 255;
+        let av: u32 = a.bytes[i] as u32;
+        let sum: u32 = av + carry;
+        out.bytes[i] = (sum & 255) as u8;
         carry = sum >> 8;
     }
 }
@@ -91,30 +141,33 @@ transform add_be_small(a: Address, delta: u32, n: u32, out: Address) {
 //   V = Hash(0x00 || seed_material)
 //   C = Hash(0x01 || V)
 //   reseed_counter = 1
-transform hash_drbg_init(state: Address, entropy: Address, entropy_len: u32,
-                  nonce: Address, nonce_len: u32) {
-    seed_len: u32 = entropy_len + nonce_len;
-    seed = allocate(seed_len);
-    memcpy(seed, entropy, entropy_len);
-    memcpy(seed + entropy_len, nonce, nonce_len);
+transform hash_drbg_init(state: State<DrbgExtraCtx>, entropy: State<DrbgXBuf>, entropy_len: u32,
+                  nonce: State<DrbgXBuf>, nonce_len: u32) {
+    // seed = entropy || nonce
+    let seed_len: u32 = entropy_len + nonce_len;
+    let seed = state_new(DrbgXBuf);
+    drbg_memcpy(seed, 0, entropy, 0, entropy_len);
+    drbg_memcpy(seed, entropy_len, nonce, 0, nonce_len);
 
     // V = Hash(0x00 || seed_material)
-    buf = allocate(1 + seed_len);
-    *(buf + 0) = 0;
-    memcpy(buf + 1, seed, seed_len);
-    sha256_oneshot(buf, 1 + seed_len, state + STATE_VK_OFF);
+    let buf = state_new(DrbgXBuf);
+    buf.bytes[0] = 0;
+    drbg_memcpy(buf, 1, seed, 0, seed_len);
+    let v_out = state_new(DrbgXBuf);
+    drbg_sha256_hash(buf, 1 + seed_len, v_out);
+    drbg_memcpy_into_state(state, 0, v_out, 0, 32);
 
     // C = Hash(0x01 || V)
-    buf2 = allocate(33);
-    *(buf2 + 0) = 1;
-    memcpy(buf2 + 1, state + STATE_VK_OFF, 32);
-    sha256_oneshot(buf2, 33, state + STATE_CV_OFF);
+    let buf2 = state_new(DrbgXBuf);
+    buf2.bytes[0] = 1;
+    let v_read = state_new(DrbgXBuf);
+    drbg_memcpy_from_state(v_read, 0, state, 0, 32);
+    drbg_memcpy(buf2, 1, v_read, 0, 32);
+    let c_out = state_new(DrbgXBuf);
+    drbg_sha256_hash(buf2, 33, c_out);
+    drbg_memcpy_into_state(state, 32, c_out, 0, 32);
 
-    store_u32_le(state, STATE_RC_OFF, 1);
-
-    free(seed);
-    free(buf);
-    free(buf2);
+    state.reseed_counter = 1;
 }
 
 // Internal: Hashgen(no_of_bytes, V) -> out  (NIST 10.1.1.4)
@@ -125,86 +178,81 @@ transform hash_drbg_init(state: Address, entropy: Address, entropy_len: u32,
 //     W = W || output
 //     data = (data + 1) mod 2^256
 //   return leftmost no_of_bytes of W
-transform hash_drbg_hashgen(no_of_bytes: u32, v_in: Address, out: Address) {
-    data = allocate(32);
-    memcpy(data, v_in, 32);
+transform hash_drbg_hashgen(no_of_bytes: u32, state: State<DrbgExtraCtx>, out: State<DrbgXBuf>) {
+    let data = state_new(DrbgXBuf);
+    let v_read = state_new(DrbgXBuf);
+    drbg_memcpy_from_state(v_read, 0, state, 0, 32);
+    drbg_memcpy(data, 0, v_read, 0, 32);
 
-    w = allocate(no_of_bytes + 32);
-    w_len: u32 = 0;
+    let w = state_new(DrbgXBuf);
+    let w_len: u32 = 0;
 
-    inbuf = allocate(33);
-    *(inbuf + 0) = 2;
-    blk = allocate(32);
+    let inbuf = state_new(DrbgXBuf);
+    inbuf.bytes[0] = 2;
+    let blk = state_new(DrbgXBuf);
 
     while w_len < no_of_bytes {
-        memcpy(inbuf + 1, data, 32);
-        sha256_oneshot(inbuf, 33, blk);
-        memcpy(w + w_len, blk, 32);
+        drbg_memcpy(inbuf, 1, data, 0, 32);
+        drbg_sha256_hash(inbuf, 33, blk);
+        drbg_memcpy(w, w_len, blk, 0, 32);
         w_len = w_len + 32;
-        add_be_small(data, 1, 32, data);
+        drbg_add_be_small(data, 1, 32, data);
     }
 
-    memcpy(out, w, no_of_bytes);
-
-    free(data);
-    free(w);
-    free(inbuf);
-    free(blk);
+    drbg_memcpy(out, 0, w, 0, no_of_bytes);
 }
 
 // hash_drbg_generate(state, out, out_len) -> u32:
-//   Per SP 800-90A 10.1.1.5:
-//   1. If reseed_counter > RESEED_INTERVAL, return 0 (caller must reseed).
-//   2. H = Hash(0x03 || V)
-//   3. V = (V + H + C + reseed_counter) mod 2^256
-//   4. output = leftmost out_len bytes of Hashgen(out_len, V)
-//   5. C = Hash(0x01 || V)
-//   6. reseed_counter = reseed_counter + 1
-//   Returns out_len on success, 0 if a reseed is required.
-transform hash_drbg_generate(state: Address, out: Address, out_len: u32) -> u32 {
-    rc: u32 = load_u32_le(state, STATE_RC_OFF);
+//   Per SP 800-90A 10.1.1.5.
+transform hash_drbg_generate(state: State<DrbgExtraCtx>, out: State<DrbgXBuf>, out_len: u32) -> u32 {
+    let rc: u32 = state.reseed_counter;
     if rc > DRBG_RESEED_INTERVAL {
         return 0;
     }
 
     // H = Hash(0x03 || V)
-    inbuf = allocate(33);
-    *(inbuf + 0) = 3;
-    memcpy(inbuf + 1, state + STATE_VK_OFF, 32);
-    h = allocate(32);
-    sha256_oneshot(inbuf, 33, h);
+    let inbuf = state_new(DrbgXBuf);
+    inbuf.bytes[0] = 3;
+    let v_read = state_new(DrbgXBuf);
+    drbg_memcpy_from_state(v_read, 0, state, 0, 32);
+    drbg_memcpy(inbuf, 1, v_read, 0, 32);
+    let h = state_new(DrbgXBuf);
+    drbg_sha256_hash(inbuf, 33, h);
 
     // reseed_counter as 32-byte big-endian for carry-safe add_be.
-    rc_bytes = allocate(32);
-    memset(rc_bytes, 0, 32);
-    *(rc_bytes + 28) = (rc >> 24) & 255;
-    *(rc_bytes + 29) = (rc >> 16) & 255;
-    *(rc_bytes + 30) = (rc >> 8) & 255;
-    *(rc_bytes + 31) = rc & 255;
+    let rc_bytes = state_new(DrbgXBuf);
+    drbg_memset(rc_bytes, 0, 0, 32);
+    rc_bytes.bytes[28] = ((rc >> 24) & 255) as u8;
+    rc_bytes.bytes[29] = ((rc >> 16) & 255) as u8;
+    rc_bytes.bytes[30] = ((rc >> 8) & 255) as u8;
+    rc_bytes.bytes[31] = (rc & 255) as u8;
 
     // V = (V + H + C + reseed_counter) mod 2^256
-    temp = allocate(32);
-    memcpy(temp, state + STATE_VK_OFF, 32);
-    add_be(temp, h, 32, temp);
-    add_be(temp, state + STATE_CV_OFF, 32, temp);
-    add_be(temp, rc_bytes, 32, temp);
-    memcpy(state + STATE_VK_OFF, temp, 32);
+    let temp = state_new(DrbgXBuf);
+    let v_read2 = state_new(DrbgXBuf);
+    drbg_memcpy_from_state(v_read2, 0, state, 0, 32);
+    drbg_memcpy(temp, 0, v_read2, 0, 32);
+    drbg_add_be(temp, h, 32, temp);
+    let c_read = state_new(DrbgXBuf);
+    drbg_memcpy_from_state(c_read, 0, state, 32, 32);
+    drbg_add_be(temp, c_read, 32, temp);
+    drbg_add_be(temp, rc_bytes, 32, temp);
+    drbg_memcpy_into_state(state, 0, temp, 0, 32);
 
     // output = leftmost out_len bytes of Hashgen(out_len, V)
-    hash_drbg_hashgen(out_len, state + STATE_VK_OFF, out);
+    hash_drbg_hashgen(out_len, state, out);
 
     // C = Hash(0x01 || V)
-    *(inbuf + 0) = 1;
-    memcpy(inbuf + 1, state + STATE_VK_OFF, 32);
-    sha256_oneshot(inbuf, 33, state + STATE_CV_OFF);
+    inbuf.bytes[0] = 1;
+    let v_read3 = state_new(DrbgXBuf);
+    drbg_memcpy_from_state(v_read3, 0, state, 0, 32);
+    drbg_memcpy(inbuf, 1, v_read3, 0, 32);
+    let c_out = state_new(DrbgXBuf);
+    drbg_sha256_hash(inbuf, 33, c_out);
+    drbg_memcpy_into_state(state, 32, c_out, 0, 32);
 
     // reseed_counter = reseed_counter + 1
-    store_u32_le(state, STATE_RC_OFF, rc + 1);
-
-    free(inbuf);
-    free(h);
-    free(rc_bytes);
-    free(temp);
+    state.reseed_counter = rc + 1;
 
     return out_len;
 }
@@ -214,28 +262,60 @@ transform hash_drbg_generate(state: Address, out: Address, out_len: u32) -> u32 
 //   V = Hash(seed_material)
 //   C = Hash(0x01 || V)
 //   reseed_counter = 1
-transform hash_drbg_reseed(state: Address, entropy: Address, entropy_len: u32) {
-    sm_len: u32 = 1 + 32 + entropy_len;
-    sm = allocate(sm_len);
-    *(sm + 0) = 0;
-    memcpy(sm + 1, state + STATE_VK_OFF, 32);
-    memcpy(sm + 33, entropy, entropy_len);
-    sha256_oneshot(sm, sm_len, state + STATE_VK_OFF);
+transform hash_drbg_reseed(state: State<DrbgExtraCtx>, entropy: State<DrbgXBuf>, entropy_len: u32) {
+    // sm = 0x00 || V || entropy
+    let sm = state_new(DrbgXBuf);
+    sm.bytes[0] = 0;
+    let v_read = state_new(DrbgXBuf);
+    drbg_memcpy_from_state(v_read, 0, state, 0, 32);
+    drbg_memcpy(sm, 1, v_read, 0, 32);
+    drbg_memcpy(sm, 33, entropy, 0, entropy_len);
+    let v_out = state_new(DrbgXBuf);
+    drbg_sha256_hash(sm, 33 + entropy_len, v_out);
+    drbg_memcpy_into_state(state, 0, v_out, 0, 32);
 
-    inbuf = allocate(33);
-    *(inbuf + 0) = 1;
-    memcpy(inbuf + 1, state + STATE_VK_OFF, 32);
-    sha256_oneshot(inbuf, 33, state + STATE_CV_OFF);
+    // C = Hash(0x01 || V)
+    let inbuf = state_new(DrbgXBuf);
+    inbuf.bytes[0] = 1;
+    let v_read2 = state_new(DrbgXBuf);
+    drbg_memcpy_from_state(v_read2, 0, state, 0, 32);
+    drbg_memcpy(inbuf, 1, v_read2, 0, 32);
+    let c_out = state_new(DrbgXBuf);
+    drbg_sha256_hash(inbuf, 33, c_out);
+    drbg_memcpy_into_state(state, 32, c_out, 0, 32);
 
-    store_u32_le(state, STATE_RC_OFF, 1);
-
-    free(sm);
-    free(inbuf);
+    state.reseed_counter = 1;
 }
 
 // ===========================================================================
 // CTR_DRBG (NIST SP 800-90A Section 10.2.1) — AES-256, seedlen = 48
 // ===========================================================================
+
+// Internal: encrypt the 16-byte V (in state.cv[0..15]) under the 32-byte
+// K (in state.vk[0..31]) into out (State<DrbgBlock>).
+transform ctr_drbg_aes_encrypt(state: State<DrbgExtraCtx>, out: State<DrbgBlock>) {
+    let key = state_new(AesKey);
+    let i: u32 = 0;
+    while i < 32 {
+        key.data[i] = state.vk[i];
+        i = i + 1;
+    }
+    let ctx = state_new(AesCtx);
+    aes256_init(ctx, key);
+    let v = state_new(AesBlock);
+    i = 0;
+    while i < 16 {
+        v.data[i] = state.cv[i];
+        i = i + 1;
+    }
+    let ct = state_new(AesBlock);
+    aes_encrypt_block(ctx, v, ct);
+    i = 0;
+    while i < 16 {
+        out.bytes[i] = ct.data[i];
+        i = i + 1;
+    }
+}
 
 // CTR_DRBG_Update(provided_data, K, V) — NIST 10.2.1.2.
 //   temp = empty
@@ -246,34 +326,44 @@ transform hash_drbg_reseed(state: Address, entropy: Address, entropy_len: u32) {
 //   temp = (temp XOR provided_data) truncated to seedlen
 //   K = leftmost 32 bytes of temp
 //   V = next 16 bytes of temp
-// K and V are modified in place through the supplied pointers.
-transform ctr_drbg_update(provided_data: Address, k: Address, v: Address) {
-    temp = allocate(SEEDLEN_CTR + 16);
-    temp_len: u32 = 0;
-    blk = allocate(16);
+// K and V are modified in place through the supplied state.
+transform ctr_drbg_update(state: State<DrbgExtraCtx>, provided_data: State<DrbgXBuf>, data_len: u32) {
+    // temp holds SEEDLEN_CTR + 16 = 64 bytes.
+    let temp = state_new(DrbgXBuf);
+    let temp_len: u32 = 0;
+    let blk = state_new(DrbgBlock);
+    // Big-endian V lives in cv[0..15]. We use a separate buffer for the
+    // increment loop to leverage drbg_add_be_small.
+    let v_buf = state_new(DrbgXBuf);
+    let i: u32 = 0;
+    while i < 16 { v_buf.bytes[i] = state.cv[i]; i = i + 1; }
 
     while temp_len < SEEDLEN_CTR {
-        add_be_small(v, 1, 16, v);
-        aes256_encrypt_block(v, k, blk);
-        memcpy(temp + temp_len, blk, 16);
+        drbg_add_be_small(v_buf, 1, 16, v_buf);
+        // Copy V back to state so ctr_drbg_aes_encrypt reads the updated V.
+        i = 0;
+        while i < 16 { state.cv[i] = v_buf.bytes[i]; i = i + 1; }
+        ctr_drbg_aes_encrypt(state, blk);
+        drbg_memcpy(temp, temp_len, blk, 0, 16);
         temp_len = temp_len + 16;
     }
 
-    // temp = temp XOR provided_data (first seedlen bytes)
-    i: u32 = 0;
-    while i < SEEDLEN_CTR {
-        a: u32 = *(temp + i);
-        b: u32 = *(provided_data + i);
-        *(temp + i) = (a ^ b) & 255;
-        i = i + 1;
+    // temp = temp XOR provided_data (first seedlen bytes), if data_len > 0.
+    if data_len > 0 {
+        i = 0;
+        while i < SEEDLEN_CTR {
+            let a: u32 = temp.bytes[i] as u32;
+            let b: u32 = provided_data.bytes[i] as u32;
+            temp.bytes[i] = ((a ^ b) & 255) as u8;
+            i = i + 1;
+        }
     }
 
     // K = temp[0..31], V = temp[32..47]
-    memcpy(k, temp, 32);
-    memcpy(v, temp + 32, 16);
-
-    free(temp);
-    free(blk);
+    i = 0;
+    while i < 32 { state.vk[i] = temp.bytes[i]; i = i + 1; }
+    i = 0;
+    while i < 16 { state.cv[i] = temp.bytes[32 + i]; i = i + 1; }
 }
 
 // ctr_drbg_init(state, entropy, entropy_len, nonce, nonce_len):
@@ -281,74 +371,67 @@ transform ctr_drbg_update(provided_data: Address, k: Address, v: Address) {
 //   seed_material = entropy || nonce (padded/truncated to seedlen = 48)
 //   CTR_DRBG_Update(seed_material, K, V)
 //   reseed_counter = 1
-transform ctr_drbg_init(state: Address, entropy: Address, entropy_len: u32,
-                 nonce: Address, nonce_len: u32) {
-    memset(state + STATE_VK_OFF, 0, 32);
-    memset(state + CTR_V_OFF, 0, 16);
+transform ctr_drbg_init(state: State<DrbgExtraCtx>, entropy: State<DrbgXBuf>, entropy_len: u32,
+                 nonce: State<DrbgXBuf>, nonce_len: u32) {
+    // K = 0 (vk[0..31]), V = 0 (cv[0..15])
+    let i: u32 = 0;
+    while i < 32 { state.vk[i] = 0; i = i + 1; }
+    i = 0;
+    while i < 16 { state.cv[i] = 0; i = i + 1; }
 
-    sm_len: u32 = entropy_len + nonce_len;
-    sm = allocate(sm_len);
-    memcpy(sm, entropy, entropy_len);
-    memcpy(sm + entropy_len, nonce, nonce_len);
+    // sm = entropy || nonce
+    let sm_len: u32 = entropy_len + nonce_len;
+    let sm = state_new(DrbgXBuf);
+    drbg_memcpy(sm, 0, entropy, 0, entropy_len);
+    drbg_memcpy(sm, entropy_len, nonce, 0, nonce_len);
 
-    pd = allocate(SEEDLEN_CTR);
-    memset(pd, 0, SEEDLEN_CTR);
-    copy_len: u32 = sm_len;
+    // pd = first SEEDLEN_CTR bytes of sm (zero-padded if shorter)
+    let pd = state_new(DrbgXBuf);
+    drbg_memset(pd, 0, 0, SEEDLEN_CTR);
+    let copy_len: u32 = sm_len;
     if copy_len > SEEDLEN_CTR { copy_len = SEEDLEN_CTR; }
-    memcpy(pd, sm, copy_len);
+    drbg_memcpy(pd, 0, sm, 0, copy_len);
 
-    ctr_drbg_update(pd, state + STATE_VK_OFF, state + CTR_V_OFF);
+    ctr_drbg_update(state, pd, SEEDLEN_CTR);
 
-    store_u32_le(state, STATE_RC_OFF, 1);
-
-    free(sm);
-    free(pd);
+    state.reseed_counter = 1;
 }
 
 // ctr_drbg_generate(state, out, out_len) -> u32:
-//   Per SP 800-90A 10.2.1.5:
-//   1. If reseed_counter > RESEED_INTERVAL, return 0 (caller must reseed).
-//   2. while len(output) < out_len:
-//        V = (V + 1) mod 2^128
-//        output_block = AES_Enc(K, V)
-//        output = output || output_block
-//   3. output = leftmost out_len bytes of output
-//   4. CTR_DRBG_Update(0x00 * seedlen, K, V)
-//   5. reseed_counter = reseed_counter + 1
-//   Returns out_len on success, 0 if a reseed is required.
-transform ctr_drbg_generate(state: Address, out: Address, out_len: u32) -> u32 {
-    rc: u32 = load_u32_le(state, STATE_RC_OFF);
+//   Per SP 800-90A 10.2.1.5.
+transform ctr_drbg_generate(state: State<DrbgExtraCtx>, out: State<DrbgXBuf>, out_len: u32) -> u32 {
+    let rc: u32 = state.reseed_counter;
     if rc > DRBG_RESEED_INTERVAL {
         return 0;
     }
 
-    k: Address = state + STATE_VK_OFF;
-    v: Address = state + CTR_V_OFF;
+    // V_buf = state.cv[0..15] (will increment + write back)
+    let v_buf = state_new(DrbgXBuf);
+    let i: u32 = 0;
+    while i < 16 { v_buf.bytes[i] = state.cv[i]; i = i + 1; }
 
-    buf_len: u32 = out_len + 16;
-    out_buf = allocate(buf_len);
-    out_pos: u32 = 0;
-    blk = allocate(16);
+    let out_buf = state_new(DrbgXBuf);
+    let out_pos: u32 = 0;
+    let blk = state_new(DrbgBlock);
 
     while out_pos < out_len {
-        add_be_small(v, 1, 16, v);
-        aes256_encrypt_block(v, k, blk);
-        memcpy(out_buf + out_pos, blk, 16);
+        drbg_add_be_small(v_buf, 1, 16, v_buf);
+        // Write V back to state.cv so ctr_drbg_aes_encrypt reads updated V.
+        i = 0;
+        while i < 16 { state.cv[i] = v_buf.bytes[i]; i = i + 1; }
+        ctr_drbg_aes_encrypt(state, blk);
+        drbg_memcpy(out_buf, out_pos, blk, 0, 16);
         out_pos = out_pos + 16;
     }
 
-    memcpy(out, out_buf, out_len);
+    drbg_memcpy(out, 0, out_buf, 0, out_len);
 
     // CTR_DRBG_Update(0x00 * seedlen, K, V)
-    zero = allocate(SEEDLEN_CTR);
-    memset(zero, 0, SEEDLEN_CTR);
-    ctr_drbg_update(zero, k, v);
+    let zero = state_new(DrbgXBuf);
+    drbg_memset(zero, 0, 0, SEEDLEN_CTR);
+    ctr_drbg_update(state, zero, SEEDLEN_CTR);
 
-    store_u32_le(state, STATE_RC_OFF, rc + 1);
-
-    free(out_buf);
-    free(blk);
-    free(zero);
+    state.reseed_counter = rc + 1;
 
     return out_len;
 }
@@ -357,16 +440,49 @@ transform ctr_drbg_generate(state: Address, out: Address, out_len: u32) -> u32 {
 //   seed_material = entropy (padded/truncated to seedlen = 48)
 //   CTR_DRBG_Update(seed_material, K, V)
 //   reseed_counter = 1
-transform ctr_drbg_reseed(state: Address, entropy: Address, entropy_len: u32) {
-    pd = allocate(SEEDLEN_CTR);
-    memset(pd, 0, SEEDLEN_CTR);
-    copy_len: u32 = entropy_len;
+transform ctr_drbg_reseed(state: State<DrbgExtraCtx>, entropy: State<DrbgXBuf>, entropy_len: u32) {
+    let pd = state_new(DrbgXBuf);
+    drbg_memset(pd, 0, 0, SEEDLEN_CTR);
+    let copy_len: u32 = entropy_len;
     if copy_len > SEEDLEN_CTR { copy_len = SEEDLEN_CTR; }
-    memcpy(pd, entropy, copy_len);
+    drbg_memcpy(pd, 0, entropy, 0, copy_len);
 
-    ctr_drbg_update(pd, state + STATE_VK_OFF, state + CTR_V_OFF);
+    ctr_drbg_update(state, pd, SEEDLEN_CTR);
 
-    store_u32_le(state, STATE_RC_OFF, 1);
+    state.reseed_counter = 1;
+}
 
-    free(pd);
+// ===========================================================================
+// Bridge helpers: copy between DrbgExtraCtx (named fields) and DrbgXBuf
+// (contiguous byte array). These keep the rest of the module readable
+// while letting SHA-256 / memcpy operate on a State<DrbgXBuf>.
+// ===========================================================================
+
+transform drbg_memcpy_into_state(state: State<DrbgExtraCtx>, dst_off: u32, src: State<DrbgXBuf>, src_off: u32, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        let b: u8 = src.bytes[src_off + i];
+        if dst_off + i < 32 {
+            state.vk[dst_off + i] = b;
+        } else {
+            if dst_off + i < 64 {
+                state.cv[dst_off + i - 32] = b;
+            }
+        }
+        i = i + 1;
+    }
+}
+
+transform drbg_memcpy_from_state(dst: State<DrbgXBuf>, dst_off: u32, state: State<DrbgExtraCtx>, src_off: u32, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        let b: u8;
+        if src_off + i < 32 {
+            b = state.vk[src_off + i];
+        } else {
+            b = state.cv[src_off + i - 32];
+        }
+        dst.bytes[dst_off + i] = b;
+        i = i + 1;
+    }
 }

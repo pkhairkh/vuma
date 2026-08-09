@@ -1,169 +1,358 @@
-// womb/crypto/hmac.vuma — HMAC (RFC 2104 / FIPS 198-1)
+// womb/crypto/mac_kdf/hmac.vuma — HMAC (RFC 2104 / FIPS 198-1)
 // Generic HMAC supporting SHA-1, SHA-256, SHA-512. No main().
-// Requires sibling modules: sha1.vuma, sha256.vuma (from sha_variants.vuma),
-// sha512.vuma. Each exports <hash>_oneshot(data, len, out).
+//
+// VUMA 2.0 PMT-native: state_new(Layout) / State<T> / [u8;N] arrays.
+// All allocate/free/Address/*ptr removed (arena auto-frees on return).
+//
+// Hash inputs are streamed in 64-byte (SHA-1/256) or 128-byte (SHA-512)
+// chunks via init+update+final, since each hash module's Sha*Data layout
+// only holds one block.
 
 const HMAC_IPAD: u32 = 54;   // 0x36
 const HMAC_OPAD: u32 = 92;   // 0x5c
 const HMAC_MASK32: u32 = 4294967295;
+const HMAC_MAX_MSG: u32 = 256;
+const HMAC_BUF_SIZE: u32 = 384;
+
+// ===========================================================================
+// Layouts
+// ===========================================================================
+
+// HMAC key buffer (max 128 bytes for SHA-512 block).
+layout HmacKey = { bytes: [u8; 128] }
+
+// HMAC message buffer.
+layout HmacMsg = { bytes: [u8; 256] }
+
+// HMAC output buffer (max 64 bytes for SHA-512 digest).
+layout HmacOut = { bytes: [u8; 64] }
+
+// HMAC working buffer — must hold kipad||msg up to 128+256=384 bytes.
+layout HmacBuf = { bytes: [u8; 384] }
+
+// ===========================================================================
+// Streaming hash helpers (chunked init+update+final). The hash modules'
+// Sha*Data layouts only hold one block, so multi-block inputs are
+// absorbed by repeatedly copying 64-byte (or 128-byte for SHA-512)
+// windows into a fresh Sha*Data state and calling sha*_update.
+// ===========================================================================
+
+transform hmac_sha1_hash(buf: State<HmacBuf>, len: u32, out: State<HmacOut>) {
+    let ctx = state_new(Sha1Ctx);
+    sha1_init(ctx);
+    let chunk = state_new(Sha1Data);
+    let pos: u32 = 0;
+    while pos < len {
+        let remaining: u32 = len - pos;
+        let chunk_len: u32 = 64;
+        if remaining < chunk_len { chunk_len = remaining; }
+        let i: u32 = 0;
+        while i < chunk_len {
+            chunk.data[i] = buf.bytes[pos + i];
+            i = i + 1;
+        }
+        sha1_update(ctx, chunk, chunk_len as u64);
+        pos = pos + chunk_len;
+    }
+    let digest = state_new(Sha1Digest);
+    sha1_final(ctx, digest);
+    let j: u32 = 0;
+    while j < 20 {
+        out.bytes[j] = digest.data[j];
+        j = j + 1;
+    }
+}
+
+transform hmac_sha256_hash(buf: State<HmacBuf>, len: u32, out: State<HmacOut>) {
+    let ctx = state_new(Sha256Ctx);
+    sha256_init(ctx);
+    let chunk = state_new(Sha256Data);
+    let pos: u32 = 0;
+    while pos < len {
+        let remaining: u32 = len - pos;
+        let chunk_len: u32 = 64;
+        if remaining < chunk_len { chunk_len = remaining; }
+        let i: u32 = 0;
+        while i < chunk_len {
+            chunk.data[i] = buf.bytes[pos + i];
+            i = i + 1;
+        }
+        sha256_update(ctx, chunk, chunk_len as u64);
+        pos = pos + chunk_len;
+    }
+    let digest = state_new(Sha256Digest);
+    sha256_final(ctx, digest);
+    let j: u32 = 0;
+    while j < 32 {
+        out.bytes[j] = digest.data[j];
+        j = j + 1;
+    }
+}
+
+transform hmac_sha512_hash(buf: State<HmacBuf>, len: u32, out: State<HmacOut>) {
+    let ctx = state_new(Sha512Ctx);
+    sha512_init(ctx);
+    let chunk = state_new(Sha512Data);
+    let pos: u32 = 0;
+    while pos < len {
+        let remaining: u32 = len - pos;
+        let chunk_len: u32 = 128;
+        if remaining < chunk_len { chunk_len = remaining; }
+        let i: u32 = 0;
+        while i < chunk_len {
+            chunk.data[i] = buf.bytes[pos + i];
+            i = i + 1;
+        }
+        sha512_update(ctx, chunk, chunk_len);
+        pos = pos + chunk_len;
+    }
+    let digest = state_new(Sha512Digest);
+    sha512_final(ctx, digest);
+    let j: u32 = 0;
+    while j < 64 {
+        out.bytes[j] = digest.data[j];
+        j = j + 1;
+    }
+}
 
 // ===========================================================================
 // HMAC-SHA-1 (20-byte digest, 64-byte block).
-//   key:    pointer to key bytes (any length)
-//   keylen: key length
-//   msg:    pointer to message bytes
-//   msglen: message length
-//   out:    pointer to 20-byte output buffer
+//   key:    HmacKey state with key bytes
+//   keylen: key length (bytes)
+//   msg:    HmacMsg state with message bytes
+//   msglen: message length (bytes)
+//   out:    HmacOut state; first 20 bytes receive the digest
 // ===========================================================================
 
-transform hmac_sha1(key: Address, keylen: u32, msg: Address, msglen: u32, out: Address) {
-    block_size: u32 = 64;
-    digest_size: u32 = 20;
+transform hmac_sha1(key: State<HmacKey>, keylen: u32, msg: State<HmacMsg>, msglen: u32, out: State<HmacOut>) {
+    let block_size: u32 = 64;
+    let digest_size: u32 = 20;
 
     // K' = key (padded to block_size with zeros), or Hash(key) if too long.
-    kprime = allocate(block_size);
-    i: u32 = 0;
-    while i < block_size { *(kprime + i) = 0; i = i + 1; }
+    let kprime = state_new(HmacBuf);
+    let i: u32 = 0;
+    while i < HMAC_BUF_SIZE {
+        kprime.bytes[i] = 0;
+        i = i + 1;
+    }
     if keylen <= block_size {
         i = 0;
-        while i < keylen { *(kprime + i) = *(key + i); i = i + 1; }
+        while i < keylen {
+            kprime.bytes[i] = key.bytes[i];
+            i = i + 1;
+        }
     } else {
-        sha1_oneshot(key, keylen, kprime);
-        // remaining bytes already zero
+        // Hash key into HmacBuf, then copy first digest_size bytes to kprime.
+        let kbuf = state_new(HmacBuf);
+        let khash = state_new(HmacOut);
+        let k: u32 = 0;
+        while k < keylen {
+            kbuf.bytes[k] = key.bytes[k];
+            k = k + 1;
+        }
+        hmac_sha1_hash(kbuf, keylen, khash);
+        let m: u32 = 0;
+        while m < digest_size {
+            kprime.bytes[m] = khash.bytes[m];
+            m = m + 1;
+        }
     }
 
-    // kipad = K' XOR ipad, kopad = K' XOR opad
-    kipad = allocate(block_size);
-    kopad = allocate(block_size);
+    // kipad = K' XOR ipad, kopad = K' XOR opad.
+    let kipad = state_new(HmacBuf);
+    let kopad = state_new(HmacBuf);
     i = 0;
     while i < block_size {
-        kb: u32 = *(kprime + i);
-        *(kipad + i) = (kb ^ HMAC_IPAD) & 255;
-        *(kopad + i) = (kb ^ HMAC_OPAD) & 255;
+        let kb: u32 = kprime.bytes[i] as u32;
+        kipad.bytes[i] = ((kb ^ HMAC_IPAD) & 255) as u8;
+        kopad.bytes[i] = ((kb ^ HMAC_OPAD) & 255) as u8;
         i = i + 1;
     }
 
     // inner = kipad || msg
-    inner = allocate(block_size + msglen);
+    let inner = state_new(HmacBuf);
     i = 0;
-    while i < block_size { *(inner + i) = *(kipad + i); i = i + 1; }
+    while i < block_size {
+        inner.bytes[i] = kipad.bytes[i];
+        i = i + 1;
+    }
     i = 0;
-    while i < msglen { *(inner + block_size + i) = *(msg + i); i = i + 1; }
+    while i < msglen {
+        inner.bytes[block_size + i] = msg.bytes[i];
+        i = i + 1;
+    }
 
     // inner_hash = SHA1(inner)
-    inner_hash = allocate(digest_size);
-    sha1_oneshot(inner, block_size + msglen, inner_hash);
+    let inner_hash = state_new(HmacOut);
+    hmac_sha1_hash(inner, block_size + msglen, inner_hash);
 
     // outer = kopad || inner_hash
-    outer = allocate(block_size + digest_size);
+    let outer = state_new(HmacBuf);
     i = 0;
-    while i < block_size { *(outer + i) = *(kopad + i); i = i + 1; }
+    while i < block_size {
+        outer.bytes[i] = kopad.bytes[i];
+        i = i + 1;
+    }
     i = 0;
-    while i < digest_size { *(outer + block_size + i) = *(inner_hash + i); i = i + 1; }
+    while i < digest_size {
+        outer.bytes[block_size + i] = inner_hash.bytes[i];
+        i = i + 1;
+    }
 
     // out = SHA1(outer)
-    sha1_oneshot(outer, block_size + digest_size, out);
-
-    free(kprime); free(kipad); free(kopad);
-    free(inner); free(inner_hash); free(outer);
+    hmac_sha1_hash(outer, block_size + digest_size, out);
 }
 
 // ===========================================================================
 // HMAC-SHA-256 (32-byte digest, 64-byte block).
 // ===========================================================================
 
-transform hmac_sha256(key: Address, keylen: u32, msg: Address, msglen: u32, out: Address) {
-    block_size: u32 = 64;
-    digest_size: u32 = 32;
+transform hmac_sha256(key: State<HmacKey>, keylen: u32, msg: State<HmacMsg>, msglen: u32, out: State<HmacOut>) {
+    let block_size: u32 = 64;
+    let digest_size: u32 = 32;
 
-    kprime = allocate(block_size);
-    i: u32 = 0;
-    while i < block_size { *(kprime + i) = 0; i = i + 1; }
+    let kprime = state_new(HmacBuf);
+    let i: u32 = 0;
+    while i < HMAC_BUF_SIZE {
+        kprime.bytes[i] = 0;
+        i = i + 1;
+    }
     if keylen <= block_size {
         i = 0;
-        while i < keylen { *(kprime + i) = *(key + i); i = i + 1; }
+        while i < keylen {
+            kprime.bytes[i] = key.bytes[i];
+            i = i + 1;
+        }
     } else {
-        sha256_oneshot(key, keylen, kprime);
+        let kbuf = state_new(HmacBuf);
+        let khash = state_new(HmacOut);
+        let k: u32 = 0;
+        while k < keylen {
+            kbuf.bytes[k] = key.bytes[k];
+            k = k + 1;
+        }
+        hmac_sha256_hash(kbuf, keylen, khash);
+        let m: u32 = 0;
+        while m < digest_size {
+            kprime.bytes[m] = khash.bytes[m];
+            m = m + 1;
+        }
     }
 
-    kipad = allocate(block_size);
-    kopad = allocate(block_size);
+    let kipad = state_new(HmacBuf);
+    let kopad = state_new(HmacBuf);
     i = 0;
     while i < block_size {
-        kb: u32 = *(kprime + i);
-        *(kipad + i) = (kb ^ HMAC_IPAD) & 255;
-        *(kopad + i) = (kb ^ HMAC_OPAD) & 255;
+        let kb: u32 = kprime.bytes[i] as u32;
+        kipad.bytes[i] = ((kb ^ HMAC_IPAD) & 255) as u8;
+        kopad.bytes[i] = ((kb ^ HMAC_OPAD) & 255) as u8;
         i = i + 1;
     }
 
-    inner = allocate(block_size + msglen);
+    let inner = state_new(HmacBuf);
     i = 0;
-    while i < block_size { *(inner + i) = *(kipad + i); i = i + 1; }
+    while i < block_size {
+        inner.bytes[i] = kipad.bytes[i];
+        i = i + 1;
+    }
     i = 0;
-    while i < msglen { *(inner + block_size + i) = *(msg + i); i = i + 1; }
+    while i < msglen {
+        inner.bytes[block_size + i] = msg.bytes[i];
+        i = i + 1;
+    }
 
-    inner_hash = allocate(digest_size);
-    sha256_oneshot(inner, block_size + msglen, inner_hash);
+    let inner_hash = state_new(HmacOut);
+    hmac_sha256_hash(inner, block_size + msglen, inner_hash);
 
-    outer = allocate(block_size + digest_size);
+    let outer = state_new(HmacBuf);
     i = 0;
-    while i < block_size { *(outer + i) = *(kopad + i); i = i + 1; }
+    while i < block_size {
+        outer.bytes[i] = kopad.bytes[i];
+        i = i + 1;
+    }
     i = 0;
-    while i < digest_size { *(outer + block_size + i) = *(inner_hash + i); i = i + 1; }
+    while i < digest_size {
+        outer.bytes[block_size + i] = inner_hash.bytes[i];
+        i = i + 1;
+    }
 
-    sha256_oneshot(outer, block_size + digest_size, out);
-
-    free(kprime); free(kipad); free(kopad);
-    free(inner); free(inner_hash); free(outer);
+    hmac_sha256_hash(outer, block_size + digest_size, out);
 }
 
 // ===========================================================================
 // HMAC-SHA-512 (64-byte digest, 128-byte block).
 // ===========================================================================
 
-transform hmac_sha512(key: Address, keylen: u32, msg: Address, msglen: u32, out: Address) {
-    block_size: u32 = 128;
-    digest_size: u32 = 64;
+transform hmac_sha512(key: State<HmacKey>, keylen: u32, msg: State<HmacMsg>, msglen: u32, out: State<HmacOut>) {
+    let block_size: u32 = 128;
+    let digest_size: u32 = 64;
 
-    kprime = allocate(block_size);
-    i: u32 = 0;
-    while i < block_size { *(kprime + i) = 0; i = i + 1; }
+    let kprime = state_new(HmacBuf);
+    let i: u32 = 0;
+    while i < HMAC_BUF_SIZE {
+        kprime.bytes[i] = 0;
+        i = i + 1;
+    }
     if keylen <= block_size {
         i = 0;
-        while i < keylen { *(kprime + i) = *(key + i); i = i + 1; }
+        while i < keylen {
+            kprime.bytes[i] = key.bytes[i];
+            i = i + 1;
+        }
     } else {
-        sha512_oneshot(key, keylen, kprime);
+        let kbuf = state_new(HmacBuf);
+        let khash = state_new(HmacOut);
+        let k: u32 = 0;
+        while k < keylen {
+            kbuf.bytes[k] = key.bytes[k];
+            k = k + 1;
+        }
+        hmac_sha512_hash(kbuf, keylen, khash);
+        let m: u32 = 0;
+        while m < digest_size {
+            kprime.bytes[m] = khash.bytes[m];
+            m = m + 1;
+        }
     }
 
-    kipad = allocate(block_size);
-    kopad = allocate(block_size);
+    let kipad = state_new(HmacBuf);
+    let kopad = state_new(HmacBuf);
     i = 0;
     while i < block_size {
-        kb: u32 = *(kprime + i);
-        *(kipad + i) = (kb ^ HMAC_IPAD) & 255;
-        *(kopad + i) = (kb ^ HMAC_OPAD) & 255;
+        let kb: u32 = kprime.bytes[i] as u32;
+        kipad.bytes[i] = ((kb ^ HMAC_IPAD) & 255) as u8;
+        kopad.bytes[i] = ((kb ^ HMAC_OPAD) & 255) as u8;
         i = i + 1;
     }
 
-    inner = allocate(block_size + msglen);
+    let inner = state_new(HmacBuf);
     i = 0;
-    while i < block_size { *(inner + i) = *(kipad + i); i = i + 1; }
+    while i < block_size {
+        inner.bytes[i] = kipad.bytes[i];
+        i = i + 1;
+    }
     i = 0;
-    while i < msglen { *(inner + block_size + i) = *(msg + i); i = i + 1; }
+    while i < msglen {
+        inner.bytes[block_size + i] = msg.bytes[i];
+        i = i + 1;
+    }
 
-    inner_hash = allocate(digest_size);
-    sha512_oneshot(inner, block_size + msglen, inner_hash);
+    let inner_hash = state_new(HmacOut);
+    hmac_sha512_hash(inner, block_size + msglen, inner_hash);
 
-    outer = allocate(block_size + digest_size);
+    let outer = state_new(HmacBuf);
     i = 0;
-    while i < block_size { *(outer + i) = *(kopad + i); i = i + 1; }
+    while i < block_size {
+        outer.bytes[i] = kopad.bytes[i];
+        i = i + 1;
+    }
     i = 0;
-    while i < digest_size { *(outer + block_size + i) = *(inner_hash + i); i = i + 1; }
+    while i < digest_size {
+        outer.bytes[block_size + i] = inner_hash.bytes[i];
+        i = i + 1;
+    }
 
-    sha512_oneshot(outer, block_size + digest_size, out);
-
-    free(kprime); free(kipad); free(kopad);
-    free(inner); free(inner_hash); free(outer);
+    hmac_sha512_hash(outer, block_size + digest_size, out);
 }
 
 // ===========================================================================
@@ -172,16 +361,17 @@ transform hmac_sha512(key: Address, keylen: u32, msg: Address, msglen: u32, out:
 // running time does not depend on where the first mismatch occurs.
 // ===========================================================================
 
-transform ct_memcmp(a: Address, b: Address, n: u32) -> u32 {
-    diff: u32 = 0;
-    i: u32 = 0;
+transform ct_memcmp(a: State<HmacBuf>, b: State<HmacBuf>, n: u32) -> u32 {
+    let diff: u32 = 0;
+    let i: u32 = 0;
     while i < n {
-        diff = diff | (*(a + i) ^ *(b + i));
+        let av: u32 = a.bytes[i] as u32;
+        let bv: u32 = b.bytes[i] as u32;
+        diff = diff | (av ^ bv);
         i = i + 1;
     }
     // diff == 0 iff equal; fold to a single-bit result without branching.
-    // (diff | -diff) >> 31 is 1 if diff != 0, 0 if diff == 0.
-    folded: u32 = (diff | ((0 - diff) & HMAC_MASK32)) >> 31;
+    let folded: u32 = (diff | ((0 - diff) & HMAC_MASK32)) >> 31;
     return 1 - folded;
 }
 

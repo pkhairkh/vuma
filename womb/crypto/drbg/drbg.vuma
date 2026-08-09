@@ -1,23 +1,66 @@
-// womb/crypto/drbg.vuma — HMAC_DRBG (NIST SP 800-90A Rev. 1)
+// womb/crypto/drbg/drbg.vuma — HMAC_DRBG (NIST SP 800-90A Rev. 1)
 // Deterministic Random Bit Generator based on HMAC-SHA-256.
 // Provides instantiate, reseed, and generate with backtracking resistance.
-// No main().
-// Requires: hmac.vuma, sha256.vuma.
+// No main(). Requires: hmac.vuma, sha256.vuma.
 //
-// State layout (68 bytes):
-//   [0..31]   K (HMAC key, 32 bytes)
-//   [32..63]  V (value, 32 bytes)
-//   [64..67]  reseed_counter (u32, little-endian)
+// VUMA 2.0 PMT-native: state_new(Layout) / State<T> / [u8;N] arrays.
+// All allocate/free/Address/*ptr removed (arena auto-frees on return).
+//
+// State layout (DrbgCtx):
+//   k[0..31]            K (HMAC key, 32 bytes)
+//   v[0..31]            V (value, 32 bytes)
+//   reseed_counter      u32 little-endian
 //
 // SP 800-90A mandates a reseed interval of 2^48 generate calls; we use a
 // u32 counter so the effective interval is 2^32. Callers that exceed this
 // interval must call drbg_reseed before the next drbg_generate.
 
-const DRBG_K_OFF: u32 = 0;
-const DRBG_V_OFF: u32 = 32;
-const DRBG_CT_OFF: u32 = 64;
 const DRBG_SEEDLEN: u32 = 32;
 const DRBG_RESEED_INTERVAL: u32 = 4294967295;  // 2^32 - 1
+const DRBG_K_LEN: u32 = 32;
+const DRBG_V_LEN: u32 = 32;
+
+// ===========================================================================
+// Layouts
+// ===========================================================================
+
+// HMAC_DRBG state (K, V, reseed_counter).
+layout DrbgCtx = {
+    k: [u8; 32],          // K (HMAC key)
+    v: [u8; 32],           // V (value)
+    reseed_counter: u32,   // little-endian counter
+}
+
+// Entropy / nonce / provided-data buffer.
+layout DrbgData = { bytes: [u8; 256] }
+
+// Output buffer for drbg_generate.
+layout DrbgOut = { bytes: [u8; 256] }
+
+// HMAC input message buffer (V || 0x00 || provided_data up to 32+1+256).
+layout DrbgMsg = { bytes: [u8; 289] }
+
+// ===========================================================================
+// Internal: compute HMAC-SHA-256(key=drbg.k, msg=msg_buf, out).
+// Copies drbg.k into a HmacKey state and msg_buf.bytes into a HmacMsg
+// state, then delegates to hmac_sha256 (from mac_kdf/hmac.vuma).
+// ===========================================================================
+
+transform drbg_hmac(drbg: State<DrbgCtx>, msg_buf: State<DrbgMsg>, msglen: u32, out: State<HmacOut>) {
+    let hkey = state_new(HmacKey);
+    let i: u32 = 0;
+    while i < DRBG_K_LEN {
+        hkey.bytes[i] = drbg.k[i];
+        i = i + 1;
+    }
+    let hmsg = state_new(HmacMsg);
+    i = 0;
+    while i < msglen {
+        hmsg.bytes[i] = msg_buf.bytes[i];
+        i = i + 1;
+    }
+    hmac_sha256(hkey, DRBG_K_LEN, hmsg, msglen, out);
+}
 
 // ===========================================================================
 // Instantiate.
@@ -30,26 +73,34 @@ const DRBG_RESEED_INTERVAL: u32 = 4294967295;  // 2^32 - 1
 //   reseed_counter = 1
 // ===========================================================================
 
-transform drbg_init(state: Address, entropy: Address, entropy_len: u32,
-             nonce: Address, nonce_len: u32) {
-    i: u32 = 0;
-    while i < DRBG_SEEDLEN { *(state + DRBG_K_OFF + i) = 0; i = i + 1; }
+transform drbg_init(drbg: State<DrbgCtx>, entropy: State<DrbgData>, entropy_len: u32,
+             nonce: State<DrbgData>, nonce_len: u32) {
+    let i: u32 = 0;
+    while i < DRBG_K_LEN {
+        drbg.k[i] = 0;
+        i = i + 1;
+    }
     i = 0;
-    while i < DRBG_SEEDLEN { *(state + DRBG_V_OFF + i) = 1; i = i + 1; }
-    *(state + DRBG_CT_OFF) = 0;
-    *(state + DRBG_CT_OFF + 1) = 0;
-    *(state + DRBG_CT_OFF + 2) = 0;
-    *(state + DRBG_CT_OFF + 3) = 0;
+    while i < DRBG_V_LEN {
+        drbg.v[i] = 1;
+        i = i + 1;
+    }
+    drbg.reseed_counter = 0;
 
-    seed_len: u32 = entropy_len + nonce_len;
-    seed = allocate(seed_len);
+    // seed = entropy || nonce
+    let seed = state_new(DrbgData);
     i = 0;
-    while i < entropy_len { *(seed + i) = *(entropy + i); i = i + 1; }
+    while i < entropy_len {
+        seed.bytes[i] = entropy.bytes[i];
+        i = i + 1;
+    }
     i = 0;
-    while i < nonce_len { *(seed + entropy_len + i) = *(nonce + i); i = i + 1; }
+    while i < nonce_len {
+        seed.bytes[entropy_len + i] = nonce.bytes[i];
+        i = i + 1;
+    }
 
-    drbg_reseed(state, seed, seed_len);
-    free(seed);
+    drbg_reseed(drbg, seed, entropy_len + nonce_len);
 }
 
 // ===========================================================================
@@ -61,49 +112,84 @@ transform drbg_init(state: Address, entropy: Address, entropy_len: u32,
 //     V = HMAC(K, V)
 // ===========================================================================
 
-transform drbg_update(state: Address, provided_data: Address, data_len: u32) {
-    input_len: u32 = DRBG_SEEDLEN + 1 + data_len;
-    input = allocate(input_len);
-    i: u32 = 0;
-    while i < DRBG_SEEDLEN { *(input + i) = *(state + DRBG_V_OFF + i); i = i + 1; }
-    *(input + DRBG_SEEDLEN) = 0;
+transform drbg_update(drbg: State<DrbgCtx>, provided_data: State<DrbgData>, data_len: u32) {
+    let input_len: u32 = DRBG_SEEDLEN + 1 + data_len;
+
+    // input = V || 0x00 || provided_data
+    let input = state_new(DrbgMsg);
+    let i: u32 = 0;
+    while i < DRBG_SEEDLEN {
+        input.bytes[i] = drbg.v[i];
+        i = i + 1;
+    }
+    input.bytes[DRBG_SEEDLEN] = 0;
     i = 0;
-    while i < data_len { *(input + DRBG_SEEDLEN + 1 + i) = *(provided_data + i); i = i + 1; }
+    while i < data_len {
+        input.bytes[DRBG_SEEDLEN + 1 + i] = provided_data.bytes[i];
+        i = i + 1;
+    }
 
-    new_k = allocate(DRBG_SEEDLEN);
-    hmac_sha256(state + DRBG_K_OFF, DRBG_SEEDLEN, input, input_len, new_k);
-
-    new_v = allocate(DRBG_SEEDLEN);
-    hmac_sha256(new_k, DRBG_SEEDLEN, state + DRBG_V_OFF, DRBG_SEEDLEN, new_v);
-
+    // new_k = HMAC(K, input)
+    let new_k = state_new(HmacOut);
+    drbg_hmac(drbg, input, input_len, new_k);
+    // Copy new_k -> drbg.k
     i = 0;
-    while i < DRBG_SEEDLEN { *(state + DRBG_K_OFF + i) = *(new_k + i); i = i + 1; }
-    i = 0;
-    while i < DRBG_SEEDLEN { *(state + DRBG_V_OFF + i) = *(new_v + i); i = i + 1; }
+    while i < DRBG_SEEDLEN {
+        drbg.k[i] = new_k.bytes[i];
+        i = i + 1;
+    }
 
-    free(input); free(new_k); free(new_v);
+    // new_v = HMAC(new_k, V)
+    let v_msg = state_new(DrbgMsg);
+    i = 0;
+    while i < DRBG_SEEDLEN {
+        v_msg.bytes[i] = drbg.v[i];
+        i = i + 1;
+    }
+    let new_v = state_new(HmacOut);
+    drbg_hmac(drbg, v_msg, DRBG_SEEDLEN, new_v);
+    i = 0;
+    while i < DRBG_SEEDLEN {
+        drbg.v[i] = new_v.bytes[i];
+        i = i + 1;
+    }
 
     // Second round if provided_data is non-empty.
     if data_len > 0 {
-        input2 = allocate(input_len);
+        let input2 = state_new(DrbgMsg);
         i = 0;
-        while i < DRBG_SEEDLEN { *(input2 + i) = *(state + DRBG_V_OFF + i); i = i + 1; }
-        *(input2 + DRBG_SEEDLEN) = 1;
+        while i < DRBG_SEEDLEN {
+            input2.bytes[i] = drbg.v[i];
+            i = i + 1;
+        }
+        input2.bytes[DRBG_SEEDLEN] = 1;
         i = 0;
-        while i < data_len { *(input2 + DRBG_SEEDLEN + 1 + i) = *(provided_data + i); i = i + 1; }
+        while i < data_len {
+            input2.bytes[DRBG_SEEDLEN + 1 + i] = provided_data.bytes[i];
+            i = i + 1;
+        }
 
-        new_k2 = allocate(DRBG_SEEDLEN);
-        hmac_sha256(state + DRBG_K_OFF, DRBG_SEEDLEN, input2, input_len, new_k2);
-
-        new_v2 = allocate(DRBG_SEEDLEN);
-        hmac_sha256(new_k2, DRBG_SEEDLEN, state + DRBG_V_OFF, DRBG_SEEDLEN, new_v2);
-
+        let new_k2 = state_new(HmacOut);
+        drbg_hmac(drbg, input2, input_len, new_k2);
         i = 0;
-        while i < DRBG_SEEDLEN { *(state + DRBG_K_OFF + i) = *(new_k2 + i); i = i + 1; }
-        i = 0;
-        while i < DRBG_SEEDLEN { *(state + DRBG_V_OFF + i) = *(new_v2 + i); i = i + 1; }
+        while i < DRBG_SEEDLEN {
+            drbg.k[i] = new_k2.bytes[i];
+            i = i + 1;
+        }
 
-        free(input2); free(new_k2); free(new_v2);
+        let v_msg2 = state_new(DrbgMsg);
+        i = 0;
+        while i < DRBG_SEEDLEN {
+            v_msg2.bytes[i] = drbg.v[i];
+            i = i + 1;
+        }
+        let new_v2 = state_new(HmacOut);
+        drbg_hmac(drbg, v_msg2, DRBG_SEEDLEN, new_v2);
+        i = 0;
+        while i < DRBG_SEEDLEN {
+            drbg.v[i] = new_v2.bytes[i];
+            i = i + 1;
+        }
     }
 }
 
@@ -114,31 +200,21 @@ transform drbg_update(state: Address, provided_data: Address, data_len: u32) {
 //   reseed_counter = 1
 // ===========================================================================
 
-transform drbg_reseed(state: Address, entropy: Address, entropy_len: u32) {
-    drbg_update(state, entropy, entropy_len);
-    *(state + DRBG_CT_OFF) = 1;
-    *(state + DRBG_CT_OFF + 1) = 0;
-    *(state + DRBG_CT_OFF + 2) = 0;
-    *(state + DRBG_CT_OFF + 3) = 0;
+transform drbg_reseed(drbg: State<DrbgCtx>, entropy: State<DrbgData>, entropy_len: u32) {
+    drbg_update(drbg, entropy, entropy_len);
+    drbg.reseed_counter = 1;
 }
 
 // ===========================================================================
-// Read the u32 reseed counter (little-endian).
+// Read / write the u32 reseed counter.
 // ===========================================================================
 
-transform drbg_get_counter(state: Address) -> u32 {
-    b0: u32 = *(state + DRBG_CT_OFF);
-    b1: u32 = *(state + DRBG_CT_OFF + 1);
-    b2: u32 = *(state + DRBG_CT_OFF + 2);
-    b3: u32 = *(state + DRBG_CT_OFF + 3);
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+transform drbg_get_counter(drbg: State<DrbgCtx>) -> u32 {
+    return drbg.reseed_counter;
 }
 
-transform drbg_set_counter(state: Address, ctr: u32) {
-    *(state + DRBG_CT_OFF) = ctr & 255;
-    *(state + DRBG_CT_OFF + 1) = (ctr >> 8) & 255;
-    *(state + DRBG_CT_OFF + 2) = (ctr >> 16) & 255;
-    *(state + DRBG_CT_OFF + 3) = (ctr >> 24) & 255;
+transform drbg_set_counter(drbg: State<DrbgCtx>, ctr: u32) {
+    drbg.reseed_counter = ctr;
 }
 
 // ===========================================================================
@@ -154,38 +230,48 @@ transform drbg_set_counter(state: Address, ctr: u32) {
 //   reseed-required).
 // ===========================================================================
 
-transform drbg_generate(state: Address, out: Address, out_len: u32) -> u32 {
-    rc: u32 = drbg_get_counter(state);
+transform drbg_generate(drbg: State<DrbgCtx>, out: State<DrbgOut>, out_len: u32) -> u32 {
+    let rc: u32 = drbg_get_counter(drbg);
     if rc > DRBG_RESEED_INTERVAL {
         // Caller must reseed before generating more output.
         return 0;
     }
 
-    pos: u32 = 0;
+    let pos: u32 = 0;
     while pos < out_len {
-        new_v = allocate(DRBG_SEEDLEN);
-        hmac_sha256(state + DRBG_K_OFF, DRBG_SEEDLEN,
-                    state + DRBG_V_OFF, DRBG_SEEDLEN, new_v);
-
-        i: u32 = 0;
-        while i < DRBG_SEEDLEN { *(state + DRBG_V_OFF + i) = *(new_v + i); i = i + 1; }
-        free(new_v);
-
-        to_copy: u32 = DRBG_SEEDLEN;
-        remaining: u32 = out_len - pos;
-        if remaining < to_copy { to_copy = remaining; }
-
-        i = 0;
-        while i < to_copy {
-            *(out + pos + i) = *(state + DRBG_V_OFF + i);
+        // new_v = HMAC(K, V) — write back into drbg.v.
+        let v_msg = state_new(DrbgMsg);
+        let i: u32 = 0;
+        while i < DRBG_SEEDLEN {
+            v_msg.bytes[i] = drbg.v[i];
             i = i + 1;
         }
-        pos = pos + to_copy;
+        let new_v = state_new(HmacOut);
+        drbg_hmac(drbg, v_msg, DRBG_SEEDLEN, new_v);
+        i = 0;
+        while i < DRBG_SEEDLEN {
+            drbg.v[i] = new_v.bytes[i];
+            i = i + 1;
+        }
+
+        // Copy min(DRBG_SEEDLEN, out_len - pos) bytes of V to out.
+        let remaining: u32 = out_len - pos;
+        let copy_len: u32 = DRBG_SEEDLEN;
+        if remaining < copy_len { copy_len = remaining; }
+
+        i = 0;
+        while i < copy_len {
+            out.bytes[pos + i] = drbg.v[i];
+            i = i + 1;
+        }
+        pos = pos + copy_len;
     }
 
-    // Update state with empty provided_data.
-    drbg_update(state, state, 0);
+    // Update state with empty provided_data (pass drbg itself as the
+    // provided_data buffer; data_len = 0 means it is never read).
+    let dummy = state_new(DrbgData);
+    drbg_update(drbg, dummy, 0);
 
-    drbg_set_counter(state, rc + 1);
+    drbg_set_counter(drbg, rc + 1);
     return out_len;
 }
