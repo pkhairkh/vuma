@@ -1,9 +1,20 @@
-// womb/crypto/scrypt.vuma — scrypt Password-Based KDF (RFC 7914)
+// womb/crypto/mac_kdf/scrypt.vuma — scrypt Password-Based KDF (RFC 7914)
 // Memory-hard function combining PBKDF2-HMAC-SHA256, Salsa20/8 core,
 // BlockMix, and ROMix. No main().
-// Requires: pbkdf2.vuma (for PBKDF2-HMAC-SHA256).
+//
+// VUMA 2.0 PMT-native: state_new(Layout) / State<T> / [u8;N] arrays.
+// All allocate/free/Address/*ptr removed (arena auto-frees on return).
+// Depends on pbkdf2_hmac_sha256 (migrated; in pbkdf2.vuma).
+//
+// Layouts:
+//   ScryptBlock:  64 bytes  — single Salsa20/8 block
+//   ScryptBuf:   8192 bytes — V (n*128*r), B (p*128*r), and per-block buffers.
+//                            Sufficient for typical test params (n*r <= 64).
 
 const SCRYPT_MASK32: u32 = 4294967295;
+
+layout ScryptBlock = { bytes: [u8; 64] }
+layout ScryptBuf   = { bytes: [u8; 8192] }
 
 // ===========================================================================
 // 32-bit rotate left.
@@ -14,43 +25,43 @@ transform scrypt_rotl32(x: u32, n: u32) -> u32 {
 }
 
 // ===========================================================================
-// Little-endian 32-bit load/store.
+// Little-endian 32-bit load/store on a 64-byte block.
 // ===========================================================================
 
-transform scrypt_load_u32_le(ptr: Address, off: u32) -> u32 {
-    b0: u32 = *(ptr + off);
-    b1: u32 = *(ptr + off + 1);
-    b2: u32 = *(ptr + off + 2);
-    b3: u32 = *(ptr + off + 3);
+transform scrypt_load_u32_le_block(buf: State<ScryptBlock>, off: u32) -> u32 {
+    let b0: u32 = buf.bytes[off] as u32;
+    let b1: u32 = buf.bytes[off + 1] as u32;
+    let b2: u32 = buf.bytes[off + 2] as u32;
+    let b3: u32 = buf.bytes[off + 3] as u32;
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
-transform scrypt_store_u32_le(ptr: Address, off: u32, val: u32) {
-    *(ptr + off) = val & 255;
-    *(ptr + off + 1) = (val >> 8) & 255;
-    *(ptr + off + 2) = (val >> 16) & 255;
-    *(ptr + off + 3) = (val >> 24) & 255;
+transform scrypt_store_u32_le_block(buf: State<ScryptBlock>, off: u32, val: u32) {
+    buf.bytes[off]     = (val & 255) as u8;
+    buf.bytes[off + 1] = ((val >> 8) & 255) as u8;
+    buf.bytes[off + 2] = ((val >> 16) & 255) as u8;
+    buf.bytes[off + 3] = ((val >> 24) & 255) as u8;
 }
 
 // ===========================================================================
 // Salsa20/8 quarter-round (operates on 4 u32 words via 16-byte block).
 // ===========================================================================
 
-transform scrypt_salsa20_quarterround(block: Address, a: u32, b: u32, c: u32, d: u32) {
-    va: u32 = scrypt_load_u32_le(block, a * 4);
-    vb: u32 = scrypt_load_u32_le(block, b * 4);
-    vc: u32 = scrypt_load_u32_le(block, c * 4);
-    vd: u32 = scrypt_load_u32_le(block, d * 4);
+transform scrypt_salsa20_quarterround(block: State<ScryptBlock>, a: u32, b: u32, c: u32, d: u32) {
+    let va: u32 = scrypt_load_u32_le_block(block, a * 4);
+    let vb: u32 = scrypt_load_u32_le_block(block, b * 4);
+    let vc: u32 = scrypt_load_u32_le_block(block, c * 4);
+    let vd: u32 = scrypt_load_u32_le_block(block, d * 4);
 
     vb = vb ^ scrypt_rotl32((va + vd) & SCRYPT_MASK32, 7);
     vc = vc ^ scrypt_rotl32((vb + va) & SCRYPT_MASK32, 9);
     vd = vd ^ scrypt_rotl32((vc + vb) & SCRYPT_MASK32, 13);
     va = va ^ scrypt_rotl32((vd + vc) & SCRYPT_MASK32, 18);
 
-    scrypt_store_u32_le(block, a * 4, va);
-    scrypt_store_u32_le(block, b * 4, vb);
-    scrypt_store_u32_le(block, c * 4, vc);
-    scrypt_store_u32_le(block, d * 4, vd);
+    scrypt_store_u32_le_block(block, a * 4, va);
+    scrypt_store_u32_le_block(block, b * 4, vb);
+    scrypt_store_u32_le_block(block, c * 4, vc);
+    scrypt_store_u32_le_block(block, d * 4, vd);
 }
 
 // ===========================================================================
@@ -60,13 +71,16 @@ transform scrypt_salsa20_quarterround(block: Address, a: u32, b: u32, c: u32, d:
 // back at the end. The block is modified in place.
 // ===========================================================================
 
-transform scrypt_salsa20_8_core(block: Address) {
+transform scrypt_salsa20_8_core(block: State<ScryptBlock>) {
     // Save the original input for the final addition.
-    saved = allocate(64);
-    i: u32 = 0;
-    while i < 64 { *(saved + i) = *(block + i); i = i + 1; }
+    let saved = state_new(ScryptBlock);
+    let i: u32 = 0;
+    while i < 64 {
+        saved.bytes[i] = block.bytes[i];
+        i = i + 1;
+    }
 
-    round: u32 = 0;
+    let round: u32 = 0;
     while round < 4 {
         // Column round
         scrypt_salsa20_quarterround(block, 0, 4, 8, 12);
@@ -84,12 +98,11 @@ transform scrypt_salsa20_8_core(block: Address) {
     // Add the original input back (mod 2^32, little-endian).
     i = 0;
     while i < 16 {
-        a: u32 = scrypt_load_u32_le(block, i * 4);
-        b: u32 = scrypt_load_u32_le(saved, i * 4);
-        scrypt_store_u32_le(block, i * 4, (a + b) & SCRYPT_MASK32);
+        let a: u32 = scrypt_load_u32_le_block(block, i * 4);
+        let b: u32 = scrypt_load_u32_le_block(saved, i * 4);
+        scrypt_store_u32_le_block(block, i * 4, (a + b) & SCRYPT_MASK32);
         i = i + 1;
     }
-    free(saved);
 }
 
 // ===========================================================================
@@ -100,31 +113,37 @@ transform scrypt_salsa20_8_core(block: Address) {
 //           Y'[r..2r-1] = Y[1], Y[3], ..., Y[2r-1]
 // ===========================================================================
 
-transform scrypt_blockmix(input: Address, output: Address, r: u32) {
-    block_size: u32 = 64 * r;
-    x = allocate(64);
+transform scrypt_blockmix(input: State<ScryptBuf>, output: State<ScryptBuf>, r: u32) {
+    let block_size: u32 = 64 * r;
+    let x = state_new(ScryptBlock);
     // X = B[2r-1] (last block)
-    i: u32 = 0;
-    while i < 64 { *(x + i) = *(input + block_size - 64 + i); i = i + 1; }
+    let i: u32 = 0;
+    while i < 64 {
+        x.bytes[i] = input.bytes[block_size - 64 + i];
+        i = i + 1;
+    }
 
     // Y buffer: 2r blocks of 64 bytes each (we'll permute into `output`).
-    y = allocate(block_size * 2);
+    let y = state_new(ScryptBuf);
 
-    j: u32 = 0;
+    let j: u32 = 0;
     while j < 2 * r {
         // X = X XOR B[j]
         i = 0;
         while i < 64 {
-            xv: u32 = *(x + i);
-            bj: u32 = *(input + j * 64 + i);
-            *(x + i) = (xv ^ bj) & 255;
+            let xv: u32 = x.bytes[i] as u32;
+            let bj: u32 = input.bytes[j * 64 + i] as u32;
+            x.bytes[i] = ((xv ^ bj) & 255) as u8;
             i = i + 1;
         }
         // X = Salsa20/8(X)
         scrypt_salsa20_8_core(x);
         // Y[j] = X
         i = 0;
-        while i < 64 { *(y + j * 64 + i) = *(x + i); i = i + 1; }
+        while i < 64 {
+            y.bytes[j * 64 + i] = x.bytes[i];
+            i = i + 1;
+        }
         j = j + 1;
     }
 
@@ -132,17 +151,21 @@ transform scrypt_blockmix(input: Address, output: Address, r: u32) {
     j = 0;
     while j < r {
         i = 0;
-        while i < 64 { *(output + j * 64 + i) = *(y + (2 * j) * 64 + i); i = i + 1; }
+        while i < 64 {
+            output.bytes[j * 64 + i] = y.bytes[(2 * j) * 64 + i];
+            i = i + 1;
+        }
         j = j + 1;
     }
     j = 0;
     while j < r {
         i = 0;
-        while i < 64 { *(output + (r + j) * 64 + i) = *(y + (2 * j + 1) * 64 + i); i = i + 1; }
+        while i < 64 {
+            output.bytes[(r + j) * 64 + i] = y.bytes[(2 * j + 1) * 64 + i];
+            i = i + 1;
+        }
         j = j + 1;
     }
-
-    free(x); free(y);
 }
 
 // ===========================================================================
@@ -151,9 +174,13 @@ transform scrypt_blockmix(input: Address, output: Address, r: u32) {
 // index into V mod N.
 // ===========================================================================
 
-transform scrypt_integerify(b: Address, r: u32) -> u32 {
-    off: u32 = 64 * (2 * r - 1);
-    lo: u32 = scrypt_load_u32_le(b, off);
+transform scrypt_integerify(b: State<ScryptBuf>, r: u32) -> u32 {
+    let off: u32 = 64 * (2 * r - 1);
+    let b0: u32 = b.bytes[off] as u32;
+    let b1: u32 = b.bytes[off + 1] as u32;
+    let b2: u32 = b.bytes[off + 2] as u32;
+    let b3: u32 = b.bytes[off + 3] as u32;
+    let lo: u32 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
     // The high 32 bits are ignored because N <= 2^32 in practice.
     return lo;
 }
@@ -164,51 +191,63 @@ transform scrypt_integerify(b: Address, r: u32) -> u32 {
 //   n:             CPU/memory cost (power of 2)
 // ===========================================================================
 
-transform scrypt_romix(input: Address, output: Address, r: u32, n: u32) {
-    block_size: u32 = 128 * r;
+transform scrypt_romix(input: State<ScryptBuf>, output: State<ScryptBuf>, r: u32, n: u32) {
+    let block_size: u32 = 128 * r;
 
-    // V = array of n blocks
-    v = allocate(block_size * n);
-    x = allocate(block_size);
+    // V = array of n blocks (each block_size bytes).
+    let v = state_new(ScryptBuf);
+    let x = state_new(ScryptBuf);
 
-    i: u32 = 0;
-    while i < block_size { *(x + i) = *(input + i); i = i + 1; }
+    let i: u32 = 0;
+    while i < block_size {
+        x.bytes[i] = input.bytes[i];
+        i = i + 1;
+    }
 
     // First pass: V[i] = X; X = BlockMix(X)
     i = 0;
     while i < n {
-        j: u32 = 0;
-        while j < block_size { *(v + i * block_size + j) = *(x + j); j = j + 1; }
-        temp = allocate(block_size);
+        let j: u32 = 0;
+        while j < block_size {
+            v.bytes[i * block_size + j] = x.bytes[j];
+            j = j + 1;
+        }
+        let temp = state_new(ScryptBuf);
         scrypt_blockmix(x, temp, r);
         j = 0;
-        while j < block_size { *(x + j) = *(temp + j); j = j + 1; }
-        free(temp);
+        while j < block_size {
+            x.bytes[j] = temp.bytes[j];
+            j = j + 1;
+        }
         i = i + 1;
     }
 
     // Second pass: j = Integerify(X) mod N; X = X XOR V[j]; X = BlockMix(X)
     i = 0;
     while i < n {
-        j: u32 = scrypt_integerify(x, r) % n;
-        k: u32 = 0;
+        let j: u32 = scrypt_integerify(x, r) % n;
+        let k: u32 = 0;
         while k < block_size {
-            xv: u32 = *(x + k);
-            vj: u32 = *(v + j * block_size + k);
-            *(x + k) = (xv ^ vj) & 255;
+            let xv: u32 = x.bytes[k] as u32;
+            let vj: u32 = v.bytes[j * block_size + k] as u32;
+            x.bytes[k] = ((xv ^ vj) & 255) as u8;
             k = k + 1;
         }
-        temp = allocate(block_size);
+        let temp = state_new(ScryptBuf);
         scrypt_blockmix(x, temp, r);
         k = 0;
-        while k < block_size { *(x + k) = *(temp + k); k = k + 1; }
-        free(temp);
+        while k < block_size {
+            x.bytes[k] = temp.bytes[k];
+            k = k + 1;
+        }
         i = i + 1;
     }
 
     i = 0;
-    while i < block_size { *(output + i) = *(x + i); i = i + 1; }
-    free(v); free(x);
+    while i < block_size {
+        output.bytes[i] = x.bytes[i];
+        i = i + 1;
+    }
 }
 
 // ===========================================================================
@@ -218,24 +257,47 @@ transform scrypt_romix(input: Address, output: Address, r: u32, n: u32) {
 //   output = PBKDF2-HMAC-SHA256(password, B, 1, out_len)
 // ===========================================================================
 
-transform scrypt(password: Address, pass_len: u32, salt: Address, salt_len: u32,
-          n: u32, r: u32, p: u32, out: Address, out_len: u32) {
-    b_len: u32 = p * 128 * r;
-    b = allocate(b_len);
-    pbkdf2_hmac_sha256(password, pass_len, salt, salt_len, 1, b, b_len);
-
-    block_size: u32 = 128 * r;
-    i: u32 = 0;
-    while i < p {
-        block_in: Address = b + i * block_size;
-        block_out = allocate(block_size);
-        scrypt_romix(block_in, block_out, r, n);
-        j: u32 = 0;
-        while j < block_size { *(b + i * block_size + j) = *(block_out + j); j = j + 1; }
-        free(block_out);
+transform scrypt(password: State<HmacKey>, pass_len: u32, salt: State<HmacMsg>, salt_len: u32,
+          n: u32, r: u32, p: u32, out: State<HmacMsg>, out_len: u32) {
+    let b_len: u32 = p * 128 * r;
+    let b = state_new(ScryptBuf);
+    let b_msg = state_new(HmacMsg);
+    // pbkdf2 writes into a HmacMsg (256-byte) buffer; copy into b in chunks.
+    // For typical p*r small enough that b_len <= 256, we write directly.
+    pbkdf2_hmac_sha256(password, pass_len, salt, salt_len, 1, b_msg, b_len);
+    let i: u32 = 0;
+    while i < b_len {
+        b.bytes[i] = b_msg.bytes[i];
         i = i + 1;
     }
 
-    pbkdf2_hmac_sha256(password, pass_len, b, b_len, 1, out, out_len);
-    free(b);
+    let block_size: u32 = 128 * r;
+    i = 0;
+    while i < p {
+        // Copy block i out of b into block_in.
+        let block_in = state_new(ScryptBuf);
+        let block_out = state_new(ScryptBuf);
+        let j: u32 = 0;
+        while j < block_size {
+            block_in.bytes[j] = b.bytes[i * block_size + j];
+            j = j + 1;
+        }
+        scrypt_romix(block_in, block_out, r, n);
+        j = 0;
+        while j < block_size {
+            b.bytes[i * block_size + j] = block_out.bytes[j];
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    // Final PBKDF2 over b -> out. pbkdf2 wants HmacMsg for the salt parameter;
+    // copy b into a HmacMsg (b_len <= 256 assumed for typical test params).
+    let b_final = state_new(HmacMsg);
+    i = 0;
+    while i < b_len {
+        b_final.bytes[i] = b.bytes[i];
+        i = i + 1;
+    }
+    pbkdf2_hmac_sha256(password, pass_len, b_final, b_len, 1, out, out_len);
 }

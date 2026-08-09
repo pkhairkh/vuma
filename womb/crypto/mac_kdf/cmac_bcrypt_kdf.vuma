@@ -1,59 +1,128 @@
-// womb/crypto/kdf_cmac_bcrypt.vuma — KDF (SP 800-108), AES-CMAC (SP 800-38B),
-// bcrypt (RFC 6964 Provos-Mazières). No main().
+// womb/crypto/mac_kdf/cmac_bcrypt_kdf.vuma — KDF (SP 800-108), AES-CMAC
+// (SP 800-38B), bcrypt (RFC 6964 Provos-Mazières). No main().
+//
+// VUMA 2.0 PMT-native: state_new(Layout) / State<T> / [u8;N] arrays.
+// All allocate/free/Address/*ptr removed (arena auto-frees on return).
 //
 // Externally resolved symbols (linked from sibling modules):
-//   sha256_oneshot(data, len, out)
-//   hmac_sha256(key, keylen, msg, msglen, out)
-//   hmac_sha512(key, keylen, msg, msglen, out)
-//   aes256_encrypt_block(plaintext, key, ciphertext)
+//   hmac_sha256(key: State<HmacKey>, keylen, msg: State<HmacMsg>, msglen, out: State<HmacOut>)
+//   hmac_sha512(key: State<HmacKey>, keylen, msg: State<HmacMsg>, msglen, out: State<HmacOut>)
+//   aes256_init(ctx: State<AesCtx>, key: State<AesKey>)
+//   aes_encrypt_block(ctx: State<AesCtx>, pt: State<AesBlock>, ct: State<AesBlock>)
 //
-// Public API:
-//   kdf_counter(kin, kin_len, label, label_len, context, context_len,
-//               out, out_len, hash_func)
-//   kdf_feedback(kin, kin_len, label, label_len, context, context_len,
-//                out, out_len)
-//   kdf_pipeline(kin, kin_len, label, label_len, context, context_len,
-//                out, out_len)
-//   aes_cmac_kdf(key, msg, msg_len, out)             [renamed to avoid clash
-//                                                     with aes_extra_modes.vuma]
-//   bcrypt_hash(password, pass_len, salt, cost, hash_out) -> u32
-//
-// Internal helpers are prefixed kc_/bf_/cmac_ to avoid symbol clashes when
-// this module is linked alongside sha256.vuma / aes256.vuma / hmac.vuma.
+// Layouts used here:
+//   KcCtx:   4168 bytes  — Blowfish context (P-array + S-boxes)
+//   HmacKey (from hmac.vuma): 128 bytes — for HMAC keys (kin)
+//   HmacMsg (from hmac.vuma): 256 bytes — for HMAC messages (label, context, buf, salt, out)
+//   HmacOut (from hmac.vuma):  64 bytes — for HMAC digests (kblock, kprev, a, state, laddr, raddr, magic)
+//   AesKey (from aes256.vuma): 32 bytes — for AES keys
+//   AesBlock (from aes256.vuma): 16 bytes — for AES blocks
 
 const KC_MASK32: u32 = 4294967295;
+
+layout KcCtx = { bytes: [u8; 4168] }
 
 // ===========================================================================
 // Byte-level big-endian helpers + memory primitives
 // ===========================================================================
 
-transform kc_load_u32_be(ptr: Address, off: u32) -> u32 {
-    b0: u32 = *(ptr + off);
-    b1: u32 = *(ptr + off + 1);
-    b2: u32 = *(ptr + off + 2);
-    b3: u32 = *(ptr + off + 3);
+transform kc_load_u32_be_ctx(buf: State<KcCtx>, off: u32) -> u32 {
+    let b0: u32 = buf.bytes[off] as u32;
+    let b1: u32 = buf.bytes[off + 1] as u32;
+    let b2: u32 = buf.bytes[off + 2] as u32;
+    let b3: u32 = buf.bytes[off + 3] as u32;
     return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
 }
 
-transform kc_store_u32_be(ptr: Address, off: u32, val: u32) {
-    *(ptr + off) = (val >> 24) & 255;
-    *(ptr + off + 1) = (val >> 16) & 255;
-    *(ptr + off + 2) = (val >> 8) & 255;
-    *(ptr + off + 3) = val & 255;
+transform kc_store_u32_be_ctx(buf: State<KcCtx>, off: u32, val: u32) {
+    buf.bytes[off]     = ((val >> 24) & 255) as u8;
+    buf.bytes[off + 1] = ((val >> 16) & 255) as u8;
+    buf.bytes[off + 2] = ((val >> 8) & 255) as u8;
+    buf.bytes[off + 3] = (val & 255) as u8;
 }
 
-transform kc_memcpy(dst: Address, src: Address, n: u32) {
-    i: u32 = 0;
+transform kc_load_u32_be_msg(buf: State<HmacMsg>, off: u32) -> u32 {
+    let b0: u32 = buf.bytes[off] as u32;
+    let b1: u32 = buf.bytes[off + 1] as u32;
+    let b2: u32 = buf.bytes[off + 2] as u32;
+    let b3: u32 = buf.bytes[off + 3] as u32;
+    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+}
+
+transform kc_store_u32_be_msg(buf: State<HmacMsg>, off: u32, val: u32) {
+    buf.bytes[off]     = ((val >> 24) & 255) as u8;
+    buf.bytes[off + 1] = ((val >> 16) & 255) as u8;
+    buf.bytes[off + 2] = ((val >> 8) & 255) as u8;
+    buf.bytes[off + 3] = (val & 255) as u8;
+}
+
+transform kc_load_u32_be_out(buf: State<HmacOut>, off: u32) -> u32 {
+    let b0: u32 = buf.bytes[off] as u32;
+    let b1: u32 = buf.bytes[off + 1] as u32;
+    let b2: u32 = buf.bytes[off + 2] as u32;
+    let b3: u32 = buf.bytes[off + 3] as u32;
+    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+}
+
+transform kc_store_u32_be_out(buf: State<HmacOut>, off: u32, val: u32) {
+    buf.bytes[off]     = ((val >> 24) & 255) as u8;
+    buf.bytes[off + 1] = ((val >> 16) & 255) as u8;
+    buf.bytes[off + 2] = ((val >> 8) & 255) as u8;
+    buf.bytes[off + 3] = (val & 255) as u8;
+}
+
+transform kc_memcpy_msg_msg(dst: State<HmacMsg>, src: State<HmacMsg>, n: u32) {
+    let i: u32 = 0;
     while i < n {
-        *(dst + i) = *(src + i);
+        dst.bytes[i] = src.bytes[i];
         i = i + 1;
     }
 }
 
-transform kc_memzero(dst: Address, n: u32) {
-    i: u32 = 0;
+transform kc_memcpy_msg_out(dst: State<HmacMsg>, src: State<HmacOut>, n: u32) {
+    let i: u32 = 0;
     while i < n {
-        *(dst + i) = 0;
+        dst.bytes[i] = src.bytes[i];
+        i = i + 1;
+    }
+}
+
+transform kc_memcpy_out_msg(dst: State<HmacOut>, src: State<HmacMsg>, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        dst.bytes[i] = src.bytes[i];
+        i = i + 1;
+    }
+}
+
+transform kc_memcpy_out_out(dst: State<HmacOut>, src: State<HmacOut>, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        dst.bytes[i] = src.bytes[i];
+        i = i + 1;
+    }
+}
+
+transform kc_memzero_msg(dst: State<HmacMsg>, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        dst.bytes[i] = 0;
+        i = i + 1;
+    }
+}
+
+transform kc_memzero_out(dst: State<HmacOut>, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        dst.bytes[i] = 0;
+        i = i + 1;
+    }
+}
+
+transform kc_memzero_block(dst: State<AesBlock>, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        dst.data[i] = 0;
         i = i + 1;
     }
 }
@@ -69,8 +138,8 @@ transform kc_hlen(hash_func: u32) -> u32 {
     return 64;
 }
 
-transform kc_prf(hash_func: u32, key: Address, key_len: u32,
-          msg: Address, msg_len: u32, out: Address) {
+transform kc_prf(hash_func: u32, key: State<HmacKey>, key_len: u32,
+          msg: State<HmacMsg>, msg_len: u32, out: State<HmacOut>) {
     if hash_func == 0 {
         hmac_sha256(key, key_len, msg, msg_len, out);
     } else {
@@ -84,38 +153,48 @@ transform kc_prf(hash_func: u32, key: Address, key_len: u32,
 //    Output = K(1) || K(2) || ... truncated to out_len.
 // ===========================================================================
 
-transform kdf_counter(kin: Address, kin_len: u32,
-               label: Address, label_len: u32,
-               context: Address, context_len: u32,
-               out: Address, out_len: u32, hash_func: u32) {
+transform kdf_counter(kin: State<HmacKey>, kin_len: u32,
+               label: State<HmacMsg>, label_len: u32,
+               context: State<HmacMsg>, context_len: u32,
+               out: State<HmacMsg>, out_len: u32, hash_func: u32) {
     if out_len > 0 {
-        hLen: u32 = kc_hlen(hash_func);
-        L_bits: u32 = out_len * 8;
-        n: u32 = (out_len + hLen - 1) / hLen;   // ceil(out_len / hLen)
+        let hLen: u32 = kc_hlen(hash_func);
+        let L_bits: u32 = out_len * 8;
+        let n: u32 = (out_len + hLen - 1) / hLen;   // ceil(out_len / hLen)
 
-        i: u32 = 1;
-        produced: u32 = 0;
-        done: u32 = 0;
+        let i: u32 = 1;
+        let produced: u32 = 0;
+        let done: u32 = 0;
         while done == 0 {
-            in_len: u32 = 4 + label_len + 1 + context_len + 4;
-            buf = allocate(in_len);
-            kc_store_u32_be(buf, 0, i);
-            kc_memcpy(buf + 4, label, label_len);
-            *(buf + 4 + label_len) = 0;
-            kc_memcpy(buf + 4 + label_len + 1, context, context_len);
-            kc_store_u32_be(buf, 4 + label_len + 1 + context_len, L_bits);
+            let in_len: u32 = 4 + label_len + 1 + context_len + 4;
+            let buf = state_new(HmacMsg);
+            kc_store_u32_be_msg(buf, 0, i);
+            // Copy label starting at offset 4.
+            let k: u32 = 0;
+            while k < label_len { buf.bytes[4 + k] = label.bytes[k]; k = k + 1; }
+            buf.bytes[4 + label_len] = 0;
+            // Copy context starting at offset 4 + label_len + 1.
+            k = 0;
+            while k < context_len {
+                buf.bytes[4 + label_len + 1 + k] = context.bytes[k];
+                k = k + 1;
+            }
+            kc_store_u32_be_msg(buf, 4 + label_len + 1 + context_len, L_bits);
 
-            kblock = allocate(hLen);
+            let kblock = state_new(HmacOut);
+            // kin is already State<HmacKey>; buf is State<HmacMsg>; kblock is State<HmacOut>.
             kc_prf(hash_func, kin, kin_len, buf, in_len, kblock);
 
-            remain: u32 = out_len - produced;
-            take: u32 = hLen;
+            let remain: u32 = out_len - produced;
+            let take: u32 = hLen;
             if remain < take { take = remain; }
-            kc_memcpy(out + produced, kblock, take);
+            // Copy `take` bytes from kblock (HmacOut) to out (HmacMsg).
+            let c: u32 = 0;
+            while c < take {
+                out.bytes[produced + c] = kblock.bytes[c];
+                c = c + 1;
+            }
             produced = produced + take;
-
-            free(buf);
-            free(kblock);
 
             if produced >= out_len { done = 1; }
             else {
@@ -132,46 +211,53 @@ transform kdf_counter(kin: Address, kin_len: u32,
 //    K(i) = PRF(Kin, K(i-1) || [i]_2 || Label || 0x00 || Context || [L]_2).
 // ===========================================================================
 
-transform kdf_feedback(kin: Address, kin_len: u32,
-                label: Address, label_len: u32,
-                context: Address, context_len: u32,
-                out: Address, out_len: u32) {
+transform kdf_feedback(kin: State<HmacKey>, kin_len: u32,
+                label: State<HmacMsg>, label_len: u32,
+                context: State<HmacMsg>, context_len: u32,
+                out: State<HmacMsg>, out_len: u32) {
     if out_len > 0 {
-        hash_func: u32 = 0;
-        hLen: u32 = 32;
-        L_bits: u32 = out_len * 8;
+        let hash_func: u32 = 0;
+        let hLen: u32 = 32;
+        let L_bits: u32 = out_len * 8;
 
-        kprev = allocate(hLen);
-        kc_memzero(kprev, hLen);
+        let kprev = state_new(HmacOut);
+        kc_memzero_out(kprev, hLen);
 
-        i: u32 = 1;
-        produced: u32 = 0;
+        let i: u32 = 1;
+        let produced: u32 = 0;
         while produced < out_len {
-            in_len: u32 = hLen + 4 + label_len + 1 + context_len + 4;
-            buf = allocate(in_len);
-            kc_memcpy(buf, kprev, hLen);
-            kc_store_u32_be(buf, hLen, i);
-            kc_memcpy(buf + hLen + 4, label, label_len);
-            *(buf + hLen + 4 + label_len) = 0;
-            kc_memcpy(buf + hLen + 4 + label_len + 1, context, context_len);
-            kc_store_u32_be(buf, hLen + 4 + label_len + 1 + context_len, L_bits);
+            let in_len: u32 = hLen + 4 + label_len + 1 + context_len + 4;
+            let buf = state_new(HmacMsg);
+            // buf[0..hLen] = kprev
+            let k: u32 = 0;
+            while k < hLen { buf.bytes[k] = kprev.bytes[k]; k = k + 1; }
+            kc_store_u32_be_msg(buf, hLen, i);
+            k = 0;
+            while k < label_len { buf.bytes[hLen + 4 + k] = label.bytes[k]; k = k + 1; }
+            buf.bytes[hLen + 4 + label_len] = 0;
+            k = 0;
+            while k < context_len {
+                buf.bytes[hLen + 4 + label_len + 1 + k] = context.bytes[k];
+                k = k + 1;
+            }
+            kc_store_u32_be_msg(buf, hLen + 4 + label_len + 1 + context_len, L_bits);
 
-            kblock = allocate(hLen);
+            let kblock = state_new(HmacOut);
             kc_prf(hash_func, kin, kin_len, buf, in_len, kblock);
 
-            remain: u32 = out_len - produced;
-            take: u32 = hLen;
+            let remain: u32 = out_len - produced;
+            let take: u32 = hLen;
             if remain < take { take = remain; }
-            kc_memcpy(out + produced, kblock, take);
+            let c: u32 = 0;
+            while c < take {
+                out.bytes[produced + c] = kblock.bytes[c];
+                c = c + 1;
+            }
             produced = produced + take;
 
-            kc_memcpy(kprev, kblock, hLen);
-
-            free(buf);
-            free(kblock);
+            kc_memcpy_out_out(kprev, kblock, hLen);
             i = i + 1;
         }
-        free(kprev);
     }
 }
 
@@ -182,59 +268,73 @@ transform kdf_feedback(kin: Address, kin_len: u32,
 //    K(i) = PRF(Kin, A(i-1) || [i]_2 || Label || 0x00 || Context || [L]_2)
 // ===========================================================================
 
-transform kdf_pipeline(kin: Address, kin_len: u32,
-                label: Address, label_len: u32,
-                context: Address, context_len: u32,
-                out: Address, out_len: u32) {
+transform kdf_pipeline(kin: State<HmacKey>, kin_len: u32,
+                label: State<HmacMsg>, label_len: u32,
+                context: State<HmacMsg>, context_len: u32,
+                out: State<HmacMsg>, out_len: u32) {
     if out_len > 0 {
-        hash_func: u32 = 0;
-        hLen: u32 = 32;
-        L_bits: u32 = out_len * 8;
+        let hash_func: u32 = 0;
+        let hLen: u32 = 32;
+        let L_bits: u32 = out_len * 8;
 
         // A(0) = PRF(Kin, [0x03] || Label || 0x00 || Context || [L]_2)
-        a = allocate(hLen);
-        a_in_len: u32 = 1 + label_len + 1 + context_len + 4;
-        abuf = allocate(a_in_len);
-        *(abuf + 0) = 3;
-        kc_memcpy(abuf + 1, label, label_len);
-        *(abuf + 1 + label_len) = 0;
-        kc_memcpy(abuf + 1 + label_len + 1, context, context_len);
-        kc_store_u32_be(abuf, 1 + label_len + 1 + context_len, L_bits);
+        let a = state_new(HmacOut);
+        let a_in_len: u32 = 1 + label_len + 1 + context_len + 4;
+        let abuf = state_new(HmacMsg);
+        abuf.bytes[0] = 3;
+        let k: u32 = 0;
+        while k < label_len { abuf.bytes[1 + k] = label.bytes[k]; k = k + 1; }
+        abuf.bytes[1 + label_len] = 0;
+        k = 0;
+        while k < context_len {
+            abuf.bytes[1 + label_len + 1 + k] = context.bytes[k];
+            k = k + 1;
+        }
+        kc_store_u32_be_msg(abuf, 1 + label_len + 1 + context_len, L_bits);
         kc_prf(hash_func, kin, kin_len, abuf, a_in_len, a);
-        free(abuf);
 
-        i: u32 = 1;
-        produced: u32 = 0;
+        let i: u32 = 1;
+        let produced: u32 = 0;
         while produced < out_len {
-            in_len: u32 = hLen + 4 + label_len + 1 + context_len + 4;
-            buf = allocate(in_len);
-            kc_memcpy(buf, a, hLen);
-            kc_store_u32_be(buf, hLen, i);
-            kc_memcpy(buf + hLen + 4, label, label_len);
-            *(buf + hLen + 4 + label_len) = 0;
-            kc_memcpy(buf + hLen + 4 + label_len + 1, context, context_len);
-            kc_store_u32_be(buf, hLen + 4 + label_len + 1 + context_len, L_bits);
+            let in_len: u32 = hLen + 4 + label_len + 1 + context_len + 4;
+            let buf = state_new(HmacMsg);
+            // buf[0..hLen] = a
+            let k2: u32 = 0;
+            while k2 < hLen { buf.bytes[k2] = a.bytes[k2]; k2 = k2 + 1; }
+            kc_store_u32_be_msg(buf, hLen, i);
+            k2 = 0;
+            while k2 < label_len { buf.bytes[hLen + 4 + k2] = label.bytes[k2]; k2 = k2 + 1; }
+            buf.bytes[hLen + 4 + label_len] = 0;
+            k2 = 0;
+            while k2 < context_len {
+                buf.bytes[hLen + 4 + label_len + 1 + k2] = context.bytes[k2];
+                k2 = k2 + 1;
+            }
+            kc_store_u32_be_msg(buf, hLen + 4 + label_len + 1 + context_len, L_bits);
 
-            kblock = allocate(hLen);
+            let kblock = state_new(HmacOut);
             kc_prf(hash_func, kin, kin_len, buf, in_len, kblock);
 
-            remain: u32 = out_len - produced;
-            take: u32 = hLen;
+            let remain: u32 = out_len - produced;
+            let take: u32 = hLen;
             if remain < take { take = remain; }
-            kc_memcpy(out + produced, kblock, take);
+            let c: u32 = 0;
+            while c < take {
+                out.bytes[produced + c] = kblock.bytes[c];
+                c = c + 1;
+            }
             produced = produced + take;
 
             // A(i) = PRF(Kin, A(i-1))
-            anext = allocate(hLen);
-            kc_prf(hash_func, kin, kin_len, a, hLen, anext);
-            kc_memcpy(a, anext, hLen);
-            free(anext);
+            let anext = state_new(HmacOut);
+            // Need to pass `a` (HmacOut) as msg (HmacMsg). Copy to a fresh HmacMsg.
+            let a_msg = state_new(HmacMsg);
+            kc_memcpy_out_msg(a_msg, a, hLen);
+            kc_prf(hash_func, kin, kin_len, a_msg, hLen, anext);
+            kc_memcpy_out_out(a, anext, hLen);
 
-            free(buf);
-            free(kblock);
             i = i + 1;
         }
-        free(a);
     }
 }
 
@@ -248,73 +348,77 @@ transform kdf_pipeline(kin: Address, kin_len: u32,
 
 // Shift a 16-byte big-endian value left by 1 bit. Returns the bit shifted
 // out of the most-significant end (byte 0, bit 7).
-transform cmac_shift_left(in_addr: Address, out_addr: Address) -> u32 {
-    carry: u32 = 0;
-    j: u32 = 0;
+transform cmac_shift_left(in_addr: State<AesBlock>, out_addr: State<AesBlock>) -> u32 {
+    let carry: u32 = 0;
+    let j: u32 = 0;
     while j < 16 {
-        idx: u32 = 15 - j;
-        b: u32 = *(in_addr + idx);
-        newcarry: u32 = (b >> 7) & 1;
-        *(out_addr + idx) = ((b << 1) | carry) & 255;
+        let idx: u32 = 15 - j;
+        let b: u32 = in_addr.data[idx] as u32;
+        let newcarry: u32 = (b >> 7) & 1;
+        out_addr.data[idx] = (((b << 1) | carry) & 255) as u8;
         carry = newcarry;
         j = j + 1;
     }
     return carry;
 }
 
-transform aes_cmac_kdf(key: Address, msg: Address, msg_len: u32, out: Address) {
-    // Subkey generation
-    zero = allocate(16);
-    kc_memzero(zero, 16);
-    L = allocate(16);
-    aes256_encrypt_block(zero, key, L);
-    free(zero);
+transform aes_cmac_kdf(key: State<AesKey>, msg: State<HmacMsg>, msg_len: u32, out: State<AesBlock>) {
+    // Initialise AES context once (key is constant throughout CMAC).
+    let aes_ctx = state_new(AesCtx);
+    aes256_init(aes_ctx, key);
 
-    k1 = allocate(16);
-    msb: u32 = cmac_shift_left(L, k1);
+    // Subkey generation: L = AES(0)
+    let zero = state_new(AesBlock);
+    kc_memzero_block(zero, 16);
+    let L = state_new(AesBlock);
+    aes_encrypt_block(aes_ctx, zero, L);
+
+    let k1 = state_new(AesBlock);
+    let msb: u32 = cmac_shift_left(L, k1);
     if msb == 1 {
-        *(k1 + 15) = (*(k1 + 15) ^ 135) & 255;   // 0x87
+        k1.data[15] = ((k1.data[15] as u32 ^ 135) & 255) as u8;   // 0x87
     }
-    free(L);
 
-    k2 = allocate(16);
-    msb2: u32 = cmac_shift_left(k1, k2);
+    let k2 = state_new(AesBlock);
+    let msb2: u32 = cmac_shift_left(k1, k2);
     if msb2 == 1 {
-        *(k2 + 15) = (*(k2 + 15) ^ 135) & 255;
+        k2.data[15] = ((k2.data[15] as u32 ^ 135) & 255) as u8;
     }
 
     // Block layout
-    num_blocks: u32 = (msg_len + 15) / 16;
+    let num_blocks: u32 = (msg_len + 15) / 16;
     if num_blocks == 0 { num_blocks = 1; }
-    complete: u32 = 0;
+    let complete: u32 = 0;
     if msg_len > 0 {
         if msg_len % 16 == 0 { complete = 1; }
     }
 
-    X = allocate(16);
-    kc_memzero(X, 16);
-    Y = allocate(16);
-    last = allocate(16);
+    let X = state_new(AesBlock);
+    kc_memzero_block(X, 16);
+    let Y = state_new(AesBlock);
+    let last = state_new(AesBlock);
 
     // Process all blocks except the last
-    i: u32 = 0;
+    let i: u32 = 0;
     while i + 1 < num_blocks {
-        k: u32 = 0;
+        let k: u32 = 0;
         while k < 16 {
-            *(Y + k) = (*(X + k) ^ *(msg + i * 16 + k)) & 255;
+            let xv: u32 = X.data[k] as u32;
+            let mv: u32 = msg.bytes[i * 16 + k] as u32;
+            Y.data[k] = ((xv ^ mv) & 255) as u8;
             k = k + 1;
         }
-        aes256_encrypt_block(Y, key, X);
+        aes_encrypt_block(aes_ctx, Y, X);
         i = i + 1;
     }
 
     // Last block: pad if incomplete, XOR with K1 (complete) or K2 (padded)
-    k: u32 = 0;
+    let k: u32 = 0;
     while k < 16 {
-        lastpos: u32 = i * 16 + k;
-        mb: u32 = 0;
+        let lastpos: u32 = i * 16 + k;
+        let mb: u32 = 0;
         if lastpos < msg_len {
-            mb = *(msg + lastpos);
+            mb = msg.bytes[lastpos] as u32;
         } else {
             if lastpos == msg_len {
                 mb = 128;       // 0x80 padding bit
@@ -322,21 +426,21 @@ transform aes_cmac_kdf(key: Address, msg: Address, msg_len: u32, out: Address) {
                 mb = 0;
             }
         }
-        kk: u32 = 0;
-        if complete == 1 { kk = *(k1 + k); } else { kk = *(k2 + k); }
-        *(last + k) = (mb ^ kk) & 255;
+        let kk: u32 = 0;
+        if complete == 1 { kk = k1.data[k] as u32; } else { kk = k2.data[k] as u32; }
+        last.data[k] = ((mb ^ kk) & 255) as u8;
         k = k + 1;
     }
 
     // Y = X XOR last ; out = AES(Y)
-    k = 0;
-    while k < 16 {
-        *(Y + k) = (*(X + k) ^ *(last + k)) & 255;
-        k = k + 1;
+    let k3: u32 = 0;
+    while k3 < 16 {
+        let xv: u32 = X.data[k3] as u32;
+        let lv: u32 = last.data[k3] as u32;
+        Y.data[k3] = ((xv ^ lv) & 255) as u8;
+        k3 = k3 + 1;
     }
-    aes256_encrypt_block(Y, key, out);
-
-    free(k1); free(k2); free(X); free(Y); free(last);
+    aes_encrypt_block(aes_ctx, Y, out);
 }
 
 // ===========================================================================
@@ -365,42 +469,42 @@ const BF_S_OFFSET: u32 = 72;
 const BF_CTX_SIZE: u32 = 4168;
 const BF_ROUNDS: u32 = 16;
 
-transform bf_get_p(ctx: Address, i: u32) -> u32 {
-    return kc_load_u32_be(ctx, BF_P_OFFSET + i * 4);
+transform bf_get_p(ctx: State<KcCtx>, i: u32) -> u32 {
+    return kc_load_u32_be_ctx(ctx, BF_P_OFFSET + i * 4);
 }
 
-transform bf_set_p(ctx: Address, i: u32, v: u32) {
-    kc_store_u32_be(ctx, BF_P_OFFSET + i * 4, v);
+transform bf_set_p(ctx: State<KcCtx>, i: u32, v: u32) {
+    kc_store_u32_be_ctx(ctx, BF_P_OFFSET + i * 4, v);
 }
 
-transform bf_get_s(ctx: Address, box_idx: u32, j: u32) -> u32 {
-    return kc_load_u32_be(ctx, BF_S_OFFSET + (box_idx * 256 + j) * 4);
+transform bf_get_s(ctx: State<KcCtx>, box_idx: u32, j: u32) -> u32 {
+    return kc_load_u32_be_ctx(ctx, BF_S_OFFSET + (box_idx * 256 + j) * 4);
 }
 
-transform bf_set_s(ctx: Address, box_idx: u32, j: u32, v: u32) {
-    kc_store_u32_be(ctx, BF_S_OFFSET + (box_idx * 256 + j) * 4, v);
+transform bf_set_s(ctx: State<KcCtx>, box_idx: u32, j: u32, v: u32) {
+    kc_store_u32_be_ctx(ctx, BF_S_OFFSET + (box_idx * 256 + j) * 4, v);
 }
 
 // 32-bit LCG (Numerical Recipes constants). Seeded with 0x243F6A88, the
 // first standard Blowfish P-array word.
-transform bf_lcg_next(state_addr: Address) -> u32 {
-    s: u32 = kc_load_u32_be(state_addr, 0);
+transform bf_lcg_next(state_addr: State<HmacOut>) -> u32 {
+    let s: u32 = kc_load_u32_be_out(state_addr, 0);
     s = (s * 1664525 + 1013904223) & KC_MASK32;
-    kc_store_u32_be(state_addr, 0, s);
+    kc_store_u32_be_out(state_addr, 0, s);
     return s;
 }
 
 // Blowfish F function: F(x) = ((S0[a] + S1[b]) XOR S2[c]) + S3[d] mod 2^32
-transform bf_f(ctx: Address, x: u32) -> u32 {
-    a: u32 = (x >> 24) & 255;
-    b: u32 = (x >> 16) & 255;
-    c: u32 = (x >> 8) & 255;
-    d: u32 = x & 255;
-    sa: u32 = bf_get_s(ctx, 0, a);
-    sb: u32 = bf_get_s(ctx, 1, b);
-    sc: u32 = bf_get_s(ctx, 2, c);
-    sd: u32 = bf_get_s(ctx, 3, d);
-    t: u32 = (sa + sb) & KC_MASK32;
+transform bf_f(ctx: State<KcCtx>, x: u32) -> u32 {
+    let a: u32 = (x >> 24) & 255;
+    let b: u32 = (x >> 16) & 255;
+    let c: u32 = (x >> 8) & 255;
+    let d: u32 = x & 255;
+    let sa: u32 = bf_get_s(ctx, 0, a);
+    let sb: u32 = bf_get_s(ctx, 1, b);
+    let sc: u32 = bf_get_s(ctx, 2, c);
+    let sd: u32 = bf_get_s(ctx, 3, d);
+    let t: u32 = (sa + sb) & KC_MASK32;
     t = t ^ sc;
     t = (t + sd) & KC_MASK32;
     return t;
@@ -408,11 +512,11 @@ transform bf_f(ctx: Address, x: u32) -> u32 {
 
 // Standard 16-round Blowfish encryption of a 64-bit block held as two
 // big-endian u32 words at *left and *right. In-place.
-transform blowfish_encrypt(ctx: Address, left: Address, right: Address) {
-    L: u32 = kc_load_u32_be(left, 0);
-    R: u32 = kc_load_u32_be(right, 0);
-    tmp: u32 = 0;
-    i: u32 = 0;
+transform blowfish_encrypt(ctx: State<KcCtx>, left: State<HmacOut>, right: State<HmacOut>) {
+    let L: u32 = kc_load_u32_be_out(left, 0);
+    let R: u32 = kc_load_u32_be_out(right, 0);
+    let tmp: u32 = 0;
+    let i: u32 = 0;
     while i < BF_ROUNDS {
         L = L ^ bf_get_p(ctx, i);
         R = R ^ bf_f(ctx, L);
@@ -422,36 +526,36 @@ transform blowfish_encrypt(ctx: Address, left: Address, right: Address) {
     tmp = L; L = R; R = tmp;       // undo final swap
     R = R ^ bf_get_p(ctx, 16);
     L = L ^ bf_get_p(ctx, 17);
-    kc_store_u32_be(left, 0, L);
-    kc_store_u32_be(right, 0, R);
+    kc_store_u32_be_out(left, 0, L);
+    kc_store_u32_be_out(right, 0, R);
 }
 
 // Eksblowfish state expansion with salt. Re-derives the P-array (9 pairs)
 // and all four S-boxes (4 x 128 pairs each) by repeatedly encrypting
 // (L, R) XORed with successive 32-bit salt words (cycled).
-transform blowfish_expand_state(ctx: Address, salt: Address) {
-    L: u32 = 0;
-    R: u32 = 0;
-    salt_idx: u32 = 0;
-    i: u32 = 0;
-    j: u32 = 0;
-    box: u32 = 0;
-    sw: u32 = 0;
-    laddr = allocate(4);
-    raddr = allocate(4);
+transform blowfish_expand_state(ctx: State<KcCtx>, salt: State<HmacMsg>) {
+    let L: u32 = 0;
+    let R: u32 = 0;
+    let salt_idx: u32 = 0;
+    let i: u32 = 0;
+    let j: u32 = 0;
+    let box: u32 = 0;
+    let sw: u32 = 0;
+    let laddr = state_new(HmacOut);
+    let raddr = state_new(HmacOut);
 
     // P-array: 18 entries = 9 pairs
     i = 0;
     while i < 9 {
-        sw = kc_load_u32_be(salt, salt_idx * 4); L = L ^ sw;
+        sw = kc_load_u32_be_msg(salt, salt_idx * 4); L = L ^ sw;
         salt_idx = salt_idx + 1; if salt_idx == 4 { salt_idx = 0; }
-        sw = kc_load_u32_be(salt, salt_idx * 4); R = R ^ sw;
+        sw = kc_load_u32_be_msg(salt, salt_idx * 4); R = R ^ sw;
         salt_idx = salt_idx + 1; if salt_idx == 4 { salt_idx = 0; }
-        kc_store_u32_be(laddr, 0, L);
-        kc_store_u32_be(raddr, 0, R);
+        kc_store_u32_be_out(laddr, 0, L);
+        kc_store_u32_be_out(raddr, 0, R);
         blowfish_encrypt(ctx, laddr, raddr);
-        L = kc_load_u32_be(laddr, 0);
-        R = kc_load_u32_be(raddr, 0);
+        L = kc_load_u32_be_out(laddr, 0);
+        R = kc_load_u32_be_out(raddr, 0);
         bf_set_p(ctx, 2 * i, L);
         bf_set_p(ctx, 2 * i + 1, R);
         i = i + 1;
@@ -462,55 +566,51 @@ transform blowfish_expand_state(ctx: Address, salt: Address) {
     while box < 4 {
         j = 0;
         while j < 128 {
-            sw = kc_load_u32_be(salt, salt_idx * 4); L = L ^ sw;
+            sw = kc_load_u32_be_msg(salt, salt_idx * 4); L = L ^ sw;
             salt_idx = salt_idx + 1; if salt_idx == 4 { salt_idx = 0; }
-            sw = kc_load_u32_be(salt, salt_idx * 4); R = R ^ sw;
+            sw = kc_load_u32_be_msg(salt, salt_idx * 4); R = R ^ sw;
             salt_idx = salt_idx + 1; if salt_idx == 4 { salt_idx = 0; }
-            kc_store_u32_be(laddr, 0, L);
-            kc_store_u32_be(raddr, 0, R);
+            kc_store_u32_be_out(laddr, 0, L);
+            kc_store_u32_be_out(raddr, 0, R);
             blowfish_encrypt(ctx, laddr, raddr);
-            L = kc_load_u32_be(laddr, 0);
-            R = kc_load_u32_be(raddr, 0);
+            L = kc_load_u32_be_out(laddr, 0);
+            R = kc_load_u32_be_out(raddr, 0);
             bf_set_s(ctx, box, 2 * j, L);
             bf_set_s(ctx, box, 2 * j + 1, R);
             j = j + 1;
         }
         box = box + 1;
     }
-
-    free(laddr);
-    free(raddr);
 }
 
 // Initialise the Blowfish context:
 //   1. Deterministic LCG fill of P and S (seed = 0x243F6A88).
 //   2. XOR the key bytes into the P-array (cycling, byte-level).
 //   3. One salted state expansion (the first of the 2^cost Eksblowfish rounds).
-transform blowfish_init(ctx: Address, key: Address, key_len: u32, salt: Address) {
-    state = allocate(4);
-    kc_store_u32_be(state, 0, 608135816);   // 0x243F6A88
-    i: u32 = 0;
+transform blowfish_init(ctx: State<KcCtx>, key: State<HmacMsg>, key_len: u32, salt: State<HmacMsg>) {
+    let state = state_new(HmacOut);
+    kc_store_u32_be_out(state, 0, 608135816);   // 0x243F6A88
+    let i: u32 = 0;
     while i < 18 {
         bf_set_p(ctx, i, bf_lcg_next(state));
         i = i + 1;
     }
-    box: u32 = 0;
+    let box: u32 = 0;
     while box < 4 {
-        j: u32 = 0;
+        let j: u32 = 0;
         while j < 256 {
             bf_set_s(ctx, box, j, bf_lcg_next(state));
             j = j + 1;
         }
         box = box + 1;
     }
-    free(state);
 
     if key_len > 0 {
         i = 0;
         while i < 72 {
-            pb: u32 = *(ctx + i);
-            kb: u32 = *(key + (i % key_len));
-            *(ctx + i) = (pb ^ kb) & 255;
+            let pb: u32 = ctx.bytes[i] as u32;
+            let kb: u32 = key.bytes[i % key_len] as u32;
+            ctx.bytes[i] = ((pb ^ kb) & 255) as u8;
             i = i + 1;
         }
     }
@@ -520,18 +620,18 @@ transform blowfish_init(ctx: Address, key: Address, key_len: u32, salt: Address)
 
 // Eksblowfish key schedule: blowfish_init (1 salted expand) followed by
 // (2^cost - 1) more salted expands, for a total of 2^cost expansions.
-transform eks_blowfish_setup(cost: u32, salt: Address,
-                      password: Address, pass_len: u32, ctx: Address) {
+transform eks_blowfish_setup(cost: u32, salt: State<HmacMsg>,
+                      password: State<HmacMsg>, pass_len: u32, ctx: State<KcCtx>) {
     blowfish_init(ctx, password, pass_len, salt);
 
-    rounds: u32 = 1;
-    c: u32 = 0;
+    let rounds: u32 = 1;
+    let c: u32 = 0;
     while c < cost {
         rounds = rounds * 2;
         c = c + 1;
     }
 
-    r: u32 = 1;
+    let r: u32 = 1;
     while r < rounds {
         blowfish_expand_state(ctx, salt);
         r = r + 1;
@@ -543,60 +643,61 @@ transform eks_blowfish_setup(cost: u32, salt: Address,
 //   salt:      16-byte (128-bit) salt
 //   cost:      exponent; setup runs 2^cost salted expansions
 //   hash_out:  24-byte output buffer
-transform bcrypt_hash(password: Address, pass_len: u32, salt: Address,
-               cost: u32, hash_out: Address) -> u32 {
-    ctx = allocate(BF_CTX_SIZE);
+transform bcrypt_hash(password: State<HmacMsg>, pass_len: u32, salt: State<HmacMsg>,
+               cost: u32, hash_out: State<HmacMsg>) -> u32 {
+    let ctx = state_new(KcCtx);
     eks_blowfish_setup(cost, salt, password, pass_len, ctx);
 
     // 24-byte magic "OrpheanBeholderScryDoubt" (the bcrypt ciphertext base)
-    magic = allocate(24);
-    *(magic + 0) = 79;    // O
-    *(magic + 1) = 114;   // r
-    *(magic + 2) = 112;   // p
-    *(magic + 3) = 104;   // h
-    *(magic + 4) = 101;   // e
-    *(magic + 5) = 97;    // a
-    *(magic + 6) = 110;   // n
-    *(magic + 7) = 66;    // B
-    *(magic + 8) = 101;   // e
-    *(magic + 9) = 104;   // h
-    *(magic + 10) = 111;  // o
-    *(magic + 11) = 108;  // l
-    *(magic + 12) = 100;  // d
-    *(magic + 13) = 101;  // e
-    *(magic + 14) = 114;  // r
-    *(magic + 15) = 83;   // S
-    *(magic + 16) = 99;   // c
-    *(magic + 17) = 114;  // r
-    *(magic + 18) = 121;  // y
-    *(magic + 19) = 68;   // D
-    *(magic + 20) = 111;  // o
-    *(magic + 21) = 117;  // u
-    *(magic + 22) = 98;   // b
-    *(magic + 23) = 116;  // t
+    let magic = state_new(HmacOut);
+    magic.bytes[0] = 79;    // O
+    magic.bytes[1] = 114;   // r
+    magic.bytes[2] = 112;   // p
+    magic.bytes[3] = 104;   // h
+    magic.bytes[4] = 101;   // e
+    magic.bytes[5] = 97;    // a
+    magic.bytes[6] = 110;   // n
+    magic.bytes[7] = 66;    // B
+    magic.bytes[8] = 101;   // e
+    magic.bytes[9] = 104;   // h
+    magic.bytes[10] = 111;  // o
+    magic.bytes[11] = 108;  // l
+    magic.bytes[12] = 100;  // d
+    magic.bytes[13] = 101;  // e
+    magic.bytes[14] = 114;  // r
+    magic.bytes[15] = 83;   // S
+    magic.bytes[16] = 99;   // c
+    magic.bytes[17] = 114;  // r
+    magic.bytes[18] = 121;  // y
+    magic.bytes[19] = 68;   // D
+    magic.bytes[20] = 111;  // o
+    magic.bytes[21] = 117;  // u
+    magic.bytes[22] = 98;   // b
+    magic.bytes[23] = 116;  // t
 
-    laddr = allocate(4);
-    raddr = allocate(4);
-    iter: u32 = 0;
-    blk: u32 = 0;
+    let laddr = state_new(HmacOut);
+    let raddr = state_new(HmacOut);
+    let iter: u32 = 0;
+    let blk: u32 = 0;
     while iter < 64 {
         blk = 0;
         while blk < 3 {
-            kc_store_u32_be(laddr, 0, kc_load_u32_be(magic, blk * 8));
-            kc_store_u32_be(raddr, 0, kc_load_u32_be(magic, blk * 8 + 4));
+            kc_store_u32_be_out(laddr, 0, kc_load_u32_be_out(magic, blk * 8));
+            kc_store_u32_be_out(raddr, 0, kc_load_u32_be_out(magic, blk * 8 + 4));
             blowfish_encrypt(ctx, laddr, raddr);
-            kc_store_u32_be(magic, blk * 8, kc_load_u32_be(laddr, 0));
-            kc_store_u32_be(magic, blk * 8 + 4, kc_load_u32_be(raddr, 0));
+            kc_store_u32_be_out(magic, blk * 8, kc_load_u32_be_out(laddr, 0));
+            kc_store_u32_be_out(magic, blk * 8 + 4, kc_load_u32_be_out(raddr, 0));
             blk = blk + 1;
         }
         iter = iter + 1;
     }
 
-    kc_memcpy(hash_out, magic, 24);
+    // Copy 24-byte magic to hash_out.
+    let c: u32 = 0;
+    while c < 24 {
+        hash_out.bytes[c] = magic.bytes[c];
+        c = c + 1;
+    }
 
-    free(ctx);
-    free(magic);
-    free(laddr);
-    free(raddr);
     return 0;
 }
