@@ -3276,22 +3276,28 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     let mut code = Vec::new();
                     // Load return value into RAX (and EDX for 64-bit returns).
                     // i386 cdecl: 64-bit return values are in EDX:EAX.
-                    // Check result_types first; fall back to parsing the
-                    // function name (e.g. "fn_foo_entry(u64)" → 64-bit).
+                    //
+                    // CRITICAL FIX: result_types may be empty (the IRBuilder
+                    // deliberately doesn't populate it for non-wasm backends to
+                    // avoid wasm32 type mismatch issues). When empty, the old
+                    // code fell back to parsing the function name for '(u64)'
+                    // — but VUMA function names (like "rotr64") don't contain
+                    // type info, so the fallback returned false, causing the
+                    // Ret handler to NOT load EDX (high 32 bits of u64 return).
+                    //
+                    // Fix: when result_types is empty AND the return value
+                    // comes from a Register (not an immediate), ALWAYS load
+                    // both EAX and EDX. This is safe because:
+                    // - 32-bit returns have garbage in EDX (harmless)
+                    // - 64-bit returns have valid data in EDX (required)
+                    // - The caller stores both EDX:EAX unconditionally
                     let is_64bit_ret = func.result_types.first()
                         .map(|t| matches!(t, IRType::I64 | IRType::U64 | IRType::F64))
                         .unwrap_or_else(|| {
-                            if let Some(open) = func.name.rfind('(') {
-                                if let Some(close) = func.name.rfind(')') {
-                                    if close > open {
-                                        let ret_ty = &func.name[open + 1..close];
-                                        return ret_ty == "u64" || ret_ty == "i64"
-                                            || ret_ty == "U64" || ret_ty == "I64"
-                                            || ret_ty == "f64" || ret_ty == "F64";
-                                    }
-                                }
-                            }
-                            false
+                            // result_types is empty — check the return value
+                            // type. If it's a Register vreg, it might be u64.
+                            // Always assume 64-bit return to be safe.
+                            true
                         });
                     if let Some(val) = values.first() {
                         if is_64bit_ret {
