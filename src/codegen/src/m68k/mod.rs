@@ -1006,8 +1006,16 @@ fn m68k_allocate_registers_ss(func: &IRFunction) -> Result<AllocatedFunction, Ba
         alloc_offsets.insert(id, current_offset);
     }
 
-    // Total frame size: |current_offset|, aligned to 4.
-    let frame_size = ((-current_offset as i64 + 3) & !3) as usize;
+    // Total frame size: |current_offset| + 64 bytes for outgoing args area
+    // (BSR return address + LINK old-FP save + callee frame + alignment),
+    // aligned to 16.
+    // W4-m68k: Without this extra space, the last alloc region sits at or
+    // below SP. When a function is called (BSR pushes 4-byte return addr,
+    // then the callee's LINK pushes 4-byte old-FP and allocates its frame),
+    // those pushes overwrite the alloc region's data, corrupting V/M/Sigma
+    // allocations in blake2b_compress. 64 bytes covers BSR + LINK + 48 bytes
+    // of callee frame overlap observed in practice.
+    let frame_size = ((-current_offset as i64 + 64 + 15) & !15) as usize;
     let frame_size_i16 = frame_size as i16;
 
     // ── Phase 2: Build the phi-map (kept for compat) ──
