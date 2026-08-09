@@ -3631,17 +3631,22 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     }
 
                     // Store return value to dst's stack slot.
-                    // VUMA (non-extern) functions return 64-bit values in
-                    // EDX:EAX.  Extern calls return 32-bit in EAX only.
+                    // VUMA functions return 64-bit values in EDX:EAX.
+                    // Extern "C" functions return 32-bit in EAX only, but
+                    // storing EDX too is harmless (it's undefined but
+                    // ignored for 32-bit returns).
+                    //
+                    // CRITICAL FIX: previously, `is_extern` was used to
+                    // decide whether to store EDX. But cross-module VUMA
+                    // function calls (e.g., sha384_compress calling rotr64)
+                    // were incorrectly marked as extern, causing the high
+                    // 32 bits of u64 return values to be lost. Now we ALWAYS
+                    // store both EAX and EDX.
                     if let Some(d) = dst {
                         let dst_id = d.as_register().unwrap_or(0);
-                        if !is_extern {
-                            let dst_off = slot_offset(dst_id);
-                            code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));     // dst.low  = EAX
-                            code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off + 4, Gpr::Rdx)); // dst.high = EDX
-                        } else {
-                            code.extend(store_vreg(dst_id, Gpr::Rax));
-                        }
+                        let dst_off = slot_offset(dst_id);
+                        code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));     // dst.low  = EAX
+                        code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off + 4, Gpr::Rdx)); // dst.high = EDX
                     }
                     code
                 }
