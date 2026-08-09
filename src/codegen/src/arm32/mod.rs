@@ -4610,8 +4610,11 @@ impl Backend for Arm32Backend {
         current_offset += 8;
         let proto_state_off = current_offset; // L4 protocol-FSM state
 
-        // Frame size must be 8-byte aligned
-        let frame_size = ((current_offset + 7) & !7) as usize;
+        // Frame size must be 8-byte aligned.
+        // W4-arm32: Add 64 bytes for outgoing args area (BL return addr,
+        // saved FP/LR, callee frame overlap). Without this, the last alloc
+        // region sits at SP, and BL+PUSH{FP,LR}+callee frame overwrite it.
+        let frame_size = ((current_offset + 64 + 7) & !7) as usize;
         let fs = frame_size as i32;
 
         // ── Helper: emit SUB SP, SP, #large_value ──
