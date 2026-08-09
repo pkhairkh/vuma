@@ -5666,11 +5666,26 @@ impl Backend for Arm32Backend {
                         // Determine if this is a 64-bit operation.
                         // U64/I64 → 64-bit. None → 64-bit (default, for safety).
                         // Explicit 32-bit types (U32/I32/U16/U8/etc) → 32-bit.
+                        //
+                        // EXCEPTION: SRem/URem/SDiv/UDiv/Mul on 32-bit types must
+                        // route through the 64-bit path. The 32-bit BinOp fast-path
+                        // below has no SRem/URem/SDiv/UDiv/Mul handlers (its
+                        // `_ => {}` catch-all silently drops them — leaving R0 =
+                        // the dividend, so `8 % 5` returns 8 instead of 3).
+                        // The 64-bit path's software modulo loop (emit_divmod)
+                        // works correctly on the low word for 32-bit operands
+                        // because ss_load_value_64 zero-extends a 32-bit value
+                        // into R0:R2 (R2=0), and the result is stored with
+                        // ss_store_32_zero which keeps only the low word.
                         let is_64bit = matches!(ty.as_ref(),
                             Some(crate::ir::IRType::U64)
                             | Some(crate::ir::IRType::I64)
                             | Some(crate::ir::IRType::Channel(_)))
-                            || ty.is_none();
+                            || ty.is_none()
+                            || matches!(op,
+                                BinOpKind::SRem | BinOpKind::URem
+                                | BinOpKind::SDiv | BinOpKind::UDiv
+                                | BinOpKind::Mul);
                         if !is_64bit {
                             // 32-bit BinOp: operate on low word only, zero high word.
                             code.extend(ss_load_value(lhs, &vreg_stack_slots, Gpr::R0));
