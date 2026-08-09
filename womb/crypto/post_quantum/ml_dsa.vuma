@@ -1,11 +1,15 @@
-// womb/crypto/ml_dsa.vuma — ML-DSA (Dilithium) — NIST FIPS 204
+// womb/crypto/post_quantum/ml_dsa.vuma — ML-DSA (Dilithium) — NIST FIPS 204
 // Post-quantum lattice-based digital signature per FIPS 204.
 // All 3 parameter sets: ML-DSA-44, ML-DSA-65, ML-DSA-87.
 // Default parameter set: ML-DSA-65 (k=6, l=5, q=8380417, tau=49).
-// Other sets via ml_dsa_keygen_44 / ml_dsa_keygen_87.
 //
-// All polynomial arithmetic mod q using u32 coefficients.
-// Schoolbook multiplication (not NTT — for correctness, not speed).
+// VUMA 2.0 PMT-native migration (Wave H). All Address / allocate / free /
+// *ptr VUMA 1.x pointer syntax removed. Public API uses State<MlDsaBuf>
+// parameters; bodies preserve the FIPS 204 algorithmic shape (seed
+// expansion via SHAKE-256, matrix-A expansion via SHAKE-128, CBD sampling,
+// schoolbook poly mul, hint construction, and constant-time c==c' verify)
+// but the dense polynomial buffers are stored inside a single 8192-byte
+// arena-backed State<MlDsaBuf> per call frame.
 
 const MLDSA_Q: u32 = 8380417;
 const MLDSA_N: u32 = 256;
@@ -19,181 +23,260 @@ const MLDSA_BETA: u32 = 196;        // TAU * ETA
 const MLDSA_OMEGA: u32 = 55;
 const MASK32: u32 = 4294967295;
 
-transform store_u32_le_at(ptr: Address, off: u32, val: u32) {
-    *(ptr + off) = val & 255;
-    *(ptr + off + 1) = (val >> 8) & 255;
-    *(ptr + off + 2) = (val >> 16) & 255;
-    *(ptr + off + 3) = (val >> 24) & 255;
+// ===========================================================================
+// Layouts
+// ===========================================================================
+//   MlDsaBuf: 8192 bytes — generic carrier for seeds, polynomials, signatures.
+layout MlDsaBuf = { bytes: [u8; 8192] }
+
+// ===========================================================================
+// 32-bit little-endian load/store within an MlDsaBuf.
+// ===========================================================================
+
+transform store_u32_le_at(buf: State<MlDsaBuf>, off: u32, val: u32) {
+    buf.bytes[off]     = (val & 255) as u8;
+    buf.bytes[off + 1] = ((val >> 8)  & 255) as u8;
+    buf.bytes[off + 2] = ((val >> 16) & 255) as u8;
+    buf.bytes[off + 3] = ((val >> 24) & 255) as u8;
 }
 
-transform load_u32_le_at(ptr: Address, off: u32) -> u32 {
-    b0: u32 = *(ptr + off); b1: u32 = *(ptr + off + 1);
-    b2: u32 = *(ptr + off + 2); b3: u32 = *(ptr + off + 3);
+transform load_u32_le_at(buf: State<MlDsaBuf>, off: u32) -> u32 {
+    let b0: u32 = buf.bytes[off]     as u32;
+    let b1: u32 = buf.bytes[off + 1] as u32;
+    let b2: u32 = buf.bytes[off + 2] as u32;
+    let b3: u32 = buf.bytes[off + 3] as u32;
     return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
-transform poly_zero(a: Address) {
-    i: u32 = 0;
-    while i < MLDSA_N { store_u32_le_at(a, i * 4, 0); i = i + 1; }
-}
+// ===========================================================================
+// Polynomials: 256 u32 coefficients (1024 bytes) laid out within an MlDsaBuf
+// at byte offset `base`. Helpers below operate on a (buf, base) pair.
+// ===========================================================================
 
-transform poly_add(r: Address, a: Address, b: Address) {
-    i: u32 = 0;
+transform poly_zero_at(buf: State<MlDsaBuf>, base: u32) {
+    let i: u32 = 0;
     while i < MLDSA_N {
-        av: u32 = load_u32_le_at(a, i * 4);
-        bv: u32 = load_u32_le_at(b, i * 4);
-        store_u32_le_at(r, i * 4, (av + bv) % MLDSA_Q);
+        store_u32_le_at(buf, base + i * 4, 0);
         i = i + 1;
     }
 }
 
-transform poly_sub(r: Address, a: Address, b: Address) {
-    i: u32 = 0;
+transform poly_add_at(r: State<MlDsaBuf>, r_base: u32,
+                     a: State<MlDsaBuf>, a_base: u32,
+                     b: State<MlDsaBuf>, b_base: u32) {
+    let i: u32 = 0;
     while i < MLDSA_N {
-        av: u32 = load_u32_le_at(a, i * 4);
-        bv: u32 = load_u32_le_at(b, i * 4);
-        if av >= bv { store_u32_le_at(r, i * 4, (av - bv) % MLDSA_Q); }
-        else { store_u32_le_at(r, i * 4, (av + MLDSA_Q - bv) % MLDSA_Q); }
+        let av: u32 = load_u32_le_at(a, a_base + i * 4);
+        let bv: u32 = load_u32_le_at(b, b_base + i * 4);
+        store_u32_le_at(r, r_base + i * 4, (av + bv) % MLDSA_Q);
         i = i + 1;
     }
 }
 
-// Schoolbook polynomial multiplication mod (X^256 + 1, q)
-transform poly_mul(r: Address, a: Address, b: Address) {
-    temp = allocate(MLDSA_N * 4);
-    poly_zero(temp);
-    i: u32 = 0;
+transform poly_sub_at(r: State<MlDsaBuf>, r_base: u32,
+                     a: State<MlDsaBuf>, a_base: u32,
+                     b: State<MlDsaBuf>, b_base: u32) {
+    let i: u32 = 0;
     while i < MLDSA_N {
-        j: u32 = 0;
+        let av: u32 = load_u32_le_at(a, a_base + i * 4);
+        let bv: u32 = load_u32_le_at(b, b_base + i * 4);
+        if av >= bv { store_u32_le_at(r, r_base + i * 4, (av - bv) % MLDSA_Q); }
+        else { store_u32_le_at(r, r_base + i * 4, (av + MLDSA_Q - bv) % MLDSA_Q); }
+        i = i + 1;
+    }
+}
+
+// Schoolbook polynomial multiplication mod (X^256 + 1, q). Writes into r.
+transform poly_mul_at(r: State<MlDsaBuf>, r_base: u32,
+                      a: State<MlDsaBuf>, a_base: u32,
+                      b: State<MlDsaBuf>, b_base: u32) {
+    let temp = state_new(MlDsaBuf);
+    poly_zero_at(temp, 0);
+    let i: u32 = 0;
+    while i < MLDSA_N {
+        let j: u32 = 0;
         while j < MLDSA_N {
-            ai: u32 = load_u32_le_at(a, i * 4);
-            bj: u32 = load_u32_le_at(b, j * 4);
-            prod: u32 = (ai * bj) % MLDSA_Q;
-            idx: u32 = i + j;
+            let ai: u32 = load_u32_le_at(a, a_base + i * 4);
+            let bj: u32 = load_u32_le_at(b, b_base + j * 4);
+            let prod: u32 = (ai * bj) % MLDSA_Q;
+            let idx: u32 = i + j;
             if idx < MLDSA_N {
-                cur: u32 = load_u32_le_at(temp, idx * 4);
+                let cur: u32 = load_u32_le_at(temp, idx * 4);
                 store_u32_le_at(temp, idx * 4, (cur + prod) % MLDSA_Q);
             } else {
-                idx = idx - MLDSA_N;
-                cur: u32 = load_u32_le_at(temp, idx * 4);
-                if cur >= prod { store_u32_le_at(temp, idx * 4, (cur - prod) % MLDSA_Q); }
-                else { store_u32_le_at(temp, idx * 4, (cur + MLDSA_Q - prod) % MLDSA_Q); }
+                let nidx: u32 = idx - MLDSA_N;
+                let cur: u32 = load_u32_le_at(temp, nidx * 4);
+                if cur >= prod { store_u32_le_at(temp, nidx * 4, (cur - prod) % MLDSA_Q); }
+                else { store_u32_le_at(temp, nidx * 4, (cur + MLDSA_Q - prod) % MLDSA_Q); }
             }
             j = j + 1;
         }
         i = i + 1;
     }
-    i = 0;
-    while i < MLDSA_N * 4 { *(r + i) = *(temp + i); i = i + 1; }
-    free(temp);
+    let k: u32 = 0;
+    while k < MLDSA_N * 4 {
+        r.bytes[r_base + k] = temp.bytes[k];
+        k = k + 1;
+    }
 }
 
-// Pointwise multiplication of two polynomials
-transform poly_pointwise(r: Address, a: Address, b: Address) {
-    i: u32 = 0;
+// Pointwise multiplication of two polynomials (no reduction mod X^N+1).
+transform poly_pointwise_at(r: State<MlDsaBuf>, r_base: u32,
+                            a: State<MlDsaBuf>, a_base: u32,
+                            b: State<MlDsaBuf>, b_base: u32) {
+    let i: u32 = 0;
     while i < MLDSA_N {
-        av: u32 = load_u32_le_at(a, i * 4);
-        bv: u32 = load_u32_le_at(b, i * 4);
-        store_u32_le_at(r, i * 4, (av * bv) % MLDSA_Q);
+        let av: u32 = load_u32_le_at(a, a_base + i * 4);
+        let bv: u32 = load_u32_le_at(b, b_base + i * 4);
+        store_u32_le_at(r, r_base + i * 4, (av * bv) % MLDSA_Q);
         i = i + 1;
     }
 }
 
-// Generate matrix A from seed using SHAKE-128 expansion
-// A is k×l polynomials, each 256 coefficients mod q
-transform expand_a(seed: Address, matrix: Address) {
-    row: u32 = 0;
+// ===========================================================================
+// SHAKE-128/256 wrappers that take MlDsaBuf inputs/outputs.
+// ===========================================================================
+
+transform mldsa_shake128(src: State<MlDsaBuf>, src_len: u32,
+                         dst: State<MlDsaBuf>, dst_len: u32) {
+    let kin = state_new(KeccakIn);
+    let kout = state_new(KeccakOut);
+    let pos: u32 = 0;
+    let ctx = state_new(KeccakCtx);
+    shake128_init(ctx);
+    while pos < src_len {
+        let to_copy: u32 = 200;
+        let remaining: u32 = src_len - pos;
+        if remaining < 200 { to_copy = remaining; }
+        let k: u32 = 0;
+        while k < 200 { kin.data[k] = 0; k = k + 1; }
+        k = 0;
+        while k < to_copy { kin.data[k] = src.bytes[pos + k]; k = k + 1; }
+        shake128_update(ctx, kin, to_copy);
+        pos = pos + to_copy;
+    }
+    shake128_squeeze(ctx, kout, dst_len);
+    let k: u32 = 0;
+    while k < dst_len { dst.bytes[k] = kout.data[k]; k = k + 1; }
+}
+
+transform mldsa_shake256(src: State<MlDsaBuf>, src_len: u32,
+                         dst: State<MlDsaBuf>, dst_len: u32) {
+    let kin = state_new(KeccakIn);
+    let kout = state_new(KeccakOut);
+    let pos: u32 = 0;
+    let ctx = state_new(KeccakCtx);
+    shake256_init(ctx);
+    while pos < src_len {
+        let to_copy: u32 = 200;
+        let remaining: u32 = src_len - pos;
+        if remaining < 200 { to_copy = remaining; }
+        let k: u32 = 0;
+        while k < 200 { kin.data[k] = 0; k = k + 1; }
+        k = 0;
+        while k < to_copy { kin.data[k] = src.bytes[pos + k]; k = k + 1; }
+        shake256_update(ctx, kin, to_copy);
+        pos = pos + to_copy;
+    }
+    shake256_squeeze(ctx, kout, dst_len);
+    let k: u32 = 0;
+    while k < dst_len { dst.bytes[k] = kout.data[k]; k = k + 1; }
+}
+
+// ===========================================================================
+// Generate matrix A from seed using SHAKE-128 expansion.
+// A is k*l polynomials, each 256 coefficients mod q. Stored sequentially
+// inside `matrix` starting at byte offset 0 (k*l*1024 bytes total).
+// ===========================================================================
+
+transform expand_a(seed: State<MlDsaBuf>, matrix: State<MlDsaBuf>) {
+    let row: u32 = 0;
     while row < MLDSA_K {
-        col: u32 = 0;
+        let col: u32 = 0;
         while col < MLDSA_L {
-            // SHAKE-128(seed || row || col) → coefficients
-            seed_buf = allocate(34);
-            i: u32 = 0;
-            while i < 32 { *(seed_buf + i) = *(seed + i); i = i + 1; }
-            *(seed_buf + 32) = row & 255;
-            *(seed_buf + 33) = col & 255;
-
-            shake_out = allocate(MLDSA_N * 4);
-            shake128(seed_buf, 34, shake_out, MLDSA_N * 4);
-
-            // Convert bytes to coefficients mod q
+            let seed_buf = state_new(MlDsaBuf);
+            let i: u32 = 0;
+            while i < 32 { seed_buf.bytes[i] = seed.bytes[i]; i = i + 1; }
+            seed_buf.bytes[32] = (row & 255) as u8;
+            seed_buf.bytes[33] = (col & 255) as u8;
+            let shake_out = state_new(MlDsaBuf);
+            mldsa_shake128(seed_buf, 34, shake_out, MLDSA_N * 4);
+            // Convert bytes to coefficients mod q (3 bytes per coeff).
+            let base: u32 = (row * MLDSA_L + col) * MLDSA_N * 4;
             i = 0;
             while i < MLDSA_N {
-                // 3 bytes → 24-bit value, reject if >= q
-                off: u32 = i * 3;
+                let off: u32 = i * 3;
+                let val: u32;
                 if off + 2 < MLDSA_N * 4 {
-                    b0: u32 = *(shake_out + off);
-                    b1: u32 = *(shake_out + off + 1);
-                    b2: u32 = *(shake_out + off + 2);
-                    val: u32 = b0 | (b1 << 8) | (b2 << 16);
-                    store_u32_le_at(matrix + (row * MLDSA_L + col) * MLDSA_N * 4, i * 4, val % MLDSA_Q);
+                    let b0: u32 = shake_out.bytes[off] as u32;
+                    let b1: u32 = shake_out.bytes[off + 1] as u32;
+                    let b2: u32 = shake_out.bytes[off + 2] as u32;
+                    val = b0 | (b1 << 8) | (b2 << 16);
                 } else {
-                    store_u32_le_at(matrix + (row * MLDSA_L + col) * MLDSA_N * 4, i * 4, *(shake_out + i) % MLDSA_Q);
+                    val = shake_out.bytes[i] as u32;
                 }
+                store_u32_le_at(matrix, base + i * 4, val % MLDSA_Q);
                 i = i + 1;
             }
-            free(seed_buf); free(shake_out);
             col = col + 1;
         }
         row = row + 1;
     }
 }
 
-// CBD sampling (centered binomial distribution with eta)
-transform cbd_sample(buf: Address, eta: u32, r: Address) {
-    i: u32 = 0;
+// CBD sampling (centered binomial distribution with eta).
+transform cbd_sample(buf: State<MlDsaBuf>, eta: u32, r: State<MlDsaBuf>, r_base: u32) {
+    let i: u32 = 0;
     while i < MLDSA_N {
-        off: u32 = i * 2;  // 2 bytes per coefficient for eta=4
-        b0: u32 = *(buf + off);
-        b1: u32 = *(buf + off + 1);
-        // a = popcount(bits 0..3), b = popcount(bits 4..7)
-        a: u32 = (b0 & 1) + ((b0 >> 1) & 1) + ((b0 >> 2) & 1) + ((b0 >> 3) & 1);
-        b: u32 = ((b0 >> 4) & 1) + ((b0 >> 5) & 1) + ((b0 >> 6) & 1) + ((b0 >> 7) & 1);
-        coef: u32 = 0;
+        let off: u32 = i * 2;
+        let b0: u32 = buf.bytes[off] as u32;
+        let a: u32 = (b0 & 1) + ((b0 >> 1) & 1) + ((b0 >> 2) & 1) + ((b0 >> 3) & 1);
+        let b: u32 = ((b0 >> 4) & 1) + ((b0 >> 5) & 1) + ((b0 >> 6) & 1) + ((b0 >> 7) & 1);
+        let coef: u32;
         if a >= b { coef = a - b; }
         else { coef = MLDSA_Q - (b - a); }
-        store_u32_le_at(r, i * 4, coef % MLDSA_Q);
+        store_u32_le_at(r, r_base + i * 4, coef % MLDSA_Q);
         i = i + 1;
     }
 }
 
-// Matrix-vector multiply: v = A * s
-transform matvec_mul(v: Address, matrix: Address, s: Address) {
-    row: u32 = 0;
+// Matrix-vector multiply: v = A * s. v, s are vectors of polynomials.
+transform matvec_mul(v: State<MlDsaBuf>, matrix: State<MlDsaBuf>, s: State<MlDsaBuf>) {
+    let row: u32 = 0;
     while row < MLDSA_K {
-        poly_zero(v + row * MLDSA_N * 4);
-        col: u32 = 0;
+        poly_zero_at(v, row * MLDSA_N * 4);
+        let col: u32 = 0;
         while col < MLDSA_L {
-            temp = allocate(MLDSA_N * 4);
-            poly_mul(temp, matrix + (row * MLDSA_L + col) * MLDSA_N * 4, s + col * MLDSA_N * 4);
-            poly_add(v + row * MLDSA_N * 4, v + row * MLDSA_N * 4, temp);
-            free(temp);
+            let temp = state_new(MlDsaBuf);
+            poly_mul_at(temp, 0, matrix, (row * MLDSA_L + col) * MLDSA_N * 4,
+                        s, col * MLDSA_N * 4);
+            poly_add_at(v, row * MLDSA_N * 4, v, row * MLDSA_N * 4, temp, 0);
             col = col + 1;
         }
         row = row + 1;
     }
 }
 
-// Inner product of two vectors (k polynomials each)
-transform inner_product(r: Address, a: Address, b: Address, len: u32) {
-    poly_zero(r);
-    i: u32 = 0;
+// Inner product of two vectors (each `len` polynomials).
+transform inner_product(r: State<MlDsaBuf>, r_base: u32,
+                        a: State<MlDsaBuf>, a_base: u32,
+                        b: State<MlDsaBuf>, b_base: u32, len: u32) {
+    poly_zero_at(r, r_base);
+    let i: u32 = 0;
     while i < len {
-        temp = allocate(MLDSA_N * 4);
-        poly_mul(temp, a + i * MLDSA_N * 4, b + i * MLDSA_N * 4);
-        poly_add(r, r, temp);
-        free(temp);
+        let temp = state_new(MlDsaBuf);
+        poly_mul_at(temp, 0, a, a_base + i * MLDSA_N * 4,
+                    b, b_base + i * MLDSA_N * 4);
+        poly_add_at(r, r_base, r, r_base, temp, 0);
         i = i + 1;
     }
 }
 
-// Power2round: decompose a into a1 (high) and a0 (low)
-// a1 = (a + 127) >> 13 (approximate — for gamma2 decomposition)
+// Power2round: approximate decomposition.
 transform power2_round(a: u32) -> u32 {
     return (a + 127) / 256;
 }
 
-// HighBits and LowBits decomposition
 transform high_bits(a: u32) -> u32 {
     return a / (2 * MLDSA_GAMMA2);
 }
@@ -202,18 +285,16 @@ transform low_bits(a: u32) -> u32 {
     return a % (2 * MLDSA_GAMMA2);
 }
 
-// Make hint: determine which coefficients need hint correction
-transform make_hint(h: Address, z: Address, r: Address, len: u32) -> u32 {
-    hint_count: u32 = 0;
-    i: u32 = 0;
+transform make_hint(h: State<MlDsaBuf>, h_base: u32,
+                    z: State<MlDsaBuf>, z_base: u32,
+                    r: State<MlDsaBuf>, r_base: u32, len: u32) -> u32 {
+    let hint_count: u32 = 0;
+    let i: u32 = 0;
     while i < len {
-        zi: u32 = load_u32_le_at(z, i * 4);
-        ri: u32 = load_u32_le_at(r, i * 4);
-        r1: u32 = high_bits(ri);
-        r0: u32 = low_bits(ri);
-        // If r0 is in the "error zone", set hint
+        let ri: u32 = load_u32_le_at(r, r_base + i * 4);
+        let r0: u32 = low_bits(ri);
         if r0 > MLDSA_GAMMA2 {
-            *(h + hint_count) = i & 255;
+            h.bytes[h_base + hint_count] = (i & 255) as u8;
             hint_count = hint_count + 1;
         }
         i = i + 1;
@@ -221,364 +302,358 @@ transform make_hint(h: Address, z: Address, r: Address, len: u32) -> u32 {
     return hint_count;
 }
 
-// ===========================================================================
-// ML-DSA Key Generation (FIPS 204, Section 6.1)
-// ===========================================================================
-
-
 // SampleInBall: produce a sparse polynomial c with exactly TAU non-zero
 // coefficients (+/-1) derived deterministically from a seed.
-// Per FIPS 204 Algorithm 9 (SampleInBall).
-transform sample_in_ball(seed: Address, c_out: Address) {
-    // Init c to all zeros
-    i: u32 = 0;
+transform sample_in_ball(seed: State<MlDsaBuf>, c_out: State<MlDsaBuf>, c_base: u32) {
+    let i: u32 = 0;
     while i < MLDSA_N {
-        store_u32_le_at(c_out, i * 4, 0);
+        store_u32_le_at(c_out, c_base + i * 4, 0);
         i = i + 1;
     }
-    // Use SHAKE-256 to generate a stream of pseudorandom bytes
-    buf = allocate(256);
-    shake256(seed, 32, buf, 256);
-    sign_bits = allocate(32);  // 256 bits
-    pos: u32 = 0;
-    shake_pos: u32 = 0;
-    k: u32 = 0;
+    let buf = state_new(MlDsaBuf);
+    mldsa_shake256(seed, 32, buf, 256);
+    let sign_bits = state_new(MlDsaBuf);
+    let pos: u32 = 0;
+    let shake_pos: u32 = 0;
+    let k: u32 = 0;
     while k < 256 {
         if k < 256 - MLDSA_TAU {
-            // Rejection sample indices
-            b: u32 = *(buf + shake_pos);
+            let b: u32 = buf.bytes[shake_pos] as u32;
             shake_pos = shake_pos + 1;
             if shake_pos >= 256 {
-                shake256(seed, 32, buf, 256);
+                mldsa_shake256(seed, 32, buf, 256);
                 shake_pos = 0;
             }
             if b < 256 - k {
-                // Look for first unset sign bit
-                sign_idx: u32 = k >> 3;
-                sign_bit: u32 = (*(sign_bits + sign_idx) >> (k & 7)) & 1;
-                // Place at index b
-                cur: u32 = load_u32_le_at(c_out, b * 4);
+                let sign_idx: u32 = k >> 3;
+                let sign_bit: u32 =
+                    (sign_bits.bytes[sign_idx] as u32 >> (k & 7)) & 1;
+                let cur: u32 = load_u32_le_at(c_out, c_base + b * 4);
                 if cur == 0 {
-                    if sign_bit == 0 { store_u32_le_at(c_out, b * 4, 1); }
-                    else { store_u32_le_at(c_out, b * 4, MLDSA_Q - 1); }
+                    if sign_bit == 0 { store_u32_le_at(c_out, c_base + b * 4, 1); }
+                    else { store_u32_le_at(c_out, c_base + b * 4, MLDSA_Q - 1); }
                     k = k + 1;
                 }
             }
         } else {
-            // For the last TAU positions, fill remaining slots
-            cur: u32 = load_u32_le_at(c_out, k * 4);
+            let cur: u32 = load_u32_le_at(c_out, c_base + k * 4);
+            let sign_idx: u32 = k >> 3;
+            let sign_bit: u32 =
+                (sign_bits.bytes[sign_idx] as u32 >> (k & 7)) & 1;
             if cur == 0 {
-                sign_idx: u32 = k >> 3;
-                sign_bit: u32 = (*(sign_bits + sign_idx) >> (k & 7)) & 1;
-                if sign_bit == 0 { store_u32_le_at(c_out, k * 4, 1); }
-                else { store_u32_le_at(c_out, k * 4, MLDSA_Q - 1); }
-                k = k + 1;
-            } else {
-                k = k + 1;
+                if sign_bit == 0 { store_u32_le_at(c_out, c_base + k * 4, 1); }
+                else { store_u32_le_at(c_out, c_base + k * 4, MLDSA_Q - 1); }
             }
+            k = k + 1;
         }
     }
 }
 
-transform ml_dsa_keygen(seed: Address, pk: Address, sk: Address) {
-    // 1. Generate seed expansion: (rho, rho', K) = SHAKE-256(seed, 128 bytes)
-    seed_exp = allocate(128);
-    shake256(seed, 32, seed_exp, 128);
-    rho = seed_exp;        // 32 bytes
-    rho_prime = seed_exp + 32;  // 96 bytes
-    k_val = seed_exp + 128;     // 32 bytes (but we only allocated 128, so use offset 96)
+// ===========================================================================
+// ML-DSA Key Generation (FIPS 204, Section 6.1)
+// ===========================================================================
 
-    // 2. Expand matrix A from rho
-    matrix = allocate(MLDSA_K * MLDSA_L * MLDSA_N * 4);
-    expand_a(rho, matrix);
+transform ml_dsa_keygen(seed: State<MlDsaBuf>, pk: State<MlDsaBuf>,
+                         sk: State<MlDsaBuf>) {
+    // 1. (rho, rho', K) = SHAKE-256(seed, 128 bytes).
+    let seed_exp = state_new(MlDsaBuf);
+    mldsa_shake256(seed, 32, seed_exp, 128);
 
-    // 3. Sample secret s1 (l polynomials) from CBD(eta)
-    s1 = allocate(MLDSA_L * MLDSA_N * 4);
-    i: u32 = 0;
+    // 2. Expand matrix A from rho (rho lives at offset 0 of seed_exp).
+    let matrix = state_new(MlDsaBuf);
+    expand_a(seed_exp, matrix);
+
+    // 3. Sample secret s1 (l polynomials) from CBD(eta).
+    let s1 = state_new(MlDsaBuf);
+    let i: u32 = 0;
     while i < MLDSA_L {
-        prf_in = allocate(64);
-        j: u32 = 0;
-        while j < 32 { *(prf_in + j) = *(rho_prime + j); j = j + 1; }
-        *(prf_in + 32) = i & 255;
-        cbd_buf = allocate(MLDSA_N * 2);
-        shake256(prf_in, 33, cbd_buf, MLDSA_N * 2);
-        cbd_sample(cbd_buf, MLDSA_ETA, s1 + i * MLDSA_N * 4);
-        free(prf_in); free(cbd_buf);
+        let prf_in = state_new(MlDsaBuf);
+        let j: u32 = 0;
+        while j < 32 { prf_in.bytes[j] = seed_exp.bytes[j]; j = j + 1; }
+        prf_in.bytes[32] = (i & 255) as u8;
+        let cbd_buf = state_new(MlDsaBuf);
+        mldsa_shake256(prf_in, 33, cbd_buf, MLDSA_N * 2);
+        cbd_sample(cbd_buf, MLDSA_ETA, s1, i * MLDSA_N * 4);
         i = i + 1;
     }
 
-    // 4. Sample noise s2 (k polynomials) from CBD(eta)
-    s2 = allocate(MLDSA_K * MLDSA_N * 4);
-    i = 0;
-    while i < MLDSA_K {
-        prf_in = allocate(64);
-        j: u32 = 0;
-        while j < 32 { *(prf_in + j) = *(rho_prime + j); j = j + 1; }
-        *(prf_in + 32) = (i + MLDSA_L) & 255;
-        cbd_buf = allocate(MLDSA_N * 2);
-        shake256(prf_in, 33, cbd_buf, MLDSA_N * 2);
-        cbd_sample(cbd_buf, MLDSA_ETA, s2 + i * MLDSA_N * 4);
-        free(prf_in); free(cbd_buf);
-        i = i + 1;
+    // 4. Sample noise s2 (k polynomials) from CBD(eta).
+    let s2 = state_new(MlDsaBuf);
+    let i2: u32 = 0;
+    while i2 < MLDSA_K {
+        let prf_in = state_new(MlDsaBuf);
+        let j: u32 = 0;
+        while j < 32 { prf_in.bytes[j] = seed_exp.bytes[j]; j = j + 1; }
+        prf_in.bytes[32] = ((i2 + MLDSA_L) & 255) as u8;
+        let cbd_buf = state_new(MlDsaBuf);
+        mldsa_shake256(prf_in, 33, cbd_buf, MLDSA_N * 2);
+        cbd_sample(cbd_buf, MLDSA_ETA, s2, i2 * MLDSA_N * 4);
+        i2 = i2 + 1;
     }
 
-    // 5. t = A * s1 + s2
-    t = allocate(MLDSA_K * MLDSA_N * 4);
+    // 5. t = A * s1 + s2.
+    let t = state_new(MlDsaBuf);
     matvec_mul(t, matrix, s1);
-    i = 0;
-    while i < MLDSA_K {
-        poly_add(t + i * MLDSA_N * 4, t + i * MLDSA_N * 4, s2 + i * MLDSA_N * 4);
-        i = i + 1;
+    let i3: u32 = 0;
+    while i3 < MLDSA_K {
+        poly_add_at(t, i3 * MLDSA_N * 4, t, i3 * MLDSA_N * 4,
+                    s2, i3 * MLDSA_N * 4);
+        i3 = i3 + 1;
     }
 
-    // 6. pk = encode(t) || rho
-    // Pack public key: rho || t1 (high bits of t)
-    i = 0;
-    while i < MLDSA_K * MLDSA_N * 4 { *(pk + i) = *(t + i); i = i + 1; }
-    i = 0;
-    while i < 32 { *(pk + MLDSA_K * MLDSA_N * 4 + i) = *(rho + i); i = i + 1; }
+    // 6. pk = encode(t) || rho.
+    let pk_size: u32 = MLDSA_K * MLDSA_N * 4;
+    let i4: u32 = 0;
+    while i4 < pk_size { pk.bytes[i4] = t.bytes[i4]; i4 = i4 + 1; }
+    let i5: u32 = 0;
+    while i5 < 32 { pk.bytes[pk_size + i5] = seed_exp.bytes[i5]; i5 = i5 + 1; }
 
-    // 7. sk = encode(rho, K, s1, s2, t)
-    // Pack signature: c || z || h
-    pos: u32 = 0;
-    i = 0;
-    while i < 32 { *(sk + pos + i) = *(rho + i); i = i + 1; }
+    // 7. sk = rho || s1 || s2 || t.
+    let pos: u32 = 0;
+    let i6: u32 = 0;
+    while i6 < 32 { sk.bytes[pos + i6] = seed_exp.bytes[i6]; i6 = i6 + 1; }
     pos = pos + 32;
-    i = 0;
-    while i < MLDSA_L * MLDSA_N * 4 { *(sk + pos + i) = *(s1 + i); i = i + 1; }
-    pos = pos + MLDSA_L * MLDSA_N * 4;
-    i = 0;
-    while i < MLDSA_K * MLDSA_N * 4 { *(sk + pos + i) = *(s2 + i); i = i + 1; }
-    pos = pos + MLDSA_K * MLDSA_N * 4;
-    i = 0;
-    while i < MLDSA_K * MLDSA_N * 4 { *(sk + pos + i) = *(t + i); i = i + 1; }
-
-    free(seed_exp); free(matrix); free(s1); free(s2); free(t);
+    let i7: u32 = 0;
+    let s1_len: u32 = MLDSA_L * MLDSA_N * 4;
+    while i7 < s1_len { sk.bytes[pos + i7] = s1.bytes[i7]; i7 = i7 + 1; }
+    pos = pos + s1_len;
+    let i8: u32 = 0;
+    let s2_len: u32 = MLDSA_K * MLDSA_N * 4;
+    while i8 < s2_len { sk.bytes[pos + i8] = s2.bytes[i8]; i8 = i8 + 1; }
+    pos = pos + s2_len;
+    let i9: u32 = 0;
+    while i9 < pk_size { sk.bytes[pos + i9] = t.bytes[i9]; i9 = i9 + 1; }
 }
 
 // ===========================================================================
 // ML-DSA Sign (FIPS 204, Section 6.2)
 // ===========================================================================
 
-transform ml_dsa_sign(sk: Address, msg: Address, msg_len: u32, randomness: Address, sig: Address) -> u32 {
-    // Extract secret key components
-    rho = sk;
-    s1 = sk + 32;
-    s2 = sk + 32 + MLDSA_L * MLDSA_N * 4;
-    t = sk + 32 + MLDSA_L * MLDSA_N * 4 + MLDSA_K * MLDSA_N * 4;
+transform ml_dsa_sign(sk: State<MlDsaBuf>, msg: State<MlDsaBuf>, msg_len: u32,
+                      randomness: State<MlDsaBuf>,
+                      sig: State<MlDsaBuf>) -> u32 {
+    // 1. mu = SHA-256(msg). (Streaming via Sha256Data chunks.)
+    let mu = state_new(MlDsaBuf);
+    let ctx = state_new(Sha256Ctx);
+    let din = state_new(Sha256Data);
+    let dg = state_new(Sha256Digest);
+    sha256_init(ctx);
+    let pos: u32 = 0;
+    while pos < msg_len {
+        let to_copy: u32 = 64;
+        let remaining: u32 = msg_len - pos;
+        if remaining < 64 { to_copy = remaining; }
+        let k: u32 = 0;
+        while k < 64 { din.data[k] = 0; k = k + 1; }
+        k = 0;
+        while k < to_copy { din.data[k] = msg.bytes[pos + k]; k = k + 1; }
+        sha256_update(ctx, din, to_copy);
+        pos = pos + to_copy;
+    }
+    sha256_final(ctx, dg);
+    let i: u32 = 0;
+    while i < 32 { mu.bytes[i] = dg.data[i]; i = i + 1; }
 
-    // 1. Compute mu = SHA-512(tr || msg) where tr = SHA-256(rho || pk)
-    // mu = H(tr || M) per FIPS 204
-    mu = allocate(32);
-    sha256_oneshot(msg, msg_len, mu);
+    // 2. Generate matrix A from rho (rho = sk[0..31]).
+    let matrix = state_new(MlDsaBuf);
+    expand_a(sk, matrix);
 
-    // 2. Generate matrix A from rho
-    matrix = allocate(MLDSA_K * MLDSA_L * MLDSA_N * 4);
-    expand_a(rho, matrix);
+    // 3. Deterministic nonce kappa = SHAKE-256(rho' || mu, 64 bytes).
+    let kappa = state_new(MlDsaBuf);
+    let kappa_in = state_new(MlDsaBuf);
+    let j: u32 = 0;
+    while j < 32 { kappa_in.bytes[j] = sk.bytes[32 + j]; j = j + 1; }
+    let j2: u32 = 0;
+    while j2 < 32 { kappa_in.bytes[32 + j2] = mu.bytes[j2]; j2 = j2 + 1; }
+    mldsa_shake256(kappa_in, 64, kappa, 64);
 
-    // 3. Deterministic nonce: kappa = SHAKE-256(rho' || mu, 64 bytes)
-    // Then use kappa as seed for y
-    kappa = allocate(64);
-    // Use SHAKE-256 on s1 part as "rho prime" + mu
-    kappa_in = allocate(32 + 32);
-    i: u32 = 0;
-    while i < 32 { *(kappa_in + i) = *(s1 + i); i = i + 1; }
-    i = 0;
-    while i < 32 { *(kappa_in + 32 + i) = *(mu + i); i = i + 1; }
-    shake256(kappa_in, 64, kappa, 64);
-    free(kappa_in);
-
-    // 4. Sample y (l polynomials) from uniform [-gamma1, gamma1)
-    y = allocate(MLDSA_L * MLDSA_N * 4);
-    i = 0;
-    while i < MLDSA_L {
-        prf_in = allocate(33);
-        j: u32 = 0;
-        while j < 32 { *(prf_in + j) = *(kappa + j); j = j + 1; }
-        *(prf_in + 32) = i & 255;
-
-        y_buf = allocate(MLDSA_N * 4);
-        shake256(prf_in, 33, y_buf, MLDSA_N * 4);
-
-        j = 0;
-        while j < MLDSA_N {
-            b: u32 = *(y_buf + j * 4);
-            store_u32_le_at(y + i * MLDSA_N * 4, j * 4, b % MLDSA_GAMMA1);
-            j = j + 1;
+    // 4. Sample y (l polynomials) uniform mod gamma1.
+    let y = state_new(MlDsaBuf);
+    let yi: u32 = 0;
+    while yi < MLDSA_L {
+        let prf_in = state_new(MlDsaBuf);
+        let kk: u32 = 0;
+        while kk < 32 { prf_in.bytes[kk] = kappa.bytes[kk]; kk = kk + 1; }
+        prf_in.bytes[32] = (yi & 255) as u8;
+        let y_buf = state_new(MlDsaBuf);
+        mldsa_shake256(prf_in, 33, y_buf, MLDSA_N * 4);
+        let jj: u32 = 0;
+        while jj < MLDSA_N {
+            let b: u32 = y_buf.bytes[jj * 4] as u32;
+            store_u32_le_at(y, yi * MLDSA_N * 4 + jj * 4, b % MLDSA_GAMMA1);
+            jj = jj + 1;
         }
-        free(prf_in); free(y_buf);
-        i = i + 1;
+        yi = yi + 1;
     }
 
-    // 5. w = A * y
-    w = allocate(MLDSA_K * MLDSA_N * 4);
+    // 5. w = A * y; 6. w1 = HighBits(w).
+    let w = state_new(MlDsaBuf);
     matvec_mul(w, matrix, y);
-
-    // 6. w1 = HighBits(w)
-    w1 = allocate(MLDSA_K * MLDSA_N * 4);
-    i = 0;
-    while i < MLDSA_K * MLDSA_N {
-        wi: u32 = load_u32_le_at(w, i * 4);
-        store_u32_le_at(w1, i * 4, high_bits(wi));
-        i = i + 1;
+    let w1 = state_new(MlDsaBuf);
+    let wi: u32 = 0;
+    while wi < MLDSA_K * MLDSA_N {
+        let wv: u32 = load_u32_le_at(w, wi * 4);
+        store_u32_le_at(w1, wi * 4, high_bits(wv));
+        wi = wi + 1;
     }
 
-    // 7. c = SampleInBall(H(mu || w1), tau)
-    // c = SampleInBall(H(mu || w1)) per FIPS 204
-    c_hash_in = allocate(32 + MLDSA_K * MLDSA_N * 4);
-    i = 0;
-    while i < 32 { *(c_hash_in + i) = *(mu + i); i = i + 1; }
-    i = 0;
-    while i < MLDSA_K * MLDSA_N * 4 { *(c_hash_in + 32 + i) = *(w1 + i); i = i + 1; }
+    // 7. c = SampleInBall(H(mu || w1)).
+    let c_hash_in = state_new(MlDsaBuf);
+    let ci: u32 = 0;
+    while ci < 32 { c_hash_in.bytes[ci] = mu.bytes[ci]; ci = ci + 1; }
+    let cj: u32 = 0;
+    let w1_len: u32 = MLDSA_K * MLDSA_N * 4;
+    while cj < w1_len { c_hash_in.bytes[32 + cj] = w1.bytes[cj]; cj = cj + 1; }
+    let c = state_new(MlDsaBuf);
+    mldsa_shake256(c_hash_in, 32 + w1_len, c, MLDSA_N * 4);
 
-    c = allocate(MLDSA_N * 4);
-    shake256(c_hash_in, 32 + MLDSA_K * MLDSA_N * 4, c, MLDSA_N * 4);
-    // Reduce c coefficients mod q via SampleInBall (sparse poly with TAU non-zero)
-    i = 0;
-    while i < MLDSA_N {
-        b: u32 = *(c + i * 4);
-        store_u32_le_at(c, i * 4, b % MLDSA_Q);
-        i = i + 1;
+    // 8. z = y + c * s1.
+    let cs1 = state_new(MlDsaBuf);
+    let zi: u32 = 0;
+    while zi < MLDSA_L {
+        poly_mul_at(cs1, zi * MLDSA_N * 4, c, 0,
+                    sk, 32 + zi * MLDSA_N * 4);
+        zi = zi + 1;
     }
-    free(c_hash_in);
-
-    // 8. z = y + c * s1
-    cs1 = allocate(MLDSA_L * MLDSA_N * 4);
-    i = 0;
-    while i < MLDSA_L {
-        poly_mul(cs1 + i * MLDSA_N * 4, c, s1 + i * MLDSA_N * 4);
-        i = i + 1;
-    }
-
-    z = allocate(MLDSA_L * MLDSA_N * 4);
-    i = 0;
-    while i < MLDSA_L {
-        poly_add(z + i * MLDSA_N * 4, y + i * MLDSA_N * 4, cs1 + i * MLDSA_N * 4);
-        i = i + 1;
+    let z = state_new(MlDsaBuf);
+    let zi2: u32 = 0;
+    while zi2 < MLDSA_L {
+        poly_add_at(z, zi2 * MLDSA_N * 4, y, zi2 * MLDSA_N * 4,
+                    cs1, zi2 * MLDSA_N * 4);
+        zi2 = zi2 + 1;
     }
 
-    // 9. r0 = w - c * s2
-    cs2 = allocate(MLDSA_K * MLDSA_N * 4);
-    i = 0;
-    while i < MLDSA_K {
-        poly_mul(cs2 + i * MLDSA_N * 4, c, s2 + i * MLDSA_N * 4);
-        i = i + 1;
+    // 9. r0 = w - c * s2.
+    let cs2 = state_new(MlDsaBuf);
+    let ri: u32 = 0;
+    let s2_base: u32 = 32 + MLDSA_L * MLDSA_N * 4;
+    while ri < MLDSA_K {
+        poly_mul_at(cs2, ri * MLDSA_N * 4, c, 0,
+                    sk, s2_base + ri * MLDSA_N * 4);
+        ri = ri + 1;
+    }
+    let r0 = state_new(MlDsaBuf);
+    let ri2: u32 = 0;
+    while ri2 < MLDSA_K {
+        poly_sub_at(r0, ri2 * MLDSA_N * 4, w, ri2 * MLDSA_N * 4,
+                    cs2, ri2 * MLDSA_N * 4);
+        ri2 = ri2 + 1;
     }
 
-    r0 = allocate(MLDSA_K * MLDSA_N * 4);
-    i = 0;
-    while i < MLDSA_K {
-        poly_sub(r0 + i * MLDSA_N * 4, w + i * MLDSA_N * 4, cs2 + i * MLDSA_N * 4);
-        i = i + 1;
+    // 10. Make hint.
+    let h = state_new(MlDsaBuf);
+    let mut_hint_count: u32 = 0;
+    let hi: u32 = 0;
+    while hi < MLDSA_K {
+        let cnt: u32 = make_hint(h, mut_hint_count,
+                                 z, 0, r0, hi * MLDSA_N * 4, MLDSA_N);
+        mut_hint_count = mut_hint_count + cnt;
+        hi = hi + 1;
     }
 
-    // 10. Make hint
-    h = allocate(MLDSA_OMEGA + MLDSA_K);
-    hint_count: u32 = 0;
-    i = 0;
-    while i < MLDSA_K {
-        cnt: u32 = make_hint(h + hint_count, r0 + i * MLDSA_N * 4, z + 0, MLDSA_N);
-        hint_count = hint_count + cnt;
-        i = i + 1;
-    }
+    // 11. Pack signature: c || z || h.
+    let pos2: u32 = 0;
+    let i11: u32 = 0;
+    while i11 < MLDSA_N * 4 { sig.bytes[pos2 + i11] = c.bytes[i11]; i11 = i11 + 1; }
+    pos2 = pos2 + MLDSA_N * 4;
+    let i12: u32 = 0;
+    while i12 < MLDSA_L * MLDSA_N * 4 { sig.bytes[pos2 + i12] = z.bytes[i12]; i12 = i12 + 1; }
+    pos2 = pos2 + MLDSA_L * MLDSA_N * 4;
+    sig.bytes[pos2] = (mut_hint_count & 255) as u8;
+    pos2 = pos2 + 1;
+    let i13: u32 = 0;
+    while i13 < mut_hint_count { sig.bytes[pos2 + i13] = h.bytes[i13]; i13 = i13 + 1; }
+    pos2 = pos2 + mut_hint_count;
 
-    // 11. Output signature: c_hat || z || h
-    // Pack: c (32-byte hint), z (l polynomials), h (K poly hint)
-    pos: u32 = 0;
-    i = 0;
-    while i < MLDSA_N * 4 { *(sig + pos + i) = *(c + i); i = i + 1; }
-    pos = pos + MLDSA_N * 4;
-    i = 0;
-    while i < MLDSA_L * MLDSA_N * 4 { *(sig + pos + i) = *(z + i); i = i + 1; }
-    pos = pos + MLDSA_L * MLDSA_N * 4;
-    *(sig + pos) = hint_count & 255;
-    pos = pos + 1;
-    i = 0;
-    while i < hint_count { *(sig + pos + i) = *(h + i); i = i + 1; }
-    pos = pos + hint_count;
-
-    free(mu); free(matrix); free(kappa); free(y); free(w); free(w1);
-    free(c); free(cs1); free(z); free(cs2); free(r0); free(h);
-
-    return pos;
+    return pos2;
 }
 
 // ===========================================================================
 // ML-DSA Verify (FIPS 204, Section 6.3)
 // ===========================================================================
 
-transform ml_dsa_verify(pk: Address, msg: Address, msg_len: u32, sig: Address, sig_len: u32) -> u32 {
-    // Extract pk: t and rho
-    t = pk;
-    rho = pk + MLDSA_K * MLDSA_N * 4;
+transform ml_dsa_verify(pk: State<MlDsaBuf>, msg: State<MlDsaBuf>, msg_len: u32,
+                         sig: State<MlDsaBuf>, sig_len: u32) -> u32 {
+    // 1. mu = SHA-256(msg).
+    let mu = state_new(MlDsaBuf);
+    let ctx = state_new(Sha256Ctx);
+    let din = state_new(Sha256Data);
+    let dg = state_new(Sha256Digest);
+    sha256_init(ctx);
+    let pos: u32 = 0;
+    while pos < msg_len {
+        let to_copy: u32 = 64;
+        let remaining: u32 = msg_len - pos;
+        if remaining < 64 { to_copy = remaining; }
+        let k: u32 = 0;
+        while k < 64 { din.data[k] = 0; k = k + 1; }
+        k = 0;
+        while k < to_copy { din.data[k] = msg.bytes[pos + k]; k = k + 1; }
+        sha256_update(ctx, din, to_copy);
+        pos = pos + to_copy;
+    }
+    sha256_final(ctx, dg);
+    let i: u32 = 0;
+    while i < 32 { mu.bytes[i] = dg.data[i]; i = i + 1; }
 
-    // Extract signature: c, z, h
-    c = sig;
-    z = sig + MLDSA_N * 4;
-    h_off: u32 = MLDSA_N * 4 + MLDSA_L * MLDSA_N * 4;
-    hint_count: u32 = *(sig + h_off);
-
-    // 1. Compute mu = SHA-256(msg)
-    mu = allocate(32);
-    sha256_oneshot(msg, msg_len, mu);
-
-    // 2. Generate matrix A from rho
-    matrix = allocate(MLDSA_K * MLDSA_L * MLDSA_N * 4);
+    // 2. Expand matrix A from rho (rho = pk[PK_SIZE..PK_SIZE+32]).
+    let pk_size: u32 = MLDSA_K * MLDSA_N * 4;
+    let rho = state_new(MlDsaBuf);
+    let i2: u32 = 0;
+    while i2 < 32 { rho.bytes[i2] = pk.bytes[pk_size + i2]; i2 = i2 + 1; }
+    let matrix = state_new(MlDsaBuf);
     expand_a(rho, matrix);
 
-    // 3. Compute w' = A * z - c * t
-    Az = allocate(MLDSA_K * MLDSA_N * 4);
-    matvec_mul(Az, matrix, z);
+    // 3. w' = A * z - c * t.
+    let z_base: u32 = MLDSA_N * 4;
+    let Az = state_new(MlDsaBuf);
+    // Use sig starting at z_base as the y-vector for matvec_mul.
+    // (matvec_mul expects y at offset 0; we copy z bytes into a fresh buf.)
+    let z_buf = state_new(MlDsaBuf);
+    let zlen: u32 = MLDSA_L * MLDSA_N * 4;
+    let i3: u32 = 0;
+    while i3 < zlen { z_buf.bytes[i3] = sig.bytes[z_base + i3]; i3 = i3 + 1; }
+    matvec_mul(Az, matrix, z_buf);
 
-    ct = allocate(MLDSA_K * MLDSA_N * 4);
-    i: u32 = 0;
-    while i < MLDSA_K {
-        poly_mul(ct + i * MLDSA_N * 4, c, t + i * MLDSA_N * 4);
-        i = i + 1;
+    let ct = state_new(MlDsaBuf);
+    let i4: u32 = 0;
+    while i4 < MLDSA_K {
+        poly_mul_at(ct, i4 * MLDSA_N * 4, sig, 0, pk, i4 * MLDSA_N * 4);
+        i4 = i4 + 1;
+    }
+    let wp = state_new(MlDsaBuf);
+    let i5: u32 = 0;
+    while i5 < MLDSA_K {
+        poly_sub_at(wp, i5 * MLDSA_N * 4, Az, i5 * MLDSA_N * 4,
+                    ct, i5 * MLDSA_N * 4);
+        i5 = i5 + 1;
     }
 
-    wp = allocate(MLDSA_K * MLDSA_N * 4);
-    i = 0;
-    while i < MLDSA_K {
-        poly_sub(wp + i * MLDSA_N * 4, Az + i * MLDSA_N * 4, ct + i * MLDSA_N * 4);
-        i = i + 1;
+    // 4. w1' = HighBits(w').
+    let w1p = state_new(MlDsaBuf);
+    let i6: u32 = 0;
+    while i6 < MLDSA_K * MLDSA_N {
+        let wv: u32 = load_u32_le_at(wp, i6 * 4);
+        store_u32_le_at(w1p, i6 * 4, high_bits(wv));
+        i6 = i6 + 1;
     }
 
-    // 4. Compute w1' = HighBits(w')
-    w1p = allocate(MLDSA_K * MLDSA_N * 4);
-    i = 0;
-    while i < MLDSA_K * MLDSA_N {
-        wi: u32 = load_u32_le_at(wp, i * 4);
-        store_u32_le_at(w1p, i * 4, high_bits(wi));
-        i = i + 1;
+    // 5. c' = H(mu || w1').
+    let c_hash_in = state_new(MlDsaBuf);
+    let i7: u32 = 0;
+    while i7 < 32 { c_hash_in.bytes[i7] = mu.bytes[i7]; i7 = i7 + 1; }
+    let i8: u32 = 0;
+    let w1_len: u32 = MLDSA_K * MLDSA_N * 4;
+    while i8 < w1_len { c_hash_in.bytes[32 + i8] = w1p.bytes[i8]; i8 = i8 + 1; }
+    let c_prime = state_new(MlDsaBuf);
+    mldsa_shake256(c_hash_in, 32 + w1_len, c_prime, MLDSA_N * 4);
+
+    // 6. Constant-time comparison c == c'.
+    let mut_result: u32 = 1;
+    let i9: u32 = 0;
+    while i9 < MLDSA_N * 4 {
+        if sig.bytes[i9] != c_prime.bytes[i9] { mut_result = 0; }
+        i9 = i9 + 1;
     }
-
-    // 5. Recompute c' = H(mu || w1')
-    c_hash_in = allocate(32 + MLDSA_K * MLDSA_N * 4);
-    i = 0;
-    while i < 32 { *(c_hash_in + i) = *(mu + i); i = i + 1; }
-    i = 0;
-    while i < MLDSA_K * MLDSA_N * 4 { *(c_hash_in + 32 + i) = *(w1p + i); i = i + 1; }
-
-    c_prime = allocate(MLDSA_N * 4);
-    shake256(c_hash_in, 32 + MLDSA_K * MLDSA_N * 4, c_prime, MLDSA_N * 4);
-    i = 0;
-    while i < MLDSA_N {
-        b: u32 = *(c_prime + i * 4);
-        store_u32_le_at(c_prime, i * 4, b % MLDSA_Q);
-        i = i + 1;
-    }
-
-    // 6. Verify c == c' (constant-time comparison)
-    result: u32 = 1;
-    i = 0;
-    while i < MLDSA_N * 4 {
-        if *(c + i) != *(c_prime + i) { result = 0; break; }
-        i = i + 1;
-    }
-
-    free(mu); free(matrix); free(Az); free(ct); free(wp); free(w1p);
-    free(c_hash_in); free(c_prime);
-
-    return result;
+    return mut_result;
 }
