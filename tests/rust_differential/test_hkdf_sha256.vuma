@@ -1,0 +1,64 @@
+// Differential test: HKDF-SHA256 (RFC 5869 Test Case 1)
+//   IKM   = 0x0b * 22 (decimal: 11, 11, ... 11)
+//   salt  = 0x00 01 02 ... 0c (13 bytes)
+//   info  = 0xf0 f1 f2 ... f9 (10 bytes)
+//   L     = 42
+//   PRK   = 077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5
+//   OKM   = 3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf
+//           3400720ffd6106cef4ad4e9c5d8b5f9c5d34 (42 bytes)
+//   First byte of OKM: 0x3c = 60
+//
+// NOTE: We call hkdf_extract_sha256 + hkdf_expand_sha256 directly from main
+// instead of the hkdf_sha256 oneshot wrapper. The oneshot wrapper takes 8
+// parameters, which exceeds the 6-register SysV x86_64 ABI; the VUMA 2.0
+// codegen currently mishandles stack-passed args 7+ (uses uninitialized
+// locals). The 2-step decomposition exercises the same HKDF code path with
+// 5-arg calls that fit in registers.
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hkdf.vuma"::{hkdf_extract_sha256, hkdf_expand_sha256};
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, hmac_sha256};
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha256_sha224.vuma"::{Sha256Ctx, Sha256Data, Sha256Digest, sha256_init, sha256_update, sha256_final};
+
+transform main() -> i32 {
+    let salt = state_new(HmacKey);
+    let ikm = state_new(HmacMsg);
+    let info = state_new(HmacMsg);
+    let okm = state_new(HmacMsg);
+    let prk = state_new(HmacOut);
+    let prk_key = state_new(HmacKey);
+
+    // salt = 0x00 01 02 ... 0c (13 bytes)
+    salt.bytes[0] = 0;   salt.bytes[1] = 1;   salt.bytes[2] = 2;   salt.bytes[3] = 3;
+    salt.bytes[4] = 4;   salt.bytes[5] = 5;   salt.bytes[6] = 6;   salt.bytes[7] = 7;
+    salt.bytes[8] = 8;   salt.bytes[9] = 9;   salt.bytes[10] = 10; salt.bytes[11] = 11;
+    salt.bytes[12] = 12;
+
+    // IKM = 0x0b * 22
+    ikm.bytes[0] = 11;  ikm.bytes[1] = 11;  ikm.bytes[2] = 11;  ikm.bytes[3] = 11;
+    ikm.bytes[4] = 11;  ikm.bytes[5] = 11;  ikm.bytes[6] = 11;  ikm.bytes[7] = 11;
+    ikm.bytes[8] = 11;  ikm.bytes[9] = 11;  ikm.bytes[10] = 11; ikm.bytes[11] = 11;
+    ikm.bytes[12] = 11; ikm.bytes[13] = 11; ikm.bytes[14] = 11; ikm.bytes[15] = 11;
+    ikm.bytes[16] = 11; ikm.bytes[17] = 11; ikm.bytes[18] = 11; ikm.bytes[19] = 11;
+    ikm.bytes[20] = 11; ikm.bytes[21] = 11;
+
+    // info = 0xf0 f1 ... f9 (10 bytes)
+    info.bytes[0] = 240; info.bytes[1] = 241; info.bytes[2] = 242; info.bytes[3] = 243;
+    info.bytes[4] = 244; info.bytes[5] = 245; info.bytes[6] = 246; info.bytes[7] = 247;
+    info.bytes[8] = 248; info.bytes[9] = 249;
+
+    // Step 1: PRK = HKDF-Extract(salt, IKM)
+    hkdf_extract_sha256(salt, 13, ikm, 22, prk);
+
+    // Step 2: copy PRK (HmacOut, 64 bytes) into prk_key (HmacKey, 128 bytes) —
+    // only the first 32 bytes (HKDF_HASH256_LEN) are valid.
+    let i: u32 = 0;
+    while i < 32 {
+        prk_key.bytes[i] = prk.bytes[i];
+        i = i + 1;
+    }
+
+    // Step 3: OKM = HKDF-Expand(PRK, info, 42)
+    hkdf_expand_sha256(prk_key, info, 10, okm, 42);
+
+    return okm.bytes[0] as i32;
+}

@@ -1,0 +1,44 @@
+// Differential test: PBKDF2-HMAC-SHA256 (RFC 8018 / PKCS#5 v2.1)
+//   password = "password"  (112 97 115 115 119 111 114 100)
+//   salt     = "NaCl"      (78 97 67 108)
+//   iter     = 1
+//   dkLen    = 32
+//
+//   Expected DK = 4d63246d2c4e42afadbee69f8c3409abc80879bc5e606870c7e63e3169a439da
+//   First byte: 0x4d = 77
+//
+// (Verified against Python `hashlib.pbkdf2_hmac('sha256', b'password',
+// b'NaCl', 1, 32)` which produces the same 32-byte derived key.)
+
+// PBKDF2-HMAC-SHA256 calls hmac_sha256 (in hmac.vuma) which calls the
+// SHA-256 streaming transforms (in sha256_sha224.vuma). Cross-module
+// references must be explicitly imported.
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/pbkdf2.vuma"::{pbkdf2_hmac_sha256};
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, hmac_sha256};
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha256_sha224.vuma"::{Sha256Ctx, Sha256Data, Sha256Digest, sha256_init, sha256_update, sha256_final};
+
+transform main() -> i32 {
+    let password = state_new(HmacKey);
+    let salt     = state_new(HmacMsg);
+    let out      = state_new(HmacMsg);
+
+    // password = "password"
+    password.bytes[0] = 112; // p
+    password.bytes[1] = 97;  // a
+    password.bytes[2] = 115; // s
+    password.bytes[3] = 115; // s
+    password.bytes[4] = 119; // w
+    password.bytes[5] = 111; // o
+    password.bytes[6] = 114; // r
+    password.bytes[7] = 100; // d
+
+    // salt = "NaCl"
+    salt.bytes[0] = 78;  // N
+    salt.bytes[1] = 97;  // a
+    salt.bytes[2] = 67;  // C
+    salt.bytes[3] = 108; // l
+
+    pbkdf2_hmac_sha256(password, 8, salt, 4, 1, out, 32);
+
+    return out.bytes[0] as i32;
+}

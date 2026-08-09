@@ -1,0 +1,35 @@
+// Differential test: HMAC_DRBG (NIST SP 800-90A Rev.1, SHA-256)
+//
+// Simple deterministic seed vector (verified against a reference Python
+// HMAC_DRBG implementation using stdlib hmac+hashlib):
+//   entropy = 0x00 * 32
+//   nonce   = 0x00 * 16
+//   generate(out_len = 32)
+//
+// Reference output (first 32 bytes):
+//   0bdb4ee263c00592f9c132acffb9793eaa74069f9a1792b5a8d3208f96ba9a89
+// First byte: 0x0b = 11
+
+// HMAC_DRBG (NIST SP 800-90A) is layered on HMAC-SHA-256 (in hmac.vuma),
+// which uses the SHA-256 streaming transforms (in sha256_sha224.vuma).
+// All cross-module references must be explicitly imported.
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/drbg/drbg.vuma"::{DrbgCtx, DrbgData, DrbgOut, drbg_init, drbg_generate};
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, hmac_sha256};
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha256_sha224.vuma"::{Sha256Ctx, Sha256Data, Sha256Digest, sha256_init, sha256_update, sha256_final};
+
+transform main() -> i32 {
+    let drbg = state_new(DrbgCtx);
+    let entropy = state_new(DrbgData);
+    let nonce = state_new(DrbgData);
+    let out = state_new(DrbgOut);
+
+    // entropy = 32 zero bytes (DrbgData defaults to zero — we leave it).
+    // nonce = 16 zero bytes (also default zero).
+
+    // Generate 32 bytes.
+    drbg_init(drbg, entropy, 32, nonce, 16);
+    drbg_generate(drbg, out, 32);
+
+    return out.bytes[0] as i32;
+}

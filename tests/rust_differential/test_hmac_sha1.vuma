@@ -1,0 +1,35 @@
+// Differential test: HMAC-SHA1 (RFC 2202 Test Case 1)
+//   key  = 0x0b * 20 (decimal: 11, 11, ... 11)
+//   msg  = "Hi There" (72 105 32 84 104 101 114 101)
+//   Expected HMAC = b617318655057264e28bc0b6fb378c8ef146be00
+//   First byte: 0xb6 = 182
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, hmac_sha1};
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha1.vuma"::{Sha1Ctx, Sha1Data, Sha1Digest, sha1_init, sha1_update, sha1_final};
+
+transform main() -> i32 {
+    let key = state_new(HmacKey);
+    let msg = state_new(HmacMsg);
+    let out = state_new(HmacOut);
+
+    // key = 0x0b repeated 20 times
+    key.bytes[0] = 11;  key.bytes[1] = 11;  key.bytes[2] = 11;  key.bytes[3] = 11;
+    key.bytes[4] = 11;  key.bytes[5] = 11;  key.bytes[6] = 11;  key.bytes[7] = 11;
+    key.bytes[8] = 11;  key.bytes[9] = 11;  key.bytes[10] = 11; key.bytes[11] = 11;
+    key.bytes[12] = 11; key.bytes[13] = 11; key.bytes[14] = 11; key.bytes[15] = 11;
+    key.bytes[16] = 11; key.bytes[17] = 11; key.bytes[18] = 11; key.bytes[19] = 11;
+
+    // msg = "Hi There"
+    msg.bytes[0] = 72;   // H
+    msg.bytes[1] = 105;  // i
+    msg.bytes[2] = 32;   // space
+    msg.bytes[3] = 84;    // T
+    msg.bytes[4] = 104;  // h
+    msg.bytes[5] = 101;  // e
+    msg.bytes[6] = 114;  // r
+    msg.bytes[7] = 101;  // e
+
+    hmac_sha1(key, 20, msg, 8, out);
+
+    return out.bytes[0] as i32;
+}
