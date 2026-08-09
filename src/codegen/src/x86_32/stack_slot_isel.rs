@@ -959,15 +959,19 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                     } else {
                         // Check if this is a 64-bit operation.
                         // ty:Some(U64/I64) → 64-bit add with carry.
-                        // ty:None + rhs=Imm(0) → 64-bit move (preserve high word
-                        //   for Call returns / 64-bit values that lost their type).
+                        // ty:None → treat as 64-bit (safe: 32-bit values have
+                        //   high=0, so ADD+ADC of high words is 0+0+carry=carry,
+                        //   which is 0 for non-overflowing 32-bit adds).
+                        //   This matches the BinOp { op: Add } handler's policy
+                        //   and is required because the IR builder (scg_to_ir.rs)
+                        //   does not always propagate the declared u64 type.
                         // For And/Or/Xor: ALWAYS use 64-bit path (safe because
                         // 32-bit values have high=0, and 0 OP 0 = 0).
                         let is_8byte = matches!(ty,
-                            Some(IRType::U64) | Some(IRType::I64) | Some(IRType::Channel(_)))
-                            
+                            Some(IRType::U64) | Some(IRType::I64) | Some(IRType::Channel(_)));
+
                         let is_move = matches!(rhs, IRValue::Immediate(0));
-                        if is_8byte || (ty.is_none() && is_move) {
+                        if is_8byte || ty.is_none() {
                             if is_move {
                                 // 64-bit move: copy both words of lhs to dst
                                 code.extend(load_value(lhs, Gpr::Rax));
