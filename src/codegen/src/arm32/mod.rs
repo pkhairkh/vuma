@@ -10995,6 +10995,10 @@ impl Backend for Arm32Backend {
             let bl_offset = (main_offset as i32 - 16) / 4;
             let patched_bl = encode_branch(Condition::Al, true, bl_offset);
             start_stub[8..12].copy_from_slice(&patched_bl);
+        } else {
+            // No main function (library module): replace BL with MOV R0, #0
+            // so the program exits with 0 instead of crashing into the FFI trap.
+            start_stub[8..12].copy_from_slice(&0xE3A00000u32.to_le_bytes()); // MOV R0, #0
         }
 
         // ── Add FFI trap stub ──

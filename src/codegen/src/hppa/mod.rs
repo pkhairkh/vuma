@@ -6759,6 +6759,15 @@ impl Backend for HppaBackend {
                 main_offset,
                 &mut trampolines,
             );
+        } else {
+            // No main function (library module): NOP out the BV at +64
+            // so execution falls through to the exit code at +80.
+            // Without this, the unpatched BV branches to address 0 (SIGSEGV).
+            let nop = encode_nop();
+            let bv_off = _start_call_offset + 64;
+            if bv_off + 4 <= all_code.len() {
+                all_code[bv_off..bv_off + 4].copy_from_slice(&nop);
+            }
         }
 
         // ── Patch inter-function calls and GetAddress relocations ──
