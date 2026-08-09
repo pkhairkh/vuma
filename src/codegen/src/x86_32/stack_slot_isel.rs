@@ -3825,8 +3825,11 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                             code.extend_from_slice(&cleanup.to_le_bytes()); // ADD ESP, imm32
                         }
                     }
-                    // Store return value (EAX) to dst's stack slot
-                    code.extend(store_vreg(dst_id, Gpr::Rax));
+                    // Store return value (EDX:EAX) to dst's stack slot.
+                    // VUMA functions return 64-bit in EDX:EAX; always store both.
+                    let dst_off = slot_offset(dst_id);
+                    code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off, Gpr::Rax));     // dst.low  = EAX
+                    code.extend(encode_mov_mem_reg(Gpr::Rbp, dst_off + 4, Gpr::Rdx)); // dst.high = EDX
                     code
                 }
             };

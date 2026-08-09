@@ -9735,11 +9735,12 @@ impl Backend for Arm32Backend {
                     // R12 = 1100, so: 1110 0001 0010 1111 1111 1111 0011 1100
                     // = E1 2F FF 3C
                     code.extend(&[0x3C, 0xFF, 0x2F, 0xE1]); // LE: BLX R12
-                    // Store return value (R0) to dst's stack slot
+                    // Store return value (R0:R1) to dst's stack slot.
+                    // VUMA functions return 64-bit in R0:R1 (AAPCS).
                     if let Some(d) = dst {
                         let dst_id = d.as_register().unwrap_or(0);
                         let dst_offset = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
-                        code.extend(ss_store_to_slot(Gpr::R0, dst_offset));
+                        code.extend(ss_store_64(Gpr::R0, Gpr::R1, dst_offset));
                     }
                     code
                 }
