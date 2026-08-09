@@ -1016,11 +1016,30 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                         code.extend(encode_xor_reg_reg(Gpr::Rax, Gpr::Rax));
                                     }
                                     if let IRValue::Immediate(imm) = rhs {
-                                        if *imm < 0 || *imm > 0x7FFFFFFF {
+                                        // Determine the correct high word of the 64-bit immediate.
+                                        // The value `imm` is an i64. For u64 values like 0xFFFFFFFF
+                                        // (4294967295), the high word should be 0 (zero-extension),
+                                        // NOT 0xFFFFFFFF (sign-extension). The old code used
+                                        // `*imm < 0 || *imm > 0x7FFFFFFF` to decide sign-extension,
+                                        // but that's wrong: 4294967295 is a POSITIVE i64 whose
+                                        // high 32 bits are 0, not 0xFFFFFFFF.
+                                        //
+                                        // Correct logic:
+                                        // - If imm >= 0 and imm <= 0xFFFFFFFF: high = 0 (zero-extended u32)
+                                        // - If imm < 0: high = -1 (0xFFFFFFFF, sign-extended from negative i32)
+                                        // - If imm > 0xFFFFFFFF: high = (imm >> 32) as u32
+                                        if *imm < 0 {
+                                            // Negative i64: sign-extend from i32 (high = 0xFFFFFFFF)
                                             code.extend(encode_mov_reg_imm32(Gpr::Rcx, -1));
                                             code.extend(encode_adc_reg_reg(Gpr::Rax, Gpr::Rcx));
-                                        } else {
+                                        } else if *imm <= 0xFFFFFFFF {
+                                            // Positive u32 value: high word = 0 (zero-extension)
                                             code.extend(encode_adc_reg_imm32(Gpr::Rax, 0));
+                                        } else {
+                                            // Large positive u64: high word = (imm >> 32)
+                                            let high = (*imm >> 32) as i32;
+                                            code.extend(encode_mov_reg_imm32(Gpr::Rcx, high));
+                                            code.extend(encode_adc_reg_reg(Gpr::Rax, Gpr::Rcx));
                                         }
                                     } else {
                                         code.extend(encode_adc_reg_imm32(Gpr::Rax, 0));
@@ -1386,16 +1405,18 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                     code.extend(load_vreg_hi(rhs_id, Gpr::Rcx));
                                     code.extend(encode_adc_reg_reg(Gpr::Rax, Gpr::Rcx));
                                 } else {
-                                    // For immediate rhs, high word is 0 or sign-extend
+                                    // For immediate rhs, high word: use zero-extension for positive u32 values
                                     code.extend(load_vreg_hi(lhs_reg, Gpr::Rax));
                                     if let IRValue::Immediate(imm) = rhs {
-                                        if *imm < 0 || *imm > 0x7FFFFFFF {
-                                            // Sign-extend: add 0xFFFFFFFF (carry propagation)
+                                        if *imm < 0 {
                                             code.extend(encode_mov_reg_imm32(Gpr::Rcx, -1));
                                             code.extend(encode_adc_reg_reg(Gpr::Rax, Gpr::Rcx));
-                                        } else {
-                                            // Add 0 (no carry from high word)
+                                        } else if *imm <= 0xFFFFFFFF {
                                             code.extend(encode_adc_reg_imm32(Gpr::Rax, 0));
+                                        } else {
+                                            let high = (*imm >> 32) as i32;
+                                            code.extend(encode_mov_reg_imm32(Gpr::Rcx, high));
+                                            code.extend(encode_adc_reg_reg(Gpr::Rax, Gpr::Rcx));
                                         }
                                     } else {
                                         code.extend(encode_adc_reg_imm32(Gpr::Rax, 0));
@@ -1446,11 +1467,15 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                                 } else {
                                     code.extend(load_vreg_hi(lhs_reg, Gpr::Rax));
                                     if let IRValue::Immediate(imm) = rhs {
-                                        if *imm < 0 || *imm > 0x7FFFFFFF {
+                                        if *imm < 0 {
                                             code.extend(encode_mov_reg_imm32(Gpr::Rcx, -1));
                                             code.extend(encode_sbb_reg_reg(Gpr::Rax, Gpr::Rcx));
-                                        } else {
+                                        } else if *imm <= 0xFFFFFFFF {
                                             code.extend(encode_sbb_reg_imm32(Gpr::Rax, 0));
+                                        } else {
+                                            let high = (*imm >> 32) as i32;
+                                            code.extend(encode_mov_reg_imm32(Gpr::Rcx, high));
+                                            code.extend(encode_sbb_reg_reg(Gpr::Rax, Gpr::Rcx));
                                         }
                                     } else {
                                         code.extend(encode_sbb_reg_imm32(Gpr::Rax, 0));

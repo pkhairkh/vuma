@@ -29,7 +29,7 @@
 // VUMA's parser rejects integer literals >= 2^63 for u64. Constants at or
 // above that threshold are written as (1 << 63) | lower_63_bits.
 
-const MASK64: u64 = (1 << 63) | ((1 << 63) - 1);
+const MASK64: u64 = 4294967295 | (4294967295 << 32);
 
 // ===========================================================================
 // SHA-512 round constants K[0..79] (FIPS 180-4 Section 4.2.3).
@@ -166,7 +166,10 @@ transform rotr64(x: u64, n: u64) -> u64 {
 }
 
 transform ch64(x: u64, y: u64, z: u64) -> u64 {
-    return (x & y) ^ ((x ^ MASK64) & z);
+    // Algebraic identity: (x & y) ^ ((!x) & z) = z ^ (x & (y ^ z))
+    // This avoids the MASK64 constant (which is broken on 32-bit backends
+    // because (1 << 63) is UB when '1' is treated as i32).
+    return z ^ (x & (y ^ z));
 }
 
 transform maj64(x: u64, y: u64, z: u64) -> u64 {

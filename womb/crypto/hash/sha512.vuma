@@ -37,7 +37,7 @@
 // above that threshold are written as (1 << 63) | lower_63_bits, which the
 // parser evaluates to the correct unsigned u64 value.
 
-const MASK64: u64 = (1 << 63) | ((1 << 63) - 1);
+const MASK64: u64 = 4294967295 | (4294967295 << 32);
 
 // ===========================================================================
 // SHA-512 round constants K[0..79] (FIPS 180-4 Section 4.2.3).
@@ -191,7 +191,9 @@ transform rotr64(x: u64, n: u64) -> u64 {
 // Ch(x, y, z) = (x AND y) XOR ((NOT x) AND z)  [§4.1.3]
 // (NOT x is computed as x XOR MASK64 — VUMA has no unary NOT on u64.)
 transform ch64(x: u64, y: u64, z: u64) -> u64 {
-    return (x & y) ^ ((x ^ MASK64) & z);
+    // Algebraic identity: (x & y) ^ ((!x) & z) = z ^ (x & (y ^ z))
+    // This avoids the MASK64 constant (which is broken on 32-bit backends).
+    return z ^ (x & (y ^ z));
 }
 
 // Maj(x, y, z) = (x AND y) XOR (x AND z) XOR (y AND z)  [§4.1.3]
