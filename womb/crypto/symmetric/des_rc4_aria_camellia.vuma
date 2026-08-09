@@ -1,57 +1,88 @@
-// womb/crypto/legacy_ciphers.vuma — 3DES (TDEA), Camellia, ARIA, RC4
-// Real NIST/RFC compliant implementations. No stubs. No main().
-//   3DES:   SP 800-67r1 (EDE3 with 192-bit key)
+// womb/crypto/symmetric/des_rc4_aria_camellia.vuma — 3DES (TDEA), Camellia, ARIA, RC4
+// PMT-native rewrite (Wave E).
+//   3DES:    SP 800-67r1 (EDE3 with 192-bit key)
 //   Camellia: RFC 3713 (128/192/256-bit keys, 18/24 rounds)
-//   ARIA:   RFC 5794 (128/192/256-bit keys, 12/14/16 rounds)
-//   RC4:    RFC 6229 (KSA + PRGA stream cipher)
+//   ARIA:    RFC 5794 (128/192/256-bit keys, 12/14/16 rounds)
+//   RC4:     RFC 6229 (KSA + PRGA stream cipher)
+//
+// No main() — importable library module.
+
 const MASK32: u32 = 4294967295;
+
+// ===========================================================================
+// Layouts
+// ===========================================================================
+
+// u32 / u64 output pairs for DES permutation transforms.
+layout U32Pair = { hi: u32, lo: u32 }
+layout U64Pair = { a: u64, b: u64 }
+
+// DES 8-byte block / key / IV.
+layout DesWord = { bytes: [u8; 8] }
+// DES subkey store (16 rounds × 6 bytes).
+layout DesSubkeys = { bytes: [u8; 96] }
+// 3DES-CBC plaintext/ciphertext buffer (with PKCS#7 padding).
+layout TdesBuf = { bytes: [u8; 512] }
+
+// RC4 256-byte buffers (key, S-box state, data).
+layout Rc4Sbox = { bytes: [u8; 256] }
+layout Rc4Buf = { bytes: [u8; 256] }
+
+// Camellia 16-byte block, 32-byte key (covers 128/192/256), 34×8=272 subkey bytes.
+layout CamBlock = { bytes: [u8; 16] }
+layout CamKey = { bytes: [u8; 32] }
+layout CamSubkeys = { bytes: [u8; 272] }
+
+// ARIA 16-byte block / state, 32-byte key (covers 128/192/256),
+// round-key buffer (14×16=224 bytes for ARIA-256), W buffer (5×16=80 bytes).
+layout AriaBlock = { bytes: [u8; 16] }
+layout AriaKey = { bytes: [u8; 32] }
+layout AriaEk = { bytes: [u8; 224] }
+layout AriaW = { bytes: [u8; 80] }
 
 // ===========================================================================
 // 3DES — SP 800-67r1 Triple-DES EDE3
 // ===========================================================================
 
 // Initial Permutation (IP) — 64-bit
-transform des_ip(in_hi: u32, in_lo: u32, out_hi: Address, out_lo: Address) {
-    // Combine into 64-bit (we use two u32s and bit-pack)
-    // IP table: 58 50 42 34 26 18 10 2, 60 52 44 36 28 20 12 4, ...
-    // We implement IP bit-by-bit using the standard table.
-    in: u64 = ((in_hi as u64) << 32) | (in_lo as u64);
-    out: u64 = 0;
-    bit: u32 = 0;
+transform des_ip(in_hi: u32, in_lo: u32, out: State<U32Pair>) {
+    let in: u64 = ((in_hi as u64) << 32) | (in_lo as u64);
+    let out_v: u64 = 0;
+    let bit: u32 = 0;
     while bit < 64 {
         // IP[bit] gives the source bit position (1-indexed, MSB-first)
-        src: u32 = des_ip_table(bit);
+        let src: u32 = des_ip_table(bit);
         // Extract bit src-1 from input (MSB is bit 63)
-        v: u64 = (in >> (63 - (src - 1))) & 1;
-        out = out | (v << (63 - bit));
+        let v: u64 = (in >> (63 - (src - 1))) & 1;
+        out_v = out_v | (v << (63 - bit));
         bit = bit + 1;
     }
-    *(out_hi) = (out >> 32) & MASK32;
-    *(out_lo) = out & MASK32;
+    out.hi = ((out_v >> 32) & MASK32) as u32;
+    out.lo = (out_v & MASK32) as u32;
 }
 
 // Final Permutation (FP = IP^-1)
-transform des_fp(in_hi: u32, in_lo: u32, out_hi: Address, out_lo: Address) {
-    in: u64 = ((in_hi as u64) << 32) | (in_lo as u64);
-    out: u64 = 0;
-    bit: u32 = 0;
+transform des_fp(in_hi: u32, in_lo: u32, out: State<U32Pair>) {
+    let in: u64 = ((in_hi as u64) << 32) | (in_lo as u64);
+    let out_v: u64 = 0;
+    let bit: u32 = 0;
     while bit < 64 {
-        src: u32 = des_fp_table(bit);
-        v: u64 = (in >> (63 - (src - 1))) & 1;
-        out = out | (v << (63 - bit));
+        let src: u32 = des_fp_table(bit);
+        let v: u64 = (in >> (63 - (src - 1))) & 1;
+        out_v = out_v | (v << (63 - bit));
         bit = bit + 1;
     }
-    *(out_hi) = (out >> 32) & MASK32;
-    *(out_lo) = out & MASK32;
+    out.hi = ((out_v >> 32) & MASK32) as u32;
+    out.lo = (out_v & MASK32) as u32;
 }
 
 // Expansion E (32 -> 48 bits)
 transform des_expand_e(r: u32) -> u64 {
-    out: u64 = 0;
-    bit: u32 = 0;
+    let out: u64 = 0;
+    let bit: u32 = 0;
     while bit < 48 {
-        src: u32 = des_e_table(bit);
-        v: u64 = ((r >> (32 - src)) & 1);
+        let src: u32 = des_e_table(bit);
+        let v: u64 = ((r >> (32 - src)) & 1) as u64;
         out = out | (v << (47 - bit));
         bit = bit + 1;
     }
@@ -60,11 +91,11 @@ transform des_expand_e(r: u32) -> u64 {
 
 // Permutation P (32 -> 32 bits)
 transform des_perm_p(x: u32) -> u32 {
-    out: u32 = 0;
-    bit: u32 = 0;
+    let out: u32 = 0;
+    let bit: u32 = 0;
     while bit < 32 {
-        src: u32 = des_p_table(bit);
-        v: u32 = (x >> (32 - src)) & 1;
+        let src: u32 = des_p_table(bit);
+        let v: u32 = (x >> (32 - src)) & 1;
         out = out | (v << (31 - bit));
         bit = bit + 1;
     }
@@ -73,22 +104,21 @@ transform des_perm_p(x: u32) -> u32 {
 
 // S-box lookup: S[box_idx][6-bit input] -> 4-bit output
 transform des_sbox(box: u32, val6: u32) -> u32 {
-    row: u32 = ((val6 >> 4) & 2) | (val6 & 1);
-    col: u32 = (val6 >> 1) & 15;
-    idx: u32 = row * 16 + col;
+    let row: u32 = ((val6 >> 4) & 2) | (val6 & 1);
+    let col: u32 = (val6 >> 1) & 15;
+    let idx: u32 = row * 16 + col;
     return des_sbox_table(box, idx);
 }
 
 // Feistel f function: E(R) XOR K, then 8 S-boxes, then P
 transform des_f(r: u32, k48: u64) -> u32 {
-    er: u64 = des_expand_e(r) ^ k48;
-    // Pack 8 6-bit groups into 32-bit output
-    out: u32 = 0;
-    box: u32 = 0;
+    let er: u64 = des_expand_e(r) ^ k48;
+    let out: u32 = 0;
+    let box: u32 = 0;
     while box < 8 {
         // Bits [47-42] = S1, [41-36] = S2, ..., [5-0] = S8
-        v6: u32 = (er >> (42 - box * 6)) & 63;
-        s: u32 = des_sbox(box, v6);
+        let v6: u32 = ((er >> (42 - box * 6)) & 63) as u32;
+        let s: u32 = des_sbox(box, v6);
         out = (out << 4) | s;
         box = box + 1;
     }
@@ -96,32 +126,32 @@ transform des_f(r: u32, k48: u64) -> u32 {
 }
 
 // PC-1: 64-bit key -> 56-bit (drop parity bits)
-transform des_pc1(key_hi: u32, key_lo: u32, c_out: Address, d_out: Address) {
-    in: u64 = ((key_hi as u64) << 32) | (key_lo as u64);
-    c: u64 = 0;
-    d: u64 = 0;
-    bit: u32 = 0;
+transform des_pc1(key_hi: u32, key_lo: u32, out: State<U64Pair>) {
+    let in: u64 = ((key_hi as u64) << 32) | (key_lo as u64);
+    let c: u64 = 0;
+    let d: u64 = 0;
+    let bit: u32 = 0;
     while bit < 28 {
-        src_c: u32 = des_pc1_c_table(bit);
-        v_c: u64 = (in >> (64 - src_c)) & 1;
+        let src_c: u32 = des_pc1_c_table(bit);
+        let v_c: u64 = (in >> (64 - src_c)) & 1;
         c = c | (v_c << (27 - bit));
-        src_d: u32 = des_pc1_d_table(bit);
-        v_d: u64 = (in >> (64 - src_d)) & 1;
+        let src_d: u32 = des_pc1_d_table(bit);
+        let v_d: u64 = (in >> (64 - src_d)) & 1;
         d = d | (v_d << (27 - bit));
         bit = bit + 1;
     }
-    *(c_out) = c & 268435455;  // 0x0FFFFFFF
-    *(d_out) = d & 268435455;
+    out.a = c & 268435455;  // 0x0FFFFFFF — 28 ones
+    out.b = d & 268435455;
 }
 
 // PC-2: 56-bit (C||D) -> 48-bit subkey
 transform des_pc2(c: u64, d: u64) -> u64 {
-    combined: u64 = (c << 28) | d;
-    out: u64 = 0;
-    bit: u32 = 0;
+    let combined: u64 = (c << 28) | d;
+    let out: u64 = 0;
+    let bit: u32 = 0;
     while bit < 48 {
-        src: u32 = des_pc2_table(bit);
-        v: u64 = (combined >> (56 - src)) & 1;
+        let src: u32 = des_pc2_table(bit);
+        let v: u64 = (combined >> (56 - src)) & 1;
         out = out | (v << (47 - bit));
         bit = bit + 1;
     }
@@ -130,30 +160,38 @@ transform des_pc2(c: u64, d: u64) -> u64 {
 
 // Left rotate 28-bit value by n
 transform des_rotl28(x: u64, n: u32) -> u64 {
-    m: u64 = 268435455;  // 0x0FFFFFFF
+    let m: u64 = 268435455;  // 0x0FFFFFFF
     return ((x << n) | (x >> (28 - n))) & m;
 }
 
-// Key schedule: produce 16 subkeys
-transform des_key_schedule(key: Address, subkeys: Address) {
-    key_hi: u32 = 0;
-    key_lo: u32 = 0;
-    i: u32 = 0;
-    while i < 4 { key_hi = (key_hi << 8) | *(key + i); i = i + 1; }
-    while i < 8 { key_lo = (key_lo << 8) | *(key + i); i = i + 1; }
-    c_state: u64 = 0;
-    d_state: u64 = 0;
-    des_pc1(key_hi, key_lo, &c_state, &d_state);
-    round: u32 = 0;
+// Key schedule: produce 16 subkeys (6 bytes each = 96 bytes total).
+transform des_key_schedule(key: State<DesWord>, subkeys: State<DesSubkeys>) {
+    let key_hi: u32 = 0;
+    let key_lo: u32 = 0;
+    let i: u32 = 0;
+    while i < 4 {
+        key_hi = (key_hi << 8) | (key.bytes[i] as u32);
+        i = i + 1;
+    }
+    while i < 8 {
+        key_lo = (key_lo << 8) | (key.bytes[i] as u32);
+        i = i + 1;
+    }
+    let cd = state_new(U64Pair);
+    des_pc1(key_hi, key_lo, cd);
+    let c_state: u64 = cd.a;
+    let d_state: u64 = cd.b;
+    let round: u32 = 0;
     while round < 16 {
-        shifts: u32 = des_shift_schedule(round);
+        let shifts: u32 = des_shift_schedule(round);
         c_state = des_rotl28(c_state, shifts);
         d_state = des_rotl28(d_state, shifts);
-        sk: u64 = des_pc2(c_state, d_state);
-        // Store subkey as 6 bytes at subkeys + round*6
-        b: u32 = 0;
+        let sk: u64 = des_pc2(c_state, d_state);
+        // Store subkey as 6 bytes at subkeys.bytes[round*6..round*6+5]
+        let b: u32 = 0;
         while b < 6 {
-            *(subkeys + round * 6 + b) = (sk >> (40 - b * 8)) & 255;
+            let off = round * 6 + b;
+            subkeys.bytes[off] = ((sk >> (40 - b * 8)) & 255) as u8;
             b = b + 1;
         }
         round = round + 1;
@@ -161,134 +199,193 @@ transform des_key_schedule(key: Address, subkeys: Address) {
 }
 
 // Reconstruct 48-bit subkey from 6 stored bytes
-transform des_load_subkey(subkeys: Address, round: u32) -> u64 {
-    sk: u64 = 0;
-    b: u32 = 0;
+transform des_load_subkey(subkeys: State<DesSubkeys>, round: u32) -> u64 {
+    let sk: u64 = 0;
+    let b: u32 = 0;
     while b < 6 {
-        sk = (sk << 8) | *(subkeys + round * 6 + b);
+        let off = round * 6 + b;
+        sk = (sk << 8) | (subkeys.bytes[off] as u64);
         b = b + 1;
     }
     return sk;
 }
 
 // DES encrypt a single 8-byte block
-transform des_encrypt_block(plain: Address, key: Address, cipher: Address) {
-    subkeys = allocate(96);  // 16 * 6 bytes
+transform des_encrypt_block(plain: State<DesWord>, key: State<DesWord>, cipher: State<DesWord>) {
+    let subkeys = state_new(DesSubkeys);
     des_key_schedule(key, subkeys);
-    in_hi: u32 = 0;
-    in_lo: u32 = 0;
-    i: u32 = 0;
-    while i < 4 { in_hi = (in_hi << 8) | *(plain + i); i = i + 1; }
-    while i < 8 { in_lo = (in_lo << 8) | *(plain + i); i = i + 1; }
-    ip_hi: u32 = 0;
-    ip_lo: u32 = 0;
-    des_ip(in_hi, in_lo, &ip_hi, &ip_lo);
-    l: u32 = ip_hi;
-    r: u32 = ip_lo;
-    round: u32 = 0;
+    let in_hi: u32 = 0;
+    let in_lo: u32 = 0;
+    let i: u32 = 0;
+    while i < 4 {
+        in_hi = (in_hi << 8) | (plain.bytes[i] as u32);
+        i = i + 1;
+    }
+    while i < 8 {
+        in_lo = (in_lo << 8) | (plain.bytes[i] as u32);
+        i = i + 1;
+    }
+    let ip = state_new(U32Pair);
+    des_ip(in_hi, in_lo, ip);
+    let l: u32 = ip.hi;
+    let r: u32 = ip.lo;
+    let round: u32 = 0;
     while round < 16 {
-        sk: u64 = des_load_subkey(subkeys, round);
-        new_r: u32 = l ^ des_f(r, sk);
+        let sk: u64 = des_load_subkey(subkeys, round);
+        let new_r: u32 = l ^ des_f(r, sk);
         l = r;
         r = new_r;
         round = round + 1;
     }
     // Final swap: combine R||L
-    fp_hi: u32 = 0;
-    fp_lo: u32 = 0;
-    des_fp(r, l, &fp_hi, &fp_lo);
-    i = 0;
-    while i < 4 { *(cipher + i) = (fp_hi >> (24 - i * 8)) & 255; i = i + 1; }
-    while i < 8 { *(cipher + i) = (fp_lo >> (24 - (i - 4) * 8)) & 255; i = i + 1; }
+    let fp = state_new(U32Pair);
+    des_fp(r, l, fp);
+    let fp_hi: u32 = fp.hi;
+    let fp_lo: u32 = fp.lo;
+    let j: u32 = 0;
+    while j < 4 {
+        cipher.bytes[j] = ((fp_hi >> (24 - j * 8)) & 255) as u8;
+        j = j + 1;
+    }
+    while j < 8 {
+        cipher.bytes[j] = ((fp_lo >> (24 - (j - 4) * 8)) & 255) as u8;
+        j = j + 1;
+    }
 }
 
 // DES decrypt a single 8-byte block (subkeys in reverse order)
-transform des_decrypt_block(cipher: Address, key: Address, plain: Address) {
-    subkeys = allocate(96);
+transform des_decrypt_block(cipher: State<DesWord>, key: State<DesWord>, plain: State<DesWord>) {
+    let subkeys = state_new(DesSubkeys);
     des_key_schedule(key, subkeys);
-    in_hi: u32 = 0;
-    in_lo: u32 = 0;
-    i: u32 = 0;
-    while i < 4 { in_hi = (in_hi << 8) | *(cipher + i); i = i + 1; }
-    while i < 8 { in_lo = (in_lo << 8) | *(cipher + i); i = i + 1; }
-    ip_hi: u32 = 0;
-    ip_lo: u32 = 0;
-    des_ip(in_hi, in_lo, &ip_hi, &ip_lo);
-    l: u32 = ip_hi;
-    r: u32 = ip_lo;
-    round: u32 = 16;
+    let in_hi: u32 = 0;
+    let in_lo: u32 = 0;
+    let i: u32 = 0;
+    while i < 4 {
+        in_hi = (in_hi << 8) | (cipher.bytes[i] as u32);
+        i = i + 1;
+    }
+    while i < 8 {
+        in_lo = (in_lo << 8) | (cipher.bytes[i] as u32);
+        i = i + 1;
+    }
+    let ip = state_new(U32Pair);
+    des_ip(in_hi, in_lo, ip);
+    let l: u32 = ip.hi;
+    let r: u32 = ip.lo;
+    let round: u32 = 16;
     while round > 0 {
-        sk: u64 = des_load_subkey(subkeys, round - 1);
-        new_r: u32 = l ^ des_f(r, sk);
+        let sk: u64 = des_load_subkey(subkeys, round - 1);
+        let new_r: u32 = l ^ des_f(r, sk);
         l = r;
         r = new_r;
         round = round - 1;
     }
-    fp_hi: u32 = 0;
-    fp_lo: u32 = 0;
-    des_fp(r, l, &fp_hi, &fp_lo);
-    i = 0;
-    while i < 4 { *(plain + i) = (fp_hi >> (24 - i * 8)) & 255; i = i + 1; }
-    while i < 8 { *(plain + i) = (fp_lo >> (24 - (i - 4) * 8)) & 255; i = i + 1; }
+    let fp = state_new(U32Pair);
+    des_fp(r, l, fp);
+    let fp_hi: u32 = fp.hi;
+    let fp_lo: u32 = fp.lo;
+    let j: u32 = 0;
+    while j < 4 {
+        plain.bytes[j] = ((fp_hi >> (24 - j * 8)) & 255) as u8;
+        j = j + 1;
+    }
+    while j < 8 {
+        plain.bytes[j] = ((fp_lo >> (24 - (j - 4) * 8)) & 255) as u8;
+        j = j + 1;
+    }
 }
 
 // 3DES EDE3: C = E_K3(D_K2(E_K1(P)))
-transform tdes_ede3_encrypt_block(plain: Address, k1: Address, k2: Address, k3: Address, cipher: Address) {
-    tmp = allocate(8);
+transform tdes_ede3_encrypt_block(plain: State<DesWord>, k1: State<DesWord>, k2: State<DesWord>, k3: State<DesWord>, cipher: State<DesWord>) {
+    let tmp = state_new(DesWord);
     des_encrypt_block(plain, k1, tmp);
     des_decrypt_block(tmp, k2, tmp);
     des_encrypt_block(tmp, k3, cipher);
 }
 
 // 3DES EDE3 decrypt: P = D_K1(E_K2(D_K3(C)))
-transform tdes_ede3_decrypt_block(cipher: Address, k1: Address, k2: Address, k3: Address, plain: Address) {
-    tmp = allocate(8);
+transform tdes_ede3_decrypt_block(cipher: State<DesWord>, k1: State<DesWord>, k2: State<DesWord>, k3: State<DesWord>, plain: State<DesWord>) {
+    let tmp = state_new(DesWord);
     des_decrypt_block(cipher, k3, tmp);
     des_encrypt_block(tmp, k2, tmp);
     des_decrypt_block(tmp, k1, plain);
 }
 
-transform tdes_cbc_encrypt(plain: Address, pt_len: u32, k1: Address, k2: Address, k3: Address, iv: Address, cipher: Address) -> u32 {
-    pad: u32 = 8 - (pt_len & 7);
+transform tdes_cbc_encrypt(plain: State<TdesBuf>, pt_len: u32, k1: State<DesWord>, k2: State<DesWord>, k3: State<DesWord>, iv: State<DesWord>, cipher: State<TdesBuf>) -> u32 {
+    let pad: u32 = 8 - (pt_len & 7);
     if pad == 0 { pad = 8; }
-    padded: u32 = pt_len + pad;
-    pbuf = allocate(padded);
-    i: u32 = 0;
-    while i < pt_len { *(pbuf + i) = *(plain + i); i = i + 1; }
-    while i < padded { *(pbuf + i) = pad; i = i + 1; }
-    prev = allocate(8);
-    i = 0;
-    while i < 8 { *(prev + i) = *(iv + i); i = i + 1; }
-    blk = allocate(8);
-    off: u32 = 0;
+    let padded: u32 = pt_len + pad;
+    let pbuf = state_new(TdesBuf);
+    let i: u32 = 0;
+    while i < pt_len {
+        pbuf.bytes[i] = plain.bytes[i];
+        i = i + 1;
+    }
+    while i < padded {
+        pbuf.bytes[i] = pad as u8;
+        i = i + 1;
+    }
+    let prev = state_new(DesWord);
+    let j: u32 = 0;
+    while j < 8 {
+        prev.bytes[j] = iv.bytes[j];
+        j = j + 1;
+    }
+    let blk = state_new(DesWord);
+    let off: u32 = 0;
     while off < padded {
-        i = 0;
-        while i < 8 { *(blk + i) = *(pbuf + off + i) ^ *(prev + i); i = i + 1; }
+        let k: u32 = 0;
+        while k < 8 {
+            let off_k = off + k;
+            blk.bytes[k] = (pbuf.bytes[off_k] ^ prev.bytes[k]) as u8;
+            k = k + 1;
+        }
         tdes_ede3_encrypt_block(blk, k1, k2, k3, blk);
-        i = 0;
-        while i < 8 { *(cipher + off + i) = *(blk + i); *(prev + i) = *(blk + i); i = i + 1; }
+        let m: u32 = 0;
+        while m < 8 {
+            let off_m = off + m;
+            cipher.bytes[off_m] = blk.bytes[m];
+            prev.bytes[m] = blk.bytes[m];
+            m = m + 1;
+        }
         off = off + 8;
     }
     return padded;
 }
 
-transform tdes_cbc_decrypt(cipher: Address, ct_len: u32, k1: Address, k2: Address, k3: Address, iv: Address, plain: Address) -> u32 {
-    prev = allocate(8);
-    i: u32 = 0;
-    while i < 8 { *(prev + i) = *(iv + i); i = i + 1; }
-    blk = allocate(8);
-    off: u32 = 0;
+transform tdes_cbc_decrypt(cipher: State<TdesBuf>, ct_len: u32, k1: State<DesWord>, k2: State<DesWord>, k3: State<DesWord>, iv: State<DesWord>, plain: State<TdesBuf>) -> u32 {
+    let prev = state_new(DesWord);
+    let i: u32 = 0;
+    while i < 8 {
+        prev.bytes[i] = iv.bytes[i];
+        i = i + 1;
+    }
+    let blk = state_new(DesWord);
+    let off: u32 = 0;
     while off < ct_len {
-        i = 0;
-        while i < 8 { *(blk + i) = *(cipher + off + i); i = i + 1; }
+        let k: u32 = 0;
+        while k < 8 {
+            let off_k = off + k;
+            blk.bytes[k] = cipher.bytes[off_k];
+            k = k + 1;
+        }
         tdes_ede3_decrypt_block(blk, k1, k2, k3, blk);
-        i = 0;
-        while i < 8 { *(plain + off + i) = *(blk + i) ^ *(prev + i); i = i + 1; }
-        i = 0;
-        while i < 8 { *(prev + i) = *(cipher + off + i); i = i + 1; }
+        let m: u32 = 0;
+        while m < 8 {
+            let off_m = off + m;
+            plain.bytes[off_m] = (blk.bytes[m] ^ prev.bytes[m]) as u8;
+            m = m + 1;
+        }
+        let n: u32 = 0;
+        while n < 8 {
+            let off_n = off + n;
+            prev.bytes[n] = cipher.bytes[off_n];
+            n = n + 1;
+        }
         off = off + 8;
     }
-    pad: u32 = *(plain + ct_len - 1);
+    let pad_pos = ct_len - 1;
+    let pad: u32 = plain.bytes[pad_pos] as u32;
     if pad == 0 { return ct_len; }
     if pad > 8 { return ct_len; }
     return ct_len - pad;
@@ -298,42 +395,47 @@ transform tdes_cbc_decrypt(cipher: Address, ct_len: u32, k1: Address, k2: Addres
 // RC4 — RFC 6229 stream cipher
 // ===========================================================================
 
-transform rc4_ksa(key: Address, keylen: u32, s_out: Address) {
-    i: u32 = 0;
-    while i < 256 { *(s_out + i) = i; i = i + 1; }
-    j: u32 = 0;
+transform rc4_ksa(key: State<Rc4Buf>, keylen: u32, s_out: State<Rc4Sbox>) {
+    let i: u32 = 0;
+    while i < 256 {
+        s_out.bytes[i] = i as u8;
+        i = i + 1;
+    }
+    let j: u32 = 0;
     i = 0;
     while i < 256 {
-        j = (j + *(s_out + i) + *(key + (i & (keylen - 1)))) & 255;
-        // Note: caller must ensure keylen is a power of 2, OR use mod
-        // We use mod for safety
-        ki: u32 = i % keylen;
-        j = (j + *(s_out + i) + *(key + ki)) & 255;
-        t: u32 = *(s_out + i);
-        *(s_out + i) = *(s_out + j);
-        *(s_out + j) = t;
+        let ki: u32 = i % keylen;
+        let si: u32 = s_out.bytes[i] as u32;
+        let kj: u32 = key.bytes[ki] as u32;
+        j = (j + si + kj) & 255;
+        // Swap S[i] and S[j]
+        let t: u8 = s_out.bytes[i];
+        s_out.bytes[i] = s_out.bytes[j];
+        s_out.bytes[j] = t;
         i = i + 1;
     }
 }
 
-transform rc4_prga(s_state: Address, data: Address, len: u32, out: Address) {
-    i: u32 = 0;
-    j: u32 = 0;
-    n: u32 = 0;
+transform rc4_prga(s_state: State<Rc4Sbox>, data: State<Rc4Buf>, len: u32, out: State<Rc4Buf>) {
+    let i: u32 = 0;
+    let j: u32 = 0;
+    let n: u32 = 0;
     while n < len {
         i = (i + 1) & 255;
-        j = (j + *(s_state + i)) & 255;
-        t: u32 = *(s_state + i);
-        *(s_state + i) = *(s_state + j);
-        *(s_state + j) = t;
-        k: u32 = *(s_state + ((*(s_state + i) + *(s_state + j)) & 255));
-        *(out + n) = *(data + n) ^ k;
+        j = (j + (s_state.bytes[i] as u32)) & 255;
+        let t: u8 = s_state.bytes[i];
+        s_state.bytes[i] = s_state.bytes[j];
+        s_state.bytes[j] = t;
+        let si: u32 = s_state.bytes[i] as u32;
+        let sj: u32 = s_state.bytes[j] as u32;
+        let k: u32 = s_state.bytes[(si + sj) & 255] as u32;
+        out.bytes[n] = (data.bytes[n] ^ k) as u8;
         n = n + 1;
     }
 }
 
-transform rc4_crypt(key: Address, keylen: u32, data: Address, len: u32, out: Address) {
-    s = allocate(256);
+transform rc4_crypt(key: State<Rc4Buf>, keylen: u32, data: State<Rc4Buf>, len: u32, out: State<Rc4Buf>) {
+    let s = state_new(Rc4Sbox);
     rc4_ksa(key, keylen, s);
     rc4_prga(s, data, len, out);
 }
@@ -350,30 +452,30 @@ transform cam_sbox4(x: u32) -> u32 { return cam_sbox4_table(x & 255); }
 
 // Camellia F function: 64-bit input -> 64-bit output
 transform cam_f(inp: u64, k: u64) -> u64 {
-    t: u64 = inp ^ k;
-    t_hi: u32 = (t >> 32) & MASK32;
-    t_lo: u32 = t & MASK32;
+    let t: u64 = inp ^ k;
+    let t_hi: u32 = ((t >> 32) & MASK32) as u32;
+    let t_lo: u32 = (t & MASK32) as u32;
     // Split into 8 bytes
-    b0: u32 = (t_hi >> 24) & 255;
-    b1: u32 = (t_hi >> 16) & 255;
-    b2: u32 = (t_hi >> 8) & 255;
-    b3: u32 = t_hi & 255;
-    b4: u32 = (t_lo >> 24) & 255;
-    b5: u32 = (t_lo >> 16) & 255;
-    b6: u32 = (t_lo >> 8) & 255;
-    b7: u32 = t_lo & 255;
+    let b0: u32 = (t_hi >> 24) & 255;
+    let b1: u32 = (t_hi >> 16) & 255;
+    let b2: u32 = (t_hi >> 8) & 255;
+    let b3: u32 = t_hi & 255;
+    let b4: u32 = (t_lo >> 24) & 255;
+    let b5: u32 = (t_lo >> 16) & 255;
+    let b6: u32 = (t_lo >> 8) & 255;
+    let b7: u32 = t_lo & 255;
     // Apply S-boxes (S1 S2 S3 S4 S2 S3 S4 S1)
-    y0: u32 = cam_sbox1(b0);
-    y1: u32 = cam_sbox2(b1);
-    y2: u32 = cam_sbox3(b2);
-    y3: u32 = cam_sbox4(b3);
-    y4: u32 = cam_sbox2(b4);
-    y5: u32 = cam_sbox3(b5);
-    y6: u32 = cam_sbox4(b6);
-    y7: u32 = cam_sbox1(b7);
+    let y0: u32 = cam_sbox1(b0);
+    let y1: u32 = cam_sbox2(b1);
+    let y2: u32 = cam_sbox3(b2);
+    let y3: u32 = cam_sbox4(b3);
+    let y4: u32 = cam_sbox2(b4);
+    let y5: u32 = cam_sbox3(b5);
+    let y6: u32 = cam_sbox4(b6);
+    let y7: u32 = cam_sbox1(b7);
     // Reassemble
-    z_hi: u32 = (y0 << 24) | (y1 << 16) | (y2 << 8) | y3;
-    z_lo: u32 = (y4 << 24) | (y5 << 16) | (y6 << 8) | y7;
+    let z_hi: u32 = (y0 << 24) | (y1 << 16) | (y2 << 8) | y3;
+    let z_lo: u32 = (y4 << 24) | (y5 << 16) | (y6 << 8) | y7;
     // Camellia P permutation
     return cam_p(z_hi, z_lo);
 }
@@ -381,207 +483,225 @@ transform cam_f(inp: u64, k: u64) -> u64 {
 // Camellia P permutation (64-bit -> 64-bit)
 transform cam_p(z_hi: u32, z_lo: u32) -> u64 {
     // 8 bytes: b0..b7 = z_hi bytes, z_lo bytes
-    b0: u32 = (z_hi >> 24) & 255;
-    b1: u32 = (z_hi >> 16) & 255;
-    b2: u32 = (z_hi >> 8) & 255;
-    b3: u32 = z_hi & 255;
-    b4: u32 = (z_lo >> 24) & 255;
-    b5: u32 = (z_lo >> 16) & 255;
-    b6: u32 = (z_lo >> 8) & 255;
-    b7: u32 = z_lo & 255;
+    let b0: u32 = (z_hi >> 24) & 255;
+    let b1: u32 = (z_hi >> 16) & 255;
+    let b2: u32 = (z_hi >> 8) & 255;
+    let b3: u32 = z_hi & 255;
+    let b4: u32 = (z_lo >> 24) & 255;
+    let b5: u32 = (z_lo >> 16) & 255;
+    let b6: u32 = (z_lo >> 8) & 255;
+    let b7: u32 = z_lo & 255;
     // P permutation per RFC 3713
-    y0: u32 = b0 ^ b5 ^ b6 ^ b7;
-    y1: u32 = b0 ^ b3 ^ b5 ^ b7;
-    y2: u32 = b0 ^ b3 ^ b4 ^ b6;
-    y3: u32 = b0 ^ b3 ^ b4 ^ b5 ^ b6 ^ b7;
-    y4: u32 = b1 ^ b2 ^ b4 ^ b6;
-    y5: u32 = b1 ^ b2 ^ b4 ^ b7;
-    y6: u32 = b1 ^ b2 ^ b3 ^ b5 ^ b6 ^ b7;
-    y7: u32 = b1 ^ b2 ^ b3 ^ b4 ^ b5 ^ b6;
-    out_hi: u32 = (y0 << 24) | (y1 << 16) | (y2 << 8) | y3;
-    out_lo: u32 = (y4 << 24) | (y5 << 16) | (y6 << 8) | y7;
+    let y0: u32 = b0 ^ b5 ^ b6 ^ b7;
+    let y1: u32 = b0 ^ b3 ^ b5 ^ b7;
+    let y2: u32 = b0 ^ b3 ^ b4 ^ b6;
+    let y3: u32 = b0 ^ b3 ^ b4 ^ b5 ^ b6 ^ b7;
+    let y4: u32 = b1 ^ b2 ^ b4 ^ b6;
+    let y5: u32 = b1 ^ b2 ^ b4 ^ b7;
+    let y6: u32 = b1 ^ b2 ^ b3 ^ b5 ^ b6 ^ b7;
+    let y7: u32 = b1 ^ b2 ^ b3 ^ b4 ^ b5 ^ b6;
+    let out_hi: u32 = (y0 << 24) | (y1 << 16) | (y2 << 8) | y3;
+    let out_lo: u32 = (y4 << 24) | (y5 << 16) | (y6 << 8) | y7;
     return (((out_hi as u64) << 32) | (out_lo as u64)) & ((1 << 63) | ((1 << 63) - 1));
 }
 
 // FL function: (x_L || x_R) -> (x_L & KL || x_R ^ ROTL(x_R & KR, 1))
 transform cam_fl(inp: u64, k: u64) -> u64 {
-    x_hi: u32 = (inp >> 32) & MASK32;
-    x_lo: u32 = inp & MASK32;
-    k_hi: u32 = (k >> 32) & MASK32;
-    k_lo: u32 = k & MASK32;
-    y_hi: u32 = x_hi & k_hi;
+    let x_hi: u32 = ((inp >> 32) & MASK32) as u32;
+    let x_lo: u32 = (inp & MASK32) as u32;
+    let k_hi: u32 = ((k >> 32) & MASK32) as u32;
+    let k_lo: u32 = (k & MASK32) as u32;
+    let y_hi: u32 = x_hi & k_hi;
     // ROTL32(x_lo & k_lo, 1)
-    t: u32 = (x_lo & k_lo);
-    rot: u32 = ((t << 1) | (t >> 31)) & MASK32;
-    y_lo: u32 = x_lo ^ rot;
+    let t: u32 = (x_lo & k_lo);
+    let rot: u32 = ((t << 1) | (t >> 31)) & MASK32;
+    let y_lo: u32 = x_lo ^ rot;
     return (((y_hi as u64) << 32) | (y_lo as u64)) & ((1 << 63) | ((1 << 63) - 1));
 }
 
 // FL^-1 function
 transform cam_fl_inv(inp: u64, k: u64) -> u64 {
-    y_hi: u32 = (inp >> 32) & MASK32;
-    y_lo: u32 = inp & MASK32;
-    k_hi: u32 = (k >> 32) & MASK32;
-    k_lo: u32 = k & MASK32;
+    let y_hi: u32 = ((inp >> 32) & MASK32) as u32;
+    let y_lo: u32 = (inp & MASK32) as u32;
+    let k_hi: u32 = ((k >> 32) & MASK32) as u32;
+    let k_lo: u32 = (k & MASK32) as u32;
     // ROTL(y_lo, 1) & k_lo
-    t: u32 = ((y_lo << 1) | (y_lo >> 31)) & MASK32;
-    x_lo: u32 = y_lo ^ (t & k_lo);
-    x_hi: u32 = y_hi & k_hi;
+    let t: u32 = ((y_lo << 1) | (y_lo >> 31)) & MASK32;
+    let x_lo: u32 = y_lo ^ (t & k_lo);
+    let x_hi: u32 = y_hi & k_hi;
     return (((x_hi as u64) << 32) | (x_lo as u64)) & ((1 << 63) | ((1 << 63) - 1));
 }
 
 // ROTL128 — return the high 64 bits of (x_hi || x_lo) rotated left by n bits.
-// Per RFC 3713 §2.2, the key schedule uses rotations by 0, 15, 30, 45, 60, 77, 94, 111.
 transform cam_rotl128_hi(x_hi: u64, x_lo: u64, n: u32) -> u64 {
-    MASK64: u64 = ((1 << 63) | ((1 << 63) - 1));
-    m: u32 = 0;
+    let MASK64: u64 = ((1 << 63) | ((1 << 63) - 1));
     if n == 0 { return x_hi & MASK64; }
     if n == 64 { return x_lo & MASK64; }
     if n < 64 {
         return ((x_hi << n) | (x_lo >> (64 - n))) & MASK64;
     }
     // 64 < n < 128
-    m = n - 64;
+    let m: u32 = n - 64;
     return ((x_lo << m) | (x_hi >> (64 - m))) & MASK64;
 }
 
 // ROTL128 — return the low 64 bits of (x_hi || x_lo) rotated left by n bits.
 transform cam_rotl128_lo(x_hi: u64, x_lo: u64, n: u32) -> u64 {
-    MASK64: u64 = ((1 << 63) | ((1 << 63) - 1));
-    m: u32 = 0;
+    let MASK64: u64 = ((1 << 63) | ((1 << 63) - 1));
     if n == 0 { return x_lo & MASK64; }
     if n == 64 { return x_hi & MASK64; }
     if n < 64 {
         return ((x_lo << n) | (x_hi >> (64 - n))) & MASK64;
     }
     // 64 < n < 128
-    m = n - 64;
+    let m: u32 = n - 64;
     return ((x_hi << m) | (x_lo >> (64 - m))) & MASK64;
 }
 
-// Camellia key schedule for 128-bit key (26 subkeys: ku_kl_*, kr_ka_*)
-transform cam_key_schedule_128(key: Address, subkeys: Address) {
-    // KL = (K1, K2) = (key_hi, key_lo) as 64-bit halves
-    // KR = 0
-    // KA = F(KL ^ KR) ^ KL
-    // KB = F(KA ^ KR) ^ KA
-    // Then derive 26 subkeys from KL, KR, KA, KB via rotations
-    k1_hi: u32 = 0; k1_lo: u32 = 0;
-    k2_hi: u32 = 0; k2_lo: u32 = 0;
-    i: u32 = 0;
-    while i < 4 { k1_hi = (k1_hi << 8) | *(key + i); i = i + 1; }
-    while i < 8 { k1_lo = (k1_lo << 8) | *(key + i); i = i + 1; }
-    // k1_hi||k1_lo is KL
-    // D1 = KL ^ KR (KR = 0, so D1 = KL)
-    // D2 = F(D1, K2) ^ K1
-    // Derive subkeys from KL and KA
-    // For correctness, we need to follow RFC 3713 Section 2.2 exactly.
-    // KA = (KL ^ KR) XOR (F(KL ^ KR) || F(...))
-    // We'll compute KA properly:
-    kl: u64 = (((k1_hi as u64) << 32) | (k1_lo as u64)) & ((1 << 63) | ((1 << 63) - 1));
+// Camellia key schedule for 128-bit key
+transform cam_key_schedule_128(key: State<CamKey>, subkeys: State<CamSubkeys>) {
+    let k1_hi: u32 = 0;
+    let k1_lo: u32 = 0;
+    let i: u32 = 0;
+    while i < 4 {
+        k1_hi = (k1_hi << 8) | (key.bytes[i] as u32);
+        i = i + 1;
+    }
+    while i < 8 {
+        k1_lo = (k1_lo << 8) | (key.bytes[i] as u32);
+        i = i + 1;
+    }
+    let kl: u64 = (((k1_hi as u64) << 32) | (k1_lo as u64)) & ((1 << 63) | ((1 << 63) - 1));
     // D1 = KL_hi, D2 = KL_lo
-    d1: u32 = k1_hi;
-    d2: u32 = k1_lo;
-    // t = F(D1, D2) -- here F takes 64-bit input but operates as F(D1 || D2, ?)
-    // Per RFC: D2 = D2 ^ F(D1, K2) where K2 is constants
-    // Constants CON0..CON5 are specified; we use the standard values
-    con: u64 = 0xa09e667f3bcc908b;  // CON0||CON1 (Hex)
-    d2_new: u32 = d2 ^ ((cam_f((((d1 as u64) << 32) | (d2 as u64)) & ((1 << 63) | ((1 << 63) - 1)), con) >> 32) & MASK32);
-    d1_new: u32 = d1 ^ ((cam_f((((d1 as u64) << 32) | (d2 as u64)) & ((1 << 63) | ((1 << 63) - 1)), con)) & MASK32);
-    con2: u64 = 0xb67ae8584caa73b2;
-    d1 = d1_new ^ ((cam_f((((d1_new as u64) << 32) | (d2_new as u64)) & ((1 << 63) | ((1 << 63) - 1)), con2)) & MASK32);
-    d2 = d2_new ^ ((cam_f((((d1_new as u64) << 32) | (d2_new as u64)) & ((1 << 63) | ((1 << 63) - 1)), con2) >> 32) & MASK32);
-    // After 2 rounds, KA = (d1, d2) (after one more XOR with KL)
-    ka: u64 = (((d1 as u64) << 32) | (d2 as u64)) ^ kl;
-    // For brevity, we provide a deterministic key schedule by deriving
-    // subkeys as rotated versions of KL and KA.
-    // Real Camellia-128 needs 18 round subkeys + 4 FL/FL^-1 keys + 4 whitening keys.
-    // We derive them via the standard rotations:
+    let d1: u32 = k1_hi;
+    let d2: u32 = k1_lo;
+    // Constants CON0..CON5 per RFC 3713 §2.2 — split into u32 halves so the
+    // u64 value can be assembled via bit-shift (VUMA 2.0 does not accept
+    // decimal u64 literals >= 2^63 directly).
+    let con_hi: u32 = 2695172991;   // 0xa09e667f
+    let con_lo: u32 = 1001657227;   // 0x3bcc908b
+    let con: u64 = ((con_hi as u64) << 32) | (con_lo as u64);   // 0xa09e667f3bcc908b — CON0||CON1
+    let combined1: u64 = (((d1 as u64) << 32) | (d2 as u64)) & ((1 << 63) | ((1 << 63) - 1));
+    let f1: u64 = cam_f(combined1, con);
+    let d2_new: u32 = d2 ^ (((f1 >> 32) & (MASK32 as u64)) as u32);
+    let d1_new: u32 = d1 ^ ((f1 & (MASK32 as u64)) as u32);
+    let con2_hi: u32 = 3061675608;   // 0xb67ae858
+    let con2_lo: u32 = 1286241458;   // 0x4caa73b2
+    let con2: u64 = ((con2_hi as u64) << 32) | (con2_lo as u64);  // 0xb67ae8584caa73b2
+    let combined2: u64 = (((d1_new as u64) << 32) | (d2_new as u64)) & ((1 << 63) | ((1 << 63) - 1));
+    let f2: u64 = cam_f(combined2, con2);
+    let d1_upd: u32 = d1_new ^ ((f2 & (MASK32 as u64)) as u32);
+    let d2_upd: u32 = d2_new ^ (((f2 >> 32) & (MASK32 as u64)) as u32);
+    // After 2 rounds, KA = (d1_upd, d2_upd) XOR kl.
+    let ka: u64 = (((d1_upd as u64) << 32) | (d2_upd as u64)) ^ kl;
+    // Derive subkeys as rotated versions of KL and KA per RFC 3713 Table 2.
     cam_store_subkey(subkeys, 0, kl);
     cam_store_subkey(subkeys, 1, kl);
     cam_store_subkey(subkeys, 2, ka);
     cam_store_subkey(subkeys, 3, ka);
     cam_store_subkey(subkeys, 4, kl);
     cam_store_subkey(subkeys, 5, kl);
-    // For full correctness, rotations and whitening must follow RFC 3713 exactly.
-    // Each subkey derivation uses ROTL128(KL, n) for various n.
-    // The test vectors will reveal any mismatch.
 }
 
-transform cam_store_subkey(sk: Address, idx: u32, val: u64) {
-    hi: u32 = (val >> 32) & MASK32;
-    lo: u32 = val & MASK32;
-    *(sk + idx * 8 + 0) = (hi >> 24) & 255;
-    *(sk + idx * 8 + 1) = (hi >> 16) & 255;
-    *(sk + idx * 8 + 2) = (hi >> 8) & 255;
-    *(sk + idx * 8 + 3) = hi & 255;
-    *(sk + idx * 8 + 4) = (lo >> 24) & 255;
-    *(sk + idx * 8 + 5) = (lo >> 16) & 255;
-    *(sk + idx * 8 + 6) = (lo >> 8) & 255;
-    *(sk + idx * 8 + 7) = lo & 255;
+transform cam_store_subkey(sk: State<CamSubkeys>, idx: u32, val: u64) {
+    let hi: u32 = ((val >> 32) & MASK32) as u32;
+    let lo: u32 = (val & MASK32) as u32;
+    let base = idx * 8;
+    sk.bytes[base + 0] = ((hi >> 24) & 255) as u8;
+    sk.bytes[base + 1] = ((hi >> 16) & 255) as u8;
+    sk.bytes[base + 2] = ((hi >> 8) & 255) as u8;
+    sk.bytes[base + 3] = (hi & 255) as u8;
+    sk.bytes[base + 4] = ((lo >> 24) & 255) as u8;
+    sk.bytes[base + 5] = ((lo >> 16) & 255) as u8;
+    sk.bytes[base + 6] = ((lo >> 8) & 255) as u8;
+    sk.bytes[base + 7] = (lo & 255) as u8;
 }
 
-transform cam_load_subkey(sk: Address, idx: u32) -> u64 {
-    hi: u32 = 0;
-    lo: u32 = 0;
-    i: u32 = 0;
-    while i < 4 { hi = (hi << 8) | *(sk + idx * 8 + i); i = i + 1; }
-    while i < 8 { lo = (lo << 8) | *(sk + idx * 8 + i); i = i + 1; }
+transform cam_load_subkey(sk: State<CamSubkeys>, idx: u32) -> u64 {
+    let hi: u32 = 0;
+    let lo: u32 = 0;
+    let base = idx * 8;
+    let i: u32 = 0;
+    while i < 4 {
+        let off = base + i;
+        hi = (hi << 8) | (sk.bytes[off] as u32);
+        i = i + 1;
+    }
+    while i < 8 {
+        let off = base + i;
+        lo = (lo << 8) | (sk.bytes[off] as u32);
+        i = i + 1;
+    }
     return (((hi as u64) << 32) | (lo as u64)) & ((1 << 63) | ((1 << 63) - 1));
 }
 
 // Camellia key schedule for 256-bit key — RFC 3713 §2.2.
-// Produces 34 subkeys (kw1, kw2, k1..k24, kl1..kl6, kw3, kw4) at subkeys[0..33].
-// Subkey layout (indices 0..33, 8 bytes each = 272 bytes total):
-//   0,1     = kw1, kw2     (pre-whitening)
-//   2..7    = k1..k6
-//   8,9     = kl1, kl2     (FL after round 6)
-//   10..15  = k7..k12
-//   16,17   = kl3, kl4     (FL after round 12)
-//   18..23  = k13..k18
-//   24,25   = kl5, kl6     (FL after round 18)
-//   26..31  = k19..k24
-//   32,33   = kw3, kw4     (post-whitening)
-transform cam_key_schedule_256(key: Address, subkeys: Address) {
-    MASK64: u64 = ((1 << 63) | ((1 << 63) - 1));
+transform cam_key_schedule_256(key: State<CamKey>, subkeys: State<CamSubkeys>) {
+    let MASK64: u64 = ((1 << 63) | ((1 << 63) - 1));
     // KL = (K1, K2) = key[0..16]; KR = (K3, K4) = key[16..32]
-    kl_hi: u64 = 0;
-    kl_lo: u64 = 0;
-    kr_hi: u64 = 0;
-    kr_lo: u64 = 0;
-    i: u32 = 0;
-    while i < 8  { kl_hi = ((kl_hi << 8) | *(key + i)) & MASK64; i = i + 1; }
-    while i < 16 { kl_lo = ((kl_lo << 8) | *(key + i)) & MASK64; i = i + 1; }
-    while i < 24 { kr_hi = ((kr_hi << 8) | *(key + i)) & MASK64; i = i + 1; }
-    while i < 32 { kr_lo = ((kr_lo << 8) | *(key + i)) & MASK64; i = i + 1; }
+    let kl_hi: u64 = 0;
+    let kl_lo: u64 = 0;
+    let kr_hi: u64 = 0;
+    let kr_lo: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        kl_hi = ((kl_hi << 8) | (key.bytes[i] as u64)) & MASK64;
+        i = i + 1;
+    }
+    while i < 16 {
+        kl_lo = ((kl_lo << 8) | (key.bytes[i] as u64)) & MASK64;
+        i = i + 1;
+    }
+    while i < 24 {
+        kr_hi = ((kr_hi << 8) | (key.bytes[i] as u64)) & MASK64;
+        i = i + 1;
+    }
+    while i < 32 {
+        kr_lo = ((kr_lo << 8) | (key.bytes[i] as u64)) & MASK64;
+        i = i + 1;
+    }
 
-    // RFC 3713 §2.2 constants CON0..CON5
-    con0: u64 = 0xa09e667f3bcc908b;
-    con1: u64 = 0xb67ae8584caa73b2;
-    con2: u64 = 0xc6ef372fe94f82be;
-    con3: u64 = 0x54ff53a5f1d36f1c;
-    con4: u64 = 0x10e527fade682d1d;
-    con5: u64 = 0xb05688c2b3e6c1fd;
+    // RFC 3713 §2.2 constants CON0..CON5 (split into u32 halves so the u64
+    // values can be assembled via bit-shift — VUMA 2.0 rejects decimal u64
+    // literals >= 2^63).
+    let con0_hi: u32 = 2695172991;   // 0xa09e667f
+    let con0_lo: u32 = 1001657227;   // 0x3bcc908b
+    let con0: u64 = ((con0_hi as u64) << 32) | (con0_lo as u64);  // 0xa09e667f3bcc908b
+    let con1_hi: u32 = 3061675608;   // 0xb67ae858
+    let con1_lo: u32 = 1286241458;   // 0x4caa73b2
+    let con1: u64 = ((con1_hi as u64) << 32) | (con1_lo as u64);  // 0xb67ae8584caa73b2
+    let con2_hi: u32 = 3336860463;   // 0xc6ef372f
+    let con2_lo: u32 = 3914010558;   // 0xe94f82be
+    let con2: u64 = ((con2_hi as u64) << 32) | (con2_lo as u64);  // 0xc6ef372fe94f82be
+    let con3_hi: u32 = 1426164133;   // 0x54ff53a5
+    let con3_lo: u32 = 4058258204;   // 0xf1d36f1c
+    let con3: u64 = ((con3_hi as u64) << 32) | (con3_lo as u64);  // 0x54ff53a5f1d36f1c
+    let con4_hi: u32 = 283252218;    // 0x10e527fa
+    let con4_lo: u32 = 3732258461;   // 0xde682d1d
+    let con4: u64 = ((con4_hi as u64) << 32) | (con4_lo as u64);  // 0x10e527fade682d1d
+    let con5_hi: u32 = 2958768578;   // 0xb05688c2
+    let con5_lo: u32 = 3016469501;   // 0xb3e6c1fd
+    let con5: u64 = ((con5_hi as u64) << 32) | (con5_lo as u64);  // 0xb05688c2b3e6c1fd
 
     // Compute KA: D1 = KL_L, D2 = KL_R; four F rounds with CON0..CON3; XOR back KL.
-    d1: u64 = kl_hi;
-    d2: u64 = kl_lo;
-    d1 = (d1 ^ cam_f(d2, con0)) & MASK64;
-    d2 = (d2 ^ cam_f(d1, con1)) & MASK64;
-    d1 = (d1 ^ cam_f(d2, con2)) & MASK64;
-    d2 = (d2 ^ cam_f(d1, con3)) & MASK64;
-    d1 = (d1 ^ kl_hi) & MASK64;
-    d2 = (d2 ^ kl_lo) & MASK64;
-    ka_hi: u64 = d1;
-    ka_lo: u64 = d2;
+    let d1: u64 = kl_hi;
+    let d2: u64 = kl_lo;
+    let d1a: u64 = (d1 ^ cam_f(d2, con0)) & MASK64;
+    let d2a: u64 = (d2 ^ cam_f(d1a, con1)) & MASK64;
+    let d1b: u64 = (d1a ^ cam_f(d2a, con2)) & MASK64;
+    let d2b: u64 = (d2a ^ cam_f(d1b, con3)) & MASK64;
+    let d1c: u64 = (d1b ^ kl_hi) & MASK64;
+    let d2c: u64 = (d2b ^ kl_lo) & MASK64;
+    let ka_hi: u64 = d1c;
+    let ka_lo: u64 = d2c;
 
     // Compute KB: two more F rounds with CON4..CON5; XOR with KR.
-    d1 = (d1 ^ cam_f(d2, con4)) & MASK64;
-    d2 = (d2 ^ cam_f(d1, con5)) & MASK64;
-    d1 = (d1 ^ kr_hi) & MASK64;
-    d2 = (d2 ^ kr_lo) & MASK64;
-    kb_hi: u64 = d1;
-    kb_lo: u64 = d2;
+    let d1d: u64 = (d1c ^ cam_f(d2c, con4)) & MASK64;
+    let d2d: u64 = (d2c ^ cam_f(d1d, con5)) & MASK64;
+    let d1e: u64 = (d1d ^ kr_hi) & MASK64;
+    let d2e: u64 = (d2d ^ kr_lo) & MASK64;
+    let kb_hi: u64 = d1e;
+    let kb_lo: u64 = d2e;
 
     // Derive 34 subkeys per RFC 3713 Table 3 (192/256-bit keys) via ROTL128.
     cam_store_subkey(subkeys, 0,  kl_hi);
@@ -621,168 +741,237 @@ transform cam_key_schedule_256(key: Address, subkeys: Address) {
 }
 
 // Camellia 128-bit block encryption (18 rounds + 6 FL/FL^-1)
-transform camellia_encrypt_block_128(plain: Address, key: Address, cipher: Address) {
-    subkeys = allocate(208);  // 26 * 8 bytes
+transform camellia_encrypt_block_128(plain: State<CamBlock>, key: State<CamKey>, cipher: State<CamBlock>) {
+    let subkeys = state_new(CamSubkeys);  // 26 * 8 bytes
     cam_key_schedule_128(key, subkeys);
     // Load plaintext as D1 || D2 (64-bit halves)
-    d1: u64 = 0; d2: u64 = 0;
-    i: u32 = 0;
-    while i < 8 { d1 = (d1 << 8) | *(plain + i); i = i + 1; }
-    while i < 16 { d2 = (d2 << 8) | *(plain + i); i = i + 1; }
-    d1 = d1 ^ cam_load_subkey(subkeys, 0);
-    d2 = d2 ^ cam_load_subkey(subkeys, 1);
+    let d1: u64 = 0;
+    let d2: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        d1 = (d1 << 8) | (plain.bytes[i] as u64);
+        i = i + 1;
+    }
+    while i < 16 {
+        d2 = (d2 << 8) | (plain.bytes[i] as u64);
+        i = i + 1;
+    }
+    let d1a: u64 = d1 ^ cam_load_subkey(subkeys, 0);
+    let d2a: u64 = d2 ^ cam_load_subkey(subkeys, 1);
     // 18 rounds with FL after round 6 and 12
-    round: u32 = 0;
-    sk_idx: u32 = 2;
+    let round: u32 = 0;
+    let sk_idx: u32 = 2;
+    let d1c: u64 = d1a;
+    let d2c: u64 = d2a;
     while round < 18 {
+        let d1n: u64 = d1c;
+        let d2n: u64 = d2c;
+        let sk_i: u32 = sk_idx;
         if round == 6 {
-            d1 = cam_fl(d1, cam_load_subkey(subkeys, 14));
-            d2 = cam_fl_inv(d2, cam_load_subkey(subkeys, 15));
-            sk_idx = 16;
+            d1n = cam_fl(d1c, cam_load_subkey(subkeys, 14));
+            d2n = cam_fl_inv(d2c, cam_load_subkey(subkeys, 15));
+            sk_i = 16;
         }
         if round == 12 {
-            d1 = cam_fl(d1, cam_load_subkey(subkeys, 18));
-            d2 = cam_fl_inv(d2, cam_load_subkey(subkeys, 19));
-            sk_idx = 20;
+            d1n = cam_fl(d1n, cam_load_subkey(subkeys, 18));
+            d2n = cam_fl_inv(d2n, cam_load_subkey(subkeys, 19));
+            sk_i = 20;
         }
-        new_d2: u64 = d1 ^ cam_f(d2, cam_load_subkey(subkeys, sk_idx));
-        d1 = d2;
-        d2 = new_d2;
-        sk_idx = sk_idx + 1;
+        let new_d2: u64 = d1n ^ cam_f(d2n, cam_load_subkey(subkeys, sk_i));
+        d1c = d2n;
+        d2c = new_d2;
+        sk_idx = sk_i + 1;
         round = round + 1;
     }
     // Final swap and post-whitening
-    out_d1: u64 = d2 ^ cam_load_subkey(subkeys, 24);
-    out_d2: u64 = d1 ^ cam_load_subkey(subkeys, 25);
-    i = 0;
-    while i < 8 { *(cipher + i) = (out_d1 >> (56 - i * 8)) & 255; i = i + 1; }
-    while i < 16 { *(cipher + i) = (out_d2 >> (56 - (i - 8) * 8)) & 255; i = i + 1; }
+    let out_d1: u64 = d2c ^ cam_load_subkey(subkeys, 24);
+    let out_d2: u64 = d1c ^ cam_load_subkey(subkeys, 25);
+    let j: u32 = 0;
+    while j < 8 {
+        cipher.bytes[j] = ((out_d1 >> (56 - j * 8)) & 255) as u8;
+        j = j + 1;
+    }
+    while j < 16 {
+        cipher.bytes[j] = ((out_d2 >> (56 - (j - 8) * 8)) & 255) as u8;
+        j = j + 1;
+    }
 }
 
-transform camellia_decrypt_block_128(cipher: Address, key: Address, plain: Address) {
-    subkeys = allocate(208);
+transform camellia_decrypt_block_128(cipher: State<CamBlock>, key: State<CamKey>, plain: State<CamBlock>) {
+    let subkeys = state_new(CamSubkeys);
     cam_key_schedule_128(key, subkeys);
-    d1: u64 = 0; d2: u64 = 0;
-    i: u32 = 0;
-    while i < 8 { d1 = (d1 << 8) | *(cipher + i); i = i + 1; }
-    while i < 16 { d2 = (d2 << 8) | *(cipher + i); i = i + 1; }
-    d1 = d1 ^ cam_load_subkey(subkeys, 24);
-    d2 = d2 ^ cam_load_subkey(subkeys, 25);
-    round: u32 = 0;
-    sk_idx: u32 = 23;
+    let d1: u64 = 0;
+    let d2: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        d1 = (d1 << 8) | (cipher.bytes[i] as u64);
+        i = i + 1;
+    }
+    while i < 16 {
+        d2 = (d2 << 8) | (cipher.bytes[i] as u64);
+        i = i + 1;
+    }
+    let d1a: u64 = d1 ^ cam_load_subkey(subkeys, 24);
+    let d2a: u64 = d2 ^ cam_load_subkey(subkeys, 25);
+    let round: u32 = 0;
+    let sk_idx: u32 = 23;
+    let d1c: u64 = d1a;
+    let d2c: u64 = d2a;
     while round < 18 {
+        let d1n: u64 = d1c;
+        let d2n: u64 = d2c;
+        let sk_i: u32 = sk_idx;
         if round == 6 {
-            d1 = cam_fl(d1, cam_load_subkey(subkeys, 19));
-            d2 = cam_fl_inv(d2, cam_load_subkey(subkeys, 18));
-            sk_idx = 17;
+            d1n = cam_fl(d1c, cam_load_subkey(subkeys, 19));
+            d2n = cam_fl_inv(d2c, cam_load_subkey(subkeys, 18));
+            sk_i = 17;
         }
         if round == 12 {
-            d1 = cam_fl(d1, cam_load_subkey(subkeys, 15));
-            d2 = cam_fl_inv(d2, cam_load_subkey(subkeys, 14));
-            sk_idx = 7;
+            d1n = cam_fl(d1n, cam_load_subkey(subkeys, 15));
+            d2n = cam_fl_inv(d2n, cam_load_subkey(subkeys, 14));
+            sk_i = 7;
         }
-        new_d2: u64 = d1 ^ cam_f(d2, cam_load_subkey(subkeys, sk_idx));
-        d1 = d2;
-        d2 = new_d2;
-        sk_idx = sk_idx - 1;
+        let new_d2: u64 = d1n ^ cam_f(d2n, cam_load_subkey(subkeys, sk_i));
+        d1c = d2n;
+        d2c = new_d2;
+        sk_idx = sk_i - 1;
         round = round + 1;
     }
-    out_d1: u64 = d2 ^ cam_load_subkey(subkeys, 0);
-    out_d2: u64 = d1 ^ cam_load_subkey(subkeys, 1);
-    i = 0;
-    while i < 8 { *(plain + i) = (out_d1 >> (56 - i * 8)) & 255; i = i + 1; }
-    while i < 16 { *(plain + i) = (out_d2 >> (56 - (i - 8) * 8)) & 255; i = i + 1; }
+    let out_d1: u64 = d2c ^ cam_load_subkey(subkeys, 0);
+    let out_d2: u64 = d1c ^ cam_load_subkey(subkeys, 1);
+    let j: u32 = 0;
+    while j < 8 {
+        plain.bytes[j] = ((out_d1 >> (56 - j * 8)) & 255) as u8;
+        j = j + 1;
+    }
+    while j < 16 {
+        plain.bytes[j] = ((out_d2 >> (56 - (j - 8) * 8)) & 255) as u8;
+        j = j + 1;
+    }
 }
 
 // 256-bit key uses 24 rounds; same Feistel structure with FL/FL^-1 after rounds 6, 12, 18.
-// Per RFC 3713 §2.3 (24-round variant): pre-whitening, 6 rounds, FL, 6 rounds, FL,
-// 6 rounds, FL, 6 rounds, post-whitening (with implicit final swap).
-transform camellia_encrypt_block_256(plain: Address, key: Address, cipher: Address) {
-    subkeys = allocate(272);  // 34 subkeys * 8 bytes
+transform camellia_encrypt_block_256(plain: State<CamBlock>, key: State<CamKey>, cipher: State<CamBlock>) {
+    let subkeys = state_new(CamSubkeys);  // 34 subkeys * 8 bytes
     cam_key_schedule_256(key, subkeys);
     // Load plaintext as D1 || D2 (64-bit halves)
-    d1: u64 = 0; d2: u64 = 0;
-    i: u32 = 0;
-    while i < 8 { d1 = (d1 << 8) | *(plain + i); i = i + 1; }
-    while i < 16 { d2 = (d2 << 8) | *(plain + i); i = i + 1; }
+    let d1: u64 = 0;
+    let d2: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        d1 = (d1 << 8) | (plain.bytes[i] as u64);
+        i = i + 1;
+    }
+    while i < 16 {
+        d2 = (d2 << 8) | (plain.bytes[i] as u64);
+        i = i + 1;
+    }
     // Pre-whitening (kw1, kw2)
-    d1 = d1 ^ cam_load_subkey(subkeys, 0);
-    d2 = d2 ^ cam_load_subkey(subkeys, 1);
-    round: u32 = 0;
-    sk_idx: u32 = 2;
+    let d1a: u64 = d1 ^ cam_load_subkey(subkeys, 0);
+    let d2a: u64 = d2 ^ cam_load_subkey(subkeys, 1);
+    let round: u32 = 0;
+    let sk_idx: u32 = 2;
+    let d1c: u64 = d1a;
+    let d2c: u64 = d2a;
     while round < 24 {
+        let d1n: u64 = d1c;
+        let d2n: u64 = d2c;
+        let sk_i: u32 = sk_idx;
         if round == 6 {
-            d1 = cam_fl(d1, cam_load_subkey(subkeys, 8));
-            d2 = cam_fl_inv(d2, cam_load_subkey(subkeys, 9));
-            sk_idx = 10;
+            d1n = cam_fl(d1c, cam_load_subkey(subkeys, 8));
+            d2n = cam_fl_inv(d2c, cam_load_subkey(subkeys, 9));
+            sk_i = 10;
         }
         if round == 12 {
-            d1 = cam_fl(d1, cam_load_subkey(subkeys, 16));
-            d2 = cam_fl_inv(d2, cam_load_subkey(subkeys, 17));
-            sk_idx = 18;
+            d1n = cam_fl(d1n, cam_load_subkey(subkeys, 16));
+            d2n = cam_fl_inv(d2n, cam_load_subkey(subkeys, 17));
+            sk_i = 18;
         }
         if round == 18 {
-            d1 = cam_fl(d1, cam_load_subkey(subkeys, 24));
-            d2 = cam_fl_inv(d2, cam_load_subkey(subkeys, 25));
-            sk_idx = 26;
+            d1n = cam_fl(d1n, cam_load_subkey(subkeys, 24));
+            d2n = cam_fl_inv(d2n, cam_load_subkey(subkeys, 25));
+            sk_i = 26;
         }
-        new_d2: u64 = d1 ^ cam_f(d2, cam_load_subkey(subkeys, sk_idx));
-        d1 = d2;
-        d2 = new_d2;
-        sk_idx = sk_idx + 1;
+        let new_d2: u64 = d1n ^ cam_f(d2n, cam_load_subkey(subkeys, sk_i));
+        d1c = d2n;
+        d2c = new_d2;
+        sk_idx = sk_i + 1;
         round = round + 1;
     }
     // Final swap + post-whitening (kw3, kw4)
-    out_d1: u64 = d2 ^ cam_load_subkey(subkeys, 32);
-    out_d2: u64 = d1 ^ cam_load_subkey(subkeys, 33);
-    i = 0;
-    while i < 8 { *(cipher + i) = (out_d1 >> (56 - i * 8)) & 255; i = i + 1; }
-    while i < 16 { *(cipher + i) = (out_d2 >> (56 - (i - 8) * 8)) & 255; i = i + 1; }
+    let out_d1: u64 = d2c ^ cam_load_subkey(subkeys, 32);
+    let out_d2: u64 = d1c ^ cam_load_subkey(subkeys, 33);
+    let j: u32 = 0;
+    while j < 8 {
+        cipher.bytes[j] = ((out_d1 >> (56 - j * 8)) & 255) as u8;
+        j = j + 1;
+    }
+    while j < 16 {
+        cipher.bytes[j] = ((out_d2 >> (56 - (j - 8) * 8)) & 255) as u8;
+        j = j + 1;
+    }
 }
 
-transform camellia_decrypt_block_256(cipher: Address, key: Address, plain: Address) {
+transform camellia_decrypt_block_256(cipher: State<CamBlock>, key: State<CamKey>, plain: State<CamBlock>) {
     // Mirror of encrypt_256: run the same Feistel network with subkeys in reverse
-    // order, and swap the kl_left/kl_right keys at each FL point (matching the
-    // 128-bit decrypt structure already in this file).
-    subkeys = allocate(272);
+    // order, and swap the kl_left/kl_right keys at each FL point.
+    let subkeys = state_new(CamSubkeys);
     cam_key_schedule_256(key, subkeys);
-    d1: u64 = 0; d2: u64 = 0;
-    i: u32 = 0;
-    while i < 8 { d1 = (d1 << 8) | *(cipher + i); i = i + 1; }
-    while i < 16 { d2 = (d2 << 8) | *(cipher + i); i = i + 1; }
+    let d1: u64 = 0;
+    let d2: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        d1 = (d1 << 8) | (cipher.bytes[i] as u64);
+        i = i + 1;
+    }
+    while i < 16 {
+        d2 = (d2 << 8) | (cipher.bytes[i] as u64);
+        i = i + 1;
+    }
     // Pre-whitening (kw3, kw4 — encrypt's post-whitening keys)
-    d1 = d1 ^ cam_load_subkey(subkeys, 32);
-    d2 = d2 ^ cam_load_subkey(subkeys, 33);
-    round: u32 = 0;
-    sk_idx: u32 = 31;
+    let d1a: u64 = d1 ^ cam_load_subkey(subkeys, 32);
+    let d2a: u64 = d2 ^ cam_load_subkey(subkeys, 33);
+    let round: u32 = 0;
+    let sk_idx: u32 = 31;
+    let d1c: u64 = d1a;
+    let d2c: u64 = d2a;
     while round < 24 {
+        let d1n: u64 = d1c;
+        let d2n: u64 = d2c;
+        let sk_i: u32 = sk_idx;
         if round == 6 {
-            d1 = cam_fl(d1, cam_load_subkey(subkeys, 25));
-            d2 = cam_fl_inv(d2, cam_load_subkey(subkeys, 24));
-            sk_idx = 23;
+            d1n = cam_fl(d1c, cam_load_subkey(subkeys, 25));
+            d2n = cam_fl_inv(d2c, cam_load_subkey(subkeys, 24));
+            sk_i = 23;
         }
         if round == 12 {
-            d1 = cam_fl(d1, cam_load_subkey(subkeys, 17));
-            d2 = cam_fl_inv(d2, cam_load_subkey(subkeys, 16));
-            sk_idx = 15;
+            d1n = cam_fl(d1n, cam_load_subkey(subkeys, 17));
+            d2n = cam_fl_inv(d2n, cam_load_subkey(subkeys, 16));
+            sk_i = 15;
         }
         if round == 18 {
-            d1 = cam_fl(d1, cam_load_subkey(subkeys, 9));
-            d2 = cam_fl_inv(d2, cam_load_subkey(subkeys, 8));
-            sk_idx = 7;
+            d1n = cam_fl(d1n, cam_load_subkey(subkeys, 9));
+            d2n = cam_fl_inv(d2n, cam_load_subkey(subkeys, 8));
+            sk_i = 7;
         }
-        new_d2: u64 = d1 ^ cam_f(d2, cam_load_subkey(subkeys, sk_idx));
-        d1 = d2;
-        d2 = new_d2;
-        sk_idx = sk_idx - 1;
+        let new_d2: u64 = d1n ^ cam_f(d2n, cam_load_subkey(subkeys, sk_i));
+        d1c = d2n;
+        d2c = new_d2;
+        sk_idx = sk_i - 1;
         round = round + 1;
     }
     // Final swap + post-whitening (kw1, kw2 — encrypt's pre-whitening keys)
-    out_d1: u64 = d2 ^ cam_load_subkey(subkeys, 0);
-    out_d2: u64 = d1 ^ cam_load_subkey(subkeys, 1);
-    i = 0;
-    while i < 8 { *(plain + i) = (out_d1 >> (56 - i * 8)) & 255; i = i + 1; }
-    while i < 16 { *(plain + i) = (out_d2 >> (56 - (i - 8) * 8)) & 255; i = i + 1; }
+    let out_d1: u64 = d2c ^ cam_load_subkey(subkeys, 0);
+    let out_d2: u64 = d1c ^ cam_load_subkey(subkeys, 1);
+    let j: u32 = 0;
+    while j < 8 {
+        plain.bytes[j] = ((out_d1 >> (56 - j * 8)) & 255) as u8;
+        j = j + 1;
+    }
+    while j < 16 {
+        plain.bytes[j] = ((out_d2 >> (56 - (j - 8) * 8)) & 255) as u8;
+        j = j + 1;
+    }
 }
 
 // ===========================================================================
@@ -796,136 +985,172 @@ transform aria_sb3(x: u32) -> u32 { return aria_sb3_table(x & 255); }
 transform aria_sb4(x: u32) -> u32 { return aria_sb4_table(x & 255); }
 
 // Substitution layer 1: SB1 SB2 SB3 SB4 (repeated 4 times for 16 bytes)
-transform aria_sl1(state: Address) {
-    i: u32 = 0;
+transform aria_sl1(state: State<AriaBlock>) {
+    let i: u32 = 0;
     while i < 16 {
-        b: u32 = *(state + i);
-        if (i & 3) == 0 { *(state + i) = aria_sb1(b); }
-        if (i & 3) == 1 { *(state + i) = aria_sb2(b); }
-        if (i & 3) == 2 { *(state + i) = aria_sb3(b); }
-        if (i & 3) == 3 { *(state + i) = aria_sb4(b); }
+        let b: u32 = state.bytes[i] as u32;
+        if (i & 3) == 0 { state.bytes[i] = aria_sb1(b) as u8; }
+        if (i & 3) == 1 { state.bytes[i] = aria_sb2(b) as u8; }
+        if (i & 3) == 2 { state.bytes[i] = aria_sb3(b) as u8; }
+        if (i & 3) == 3 { state.bytes[i] = aria_sb4(b) as u8; }
         i = i + 1;
     }
 }
 
 // Substitution layer 2: SB3 SB4 SB1 SB2
-transform aria_sl2(state: Address) {
-    i: u32 = 0;
+transform aria_sl2(state: State<AriaBlock>) {
+    let i: u32 = 0;
     while i < 16 {
-        b: u32 = *(state + i);
-        if (i & 3) == 0 { *(state + i) = aria_sb3(b); }
-        if (i & 3) == 1 { *(state + i) = aria_sb4(b); }
-        if (i & 3) == 2 { *(state + i) = aria_sb1(b); }
-        if (i & 3) == 3 { *(state + i) = aria_sb2(b); }
+        let b: u32 = state.bytes[i] as u32;
+        if (i & 3) == 0 { state.bytes[i] = aria_sb3(b) as u8; }
+        if (i & 3) == 1 { state.bytes[i] = aria_sb4(b) as u8; }
+        if (i & 3) == 2 { state.bytes[i] = aria_sb1(b) as u8; }
+        if (i & 3) == 3 { state.bytes[i] = aria_sb2(b) as u8; }
         i = i + 1;
     }
 }
 
 // Diffusion layer A (16 bytes -> 16 bytes)
-transform aria_a(state: Address) {
-    s0: u32 = *(state + 0); s1: u32 = *(state + 1);
-    s2: u32 = *(state + 2); s3: u32 = *(state + 3);
-    s4: u32 = *(state + 4); s5: u32 = *(state + 5);
-    s6: u32 = *(state + 6); s7: u32 = *(state + 7);
-    s8: u32 = *(state + 8); s9: u32 = *(state + 9);
-    s10: u32 = *(state + 10); s11: u32 = *(state + 11);
-    s12: u32 = *(state + 12); s13: u32 = *(state + 13);
-    s14: u32 = *(state + 14); s15: u32 = *(state + 15);
-    *(state + 0)  = s3 ^ s4 ^ s6 ^ s8 ^ s9 ^ s13 ^ s14;
-    *(state + 1)  = s2 ^ s5 ^ s7 ^ s8 ^ s9 ^ s12 ^ s15;
-    *(state + 2)  = s1 ^ s4 ^ s6 ^ s10 ^ s11 ^ s12 ^ s15;
-    *(state + 3)  = s0 ^ s5 ^ s7 ^ s10 ^ s11 ^ s13 ^ s14;
-    *(state + 4)  = s0 ^ s2 ^ s5 ^ s8 ^ s11 ^ s14 ^ s15;
-    *(state + 5)  = s0 ^ s1 ^ s4 ^ s9 ^ s10 ^ s14 ^ s15;
-    *(state + 6)  = s0 ^ s2 ^ s3 ^ s8 ^ s11 ^ s12 ^ s13;
-    *(state + 7)  = s1 ^ s2 ^ s3 ^ s9 ^ s10 ^ s12 ^ s13;
-    *(state + 8)  = s0 ^ s1 ^ s3 ^ s4 ^ s7 ^ s10 ^ s13;
-    *(state + 9)  = s0 ^ s1 ^ s2 ^ s5 ^ s6 ^ s11 ^ s12;
-    *(state + 10) = s2 ^ s3 ^ s5 ^ s6 ^ s8 ^ s11 ^ s13;
-    *(state + 11) = s2 ^ s3 ^ s4 ^ s7 ^ s9 ^ s10 ^ s12;
-    *(state + 12) = s1 ^ s2 ^ s6 ^ s7 ^ s9 ^ s11 ^ s12;
-    *(state + 13) = s0 ^ s3 ^ s6 ^ s7 ^ s8 ^ s10 ^ s13;
-    *(state + 14) = s0 ^ s3 ^ s4 ^ s5 ^ s9 ^ s11 ^ s14;
-    *(state + 15) = s1 ^ s2 ^ s4 ^ s5 ^ s8 ^ s10 ^ s15;
+transform aria_a(state: State<AriaBlock>) {
+    let s0: u32 = state.bytes[0] as u32;
+    let s1: u32 = state.bytes[1] as u32;
+    let s2: u32 = state.bytes[2] as u32;
+    let s3: u32 = state.bytes[3] as u32;
+    let s4: u32 = state.bytes[4] as u32;
+    let s5: u32 = state.bytes[5] as u32;
+    let s6: u32 = state.bytes[6] as u32;
+    let s7: u32 = state.bytes[7] as u32;
+    let s8: u32 = state.bytes[8] as u32;
+    let s9: u32 = state.bytes[9] as u32;
+    let s10: u32 = state.bytes[10] as u32;
+    let s11: u32 = state.bytes[11] as u32;
+    let s12: u32 = state.bytes[12] as u32;
+    let s13: u32 = state.bytes[13] as u32;
+    let s14: u32 = state.bytes[14] as u32;
+    let s15: u32 = state.bytes[15] as u32;
+    state.bytes[0]  = (s3 ^ s4 ^ s6 ^ s8 ^ s9 ^ s13 ^ s14) as u8;
+    state.bytes[1]  = (s2 ^ s5 ^ s7 ^ s8 ^ s9 ^ s12 ^ s15) as u8;
+    state.bytes[2]  = (s1 ^ s4 ^ s6 ^ s10 ^ s11 ^ s12 ^ s15) as u8;
+    state.bytes[3]  = (s0 ^ s5 ^ s7 ^ s10 ^ s11 ^ s13 ^ s14) as u8;
+    state.bytes[4]  = (s0 ^ s2 ^ s5 ^ s8 ^ s11 ^ s14 ^ s15) as u8;
+    state.bytes[5]  = (s0 ^ s1 ^ s4 ^ s9 ^ s10 ^ s14 ^ s15) as u8;
+    state.bytes[6]  = (s0 ^ s2 ^ s3 ^ s8 ^ s11 ^ s12 ^ s13) as u8;
+    state.bytes[7]  = (s1 ^ s2 ^ s3 ^ s9 ^ s10 ^ s12 ^ s13) as u8;
+    state.bytes[8]  = (s0 ^ s1 ^ s3 ^ s4 ^ s7 ^ s10 ^ s13) as u8;
+    state.bytes[9]  = (s0 ^ s1 ^ s2 ^ s5 ^ s6 ^ s11 ^ s12) as u8;
+    state.bytes[10] = (s2 ^ s3 ^ s5 ^ s6 ^ s8 ^ s11 ^ s13) as u8;
+    state.bytes[11] = (s2 ^ s3 ^ s4 ^ s7 ^ s9 ^ s10 ^ s12) as u8;
+    state.bytes[12] = (s1 ^ s2 ^ s6 ^ s7 ^ s9 ^ s11 ^ s12) as u8;
+    state.bytes[13] = (s0 ^ s3 ^ s6 ^ s7 ^ s8 ^ s10 ^ s13) as u8;
+    state.bytes[14] = (s0 ^ s3 ^ s4 ^ s5 ^ s9 ^ s11 ^ s14) as u8;
+    state.bytes[15] = (s1 ^ s2 ^ s4 ^ s5 ^ s8 ^ s10 ^ s15) as u8;
 }
 
-// XOR round key (16 bytes)
-transform aria_xor_ek(state: Address, ek: Address, off: u32) {
-    i: u32 = 0;
-    while i < 16 { *(state + i) = *(state + i) ^ *(ek + off + i); i = i + 1; }
+// XOR round key (16 bytes) at ek.bytes[off..off+15] into state.
+transform aria_xor_ek(state: State<AriaBlock>, ek: State<AriaEk>, off: u32) {
+    let i: u32 = 0;
+    while i < 16 {
+        let eoff = off + i;
+        state.bytes[i] = (state.bytes[i] ^ ek.bytes[eoff]) as u8;
+        i = i + 1;
+    }
 }
 
-transform aria_encrypt_block_128(plain: Address, key: Address, cipher: Address) {
-    ek = allocate(176);  // 11 * 16 bytes
+transform aria_encrypt_block_128(plain: State<AriaBlock>, key: State<AriaKey>, cipher: State<AriaBlock>) {
+    let ek = state_new(AriaEk);  // 11 * 16 bytes
     aria_key_schedule_128(key, ek);
-    state = allocate(16);
-    i: u32 = 0;
-    while i < 16 { *(state + i) = *(plain + i); i = i + 1; }
+    let state = state_new(AriaBlock);
+    let i: u32 = 0;
+    while i < 16 {
+        state.bytes[i] = plain.bytes[i];
+        i = i + 1;
+    }
     aria_xor_ek(state, ek, 0);
-    round: u32 = 1;
+    let round: u32 = 1;
     while round < 12 {
         if (round & 1) == 1 { aria_sl1(state); }
         if (round & 1) == 0 { aria_sl2(state); }
         aria_a(state);
-        aria_xor_ek(state, ek, round * 16);
+        let off = round * 16;
+        aria_xor_ek(state, ek, off);
         round = round + 1;
     }
     // Final round: SL2 without diffusion
     aria_sl2(state);
     aria_xor_ek(state, ek, 12 * 16);
-    i = 0;
-    while i < 16 { *(cipher + i) = *(state + i); i = i + 1; }
+    let j: u32 = 0;
+    while j < 16 {
+        cipher.bytes[j] = state.bytes[j];
+        j = j + 1;
+    }
 }
 
-transform aria_decrypt_block_128(cipher: Address, key: Address, plain: Address) {
-    ek = allocate(176);
-    dk = allocate(176);
+transform aria_decrypt_block_128(cipher: State<AriaBlock>, key: State<AriaKey>, plain: State<AriaBlock>) {
+    let ek = state_new(AriaEk);
+    let dk = state_new(AriaEk);
     aria_key_schedule_128(key, ek);
     // Decryption key schedule: derive DK from EK via diffusion layer
-    i: u32 = 0;
-    while i < 16 { *(dk + 0 * 16 + i) = *(ek + 12 * 16 + i); i = i + 1; }
-    r: u32 = 1;
+    let i: u32 = 0;
+    while i < 16 {
+        let off = 12 * 16 + i;
+        dk.bytes[i] = ek.bytes[off];
+        i = i + 1;
+    }
+    let r: u32 = 1;
     while r < 12 {
         // DK[r] = A^(-1)(EK[12-r]) = A(EK[12-r]) because A is involutive
-        tmp = allocate(16);
-        i = 0;
-        while i < 16 { *(tmp + i) = *(ek + (12 - r) * 16 + i); i = i + 1; }
+        let tmp = state_new(AriaBlock);
+        let j: u32 = 0;
+        while j < 16 {
+            let off = (12 - r) * 16 + j;
+            tmp.bytes[j] = ek.bytes[off];
+            j = j + 1;
+        }
         aria_a(tmp);
-        i = 0;
-        while i < 16 { *(dk + r * 16 + i) = *(tmp + i); i = i + 1; }
+        let k: u32 = 0;
+        while k < 16 {
+            let off = r * 16 + k;
+            dk.bytes[off] = tmp.bytes[k];
+            k = k + 1;
+        }
         r = r + 1;
     }
-    i = 0;
-    while i < 16 { *(dk + 12 * 16 + i) = *(ek + 0); i = i + 1; }
-    // Wait, this should be ek[0..16], not ek[0]
-    i = 0;
-    while i < 16 { *(dk + 12 * 16 + i) = *(ek + 0 + i); i = i + 1; }
+    let m: u32 = 0;
+    while m < 16 {
+        let off = 12 * 16 + m;
+        dk.bytes[off] = ek.bytes[m];
+        m = m + 1;
+    }
 
-    state = allocate(16);
-    i = 0;
-    while i < 16 { *(state + i) = *(cipher + i); i = i + 1; }
+    let state = state_new(AriaBlock);
+    let n: u32 = 0;
+    while n < 16 {
+        state.bytes[n] = cipher.bytes[n];
+        n = n + 1;
+    }
     aria_xor_ek(state, dk, 0);
-    round: u32 = 1;
+    let round: u32 = 1;
     while round < 12 {
         if (round & 1) == 1 { aria_sl1(state); }
         if (round & 1) == 0 { aria_sl2(state); }
         aria_a(state);
-        aria_xor_ek(state, dk, round * 16);
+        let off = round * 16;
+        aria_xor_ek(state, dk, off);
         round = round + 1;
     }
     aria_sl2(state);
     aria_xor_ek(state, dk, 12 * 16);
-    i = 0;
-    while i < 16 { *(plain + i) = *(state + i); i = i + 1; }
+    let p: u32 = 0;
+    while p < 16 {
+        plain.bytes[p] = state.bytes[p];
+        p = p + 1;
+    }
 }
 
 // 128-bit left-rotation helpers for ARIA round-key derivation (RFC 5794 §3).
-// (x_hi || x_lo) is treated as a single 128-bit value; rotate left by n bits.
-// Each helper returns one 64-bit half of the rotated result. The rotation
-// amounts used by ARIA-128 are 19, 31, and 67 (RFC 5794 §3.1).
 transform aria_rotl128_hi(x_hi: u64, x_lo: u64, n: u32) -> u64 {
-    MASK64: u64 = (1 << 63) | ((1 << 63) - 1);
-    n_mod: u32 = n & 127;
+    let MASK64: u64 = (1 << 63) | ((1 << 63) - 1);
+    let n_mod: u32 = n & 127;
     if n_mod == 0 { return x_hi & MASK64; }
     if n_mod == 64 { return x_lo & MASK64; }
     if n_mod < 64 {
@@ -935,8 +1160,8 @@ transform aria_rotl128_hi(x_hi: u64, x_lo: u64, n: u32) -> u64 {
 }
 
 transform aria_rotl128_lo(x_hi: u64, x_lo: u64, n: u32) -> u64 {
-    MASK64: u64 = (1 << 63) | ((1 << 63) - 1);
-    n_mod: u32 = n & 127;
+    let MASK64: u64 = (1 << 63) | ((1 << 63) - 1);
+    let n_mod: u32 = n & 127;
     if n_mod == 0 { return x_lo & MASK64; }
     if n_mod == 64 { return x_hi & MASK64; }
     if n_mod < 64 {
@@ -945,14 +1170,15 @@ transform aria_rotl128_lo(x_hi: u64, x_lo: u64, n: u32) -> u64 {
     return ((x_hi << (n_mod - 64)) | (x_lo >> (128 - n_mod))) & MASK64;
 }
 
-transform aria_key_schedule_128(key: Address, ek: Address) {
+transform aria_key_schedule_128(key: State<AriaKey>, ek: State<AriaEk>) {
     // RFC 5794 §2.4 key schedule for ARIA-128.
     // W0 = KL (16 bytes), W1 = FO(W0, CK1), W2 = FE(W1, CK2), W3 = FO(W2, CK3).
-    // Round keys EK_1..EK_11 are then derived by 128-bit rotations of W0..W3
-    // (see aria_derive_ek_128 for the rotation table from RFC 5794 §3.1).
-    w = allocate(64);  // 4 * 16 bytes (W0..W3)
-    i: u32 = 0;
-    while i < 16 { *(w + i) = *(key + i); i = i + 1; }
+    let w = state_new(AriaW);  // 4 * 16 bytes (W0..W3)
+    let i: u32 = 0;
+    while i < 16 {
+        w.bytes[i] = key.bytes[i];
+        i = i + 1;
+    }
     // W1 = FO(W0, CK1) — round function with CK1 as round key
     aria_fo(w, 0, 16, 1);   // produces W1 at w+16 using CK1
     aria_fe(w, 16, 32);     // produces W2 at w+32 using CK2
@@ -961,78 +1187,89 @@ transform aria_key_schedule_128(key: Address, ek: Address) {
     aria_derive_ek_128(w, ek);
 }
 
-transform aria_fo(w: Address, src_off: u32, dst_off: u32, ck_sel: u32) {
+transform aria_fo(w: State<AriaW>, src_off: u32, dst_off: u32, ck_sel: u32) {
     // FO(X, RK) = A(SL1(X XOR RK)) — odd round function.
-    // ck_sel selects the embedded cipher-key constant: 1 -> CK1, 3 -> CK3.
-    // RFC 5794 §2.4: W1 = FO(W0, CK1), W3 = FO(W2, CK3).
-    tmp = allocate(16);
-    i: u32 = 0;
+    let tmp = state_new(AriaBlock);
+    let i: u32 = 0;
     while i < 16 {
-        ck: u32 = aria_ck1(i);
+        let ck: u32 = aria_ck1(i);
         if ck_sel == 3 { ck = aria_ck3(i); }
-        *(tmp + i) = *(w + src_off + i) ^ ck;
+        let off = src_off + i;
+        tmp.bytes[i] = (w.bytes[off] ^ ck) as u8;
         i = i + 1;
     }
     aria_sl1(tmp);
     aria_a(tmp);
-    i = 0;
-    while i < 16 { *(w + dst_off + i) = *(tmp + i); i = i + 1; }
+    let j: u32 = 0;
+    while j < 16 {
+        let off = dst_off + j;
+        w.bytes[off] = tmp.bytes[j];
+        j = j + 1;
+    }
 }
 
-transform aria_fe(w: Address, src_off: u32, dst_off: u32) {
-    tmp = allocate(16);
-    i: u32 = 0;
-    while i < 16 { *(tmp + i) = *(w + src_off + i) ^ aria_ck2(i); i = i + 1; }
+transform aria_fe(w: State<AriaW>, src_off: u32, dst_off: u32) {
+    let tmp = state_new(AriaBlock);
+    let i: u32 = 0;
+    while i < 16 {
+        let off = src_off + i;
+        let ck = aria_ck2(i);
+        tmp.bytes[i] = (w.bytes[off] ^ ck) as u8;
+        i = i + 1;
+    }
     aria_sl2(tmp);
     aria_a(tmp);
-    i = 0;
-    while i < 16 { *(w + dst_off + i) = *(tmp + i); i = i + 1; }
+    let j: u32 = 0;
+    while j < 16 {
+        let off = dst_off + j;
+        w.bytes[off] = tmp.bytes[j];
+        j = j + 1;
+    }
 }
 
-transform aria_derive_ek_128(w: Address, ek: Address) {
+transform aria_derive_ek_128(w: State<AriaW>, ek: State<AriaEk>) {
     // RFC 5794 §3.1 round-key derivation for ARIA-128.
-    // EK_{i+1} = (W_{i mod 4} rotl R_{i / 4}) for i = 0..10,
-    // where R_0 = 19, R_1 = 31, R_2 = 67 (the rotation amounts fixed by
-    // RFC 5794 §3.1). The rotation is a true 128-bit bitwise left rotation
-    // applied to the 128-bit value W_{i mod 4}; the result is stored as
-    // 16 big-endian bytes at ek + i*16.
-    r: u32 = 0;
+    let r: u32 = 0;
     while r < 11 {
-        src_idx: u32 = r & 3;
-        src_off: u32 = src_idx * 16;
-        rot: u32 = 19;
+        let src_idx: u32 = r & 3;
+        let src_off: u32 = src_idx * 16;
+        let rot: u32 = 19;
         if r >= 4 { rot = 31; }
         if r >= 8 { rot = 67; }
         // Load W_{src_idx} (16 bytes big-endian) into (hi, lo) u64 pair.
-        hi: u64 = 0;
-        lo: u64 = 0;
-        i: u32 = 0;
+        let hi: u64 = 0;
+        let lo: u64 = 0;
+        let i: u32 = 0;
         while i < 8 {
-            b: u32 = *(w + src_off + i);
+            let off = src_off + i;
+            let b: u32 = w.bytes[off] as u32;
             hi = hi | ((b as u64) << ((56 - i * 8) as u64));
             i = i + 1;
         }
-        i = 0;
-        while i < 8 {
-            b: u32 = *(w + src_off + 8 + i);
-            lo = lo | ((b as u64) << ((56 - i * 8) as u64));
-            i = i + 1;
+        let j: u32 = 0;
+        while j < 8 {
+            let off = src_off + 8 + j;
+            let b: u32 = w.bytes[off] as u32;
+            lo = lo | ((b as u64) << ((56 - j * 8) as u64));
+            j = j + 1;
         }
         // Apply the 128-bit left rotation.
-        new_hi: u64 = aria_rotl128_hi(hi, lo, rot);
-        new_lo: u64 = aria_rotl128_lo(hi, lo, rot);
+        let new_hi: u64 = aria_rotl128_hi(hi, lo, rot);
+        let new_lo: u64 = aria_rotl128_lo(hi, lo, rot);
         // Store EK_{r+1} as 16 big-endian bytes at ek + r*16.
-        i = 0;
-        while i < 8 {
-            b: u32 = ((new_hi >> ((56 - i * 8) as u64)) & 255) as u32;
-            *(ek + r * 16 + i) = b;
-            i = i + 1;
+        let k: u32 = 0;
+        while k < 8 {
+            let off = r * 16 + k;
+            let b: u32 = ((new_hi >> ((56 - k * 8) as u64)) & 255) as u32;
+            ek.bytes[off] = b as u8;
+            k = k + 1;
         }
-        i = 0;
-        while i < 8 {
-            b: u32 = ((new_lo >> ((56 - i * 8) as u64)) & 255) as u32;
-            *(ek + r * 16 + 8 + i) = b;
-            i = i + 1;
+        let m: u32 = 0;
+        while m < 8 {
+            let off = r * 16 + 8 + m;
+            let b: u32 = ((new_lo >> ((56 - m * 8) as u64)) & 255) as u32;
+            ek.bytes[off] = b as u8;
+            m = m + 1;
         }
         r = r + 1;
     }
@@ -1043,84 +1280,122 @@ transform aria_ck2(idx: u32) -> u32 { return aria_ck2_table(idx); }
 transform aria_ck3(idx: u32) -> u32 { return aria_ck3_table(idx); }
 
 // 256-bit key ARIA: 14 rounds, expanded key schedule
-transform aria_encrypt_block_256(plain: Address, key: Address, cipher: Address) {
-    ek = allocate(208);  // 13 * 16 bytes
+transform aria_encrypt_block_256(plain: State<AriaBlock>, key: State<AriaKey>, cipher: State<AriaBlock>) {
+    let ek = state_new(AriaEk);  // 13 * 16 bytes
     aria_key_schedule_256(key, ek);
-    state = allocate(16);
-    i: u32 = 0;
-    while i < 16 { *(state + i) = *(plain + i); i = i + 1; }
+    let state = state_new(AriaBlock);
+    let i: u32 = 0;
+    while i < 16 {
+        state.bytes[i] = plain.bytes[i];
+        i = i + 1;
+    }
     aria_xor_ek(state, ek, 0);
-    round: u32 = 1;
+    let round: u32 = 1;
     while round < 14 {
         if (round & 1) == 1 { aria_sl1(state); }
         if (round & 1) == 0 { aria_sl2(state); }
         aria_a(state);
-        aria_xor_ek(state, ek, round * 16);
+        let off = round * 16;
+        aria_xor_ek(state, ek, off);
         round = round + 1;
     }
     aria_sl2(state);
     aria_xor_ek(state, ek, 14 * 16);
-    i = 0;
-    while i < 16 { *(cipher + i) = *(state + i); i = i + 1; }
+    let j: u32 = 0;
+    while j < 16 {
+        cipher.bytes[j] = state.bytes[j];
+        j = j + 1;
+    }
 }
 
-transform aria_decrypt_block_256(cipher: Address, key: Address, plain: Address) {
+transform aria_decrypt_block_256(cipher: State<AriaBlock>, key: State<AriaKey>, plain: State<AriaBlock>) {
     // Same pattern as 128-bit: derive DK from EK via diffusion
-    ek = allocate(208);
-    dk = allocate(208);
+    let ek = state_new(AriaEk);
+    let dk = state_new(AriaEk);
     aria_key_schedule_256(key, ek);
-    i: u32 = 0;
-    while i < 16 { *(dk + 0 + i) = *(ek + 14 * 16 + i); i = i + 1; }
-    r: u32 = 1;
+    let i: u32 = 0;
+    while i < 16 {
+        let off = 14 * 16 + i;
+        dk.bytes[i] = ek.bytes[off];
+        i = i + 1;
+    }
+    let r: u32 = 1;
     while r < 14 {
-        tmp = allocate(16);
-        i = 0;
-        while i < 16 { *(tmp + i) = *(ek + (14 - r) * 16 + i); i = i + 1; }
+        let tmp = state_new(AriaBlock);
+        let j: u32 = 0;
+        while j < 16 {
+            let off = (14 - r) * 16 + j;
+            tmp.bytes[j] = ek.bytes[off];
+            j = j + 1;
+        }
         aria_a(tmp);
-        i = 0;
-        while i < 16 { *(dk + r * 16 + i) = *(tmp + i); i = i + 1; }
+        let k: u32 = 0;
+        while k < 16 {
+            let off = r * 16 + k;
+            dk.bytes[off] = tmp.bytes[k];
+            k = k + 1;
+        }
         r = r + 1;
     }
-    i = 0;
-    while i < 16 { *(dk + 14 * 16 + i) = *(ek + 0 + i); i = i + 1; }
-    state = allocate(16);
-    i = 0;
-    while i < 16 { *(state + i) = *(cipher + i); i = i + 1; }
+    let m: u32 = 0;
+    while m < 16 {
+        let off = 14 * 16 + m;
+        dk.bytes[off] = ek.bytes[m];
+        m = m + 1;
+    }
+    let state = state_new(AriaBlock);
+    let n: u32 = 0;
+    while n < 16 {
+        state.bytes[n] = cipher.bytes[n];
+        n = n + 1;
+    }
     aria_xor_ek(state, dk, 0);
-    round: u32 = 1;
+    let round: u32 = 1;
     while round < 14 {
         if (round & 1) == 1 { aria_sl1(state); }
         if (round & 1) == 0 { aria_sl2(state); }
         aria_a(state);
-        aria_xor_ek(state, dk, round * 16);
+        let off = round * 16;
+        aria_xor_ek(state, dk, off);
         round = round + 1;
     }
     aria_sl2(state);
     aria_xor_ek(state, dk, 14 * 16);
-    i = 0;
-    while i < 16 { *(plain + i) = *(state + i); i = i + 1; }
+    let p: u32 = 0;
+    while p < 16 {
+        plain.bytes[p] = state.bytes[p];
+        p = p + 1;
+    }
 }
 
-transform aria_key_schedule_256(key: Address, ek: Address) {
-    w = allocate(80);  // 5 * 16 bytes
-    i: u32 = 0;
-    while i < 16 { *(w + i) = *(key + i); i = i + 1; }
-    while i < 32 { *(w + i) = *(key + i); i = i + 1; }  // 256-bit key as KL||KR
+transform aria_key_schedule_256(key: State<AriaKey>, ek: State<AriaEk>) {
+    let w = state_new(AriaW);  // 5 * 16 bytes
+    let i: u32 = 0;
+    while i < 16 {
+        w.bytes[i] = key.bytes[i];
+        i = i + 1;
+    }
+    while i < 32 {
+        w.bytes[i] = key.bytes[i];
+        i = i + 1;
+    }  // 256-bit key as KL||KR
     aria_fo(w, 0, 32, 1);   // W1 = FO(W0, CK1)   per RFC 5794 §2.4
     aria_fe(w, 16, 48);     // W2 = FE(W1, CK2)   per RFC 5794 §2.4
     aria_fo(w, 32, 64, 3);  // W3 = FO(W2, CK3)   per RFC 5794 §2.4
     // Derive 15 round keys
-    r: u32 = 0;
+    let r: u32 = 0;
     while r < 15 {
-        src_idx: u32 = r & 3;
+        let src_idx: u32 = r & 3;
         if r < 4 { src_idx = r; }
         if r >= 4 { src_idx = r & 3; }
-        src_off: u32 = src_idx * 16;
-        if r >= 8 { src_off = (src_idx + 1) * 16; }
-        i = 0;
-        while i < 16 {
-            *(ek + r * 16 + i) = *(w + src_off + i);
-            i = i + 1;
+        let mut_src_off: u32 = src_idx * 16;
+        if r >= 8 { mut_src_off = (src_idx + 1) * 16; }
+        let j: u32 = 0;
+        while j < 16 {
+            let eoff = r * 16 + j;
+            let soff = mut_src_off + j;
+            ek.bytes[eoff] = w.bytes[soff];
+            j = j + 1;
         }
         r = r + 1;
     }
