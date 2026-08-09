@@ -961,8 +961,11 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                         // ty:Some(U64/I64) → 64-bit add with carry.
                         // ty:None + rhs=Imm(0) → 64-bit move (preserve high word
                         //   for Call returns / 64-bit values that lost their type).
+                        // For And/Or/Xor: ALWAYS use 64-bit path (safe because
+                        // 32-bit values have high=0, and 0 OP 0 = 0).
                         let is_8byte = matches!(ty,
-                            Some(IRType::U64) | Some(IRType::I64) | Some(IRType::Channel(_)));
+                            Some(IRType::U64) | Some(IRType::I64) | Some(IRType::Channel(_)))
+                            
                         let is_move = matches!(rhs, IRValue::Immediate(0));
                         if is_8byte || (ty.is_none() && is_move) {
                             if is_move {
