@@ -1,72 +1,80 @@
 // womb/crypto/bignum2048.vuma — 2048-bit Multi-Precision Integer Arithmetic
 // 32 x u64 limbs (little-endian). Real add, sub, mul, mod, mod_exp, gcd,
 // mod_inv for RSA-2048. No main().
+//
+// VUMA 2.0 PMT-native: state_new(Layout) / State<T> / [u64;N] limb arrays.
+// All allocate/free/Address/*ptr removed (arena auto-frees on return).
 
 const BN2048_MASK32: u32 = 4294967295;
 const BN2048_LIMBS: u32 = 32;
 const BN2048_BYTES: u32 = 256;
 
 // ===========================================================================
-// Byte-level memory helpers
+// Layouts
 // ===========================================================================
 
-transform bn2048_load_u64(ptr: Address, off: u32) -> u64 {
-    b0: u64 = *(ptr + off);
-    b1: u64 = *(ptr + off + 1);
-    b2: u64 = *(ptr + off + 2);
-    b3: u64 = *(ptr + off + 3);
-    b4: u64 = *(ptr + off + 4);
-    b5: u64 = *(ptr + off + 5);
-    b6: u64 = *(ptr + off + 6);
-    b7: u64 = *(ptr + off + 7);
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
-             | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+// 64-bit (1-limb) scratch — output of bn2048_mul_u64.
+layout Bn2048_64Ctx = { limbs: [u64; 1] }
+
+// 2048-bit (32-limb) bignum context — primary RSA-2048 bignum size.
+layout Bn2048Ctx = { limbs: [u64; 32] }
+
+// 4096-bit (64-limb) — 2048x2048 multiplication result, 4096/2048 division
+// dividend. Also used as the quotient buffer.
+layout Bn4096Ctx = { limbs: [u64; 64] }
+
+// 4160-bit (65-limb) — Montgomery reduction input t (mul output + 1 extra
+// limb to absorb the carry produced during reduction; reduced value can
+// reach 2m - 1 < 2^2049 which needs 33 result limbs, hence the slack).
+layout Bn4160Ctx = { limbs: [u64; 65] }
+
+// 2112-bit (33-limb) — Montgomery reduction candidate buffer (post-reduce
+// value < 2m, so 33 limbs suffice before the final conditional subtract).
+layout Bn2112Ctx = { limbs: [u64; 33] }
+
+// ===========================================================================
+// Limb load/store helpers (now trivial: u64 limbs indexed directly).
+// `off` is a LIMB index (0..31 for Bn2048Ctx, 0..63 for Bn4096Ctx).
+// ===========================================================================
+
+transform bn2048_load_u64(a: State<Bn2048Ctx>, off: u32) -> u64 {
+    return a.limbs[off];
 }
 
-transform bn2048_store_u64(ptr: Address, off: u32, val: u64) {
-    *(ptr + off) = val & 255;
-    *(ptr + off + 1) = (val >> 8) & 255;
-    *(ptr + off + 2) = (val >> 16) & 255;
-    *(ptr + off + 3) = (val >> 24) & 255;
-    *(ptr + off + 4) = (val >> 32) & 255;
-    *(ptr + off + 5) = (val >> 40) & 255;
-    *(ptr + off + 6) = (val >> 48) & 255;
-    *(ptr + off + 7) = (val >> 56) & 255;
+transform bn2048_store_u64(r: State<Bn2048Ctx>, off: u32, val: u64) {
+    r.limbs[off] = val;
 }
 
-transform bn2048_zero(a: Address) {
-    i: u32 = 0;
-    while i < BN2048_BYTES { *(a + i) = 0; i = i + 1; }
+transform bn2048_zero(a: State<Bn2048Ctx>) {
+    let i = 0;
+    while i < BN2048_LIMBS { a.limbs[i] = 0; i = i + 1; }
 }
 
-transform bn2048_copy(r: Address, a: Address) {
-    i: u32 = 0;
-    while i < BN2048_BYTES { *(r + i) = *(a + i); i = i + 1; }
+transform bn2048_copy(r: State<Bn2048Ctx>, a: State<Bn2048Ctx>) {
+    let i = 0;
+    while i < BN2048_LIMBS { r.limbs[i] = a.limbs[i]; i = i + 1; }
 }
 
-transform bn2048_set_u32(r: Address, v: u32) {
+transform bn2048_set_u32(r: State<Bn2048Ctx>, v: u32) {
     bn2048_zero(r);
-    *(r + 0) = v & 255;
-    *(r + 1) = (v >> 8) & 255;
-    *(r + 2) = (v >> 16) & 255;
-    *(r + 3) = (v >> 24) & 255;
+    r.limbs[0] = v as u64;
 }
 
-transform bn2048_is_zero(a: Address) -> u32 {
-    i: u32 = 0;
+transform bn2048_is_zero(a: State<Bn2048Ctx>) -> u32 {
+    let i = 0;
     while i < BN2048_LIMBS {
-        if bn2048_load_u64(a, i * 8) != 0 { return 0; }
+        if a.limbs[i] != 0 { return 0; }
         i = i + 1;
     }
     return 1;
 }
 
 // Three-way compare: 1 if a>b, -1 if a<b, 0 if equal.
-transform bn2048_cmp(a: Address, b: Address) -> i32 {
-    i: u32 = BN2048_LIMBS - 1;
+transform bn2048_cmp(a: State<Bn2048Ctx>, b: State<Bn2048Ctx>) -> i32 {
+    let i: u32 = BN2048_LIMBS - 1;
     while 1 == 1 {
-        av: u64 = bn2048_load_u64(a, i * 8);
-        bv: u64 = bn2048_load_u64(b, i * 8);
+        let av = a.limbs[i];
+        let bv = b.limbs[i];
         if av > bv { return 1; }
         if av < bv { return -1; }
         if i == 0 { break; }
@@ -76,14 +84,14 @@ transform bn2048_cmp(a: Address, b: Address) -> i32 {
 }
 
 // r = a + b. Returns carry-out (0 or 1).
-transform bn2048_add(r: Address, a: Address, b: Address) -> u32 {
-    carry: u64 = 0;
-    i: u32 = 0;
+transform bn2048_add(r: State<Bn2048Ctx>, a: State<Bn2048Ctx>, b: State<Bn2048Ctx>) -> u32 {
+    let carry: u64 = 0;
+    let i = 0;
     while i < BN2048_LIMBS {
-        av: u64 = bn2048_load_u64(a, i * 8);
-        bv: u64 = bn2048_load_u64(b, i * 8);
-        sum: u64 = av + bv + carry;
-        bn2048_store_u64(r, i * 8, sum);
+        let av = a.limbs[i];
+        let bv = b.limbs[i];
+        let sum: u64 = av + bv + carry;
+        r.limbs[i] = sum;
         if sum < av { carry = 1; }
         else {
             if sum == av {
@@ -92,18 +100,18 @@ transform bn2048_add(r: Address, a: Address, b: Address) -> u32 {
         }
         i = i + 1;
     }
-    return carry;
+    return carry as u32;
 }
 
 // r = a - b. Returns borrow-out (0 or 1).
-transform bn2048_sub(r: Address, a: Address, b: Address) -> u32 {
-    borrow: u64 = 0;
-    i: u32 = 0;
+transform bn2048_sub(r: State<Bn2048Ctx>, a: State<Bn2048Ctx>, b: State<Bn2048Ctx>) -> u32 {
+    let borrow: u64 = 0;
+    let i = 0;
     while i < BN2048_LIMBS {
-        av: u64 = bn2048_load_u64(a, i * 8);
-        bv: u64 = bn2048_load_u64(b, i * 8);
-        diff: u64 = av - bv - borrow;
-        bn2048_store_u64(r, i * 8, diff);
+        let av = a.limbs[i];
+        let bv = b.limbs[i];
+        let diff: u64 = av - bv - borrow;
+        r.limbs[i] = diff;
         if av < bv { borrow = 1; }
         else {
             if av == bv {
@@ -112,51 +120,53 @@ transform bn2048_sub(r: Address, a: Address, b: Address) -> u32 {
         }
         i = i + 1;
     }
-    return borrow;
+    return borrow as u32;
 }
 
 // r = a << 1. Returns the bit shifted out (0 or 1).
-transform bn2048_lshift1(r: Address, a: Address) -> u32 {
-    carry: u64 = 0;
-    i: u32 = 0;
+transform bn2048_lshift1(r: State<Bn2048Ctx>, a: State<Bn2048Ctx>) -> u32 {
+    let carry: u64 = 0;
+    let i = 0;
     while i < BN2048_LIMBS {
-        v: u64 = bn2048_load_u64(a, i * 8);
-        bn2048_store_u64(r, i * 8, (v << 1) | carry);
+        let v = a.limbs[i];
+        r.limbs[i] = (v << 1) | carry;
         carry = v >> 63;
         i = i + 1;
     }
-    return carry;
+    return carry as u32;
 }
 
 // r = a >> 1.
-transform bn2048_rshift1(r: Address, a: Address) {
-    i: u32 = BN2048_LIMBS - 1;
+transform bn2048_rshift1(r: State<Bn2048Ctx>, a: State<Bn2048Ctx>) {
+    let i: u32 = BN2048_LIMBS - 1;
     while i > 0 {
-        hi: u64 = bn2048_load_u64(a, i * 8);
-        lo: u64 = bn2048_load_u64(a, (i - 1) * 8);
-        bn2048_store_u64(r, i * 8, (hi >> 1) | (lo << 63));
+        let hi = a.limbs[i];
+        let im1 = i - 1;
+        let lo = a.limbs[im1];
+        r.limbs[i] = (hi >> 1) | (lo << 63);
         i = i - 1;
     }
-    v0: u64 = bn2048_load_u64(a, 0);
-    bn2048_store_u64(r, 0, v0 >> 1);
+    let v0 = a.limbs[0];
+    r.limbs[0] = v0 >> 1;
 }
 
-transform bn2048_get_bit(a: Address, bit: u32) -> u32 {
-    limb: u32 = bit / 64;
-    pos: u32 = bit % 64;
+transform bn2048_get_bit(a: State<Bn2048Ctx>, bit: u32) -> u32 {
+    let limb = bit / 64;
+    let pos = bit % 64;
     if limb >= BN2048_LIMBS { return 0; }
-    v: u64 = bn2048_load_u64(a, limb * 8);
-    return (v >> pos) & 1;
+    let v = a.limbs[limb];
+    return ((v >> pos) & 1) as u32;
 }
 
-transform bn2048_bitlen(a: Address) -> u32 {
-    i: u32 = BN2048_LIMBS - 1;
+transform bn2048_bitlen(a: State<Bn2048Ctx>) -> u32 {
+    let i: u32 = BN2048_LIMBS - 1;
     while 1 == 1 {
-        v: u64 = bn2048_load_u64(a, i * 8);
+        let v = a.limbs[i];
         if v != 0 {
-            bits: u32 = 64;
+            let bits: u32 = 64;
             while bits > 0 {
-                if ((v >> (bits - 1)) & 1) == 1 { return i * 64 + bits; }
+                let b = bits - 1;
+                if ((v >> b) & 1) == 1 { return i * 64 + bits; }
                 bits = bits - 1;
             }
             return i * 64 + 1;
@@ -171,120 +181,133 @@ transform bn2048_bitlen(a: Address) -> u32 {
 // 64x64 -> 128 multiplication helper (split into 32-bit halves).
 // ===========================================================================
 
-transform bn2048_mul_u64(a: u64, b: u64, lo_out: Address, hi_out: Address) {
-    a_lo: u64 = a & 4294967295;
-    a_hi: u64 = a >> 32;
-    b_lo: u64 = b & 4294967295;
-    b_hi: u64 = b >> 32;
+transform bn2048_mul_u64(a: u64, b: u64, lo_out: State<Bn2048_64Ctx>, hi_out: State<Bn2048_64Ctx>) {
+    let a_lo: u64 = a & 4294967295;
+    let a_hi: u64 = a >> 32;
+    let b_lo: u64 = b & 4294967295;
+    let b_hi: u64 = b >> 32;
 
-    ll: u64 = a_lo * b_lo;
-    lh: u64 = a_lo * b_hi;
-    hl: u64 = a_hi * b_lo;
-    hh: u64 = a_hi * b_hi;
+    let ll: u64 = a_lo * b_lo;
+    let lh: u64 = a_lo * b_hi;
+    let hl: u64 = a_hi * b_lo;
+    let hh: u64 = a_hi * b_hi;
 
-    mid: u64 = lh + hl;
-    mid_carry: u64 = 0;
+    let mid: u64 = lh + hl;
+    let mid_carry: u64 = 0;
     if mid < lh { mid_carry = 1; }
 
-    mid_lo: u64 = mid & 4294967295;
-    mid_hi: u64 = mid >> 32;
+    let mid_lo: u64 = mid & 4294967295;
+    let mid_hi: u64 = mid >> 32;
 
-    lo: u64 = ll + (mid_lo << 32);
-    lo_carry: u64 = 0;
+    let lo: u64 = ll + (mid_lo << 32);
+    let lo_carry: u64 = 0;
     if lo < ll { lo_carry = 1; }
 
-    hi: u64 = hh + mid_hi + (mid_carry << 32) + lo_carry;
+    let hi: u64 = hh + mid_hi + (mid_carry << 32) + lo_carry;
 
-    bn2048_store_u64(lo_out, 0, lo);
-    bn2048_store_u64(hi_out, 0, hi);
+    lo_out.limbs[0] = lo;
+    hi_out.limbs[0] = hi;
 }
 
 // ===========================================================================
 // Schoolbook 32x32 -> 64 limb multiplication (4096-bit result).
-// r must be 512 bytes (64 limbs). r may not alias a or b.
+// r is a Bn4096Ctx (64 limbs). r may not alias a or b.
 // ===========================================================================
 
-transform bn2048_mul_4096(r: Address, a: Address, b: Address) {
-    i: u32 = 0;
-    while i < 512 { *(r + i) = 0; i = i + 1; }
+transform bn2048_mul_4096(r: State<Bn4096Ctx>, a: State<Bn2048Ctx>, b: State<Bn2048Ctx>) {
+    let i = 0;
+    while i < 64 { r.limbs[i] = 0; i = i + 1; }
 
-    lo = allocate(8);
-    hi = allocate(8);
+    let lo = state_new(Bn2048_64Ctx);
+    let hi = state_new(Bn2048_64Ctx);
 
-    ai: u32 = 0;
+    let ai = 0;
     while ai < BN2048_LIMBS {
-        bj: u32 = 0;
+        let bj = 0;
         while bj < BN2048_LIMBS {
-            av: u64 = bn2048_load_u64(a, ai * 8);
-            bv: u64 = bn2048_load_u64(b, bj * 8);
+            let av = a.limbs[ai];
+            let bv = b.limbs[bj];
             bn2048_mul_u64(av, bv, lo, hi);
 
-            off: u32 = (ai + bj) * 8;
-            carry: u64 = 0;
-            k: u32 = 0;
-            while k < 8 {
-                cur: u64 = *(r + off + k);
-                addv: u64 = *(lo + k);
-                sum: u64 = cur + addv + carry;
-                *(r + off + k) = sum & 255;
-                carry = sum >> 8;
-                k = k + 1;
+            let idx = ai + bj;
+            let carry: u64 = 0;
+
+            // Add lo at limb idx
+            let cur0 = r.limbs[idx];
+            let addv0 = lo.limbs[0];
+            let sum0: u64 = cur0 + addv0 + carry;
+            r.limbs[idx] = sum0;
+            if sum0 < cur0 { carry = 1; }
+            else {
+                if sum0 == cur0 {
+                    // carry unchanged
+                } else { carry = 0; }
             }
-            k = 0;
-            while k < 8 {
-                cur: u64 = *(r + off + 8 + k);
-                addv: u64 = *(hi + k);
-                sum: u64 = cur + addv + carry;
-                *(r + off + 8 + k) = sum & 255;
-                carry = sum >> 8;
-                k = k + 1;
+
+            // Add hi at limb idx+1
+            let idx1 = idx + 1;
+            let cur1 = r.limbs[idx1];
+            let addv1 = hi.limbs[0];
+            let sum1: u64 = cur1 + addv1 + carry;
+            r.limbs[idx1] = sum1;
+            if sum1 < cur1 { carry = 1; }
+            else {
+                if sum1 == cur1 {
+                    // carry unchanged
+                } else { carry = 0; }
             }
-            k = 16;
+
+            // Rare further carry propagation
+            let k = 2;
             while carry != 0 {
-                cur: u64 = *(r + off + k);
-                sum: u64 = cur + carry;
-                *(r + off + k) = sum & 255;
-                carry = sum >> 8;
-                k = k + 1;
+                let idxk = idx + k;
+                if idxk >= 64 {
+                    carry = 0;
+                } else {
+                    let curk = r.limbs[idxk];
+                    let sumk: u64 = curk + carry;
+                    r.limbs[idxk] = sumk;
+                    if sumk < curk { carry = 1; } else { carry = 0; }
+                    k = k + 1;
+                }
             }
             bj = bj + 1;
         }
         ai = ai + 1;
     }
-    free(lo); free(hi);
 }
 
 // ===========================================================================
 // 4096 / 2048 binary long division.
-//   dividend:  512 bytes (4096 bits)
-//   divisor:   256 bytes (2048 bits), must be non-zero
-//   quotient:  512 bytes (caller-provided, fits up to 4096 bits)
-//   remainder: 256 bytes (will be < divisor)
+//   dividend:  Bn4096Ctx (64 limbs, 4096 bits)
+//   divisor:   Bn2048Ctx (32 limbs, 2048 bits), must be non-zero
+//   quotient:  Bn4096Ctx (64 limbs, fits up to 4096 bits)
+//   remainder: Bn2048Ctx (32 limbs, will be < divisor)
 // ===========================================================================
 
-transform bn2048_divmod_4096(dividend: Address, divisor: Address, quotient: Address, remainder: Address) {
-    i: u32 = 0;
-    while i < 512 { *(quotient + i) = 0; i = i + 1; }
+transform bn2048_divmod_4096(dividend: State<Bn4096Ctx>, divisor: State<Bn2048Ctx>, quotient: State<Bn4096Ctx>, remainder: State<Bn2048Ctx>) {
+    let i = 0;
+    while i < 64 { quotient.limbs[i] = 0; i = i + 1; }
     bn2048_zero(remainder);
 
-    bit: u32 = 4096;
+    let bit: u32 = 4096;
     while bit > 0 {
         bit = bit - 1;
         bn2048_lshift1(remainder, remainder);
-        word: u32 = bit / 64;
-        pos: u32 = bit % 64;
-        d_word: u64 = bn2048_load_u64(dividend, word * 8);
-        in_bit: u32 = (d_word >> pos) & 1;
+        let word = bit / 64;
+        let pos = bit % 64;
+        let d_word = dividend.limbs[word];
+        let in_bit: u32 = ((d_word >> pos) & 1) as u32;
         if in_bit == 1 {
-            *(remainder + 0) = *(remainder + 0) | 1;
+            let cur = remainder.limbs[0];
+            remainder.limbs[0] = cur | 1;
         }
         if bn2048_cmp(remainder, divisor) >= 0 {
             bn2048_sub(remainder, remainder, divisor);
-            q_word: u32 = bit / 64;
-            q_pos: u32 = bit % 64;
-            cur: u64 = bn2048_load_u64(quotient, q_word * 8);
-            cur = cur | ((1 as u64) << q_pos);
-            bn2048_store_u64(quotient, q_word * 8, cur);
+            let q_word = bit / 64;
+            let q_pos = bit % 64;
+            let cur = quotient.limbs[q_word];
+            quotient.limbs[q_word] = cur | (1 << q_pos);
         }
     }
 }
@@ -293,8 +316,8 @@ transform bn2048_divmod_4096(dividend: Address, divisor: Address, quotient: Addr
 // Modular arithmetic (mod m), assumes a, b < m.
 // ===========================================================================
 
-transform bn2048_mod_add(r: Address, a: Address, b: Address, m: Address) {
-    carry: u32 = bn2048_add(r, a, b);
+transform bn2048_mod_add(r: State<Bn2048Ctx>, a: State<Bn2048Ctx>, b: State<Bn2048Ctx>, m: State<Bn2048Ctx>) {
+    let carry: u32 = bn2048_add(r, a, b);
     if carry == 1 {
         bn2048_sub(r, r, m);
     } else {
@@ -304,8 +327,8 @@ transform bn2048_mod_add(r: Address, a: Address, b: Address, m: Address) {
     }
 }
 
-transform bn2048_mod_sub(r: Address, a: Address, b: Address, m: Address) {
-    borrow: u32 = bn2048_sub(r, a, b);
+transform bn2048_mod_sub(r: State<Bn2048Ctx>, a: State<Bn2048Ctx>, b: State<Bn2048Ctx>, m: State<Bn2048Ctx>) {
+    let borrow: u32 = bn2048_sub(r, a, b);
     if borrow == 1 {
         bn2048_add(r, r, m);
     }
@@ -313,69 +336,61 @@ transform bn2048_mod_sub(r: Address, a: Address, b: Address, m: Address) {
 
 // r = (a * b) mod m. Uses real schoolbook mul + 4096/2048 long division.
 // a, b assumed < m.
-transform bn2048_mod_mul(r: Address, a: Address, b: Address, m: Address) {
-    prod = allocate(512);
-    quot = allocate(512);
+transform bn2048_mod_mul(r: State<Bn2048Ctx>, a: State<Bn2048Ctx>, b: State<Bn2048Ctx>, m: State<Bn2048Ctx>) {
+    let prod = state_new(Bn4096Ctx);
+    let quot = state_new(Bn4096Ctx);
     bn2048_mul_4096(prod, a, b);
     bn2048_divmod_4096(prod, m, quot, r);
-    free(prod); free(quot);
 }
 
 // r = a mod m for any 2048-bit a (zero-extends to 4096-bit dividend).
-transform bn2048_mod(r: Address, a: Address, m: Address) {
-    prod = allocate(512);
-    quot = allocate(512);
-    i: u32 = 0;
-    while i < 512 {
-        if i < 256 { *(prod + i) = *(a + i); }
-        else { *(prod + i) = 0; }
+transform bn2048_mod(r: State<Bn2048Ctx>, a: State<Bn2048Ctx>, m: State<Bn2048Ctx>) {
+    let prod = state_new(Bn4096Ctx);
+    let quot = state_new(Bn4096Ctx);
+    let i = 0;
+    while i < 64 {
+        if i < 32 { prod.limbs[i] = a.limbs[i]; }
+        else { prod.limbs[i] = 0; }
         i = i + 1;
     }
     bn2048_divmod_4096(prod, m, quot, r);
-    free(prod); free(quot);
 }
 
 // r = a^exp mod m via square-and-multiply.
-transform bn2048_mod_exp(r: Address, a: Address, exp: Address, m: Address) {
+transform bn2048_mod_exp(r: State<Bn2048Ctx>, a: State<Bn2048Ctx>, exp: State<Bn2048Ctx>, m: State<Bn2048Ctx>) {
     bn2048_zero(r);
-    *(r + 0) = 1;  // r = 1
+    r.limbs[0] = 1;  // r = 1
 
-    base = allocate(256);
+    let base = state_new(Bn2048Ctx);
     bn2048_mod(base, a, m);
 
-    bits: u32 = bn2048_bitlen(exp);
-    if bits == 0 {
-        free(base);
-        return;
-    }
-    i: u32 = 0;
+    let bits: u32 = bn2048_bitlen(exp);
+    if bits == 0 { return; }
+    let i = 0;
     while i < bits {
         if bn2048_get_bit(exp, i) == 1 {
-            tmp = allocate(256);
+            let tmp = state_new(Bn2048Ctx);
             bn2048_mod_mul(tmp, r, base, m);
             bn2048_copy(r, tmp);
-            free(tmp);
         }
-        sq = allocate(256);
+        let sq = state_new(Bn2048Ctx);
         bn2048_mod_mul(sq, base, base, m);
         bn2048_copy(base, sq);
-        free(sq);
         i = i + 1;
     }
-    free(base);
 }
 
 // ===========================================================================
 // Binary GCD: r = gcd(a, b). Inputs are 2048-bit unsigned.
 // ===========================================================================
 
-transform bn2048_gcd(r: Address, a: Address, b: Address) {
-    u = allocate(256);
-    v = allocate(256);
+transform bn2048_gcd(r: State<Bn2048Ctx>, a: State<Bn2048Ctx>, b: State<Bn2048Ctx>) {
+    let u = state_new(Bn2048Ctx);
+    let v = state_new(Bn2048Ctx);
     bn2048_copy(u, a);
     bn2048_copy(v, b);
 
-    shift: u32 = 0;
+    let shift: u32 = 0;
     while (bn2048_get_bit(u, 0) == 0) && (bn2048_get_bit(v, 0) == 0) {
         bn2048_rshift1(u, u);
         bn2048_rshift1(v, v);
@@ -392,20 +407,18 @@ transform bn2048_gcd(r: Address, a: Address, b: Address) {
             bn2048_sub(u, u, v);
         } else {
             bn2048_sub(v, v, u);
-            t = allocate(256);
+            let t = state_new(Bn2048Ctx);
             bn2048_copy(t, u);
             bn2048_copy(u, v);
             bn2048_copy(v, t);
-            free(t);
         }
     }
     bn2048_copy(r, u);
-    s: u32 = 0;
+    let s: u32 = 0;
     while s < shift {
         bn2048_lshift1(r, r);
         s = s + 1;
     }
-    free(u); free(v);
 }
 
 // ===========================================================================
@@ -413,11 +426,11 @@ transform bn2048_gcd(r: Address, a: Address, b: Address) {
 // Computes r = a^(-1) mod m. Requires m odd and gcd(a, m) = 1.
 // ===========================================================================
 
-transform bn2048_mod_inv(r: Address, a: Address, m: Address) {
-    u = allocate(256);
-    v = allocate(256);
-    x1 = allocate(256);
-    x2 = allocate(256);
+transform bn2048_mod_inv(r: State<Bn2048Ctx>, a: State<Bn2048Ctx>, m: State<Bn2048Ctx>) {
+    let u = state_new(Bn2048Ctx);
+    let v = state_new(Bn2048Ctx);
+    let x1 = state_new(Bn2048Ctx);
+    let x2 = state_new(Bn2048Ctx);
 
     bn2048_copy(u, a);
     bn2048_copy(v, m);
@@ -452,8 +465,6 @@ transform bn2048_mod_inv(r: Address, a: Address, m: Address) {
         }
     }
     bn2048_mod(r, x1, m);
-
-    free(u); free(v); free(x1); free(x2);
 }
 
 // ===========================================================================
@@ -469,35 +480,34 @@ transform bn2048_mod_inv(r: Address, a: Address, m: Address) {
 //                                   (bn2048_mont_compute_m_prime)
 //
 // The modulus m must be odd so that m^(-1) mod 2^64 exists.  All Montgomery-
-// domain values are stored as 256-byte (32-limb) buffers and are kept
+// domain values are stored as 32-limb Bn2048Ctx buffers and are kept
 // reduced below m.
 // ===========================================================================
 
 // Compute R^2 mod m = 2^4096 mod m via 4096 doublings, reducing mod m after
-// each doubling.  r2_out receives the 256-byte result.  m must be odd and > 1.
-transform bn2048_mont_compute_r2(r2_out: Address, m: Address) {
+// each doubling.  r2_out receives the result.  m must be odd and > 1.
+transform bn2048_mont_compute_r2(r2_out: State<Bn2048Ctx>, m: State<Bn2048Ctx>) {
     bn2048_set_u32(r2_out, 1);
-    tmp = allocate(256);
-    i: u32 = 0;
+    let tmp = state_new(Bn2048Ctx);
+    let i = 0;
     while i < 4096 {
         bn2048_copy(tmp, r2_out);
         bn2048_mod_add(r2_out, tmp, tmp, m);
         i = i + 1;
     }
-    free(tmp);
 }
 
 // Compute m_prime = -m^(-1) mod 2^64 via Newton iteration on the low limb
 // of m.  Only the low limb m[0] participates because (m * m') mod 2^64
 // depends solely on m[0] * m' mod 2^64.  m must be odd.  Returns m_prime.
-transform bn2048_mont_compute_m_prime(m: Address) -> u64 {
-    m0: u64 = bn2048_load_u64(m, 0);
-    m_prime: u64 = 1;
-    two: u64 = 2;
-    i: u32 = 0;
+transform bn2048_mont_compute_m_prime(m: State<Bn2048Ctx>) -> u64 {
+    let m0 = m.limbs[0];
+    let m_prime: u64 = 1;
+    let two: u64 = 2;
+    let i = 0;
     while i < 6 {
-        prod: u64 = m0 * m_prime;
-        factor: u64 = two - prod;
+        let prod: u64 = m0 * m_prime;
+        let factor: u64 = two - prod;
         m_prime = m_prime * factor;
         i = i + 1;
     }
@@ -505,62 +515,66 @@ transform bn2048_mont_compute_m_prime(m: Address) -> u64 {
 }
 
 // Montgomery reduction: result = t * R^(-1) mod m, where R = 2^2048.
-// t is a t_len-limb buffer (t_len must be >= 65) that is modified in place.
-// After the reduction loop the low 32 limbs of t are zero and the result
-// lives in limbs 32..64 (33 limbs, value < 2m).  A final conditional
-// subtraction by m brings the value below m and the low 32 limbs are stored
-// into result.  m_prime comes from bn2048_mont_compute_m_prime.
-transform bn2048_mont_reduce(result: Address, t: Address, t_len: u32, m: Address, m_prime: u64) {
-    n: u32 = 32;
-    t_bytes: u32 = t_len * 8;
+// t is a 65-limb Bn4160Ctx buffer that is modified in place.  After the
+// reduction loop the low 32 limbs of t are zero and the result lives in
+// limbs 32..64 (33 limbs, value < 2m).  A final conditional subtraction by
+// m brings the value below m and the low 32 limbs are stored into result.
+// m_prime comes from bn2048_mont_compute_m_prime.
+transform bn2048_mont_reduce(result: State<Bn2048Ctx>, t: State<Bn4160Ctx>, m: State<Bn2048Ctx>, m_prime: u64) {
+    let n: u32 = 32;
 
-    lo = allocate(8);
-    hi = allocate(8);
+    let lo = state_new(Bn2048_64Ctx);
+    let hi = state_new(Bn2048_64Ctx);
 
-    i: u32 = 0;
+    let i = 0;
     while i < n {
-        ti: u64 = bn2048_load_u64(t, i * 8);
-        u: u64 = ti * m_prime;
+        let ti = t.limbs[i];
+        let u: u64 = ti * m_prime;
 
-        j: u32 = 0;
+        let j = 0;
         while j < n {
-            mj: u64 = bn2048_load_u64(m, j * 8);
+            let mj = m.limbs[j];
             bn2048_mul_u64(mj, u, lo, hi);
 
-            off: u32 = (i + j) * 8;
-            carry: u64 = 0;
+            let idx = i + j;
+            let carry: u64 = 0;
 
-            // Add low 64 bits of (m[j] * u) at limb (i + j).
-            k: u32 = 0;
-            while k < 8 {
-                cur: u64 = *(t + off + k);
-                addv: u64 = *(lo + k);
-                sum: u64 = cur + addv + carry;
-                *(t + off + k) = sum & 255;
-                carry = sum >> 8;
-                k = k + 1;
+            // Add low 64 bits of (m[j] * u) at limb idx.
+            let cur0 = t.limbs[idx];
+            let addv0 = lo.limbs[0];
+            let sum0: u64 = cur0 + addv0 + carry;
+            t.limbs[idx] = sum0;
+            if sum0 < cur0 { carry = 1; }
+            else {
+                if sum0 == cur0 {
+                    // carry unchanged
+                } else { carry = 0; }
             }
-            // Add high 64 bits of (m[j] * u) at limb (i + j + 1).
-            k = 0;
-            while k < 8 {
-                cur: u64 = *(t + off + 8 + k);
-                addv: u64 = *(hi + k);
-                sum: u64 = cur + addv + carry;
-                *(t + off + 8 + k) = sum & 255;
-                carry = sum >> 8;
-                k = k + 1;
+
+            // Add high 64 bits of (m[j] * u) at limb idx+1.
+            let idx1 = idx + 1;
+            let cur1 = t.limbs[idx1];
+            let addv1 = hi.limbs[0];
+            let sum1: u64 = cur1 + addv1 + carry;
+            t.limbs[idx1] = sum1;
+            if sum1 < cur1 { carry = 1; }
+            else {
+                if sum1 == cur1 {
+                    // carry unchanged
+                } else { carry = 0; }
             }
-            // Propagate any remaining carry through higher bytes.
-            k = 16;
+
+            // Propagate any remaining carry through higher limbs.
+            let k = 2;
             while carry != 0 {
-                pos: u32 = off + k;
-                if pos >= t_bytes {
+                let idxk = idx + k;
+                if idxk >= 65 {
                     carry = 0;
                 } else {
-                    cur: u64 = *(t + pos);
-                    sum: u64 = cur + carry;
-                    *(t + pos) = sum & 255;
-                    carry = sum >> 8;
+                    let curk = t.limbs[idxk];
+                    let sumk: u64 = curk + carry;
+                    t.limbs[idxk] = sumk;
+                    if sumk < curk { carry = 1; } else { carry = 0; }
                     k = k + 1;
                 }
             }
@@ -569,121 +583,146 @@ transform bn2048_mont_reduce(result: Address, t: Address, t_len: u32, m: Address
         i = i + 1;
     }
 
-    free(lo); free(hi);
-
-    // The result lives in t[32..64] (33 limbs, 264 bytes).  Copy it into a
-    // candidate buffer so the conditional subtraction can run without
-    // aliasing concerns.
-    candidate = allocate(264);
-    ci: u32 = 0;
-    while ci < 264 {
-        *(candidate + ci) = *(t + n * 8 + ci);
+    // The result lives in t[32..64] (33 limbs).  Copy it into a candidate
+    // buffer so the conditional subtraction can run without aliasing.
+    let candidate = state_new(Bn2112Ctx);
+    let ci = 0;
+    while ci < 33 {
+        let base = 32 + ci;
+        candidate.limbs[ci] = t.limbs[base];
         ci = ci + 1;
     }
 
     // If candidate >= m, subtract m.  candidate < 2m so one subtraction
-    // suffices.  The top (33rd) limb is at most 1 because the reduced
-    // value is < 2m < 2^2049.
-    top: u64 = bn2048_load_u64(candidate, 32 * 8);
-    need_sub: u32 = 0;
+    // suffices.  The top (33rd) limb is at most 1 because the reduced value
+    // is < 2m < 2^2049.
+    let top = candidate.limbs[32];
+    let need_sub: u32 = 0;
     if top != 0 {
         need_sub = 1;
     } else {
-        if bn2048_cmp(candidate, m) >= 0 {
-            need_sub = 1;
+        // Compare low 32 limbs of candidate against m.  Build a 32-limb
+        // view by comparing candidate.limbs[0..31] vs m.limbs[0..31].
+        let cmp_i: u32 = 31;
+        let cmp_result: i32 = 0;
+        while 1 == 1 {
+            let cv = candidate.limbs[cmp_i];
+            let mv = m.limbs[cmp_i];
+            if cv > mv { cmp_result = 1; }
+            else {
+                if cv < mv { cmp_result = -1; }
+            }
+            if cmp_result != 0 { break; }
+            if cmp_i == 0 { break; }
+            cmp_i = cmp_i - 1;
         }
+        if cmp_result >= 0 { need_sub = 1; }
     }
     if need_sub == 1 {
-        borrow: u32 = bn2048_sub(candidate, candidate, m);
-        new_top: u64 = top - (borrow as u64);
-        bn2048_store_u64(candidate, 32 * 8, new_top);
+        // Subtract m from the low 32 limbs of candidate (limb 32 holds the
+        // high bit which is reduced modulo the borrow).
+        let borrow: u64 = 0;
+        let si = 0;
+        while si < 32 {
+            let av = candidate.limbs[si];
+            let bv = m.limbs[si];
+            let diff: u64 = av - bv - borrow;
+            candidate.limbs[si] = diff;
+            if av < bv { borrow = 1; }
+            else {
+                if av == bv {
+                    if borrow == 1 { borrow = 1; } else { borrow = 0; }
+                } else { borrow = 0; }
+            }
+            si = si + 1;
+        }
+        let new_top: u64 = top - borrow;
+        candidate.limbs[32] = new_top;
     }
 
     // Store the low 32 limbs (256 bytes) into result.
-    ci = 0;
-    while ci < 256 {
-        *(result + ci) = *(candidate + ci);
-        ci = ci + 1;
+    let ri = 0;
+    while ri < 32 {
+        result.limbs[ri] = candidate.limbs[ri];
+        ri = ri + 1;
     }
-
-    free(candidate);
 }
 
 // Montgomery multiplication: r = a * b * R^(-1) mod m.
-// a and b are 256-byte operands (each < m).  r is the 256-byte result (< m).
+// a and b are 32-limb operands (each < m).  r is the 32-limb result (< m).
 // m_prime is -m^(-1) mod 2^64 from bn2048_mont_compute_m_prime.
-transform bn2048_mont_mul(r: Address, a: Address, b: Address, m: Address, m_prime: u64) {
-    // t = a * b (4096-bit, 64 limbs) plus one extra limb to absorb the
-    // carry produced during Montgomery reduction (the reduced value can
+transform bn2048_mont_mul(r: State<Bn2048Ctx>, a: State<Bn2048Ctx>, b: State<Bn2048Ctx>, m: State<Bn2048Ctx>, m_prime: u64) {
+    // Compute t = a * b (4096-bit, 64 limbs) into a Bn4096Ctx, then copy
+    // into a 65-limb Bn4160Ctx with limb 64 = 0 (the extra limb absorbs the
+    // carry produced during Montgomery reduction; the reduced value can
     // reach 2m - 1 < 2^2049, which needs 33 result limbs).
-    t = allocate(520);
-    bn2048_mul_4096(t, a, b);
-    bn2048_store_u64(t, 512, 0);
-    bn2048_mont_reduce(r, t, 65, m, m_prime);
-    free(t);
+    let prod = state_new(Bn4096Ctx);
+    let t = state_new(Bn4160Ctx);
+    bn2048_mul_4096(prod, a, b);
+    let i = 0;
+    while i < 64 {
+        t.limbs[i] = prod.limbs[i];
+        i = i + 1;
+    }
+    t.limbs[64] = 0;
+    bn2048_mont_reduce(r, t, m, m_prime);
 }
 
 // Convert a from normal to Montgomery domain: r = a * R mod m.
 // Computed as bn2048_mont_mul(a, R2, m, m_prime) since a * R2 * R^(-1) = a * R.
-transform bn2048_mont_convert(r: Address, a: Address, m: Address, r2: Address, m_prime: u64) {
+transform bn2048_mont_convert(r: State<Bn2048Ctx>, a: State<Bn2048Ctx>, m: State<Bn2048Ctx>, r2: State<Bn2048Ctx>, m_prime: u64) {
     bn2048_mont_mul(r, a, r2, m, m_prime);
 }
 
 // Convert a from Montgomery to normal domain: r = a * R^(-1) mod m.
 // Computed as bn2048_mont_mul(a, 1, m, m_prime) since a * 1 * R^(-1) = a * R^(-1).
-transform bn2048_momt_revert(r: Address, a: Address, m: Address, m_prime: u64) {
-    one = allocate(256);
+transform bn2048_momt_revert(r: State<Bn2048Ctx>, a: State<Bn2048Ctx>, m: State<Bn2048Ctx>, m_prime: u64) {
+    let one = state_new(Bn2048Ctx);
     bn2048_set_u32(one, 1);
     bn2048_mont_mul(r, a, one, m, m_prime);
-    free(one);
 }
 
 // Montgomery-based modular exponentiation: r = a^exp mod m.
 // m must be odd.  Uses square-and-multiply with Montgomery multiplication,
 // avoiding the 4096/2048 binary long division used by bn2048_mod_exp.
-transform bn2048_mod_exp_mont(r: Address, a: Address, exp: Address, m: Address) {
+transform bn2048_mod_exp_mont(r: State<Bn2048Ctx>, a: State<Bn2048Ctx>, exp: State<Bn2048Ctx>, m: State<Bn2048Ctx>) {
     // r2 = R^2 mod m
-    r2 = allocate(256);
+    let r2 = state_new(Bn2048Ctx);
     bn2048_mont_compute_r2(r2, m);
 
     // m_prime = -m^(-1) mod 2^64
-    m_prime: u64 = bn2048_mont_compute_m_prime(m);
+    let m_prime: u64 = bn2048_mont_compute_m_prime(m);
 
     // a_mont = a * R mod m  (base in Montgomery domain)
-    a_mont = allocate(256);
+    let a_mont = state_new(Bn2048Ctx);
     bn2048_mont_convert(a_mont, a, m, r2, m_prime);
 
     // result_mont = R mod m = mont_mul(1, r2)  (represents the value 1)
-    result_mont = allocate(256);
-    one = allocate(256);
+    let result_mont = state_new(Bn2048Ctx);
+    let one = state_new(Bn2048Ctx);
     bn2048_set_u32(one, 1);
     bn2048_mont_mul(result_mont, one, r2, m, m_prime);
 
-    bits: u32 = bn2048_bitlen(exp);
+    let bits: u32 = bn2048_bitlen(exp);
     if bits == 0 {
         // exp = 0  =>  a^0 = 1
         bn2048_set_u32(r, 1);
-        free(r2); free(a_mont); free(result_mont); free(one);
         return;
     }
 
-    i: u32 = 0;
+    let i = 0;
     while i < bits {
         if bn2048_get_bit(exp, i) == 1 {
-            tmp = allocate(256);
+            let tmp = state_new(Bn2048Ctx);
             bn2048_mont_mul(tmp, result_mont, a_mont, m, m_prime);
             bn2048_copy(result_mont, tmp);
-            free(tmp);
         }
-        sq = allocate(256);
+        let sq = state_new(Bn2048Ctx);
         bn2048_mont_mul(sq, a_mont, a_mont, m, m_prime);
         bn2048_copy(a_mont, sq);
-        free(sq);
         i = i + 1;
     }
 
     // r = result_mont * R^(-1) mod m  (convert back to normal domain)
     bn2048_momt_revert(r, result_mont, m, m_prime);
-
-    free(r2); free(a_mont); free(result_mont); free(one);
 }
