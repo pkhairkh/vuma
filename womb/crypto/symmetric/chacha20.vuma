@@ -126,37 +126,41 @@ transform chacha20_load_u32_le_buf(buf: State<ChaCha20Buf>, off: u32) -> u32 {
 // The state is rebuilt from (key, nonce, counter) at the start of each
 // chacha20_block call.
 transform chacha20_init(ctx: State<ChaCha20Ctx>, key: State<ChaCha20Key>, nonce: State<ChaCha20Nonce>) {
-    // Copy key bytes into ctx.key
-    let i: u32 = 0;
-    while i < 32 {
-        ctx.key[i] = key.bytes[i];
-        i = i + 1;
-    }
-    // Copy nonce bytes into ctx.nonce
-    i = 0;
-    while i < 12 {
-        ctx.nonce[i] = nonce.bytes[i];
-        i = i + 1;
-    }
+    // Copy key bytes into ctx.key using LITERAL indices (avoids the
+    // param-index codegen bug — using `i` as an array index in a loop
+    // produces garbled output on all backends).
+    ctx.key[0]  = key.bytes[0];   ctx.key[1]  = key.bytes[1];
+    ctx.key[2]  = key.bytes[2];   ctx.key[3]  = key.bytes[3];
+    ctx.key[4]  = key.bytes[4];   ctx.key[5]  = key.bytes[5];
+    ctx.key[6]  = key.bytes[6];   ctx.key[7]  = key.bytes[7];
+    ctx.key[8]  = key.bytes[8];   ctx.key[9]  = key.bytes[9];
+    ctx.key[10] = key.bytes[10];  ctx.key[11] = key.bytes[11];
+    ctx.key[12] = key.bytes[12];  ctx.key[13] = key.bytes[13];
+    ctx.key[14] = key.bytes[14];  ctx.key[15] = key.bytes[15];
+    ctx.key[16] = key.bytes[16];  ctx.key[17] = key.bytes[17];
+    ctx.key[18] = key.bytes[18];  ctx.key[19] = key.bytes[19];
+    ctx.key[20] = key.bytes[20];  ctx.key[21] = key.bytes[21];
+    ctx.key[22] = key.bytes[22];  ctx.key[23] = key.bytes[23];
+    ctx.key[24] = key.bytes[24];  ctx.key[25] = key.bytes[25];
+    ctx.key[26] = key.bytes[26];  ctx.key[27] = key.bytes[27];
+    ctx.key[28] = key.bytes[28];  ctx.key[29] = key.bytes[29];
+    ctx.key[30] = key.bytes[30];  ctx.key[31] = key.bytes[31];
+
+    // Copy nonce bytes into ctx.nonce using LITERAL indices
+    ctx.nonce[0]  = nonce.bytes[0];   ctx.nonce[1]  = nonce.bytes[1];
+    ctx.nonce[2]  = nonce.bytes[2];   ctx.nonce[3]  = nonce.bytes[3];
+    ctx.nonce[4]  = nonce.bytes[4];   ctx.nonce[5]  = nonce.bytes[5];
+    ctx.nonce[6]  = nonce.bytes[6];   ctx.nonce[7]  = nonce.bytes[7];
+    ctx.nonce[8]  = nonce.bytes[8];   ctx.nonce[9]  = nonce.bytes[9];
+    ctx.nonce[10] = nonce.bytes[10];  ctx.nonce[11] = nonce.bytes[11];
+
     ctx.counter = 0;
 }
 
 // chacha20_set_counter: set the block counter (for resuming encryption).
-//
-// The counter is interpreted as 1-indexed: counter=1 means "first block"
-// (i.e. state[12]=0), counter=2 means "second block" (state[12]=1), etc.
-// This mirrors the chacha20 Rust crate's `seek(0)` (default) behaviour where
-// the first keystream block uses state[12]=0, so callers can express
-// "start from block N" with the natural 1-indexed form. Without this
-// adjustment the caller had to pass N-1 to target block N, which is the
-// off-by-one that produced a wrong first-block keystream (the second of the
-// two bugs flagged by W4-sym). The counter increment between 64-byte blocks
-// (chacha20_block line: `ctx.counter = (ctx.counter + 1) & MASK32`) was
-// already correct; this is the only state-setup fix required.
+// counter=0 produces the first 64-byte keystream block (state[12]=0).
 transform chacha20_set_counter(ctx: State<ChaCha20Ctx>, counter: u32) {
-    // 1-indexed: counter=1 -> state[12]=0 (first keystream block).
-    // Mask to u32 to handle the (counter=0) underflow edge case defensively.
-    ctx.counter = (counter - 1) & CHACHA20_MASK32;
+    ctx.counter = counter;
 }
 
 // ===========================================================================
@@ -234,16 +238,16 @@ transform chacha20_block(ctx: State<ChaCha20Ctx>, block: State<ChaCha20Block>) {
         let d = ctx.state[12];
         a = (a + b) & CHACHA20_MASK32;
         d = d ^ a;
-        d = chacha20_rotl32(d, 16);
+        d = ((d << 16) | (d >> 16)) & CHACHA20_MASK32;
         c = (c + d) & CHACHA20_MASK32;
         b = b ^ c;
-        b = chacha20_rotl32(b, 12);
+        b = ((b << 12) | (b >> 20)) & CHACHA20_MASK32;
         a = (a + b) & CHACHA20_MASK32;
         d = d ^ a;
-        d = chacha20_rotl32(d, 8);
+        d = ((d << 8) | (d >> 24)) & CHACHA20_MASK32;
         c = (c + d) & CHACHA20_MASK32;
         b = b ^ c;
-        b = chacha20_rotl32(b, 7);
+        b = ((b << 7) | (b >> 25)) & CHACHA20_MASK32;
         ctx.state[0] = a;
         ctx.state[4] = b;
         ctx.state[8] = c;
@@ -256,16 +260,16 @@ transform chacha20_block(ctx: State<ChaCha20Ctx>, block: State<ChaCha20Block>) {
         d = ctx.state[13];
         a = (a + b) & CHACHA20_MASK32;
         d = d ^ a;
-        d = chacha20_rotl32(d, 16);
+        d = ((d << 16) | (d >> 16)) & CHACHA20_MASK32;
         c = (c + d) & CHACHA20_MASK32;
         b = b ^ c;
-        b = chacha20_rotl32(b, 12);
+        b = ((b << 12) | (b >> 20)) & CHACHA20_MASK32;
         a = (a + b) & CHACHA20_MASK32;
         d = d ^ a;
-        d = chacha20_rotl32(d, 8);
+        d = ((d << 8) | (d >> 24)) & CHACHA20_MASK32;
         c = (c + d) & CHACHA20_MASK32;
         b = b ^ c;
-        b = chacha20_rotl32(b, 7);
+        b = ((b << 7) | (b >> 25)) & CHACHA20_MASK32;
         ctx.state[1] = a;
         ctx.state[5] = b;
         ctx.state[9] = c;
@@ -278,16 +282,16 @@ transform chacha20_block(ctx: State<ChaCha20Ctx>, block: State<ChaCha20Block>) {
         d = ctx.state[14];
         a = (a + b) & CHACHA20_MASK32;
         d = d ^ a;
-        d = chacha20_rotl32(d, 16);
+        d = ((d << 16) | (d >> 16)) & CHACHA20_MASK32;
         c = (c + d) & CHACHA20_MASK32;
         b = b ^ c;
-        b = chacha20_rotl32(b, 12);
+        b = ((b << 12) | (b >> 20)) & CHACHA20_MASK32;
         a = (a + b) & CHACHA20_MASK32;
         d = d ^ a;
-        d = chacha20_rotl32(d, 8);
+        d = ((d << 8) | (d >> 24)) & CHACHA20_MASK32;
         c = (c + d) & CHACHA20_MASK32;
         b = b ^ c;
-        b = chacha20_rotl32(b, 7);
+        b = ((b << 7) | (b >> 25)) & CHACHA20_MASK32;
         ctx.state[2] = a;
         ctx.state[6] = b;
         ctx.state[10] = c;
@@ -300,16 +304,16 @@ transform chacha20_block(ctx: State<ChaCha20Ctx>, block: State<ChaCha20Block>) {
         d = ctx.state[15];
         a = (a + b) & CHACHA20_MASK32;
         d = d ^ a;
-        d = chacha20_rotl32(d, 16);
+        d = ((d << 16) | (d >> 16)) & CHACHA20_MASK32;
         c = (c + d) & CHACHA20_MASK32;
         b = b ^ c;
-        b = chacha20_rotl32(b, 12);
+        b = ((b << 12) | (b >> 20)) & CHACHA20_MASK32;
         a = (a + b) & CHACHA20_MASK32;
         d = d ^ a;
-        d = chacha20_rotl32(d, 8);
+        d = ((d << 8) | (d >> 24)) & CHACHA20_MASK32;
         c = (c + d) & CHACHA20_MASK32;
         b = b ^ c;
-        b = chacha20_rotl32(b, 7);
+        b = ((b << 7) | (b >> 25)) & CHACHA20_MASK32;
         ctx.state[3] = a;
         ctx.state[7] = b;
         ctx.state[11] = c;
@@ -324,16 +328,16 @@ transform chacha20_block(ctx: State<ChaCha20Ctx>, block: State<ChaCha20Block>) {
         d = ctx.state[15];
         a = (a + b) & CHACHA20_MASK32;
         d = d ^ a;
-        d = chacha20_rotl32(d, 16);
+        d = ((d << 16) | (d >> 16)) & CHACHA20_MASK32;
         c = (c + d) & CHACHA20_MASK32;
         b = b ^ c;
-        b = chacha20_rotl32(b, 12);
+        b = ((b << 12) | (b >> 20)) & CHACHA20_MASK32;
         a = (a + b) & CHACHA20_MASK32;
         d = d ^ a;
-        d = chacha20_rotl32(d, 8);
+        d = ((d << 8) | (d >> 24)) & CHACHA20_MASK32;
         c = (c + d) & CHACHA20_MASK32;
         b = b ^ c;
-        b = chacha20_rotl32(b, 7);
+        b = ((b << 7) | (b >> 25)) & CHACHA20_MASK32;
         ctx.state[0] = a;
         ctx.state[5] = b;
         ctx.state[10] = c;
@@ -346,16 +350,16 @@ transform chacha20_block(ctx: State<ChaCha20Ctx>, block: State<ChaCha20Block>) {
         d = ctx.state[12];
         a = (a + b) & CHACHA20_MASK32;
         d = d ^ a;
-        d = chacha20_rotl32(d, 16);
+        d = ((d << 16) | (d >> 16)) & CHACHA20_MASK32;
         c = (c + d) & CHACHA20_MASK32;
         b = b ^ c;
-        b = chacha20_rotl32(b, 12);
+        b = ((b << 12) | (b >> 20)) & CHACHA20_MASK32;
         a = (a + b) & CHACHA20_MASK32;
         d = d ^ a;
-        d = chacha20_rotl32(d, 8);
+        d = ((d << 8) | (d >> 24)) & CHACHA20_MASK32;
         c = (c + d) & CHACHA20_MASK32;
         b = b ^ c;
-        b = chacha20_rotl32(b, 7);
+        b = ((b << 7) | (b >> 25)) & CHACHA20_MASK32;
         ctx.state[1] = a;
         ctx.state[6] = b;
         ctx.state[11] = c;
@@ -368,16 +372,16 @@ transform chacha20_block(ctx: State<ChaCha20Ctx>, block: State<ChaCha20Block>) {
         d = ctx.state[13];
         a = (a + b) & CHACHA20_MASK32;
         d = d ^ a;
-        d = chacha20_rotl32(d, 16);
+        d = ((d << 16) | (d >> 16)) & CHACHA20_MASK32;
         c = (c + d) & CHACHA20_MASK32;
         b = b ^ c;
-        b = chacha20_rotl32(b, 12);
+        b = ((b << 12) | (b >> 20)) & CHACHA20_MASK32;
         a = (a + b) & CHACHA20_MASK32;
         d = d ^ a;
-        d = chacha20_rotl32(d, 8);
+        d = ((d << 8) | (d >> 24)) & CHACHA20_MASK32;
         c = (c + d) & CHACHA20_MASK32;
         b = b ^ c;
-        b = chacha20_rotl32(b, 7);
+        b = ((b << 7) | (b >> 25)) & CHACHA20_MASK32;
         ctx.state[2] = a;
         ctx.state[7] = b;
         ctx.state[8] = c;
@@ -390,16 +394,16 @@ transform chacha20_block(ctx: State<ChaCha20Ctx>, block: State<ChaCha20Block>) {
         d = ctx.state[14];
         a = (a + b) & CHACHA20_MASK32;
         d = d ^ a;
-        d = chacha20_rotl32(d, 16);
+        d = ((d << 16) | (d >> 16)) & CHACHA20_MASK32;
         c = (c + d) & CHACHA20_MASK32;
         b = b ^ c;
-        b = chacha20_rotl32(b, 12);
+        b = ((b << 12) | (b >> 20)) & CHACHA20_MASK32;
         a = (a + b) & CHACHA20_MASK32;
         d = d ^ a;
-        d = chacha20_rotl32(d, 8);
+        d = ((d << 8) | (d >> 24)) & CHACHA20_MASK32;
         c = (c + d) & CHACHA20_MASK32;
         b = b ^ c;
-        b = chacha20_rotl32(b, 7);
+        b = ((b << 7) | (b >> 25)) & CHACHA20_MASK32;
         ctx.state[3] = a;
         ctx.state[4] = b;
         ctx.state[9] = c;
@@ -410,22 +414,90 @@ transform chacha20_block(ctx: State<ChaCha20Ctx>, block: State<ChaCha20Block>) {
 
     // Final addition: output = working_state + original_state
     // Write keystream as 16 LE u32 words into block.bytes[0..63]
-    chacha20_store_u32_le(block, 0,  (ctx.state[0]  + s0)  & CHACHA20_MASK32);
-    chacha20_store_u32_le(block, 4,  (ctx.state[1]  + s1)  & CHACHA20_MASK32);
-    chacha20_store_u32_le(block, 8,  (ctx.state[2]  + s2)  & CHACHA20_MASK32);
-    chacha20_store_u32_le(block, 12, (ctx.state[3]  + s3)  & CHACHA20_MASK32);
-    chacha20_store_u32_le(block, 16, (ctx.state[4]  + s4)  & CHACHA20_MASK32);
-    chacha20_store_u32_le(block, 20, (ctx.state[5]  + s5)  & CHACHA20_MASK32);
-    chacha20_store_u32_le(block, 24, (ctx.state[6]  + s6)  & CHACHA20_MASK32);
-    chacha20_store_u32_le(block, 28, (ctx.state[7]  + s7)  & CHACHA20_MASK32);
-    chacha20_store_u32_le(block, 32, (ctx.state[8]  + s8)  & CHACHA20_MASK32);
-    chacha20_store_u32_le(block, 36, (ctx.state[9]  + s9)  & CHACHA20_MASK32);
-    chacha20_store_u32_le(block, 40, (ctx.state[10] + s10) & CHACHA20_MASK32);
-    chacha20_store_u32_le(block, 44, (ctx.state[11] + s11) & CHACHA20_MASK32);
-    chacha20_store_u32_le(block, 48, (ctx.state[12] + s12) & CHACHA20_MASK32);
-    chacha20_store_u32_le(block, 52, (ctx.state[13] + s13) & CHACHA20_MASK32);
-    chacha20_store_u32_le(block, 56, (ctx.state[14] + s14) & CHACHA20_MASK32);
-    chacha20_store_u32_le(block, 60, (ctx.state[15] + s15) & CHACHA20_MASK32);
+    // Inline with LITERAL offsets (avoids the param-index codegen bug —
+    // chacha20_store_u32_le passed `off` as a parameter, which broke array
+    // indexing on all backends).
+    let w0  = (ctx.state[0]  + s0)  & CHACHA20_MASK32;
+    let w1  = (ctx.state[1]  + s1)  & CHACHA20_MASK32;
+    let w2  = (ctx.state[2]  + s2)  & CHACHA20_MASK32;
+    let w3  = (ctx.state[3]  + s3)  & CHACHA20_MASK32;
+    let w4  = (ctx.state[4]  + s4)  & CHACHA20_MASK32;
+    let w5  = (ctx.state[5]  + s5)  & CHACHA20_MASK32;
+    let w6  = (ctx.state[6]  + s6)  & CHACHA20_MASK32;
+    let w7  = (ctx.state[7]  + s7)  & CHACHA20_MASK32;
+    let w8  = (ctx.state[8]  + s8)  & CHACHA20_MASK32;
+    let w9  = (ctx.state[9]  + s9)  & CHACHA20_MASK32;
+    let w10 = (ctx.state[10] + s10) & CHACHA20_MASK32;
+    let w11 = (ctx.state[11] + s11) & CHACHA20_MASK32;
+    let w12 = (ctx.state[12] + s12) & CHACHA20_MASK32;
+    let w13 = (ctx.state[13] + s13) & CHACHA20_MASK32;
+    let w14 = (ctx.state[14] + s14) & CHACHA20_MASK32;
+    let w15 = (ctx.state[15] + s15) & CHACHA20_MASK32;
+
+    block.bytes[0]  = (w0 & 255) as u8;
+    block.bytes[1]  = ((w0 >> 8) & 255) as u8;
+    block.bytes[2]  = ((w0 >> 16) & 255) as u8;
+    block.bytes[3]  = ((w0 >> 24) & 255) as u8;
+    block.bytes[4]  = (w1 & 255) as u8;
+    block.bytes[5]  = ((w1 >> 8) & 255) as u8;
+    block.bytes[6]  = ((w1 >> 16) & 255) as u8;
+    block.bytes[7]  = ((w1 >> 24) & 255) as u8;
+    block.bytes[8]  = (w2 & 255) as u8;
+    block.bytes[9]  = ((w2 >> 8) & 255) as u8;
+    block.bytes[10] = ((w2 >> 16) & 255) as u8;
+    block.bytes[11] = ((w2 >> 24) & 255) as u8;
+    block.bytes[12] = (w3 & 255) as u8;
+    block.bytes[13] = ((w3 >> 8) & 255) as u8;
+    block.bytes[14] = ((w3 >> 16) & 255) as u8;
+    block.bytes[15] = ((w3 >> 24) & 255) as u8;
+    block.bytes[16] = (w4 & 255) as u8;
+    block.bytes[17] = ((w4 >> 8) & 255) as u8;
+    block.bytes[18] = ((w4 >> 16) & 255) as u8;
+    block.bytes[19] = ((w4 >> 24) & 255) as u8;
+    block.bytes[20] = (w5 & 255) as u8;
+    block.bytes[21] = ((w5 >> 8) & 255) as u8;
+    block.bytes[22] = ((w5 >> 16) & 255) as u8;
+    block.bytes[23] = ((w5 >> 24) & 255) as u8;
+    block.bytes[24] = (w6 & 255) as u8;
+    block.bytes[25] = ((w6 >> 8) & 255) as u8;
+    block.bytes[26] = ((w6 >> 16) & 255) as u8;
+    block.bytes[27] = ((w6 >> 24) & 255) as u8;
+    block.bytes[28] = (w7 & 255) as u8;
+    block.bytes[29] = ((w7 >> 8) & 255) as u8;
+    block.bytes[30] = ((w7 >> 16) & 255) as u8;
+    block.bytes[31] = ((w7 >> 24) & 255) as u8;
+    block.bytes[32] = (w8 & 255) as u8;
+    block.bytes[33] = ((w8 >> 8) & 255) as u8;
+    block.bytes[34] = ((w8 >> 16) & 255) as u8;
+    block.bytes[35] = ((w8 >> 24) & 255) as u8;
+    block.bytes[36] = (w9 & 255) as u8;
+    block.bytes[37] = ((w9 >> 8) & 255) as u8;
+    block.bytes[38] = ((w9 >> 16) & 255) as u8;
+    block.bytes[39] = ((w9 >> 24) & 255) as u8;
+    block.bytes[40] = (w10 & 255) as u8;
+    block.bytes[41] = ((w10 >> 8) & 255) as u8;
+    block.bytes[42] = ((w10 >> 16) & 255) as u8;
+    block.bytes[43] = ((w10 >> 24) & 255) as u8;
+    block.bytes[44] = (w11 & 255) as u8;
+    block.bytes[45] = ((w11 >> 8) & 255) as u8;
+    block.bytes[46] = ((w11 >> 16) & 255) as u8;
+    block.bytes[47] = ((w11 >> 24) & 255) as u8;
+    block.bytes[48] = (w12 & 255) as u8;
+    block.bytes[49] = ((w12 >> 8) & 255) as u8;
+    block.bytes[50] = ((w12 >> 16) & 255) as u8;
+    block.bytes[51] = ((w12 >> 24) & 255) as u8;
+    block.bytes[52] = (w13 & 255) as u8;
+    block.bytes[53] = ((w13 >> 8) & 255) as u8;
+    block.bytes[54] = ((w13 >> 16) & 255) as u8;
+    block.bytes[55] = ((w13 >> 24) & 255) as u8;
+    block.bytes[56] = (w14 & 255) as u8;
+    block.bytes[57] = ((w14 >> 8) & 255) as u8;
+    block.bytes[58] = ((w14 >> 16) & 255) as u8;
+    block.bytes[59] = ((w14 >> 24) & 255) as u8;
+    block.bytes[60] = (w15 & 255) as u8;
+    block.bytes[61] = ((w15 >> 8) & 255) as u8;
+    block.bytes[62] = ((w15 >> 16) & 255) as u8;
+    block.bytes[63] = ((w15 >> 24) & 255) as u8;
 
     // Increment counter for next block
     ctx.counter = (ctx.counter + 1) & CHACHA20_MASK32;
