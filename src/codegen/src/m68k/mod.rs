@@ -1393,8 +1393,17 @@ fn emit_instr(
     match instr {
         IRInstr::Add { dst, lhs, rhs, ty } => {
             let is_64bit = matches!(ty, Some(IRType::I64) | Some(IRType::U64));
-            let is_move = matches!(rhs, IRValue::Immediate(0)) && ty.is_none();
-            if !is_64bit && !is_move {
+            let is_move = matches!(rhs, IRValue::Immediate(0)) && (ty.is_none() || is_64bit);
+            if is_move {
+                // W5-m68k: 64-bit MOVE (Add with rhs=0). Uses simple MOVE.L
+                // instead of ADD+ADDX. The IR optimizer generates many of these
+                // as copy operations. Using ADD+ADDX for identity copies can
+                // interact with QEMU's TB translation in large functions.
+                let dst_id = dst.as_register().unwrap_or(0);
+                let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
+                code.extend(ss_load_value_64(lhs, vreg_stack_slots, S0, S2));
+                code.extend(ss_store_64(S0, S2, dst_off));
+            } else if !is_64bit && !is_move {
                 // 32-bit add: operate on low word only, ss_st zeros high word
                 let dst_id = dst.as_register().unwrap_or(0);
                 let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
@@ -2593,6 +2602,18 @@ fn emit_binop(
     let dst_off = vreg_stack_slots.get(&dst_id).copied().unwrap_or(0);
     match op {
         BinOpKind::Add => {
+            // W5-m68k: Optimize "Add with rhs=0" as a 64-bit MOVE.
+            // The IR optimizer generates many BinOp { op: Add, rhs: Immediate(0) }
+            // instructions as copy operations. Using ADD+ADDX for identity copies
+            // is wasteful and can interact badly with QEMU's TB translation in
+            // large functions (100+ copy operations in a single TB). Using
+            // simple MOVE.L instructions avoids the ADDX carry chain entirely.
+            let is_move = matches!(rhs, IRValue::Immediate(0));
+            if is_move {
+                // 64-bit move: copy both words of lhs to dst
+                code.extend(ss_load_value_64(lhs, vreg_stack_slots, S0, S2));
+                code.extend(ss_store_64(S0, S2, dst_off));
+            } else {
             // 64-bit add: load BOTH low and high words first, then do
             // ADD.L (low, sets X) immediately followed by ADDX.L (high,
             // uses X). No gap between ADD and ADDX to preserve X flag.
@@ -2620,6 +2641,7 @@ fn emit_binop(
             code.extend(Instruction::Addx { src: S3, dst: S2 }.encode());
             code.extend(ss_st(S0, dst_off));
             code.extend(Instruction::Store { src: S2, base: FP, offset: (dst_off + 4) as i16 }.encode());
+            }
         }
         BinOpKind::Sub => {
             // 64-bit sub: load BOTH low and high words first, then do
