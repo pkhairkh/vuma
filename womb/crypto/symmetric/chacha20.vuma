@@ -164,6 +164,200 @@ transform chacha20_set_counter(ctx: State<ChaCha20Ctx>, counter: u32) {
 }
 
 // ===========================================================================
+// Double-round — one column round + one diagonal round (8 quarter-rounds)
+// ===========================================================================
+//
+// Extracted into its own transform (matching the salsa20.vuma
+// salsa20_double_round pattern) so the 10-iteration while loop in
+// chacha20_block contains only `chacha20_double_round(ctx); round = round + 1;`.
+// VUMA's codegen mishandles large inline code blocks inside while loops,
+// causing the round body to be emitted only once (or with broken
+// phi/loop-carried state) — pulling the body into a separate transform
+// produces correct per-iteration behaviour.
+
+transform chacha20_double_round(ctx: State<ChaCha20Ctx>) {
+    // ── Column round ──
+
+    // QR(0, 4, 8, 12)
+    let a = ctx.state[0];
+    let b = ctx.state[4];
+    let c = ctx.state[8];
+    let d = ctx.state[12];
+    a = (a + b) & CHACHA20_MASK32;
+    d = d ^ a;
+    d = ((d << 16) | (d >> 16)) & CHACHA20_MASK32;
+    c = (c + d) & CHACHA20_MASK32;
+    b = b ^ c;
+    b = ((b << 12) | (b >> 20)) & CHACHA20_MASK32;
+    a = (a + b) & CHACHA20_MASK32;
+    d = d ^ a;
+    d = ((d << 8) | (d >> 24)) & CHACHA20_MASK32;
+    c = (c + d) & CHACHA20_MASK32;
+    b = b ^ c;
+    b = ((b << 7) | (b >> 25)) & CHACHA20_MASK32;
+    ctx.state[0] = a;
+    ctx.state[4] = b;
+    ctx.state[8] = c;
+    ctx.state[12] = d;
+
+    // QR(1, 5, 9, 13)
+    a = ctx.state[1];
+    b = ctx.state[5];
+    c = ctx.state[9];
+    d = ctx.state[13];
+    a = (a + b) & CHACHA20_MASK32;
+    d = d ^ a;
+    d = ((d << 16) | (d >> 16)) & CHACHA20_MASK32;
+    c = (c + d) & CHACHA20_MASK32;
+    b = b ^ c;
+    b = ((b << 12) | (b >> 20)) & CHACHA20_MASK32;
+    a = (a + b) & CHACHA20_MASK32;
+    d = d ^ a;
+    d = ((d << 8) | (d >> 24)) & CHACHA20_MASK32;
+    c = (c + d) & CHACHA20_MASK32;
+    b = b ^ c;
+    b = ((b << 7) | (b >> 25)) & CHACHA20_MASK32;
+    ctx.state[1] = a;
+    ctx.state[5] = b;
+    ctx.state[9] = c;
+    ctx.state[13] = d;
+
+    // QR(2, 6, 10, 14)
+    a = ctx.state[2];
+    b = ctx.state[6];
+    c = ctx.state[10];
+    d = ctx.state[14];
+    a = (a + b) & CHACHA20_MASK32;
+    d = d ^ a;
+    d = ((d << 16) | (d >> 16)) & CHACHA20_MASK32;
+    c = (c + d) & CHACHA20_MASK32;
+    b = b ^ c;
+    b = ((b << 12) | (b >> 20)) & CHACHA20_MASK32;
+    a = (a + b) & CHACHA20_MASK32;
+    d = d ^ a;
+    d = ((d << 8) | (d >> 24)) & CHACHA20_MASK32;
+    c = (c + d) & CHACHA20_MASK32;
+    b = b ^ c;
+    b = ((b << 7) | (b >> 25)) & CHACHA20_MASK32;
+    ctx.state[2] = a;
+    ctx.state[6] = b;
+    ctx.state[10] = c;
+    ctx.state[14] = d;
+
+    // QR(3, 7, 11, 15)
+    a = ctx.state[3];
+    b = ctx.state[7];
+    c = ctx.state[11];
+    d = ctx.state[15];
+    a = (a + b) & CHACHA20_MASK32;
+    d = d ^ a;
+    d = ((d << 16) | (d >> 16)) & CHACHA20_MASK32;
+    c = (c + d) & CHACHA20_MASK32;
+    b = b ^ c;
+    b = ((b << 12) | (b >> 20)) & CHACHA20_MASK32;
+    a = (a + b) & CHACHA20_MASK32;
+    d = d ^ a;
+    d = ((d << 8) | (d >> 24)) & CHACHA20_MASK32;
+    c = (c + d) & CHACHA20_MASK32;
+    b = b ^ c;
+    b = ((b << 7) | (b >> 25)) & CHACHA20_MASK32;
+    ctx.state[3] = a;
+    ctx.state[7] = b;
+    ctx.state[11] = c;
+    ctx.state[15] = d;
+
+    // ── Diagonal round ──
+
+    // QR(0, 5, 10, 15)
+    a = ctx.state[0];
+    b = ctx.state[5];
+    c = ctx.state[10];
+    d = ctx.state[15];
+    a = (a + b) & CHACHA20_MASK32;
+    d = d ^ a;
+    d = ((d << 16) | (d >> 16)) & CHACHA20_MASK32;
+    c = (c + d) & CHACHA20_MASK32;
+    b = b ^ c;
+    b = ((b << 12) | (b >> 20)) & CHACHA20_MASK32;
+    a = (a + b) & CHACHA20_MASK32;
+    d = d ^ a;
+    d = ((d << 8) | (d >> 24)) & CHACHA20_MASK32;
+    c = (c + d) & CHACHA20_MASK32;
+    b = b ^ c;
+    b = ((b << 7) | (b >> 25)) & CHACHA20_MASK32;
+    ctx.state[0] = a;
+    ctx.state[5] = b;
+    ctx.state[10] = c;
+    ctx.state[15] = d;
+
+    // QR(1, 6, 11, 12)
+    a = ctx.state[1];
+    b = ctx.state[6];
+    c = ctx.state[11];
+    d = ctx.state[12];
+    a = (a + b) & CHACHA20_MASK32;
+    d = d ^ a;
+    d = ((d << 16) | (d >> 16)) & CHACHA20_MASK32;
+    c = (c + d) & CHACHA20_MASK32;
+    b = b ^ c;
+    b = ((b << 12) | (b >> 20)) & CHACHA20_MASK32;
+    a = (a + b) & CHACHA20_MASK32;
+    d = d ^ a;
+    d = ((d << 8) | (d >> 24)) & CHACHA20_MASK32;
+    c = (c + d) & CHACHA20_MASK32;
+    b = b ^ c;
+    b = ((b << 7) | (b >> 25)) & CHACHA20_MASK32;
+    ctx.state[1] = a;
+    ctx.state[6] = b;
+    ctx.state[11] = c;
+    ctx.state[12] = d;
+
+    // QR(2, 7, 8, 13)
+    a = ctx.state[2];
+    b = ctx.state[7];
+    c = ctx.state[8];
+    d = ctx.state[13];
+    a = (a + b) & CHACHA20_MASK32;
+    d = d ^ a;
+    d = ((d << 16) | (d >> 16)) & CHACHA20_MASK32;
+    c = (c + d) & CHACHA20_MASK32;
+    b = b ^ c;
+    b = ((b << 12) | (b >> 20)) & CHACHA20_MASK32;
+    a = (a + b) & CHACHA20_MASK32;
+    d = d ^ a;
+    d = ((d << 8) | (d >> 24)) & CHACHA20_MASK32;
+    c = (c + d) & CHACHA20_MASK32;
+    b = b ^ c;
+    b = ((b << 7) | (b >> 25)) & CHACHA20_MASK32;
+    ctx.state[2] = a;
+    ctx.state[7] = b;
+    ctx.state[8] = c;
+    ctx.state[13] = d;
+
+    // QR(3, 4, 9, 14)
+    a = ctx.state[3];
+    b = ctx.state[4];
+    c = ctx.state[9];
+    d = ctx.state[14];
+    a = (a + b) & CHACHA20_MASK32;
+    d = d ^ a;
+    d = ((d << 16) | (d >> 16)) & CHACHA20_MASK32;
+    c = (c + d) & CHACHA20_MASK32;
+    b = b ^ c;
+    b = ((b << 12) | (b >> 20)) & CHACHA20_MASK32;
+    a = (a + b) & CHACHA20_MASK32;
+    d = d ^ a;
+    d = ((d << 8) | (d >> 24)) & CHACHA20_MASK32;
+    c = (c + d) & CHACHA20_MASK32;
+    b = b ^ c;
+    b = ((b << 7) | (b >> 25)) & CHACHA20_MASK32;
+    ctx.state[3] = a;
+    ctx.state[4] = b;
+    ctx.state[9] = c;
+    ctx.state[14] = d;
+}
+
+// ===========================================================================
 // Block function — generates 64 bytes of keystream
 // ===========================================================================
 
@@ -226,189 +420,13 @@ transform chacha20_block(ctx: State<ChaCha20Ctx>, block: State<ChaCha20Block>) {
     let s14 = ctx.state[14];
     let s15 = ctx.state[15];
 
-    // 10 double-rounds (20 rounds total)
+    // 10 double-rounds (20 rounds total). The 8 quarter-rounds per
+    // iteration live in chacha20_double_round(ctx) — extracted into a
+    // separate transform because VUMA's codegen mishandles large inline
+    // bodies inside while loops (matching the salsa20.vuma pattern).
     let round: u32 = 0;
     while round < 10 {
-        // Column round: QR(0,4,8,12), QR(1,5,9,13), QR(2,6,10,14), QR(3,7,11,15)
-
-        // QR(0, 4, 8, 12)
-        let a = ctx.state[0];
-        let b = ctx.state[4];
-        let c = ctx.state[8];
-        let d = ctx.state[12];
-        a = (a + b) & CHACHA20_MASK32;
-        d = d ^ a;
-        d = ((d << 16) | (d >> 16)) & CHACHA20_MASK32;
-        c = (c + d) & CHACHA20_MASK32;
-        b = b ^ c;
-        b = ((b << 12) | (b >> 20)) & CHACHA20_MASK32;
-        a = (a + b) & CHACHA20_MASK32;
-        d = d ^ a;
-        d = ((d << 8) | (d >> 24)) & CHACHA20_MASK32;
-        c = (c + d) & CHACHA20_MASK32;
-        b = b ^ c;
-        b = ((b << 7) | (b >> 25)) & CHACHA20_MASK32;
-        ctx.state[0] = a;
-        ctx.state[4] = b;
-        ctx.state[8] = c;
-        ctx.state[12] = d;
-
-        // QR(1, 5, 9, 13)
-        a = ctx.state[1];
-        b = ctx.state[5];
-        c = ctx.state[9];
-        d = ctx.state[13];
-        a = (a + b) & CHACHA20_MASK32;
-        d = d ^ a;
-        d = ((d << 16) | (d >> 16)) & CHACHA20_MASK32;
-        c = (c + d) & CHACHA20_MASK32;
-        b = b ^ c;
-        b = ((b << 12) | (b >> 20)) & CHACHA20_MASK32;
-        a = (a + b) & CHACHA20_MASK32;
-        d = d ^ a;
-        d = ((d << 8) | (d >> 24)) & CHACHA20_MASK32;
-        c = (c + d) & CHACHA20_MASK32;
-        b = b ^ c;
-        b = ((b << 7) | (b >> 25)) & CHACHA20_MASK32;
-        ctx.state[1] = a;
-        ctx.state[5] = b;
-        ctx.state[9] = c;
-        ctx.state[13] = d;
-
-        // QR(2, 6, 10, 14)
-        a = ctx.state[2];
-        b = ctx.state[6];
-        c = ctx.state[10];
-        d = ctx.state[14];
-        a = (a + b) & CHACHA20_MASK32;
-        d = d ^ a;
-        d = ((d << 16) | (d >> 16)) & CHACHA20_MASK32;
-        c = (c + d) & CHACHA20_MASK32;
-        b = b ^ c;
-        b = ((b << 12) | (b >> 20)) & CHACHA20_MASK32;
-        a = (a + b) & CHACHA20_MASK32;
-        d = d ^ a;
-        d = ((d << 8) | (d >> 24)) & CHACHA20_MASK32;
-        c = (c + d) & CHACHA20_MASK32;
-        b = b ^ c;
-        b = ((b << 7) | (b >> 25)) & CHACHA20_MASK32;
-        ctx.state[2] = a;
-        ctx.state[6] = b;
-        ctx.state[10] = c;
-        ctx.state[14] = d;
-
-        // QR(3, 7, 11, 15)
-        a = ctx.state[3];
-        b = ctx.state[7];
-        c = ctx.state[11];
-        d = ctx.state[15];
-        a = (a + b) & CHACHA20_MASK32;
-        d = d ^ a;
-        d = ((d << 16) | (d >> 16)) & CHACHA20_MASK32;
-        c = (c + d) & CHACHA20_MASK32;
-        b = b ^ c;
-        b = ((b << 12) | (b >> 20)) & CHACHA20_MASK32;
-        a = (a + b) & CHACHA20_MASK32;
-        d = d ^ a;
-        d = ((d << 8) | (d >> 24)) & CHACHA20_MASK32;
-        c = (c + d) & CHACHA20_MASK32;
-        b = b ^ c;
-        b = ((b << 7) | (b >> 25)) & CHACHA20_MASK32;
-        ctx.state[3] = a;
-        ctx.state[7] = b;
-        ctx.state[11] = c;
-        ctx.state[15] = d;
-
-        // Diagonal round: QR(0,5,10,15), QR(1,6,11,12), QR(2,7,8,13), QR(3,4,9,14)
-
-        // QR(0, 5, 10, 15)
-        a = ctx.state[0];
-        b = ctx.state[5];
-        c = ctx.state[10];
-        d = ctx.state[15];
-        a = (a + b) & CHACHA20_MASK32;
-        d = d ^ a;
-        d = ((d << 16) | (d >> 16)) & CHACHA20_MASK32;
-        c = (c + d) & CHACHA20_MASK32;
-        b = b ^ c;
-        b = ((b << 12) | (b >> 20)) & CHACHA20_MASK32;
-        a = (a + b) & CHACHA20_MASK32;
-        d = d ^ a;
-        d = ((d << 8) | (d >> 24)) & CHACHA20_MASK32;
-        c = (c + d) & CHACHA20_MASK32;
-        b = b ^ c;
-        b = ((b << 7) | (b >> 25)) & CHACHA20_MASK32;
-        ctx.state[0] = a;
-        ctx.state[5] = b;
-        ctx.state[10] = c;
-        ctx.state[15] = d;
-
-        // QR(1, 6, 11, 12)
-        a = ctx.state[1];
-        b = ctx.state[6];
-        c = ctx.state[11];
-        d = ctx.state[12];
-        a = (a + b) & CHACHA20_MASK32;
-        d = d ^ a;
-        d = ((d << 16) | (d >> 16)) & CHACHA20_MASK32;
-        c = (c + d) & CHACHA20_MASK32;
-        b = b ^ c;
-        b = ((b << 12) | (b >> 20)) & CHACHA20_MASK32;
-        a = (a + b) & CHACHA20_MASK32;
-        d = d ^ a;
-        d = ((d << 8) | (d >> 24)) & CHACHA20_MASK32;
-        c = (c + d) & CHACHA20_MASK32;
-        b = b ^ c;
-        b = ((b << 7) | (b >> 25)) & CHACHA20_MASK32;
-        ctx.state[1] = a;
-        ctx.state[6] = b;
-        ctx.state[11] = c;
-        ctx.state[12] = d;
-
-        // QR(2, 7, 8, 13)
-        a = ctx.state[2];
-        b = ctx.state[7];
-        c = ctx.state[8];
-        d = ctx.state[13];
-        a = (a + b) & CHACHA20_MASK32;
-        d = d ^ a;
-        d = ((d << 16) | (d >> 16)) & CHACHA20_MASK32;
-        c = (c + d) & CHACHA20_MASK32;
-        b = b ^ c;
-        b = ((b << 12) | (b >> 20)) & CHACHA20_MASK32;
-        a = (a + b) & CHACHA20_MASK32;
-        d = d ^ a;
-        d = ((d << 8) | (d >> 24)) & CHACHA20_MASK32;
-        c = (c + d) & CHACHA20_MASK32;
-        b = b ^ c;
-        b = ((b << 7) | (b >> 25)) & CHACHA20_MASK32;
-        ctx.state[2] = a;
-        ctx.state[7] = b;
-        ctx.state[8] = c;
-        ctx.state[13] = d;
-
-        // QR(3, 4, 9, 14)
-        a = ctx.state[3];
-        b = ctx.state[4];
-        c = ctx.state[9];
-        d = ctx.state[14];
-        a = (a + b) & CHACHA20_MASK32;
-        d = d ^ a;
-        d = ((d << 16) | (d >> 16)) & CHACHA20_MASK32;
-        c = (c + d) & CHACHA20_MASK32;
-        b = b ^ c;
-        b = ((b << 12) | (b >> 20)) & CHACHA20_MASK32;
-        a = (a + b) & CHACHA20_MASK32;
-        d = d ^ a;
-        d = ((d << 8) | (d >> 24)) & CHACHA20_MASK32;
-        c = (c + d) & CHACHA20_MASK32;
-        b = b ^ c;
-        b = ((b << 7) | (b >> 25)) & CHACHA20_MASK32;
-        ctx.state[3] = a;
-        ctx.state[4] = b;
-        ctx.state[9] = c;
-        ctx.state[14] = d;
-
+        chacha20_double_round(ctx);
         round = round + 1;
     }
 
