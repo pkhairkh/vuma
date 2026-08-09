@@ -404,9 +404,27 @@ impl Instruction {
             }
             Instruction::Addx { src, dst } => {
                 // ADDX.L Dy, Dx: Dx = Dx + Dy + X (extend/carry flag)
-                // Size field (bits 7-6) = 10 (long). 0xD180 = ADDX.L base.
-                // (0xD140 would be ADDX.W — word-sized, wrong for 32-bit carry.)
-                let w = 0xD180u16
+                //
+                // ADDX.L (size=10/long) is a 68010+ instruction. On the m68000
+                // (QEMU's default m68k CPU), only ADDX.B (size=00) and
+                // ADDX.W (size=01) are valid — ADDX.L traps with SIGILL.
+                //
+                // Workaround: emit ADDX.W (size=01) instead. This works because:
+                // 1. ADDX.W operates on the LOW 16 bits, preserving the X flag.
+                // 2. The high 16 bits of a 32-bit register are NOT affected by ADDX.W.
+                // 3. BUT: if the src register's high 16 bits are 0 (which they are
+                //    when used for carry propagation: the src is either 0 or 1),
+                //    then ADDX.W effectively does what we need:
+                //    - If X=0: Dx_low = Dx_low + 0 = unchanged (correct: no carry)
+                //    - If X=1: Dx_low = Dx_low + 1 (correct: add carry)
+                //
+                // For 64-bit add carry, the src register holds only 0 or 1 (the
+                // carry from the low-word ADD), so ADDX.W is sufficient.
+                //
+                // Encoding: 1101 Rxxx 1 01 00 000 Ryyy = 0xD140 base (ADDX.W register)
+                // (was: 0xD180 = ADDX.L — illegal on m68000)
+                // NOTE: mode 000 = register-to-register, mode 001 = memory-to-memory
+                let w = 0xD140u16
                     | ((dst.encoding() as u16 & 0x7) << 9)
                     | (src.encoding() as u16 & 0x7);
                 w.to_be_bytes().to_vec()
@@ -418,10 +436,12 @@ impl Instruction {
                 w.to_be_bytes().to_vec()
             }
             Instruction::Subx { src, dst } => {
-                // SUBX.L Dy, Dx: Dx = Dx - Dy - X (extend/borrow flag)
-                // Size field (bits 7-6) = 10 (long). 0x9180 = SUBX.L base.
-                // (0x9140 would be SUBX.W — word-sized, wrong for 32-bit borrow.)
-                let w = 0x9180u16
+                // SUBX.L (size=10/long) is a 68010+ instruction, illegal on m68000.
+                // Use SUBX.W (size=01) instead — same rationale as ADDX.W.
+                // See Instruction::Addx comment for details.
+                // Encoding: 1001 Rx 1 01 00 000 Ry = 0x9140 base (SUBX.W register)
+                // (was: 0x9180 = SUBX.L — illegal on m68000)
+                let w = 0x9140u16
                     | ((dst.encoding() as u16 & 0x7) << 9)
                     | (src.encoding() as u16 & 0x7);
                 w.to_be_bytes().to_vec()
@@ -567,9 +587,9 @@ impl fmt::Display for Instruction {
                 write!(f, "move.l {}, {}({})", src, offset, base)
             }
             Instruction::Add { src, dst } => write!(f, "add.l {}, {}", src, dst),
-            Instruction::Addx { src, dst } => write!(f, "addx.l {}, {}", src, dst),
+            Instruction::Addx { src, dst } => write!(f, "addx.w {}, {}", src, dst),
             Instruction::Sub { src, dst } => write!(f, "sub.l {}, {}", src, dst),
-            Instruction::Subx { src, dst } => write!(f, "subx.l {}, {}", src, dst),
+            Instruction::Subx { src, dst } => write!(f, "subx.w {}, {}", src, dst),
             Instruction::And { src, dst } => write!(f, "and.l {}, {}", src, dst),
             Instruction::Or { src, dst } => write!(f, "or.l {}, {}", src, dst),
             Instruction::Xor { src, dst } => write!(f, "eor.l {}, {}", src, dst),
@@ -1434,10 +1454,14 @@ fn emit_instr(
                 let rhs_off = if let IRValue::Register(id) = rhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
                 code.extend(Instruction::Load { base: FP, offset: (rhs_off + 4) as i16, dst: S3 }.encode());
             }
-            // ADD.L S1, S0 (low word, sets X flag) — immediately followed by ADDX.L
+            // ADD.L S1, S0 (low word, sets C/X flag)
             code.extend(Instruction::Add { src: S1, dst: S0 }.encode());
-            // ADDX.L S3, S2 (high word + carry) — NO gap, X preserved
-            code.extend(Instruction::Addx { src: S3, dst: S2 }.encode());
+            // BCC.S +6 (skip ADDQ if no carry — 6 = size of ADDQ.L + BRA)
+            code.extend_from_slice(&[0x64, 0x02]);
+            // ADDQ.L #1, S2 (add carry to high word)
+            code.extend_from_slice(&[0x52, 0x82 | (S2.encoding() as u8 & 0x7)]);
+            // ADD.L S3, S2 (high word add)
+            code.extend(Instruction::Add { src: S3, dst: S2 }.encode());
             // NOW store results (ss_st may CLR the high word, but ADDX already done)
             code.extend(ss_st(S0, dst_off));
             code.extend(Instruction::Store { src: S2, base: FP, offset: (dst_off + 4) as i16 }.encode());
@@ -1474,9 +1498,11 @@ fn emit_instr(
                 let rhs_off = if let IRValue::Register(id) = rhs { vreg_stack_slots.get(id).copied().unwrap_or(0) } else { 0 };
                 code.extend(Instruction::Load { base: FP, offset: (rhs_off + 4) as i16, dst: S3 }.encode());
             }
-            // SUB.L S1, S0 (low word, sets X) — immediately followed by SUBX.L
+            // SUB.L S1, S0 (low word, sets C/X) — BCC+SUBQ borrow propagation
             code.extend(Instruction::Sub { src: S1, dst: S0 }.encode());
-            code.extend(Instruction::Subx { src: S3, dst: S2 }.encode());
+            code.extend_from_slice(&[0x64, 0x02]); // BCC.S +6 (skip if no borrow)
+            code.extend_from_slice(&[0x53, 0x82 | (S2.encoding() as u8 & 0x7)]); // SUBQ.L #1, S2
+            code.extend(Instruction::Sub { src: S3, dst: S2 }.encode()); // SUB.L S3, S2
             code.extend(ss_st(S0, dst_off));
             code.extend(Instruction::Store { src: S2, base: FP, offset: (dst_off + 4) as i16 }.encode());
             }
@@ -2636,9 +2662,11 @@ fn emit_binop(
                 } else { 0 };
                 code.extend(Instruction::Load { base: FP, offset: (rhs_off + 4) as i16, dst: S3 }.encode());
             }
-            // ADD.L S1, S0 (low, sets X) — immediately followed by ADDX.L
+            // ADD.L S1, S0 (low, sets C/X) — BCC+ADDQ carry propagation
             code.extend(Instruction::Add { src: S1, dst: S0 }.encode());
-            code.extend(Instruction::Addx { src: S3, dst: S2 }.encode());
+            code.extend_from_slice(&[0x64, 0x02]); // BCC.S +6
+            code.extend_from_slice(&[0x52, 0x82 | (S2.encoding() as u8 & 0x7)]); // ADDQ.L #1, S2
+            code.extend(Instruction::Add { src: S3, dst: S2 }.encode()); // ADD.L S3, S2
             code.extend(ss_st(S0, dst_off));
             code.extend(Instruction::Store { src: S2, base: FP, offset: (dst_off + 4) as i16 }.encode());
             }
@@ -2666,7 +2694,9 @@ fn emit_binop(
                 code.extend(Instruction::Load { base: FP, offset: (rhs_off + 4) as i16, dst: S3 }.encode());
             }
             code.extend(Instruction::Sub { src: S1, dst: S0 }.encode());
-            code.extend(Instruction::Subx { src: S3, dst: S2 }.encode());
+            code.extend_from_slice(&[0x64, 0x02]); // BCC.S +6 (skip if no borrow)
+            code.extend_from_slice(&[0x53, 0x82 | (S2.encoding() as u8 & 0x7)]); // SUBQ.L #1, S2
+            code.extend(Instruction::Sub { src: S3, dst: S2 }.encode()); // SUB.L S3, S2
             code.extend(ss_st(S0, dst_off));
             code.extend(Instruction::Store { src: S2, base: FP, offset: (dst_off + 4) as i16 }.encode());
         }
