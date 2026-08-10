@@ -523,5 +523,35 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "chacha20|s390x": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|sparc64": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "chacha20|alpha": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|hppa": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|m68k": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|wasm32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
