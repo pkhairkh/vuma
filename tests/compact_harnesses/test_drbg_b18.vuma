@@ -1,0 +1,49 @@
+// drbg batch 18 (vector 18)
+import "/home/z/my-project/workdir/vuma/womb/crypto/drbg/drbg.vuma"::{DrbgCtx, DrbgData, DrbgOut, drbg_init, drbg_generate};
+
+transform main() -> i32 {
+    let drbg = state_new(DrbgCtx);
+    let entropy = state_new(DrbgData);
+    let out = state_new(DrbgOut);
+    entropy.bytes[0] = 50;
+    entropy.bytes[1] = 81;
+    entropy.bytes[2] = 112;
+    entropy.bytes[3] = 143;
+    entropy.bytes[4] = 174;
+    entropy.bytes[5] = 205;
+    entropy.bytes[6] = 236;
+    entropy.bytes[7] = 11;
+    entropy.bytes[8] = 42;
+    entropy.bytes[9] = 73;
+    entropy.bytes[10] = 104;
+    entropy.bytes[11] = 135;
+    entropy.bytes[12] = 166;
+    entropy.bytes[13] = 197;
+    entropy.bytes[14] = 228;
+    entropy.bytes[15] = 3;
+    entropy.bytes[16] = 34;
+    entropy.bytes[17] = 65;
+    entropy.bytes[18] = 96;
+    entropy.bytes[19] = 127;
+    entropy.bytes[20] = 158;
+    entropy.bytes[21] = 189;
+    entropy.bytes[22] = 220;
+    entropy.bytes[23] = 251;
+    entropy.bytes[24] = 26;
+    entropy.bytes[25] = 57;
+    entropy.bytes[26] = 88;
+    entropy.bytes[27] = 119;
+    entropy.bytes[28] = 150;
+    entropy.bytes[29] = 181;
+    entropy.bytes[30] = 212;
+    entropy.bytes[31] = 243;
+    drbg_init(drbg, entropy, 32, entropy, 0);
+    drbg_generate(drbg, out, 32);
+    let oi: u32 = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

@@ -1,0 +1,144 @@
+{
+  "vectors": [
+    {
+      "desc": "HMAC-DRBG-SHA256 test 0",
+      "entropy_hex": "001f3e5d7c9bbad9f81736557493b2d1f00f2e4d6c8baac9e80726456483a2c1",
+      "input_hex": "001f3e5d7c9bbad9f81736557493b2d1f00f2e4d6c8baac9e80726456483a2c1",
+      "expected_hex": "95a73f7ec8e348d3b3b76bbb644f65eb570a0c885f94356f2114a48f1b942685",
+      "out_len": 32
+    },
+    {
+      "desc": "HMAC-DRBG-SHA256 test 1",
+      "entropy_hex": "11304f6e8daccbea0928476685a4c3e201203f5e7d9cbbdaf91837567594b3d2",
+      "input_hex": "11304f6e8daccbea0928476685a4c3e201203f5e7d9cbbdaf91837567594b3d2",
+      "expected_hex": "4ab58dcaac1e34abfd880d496fa6ad52c75cd293fec8be94fbffbb1964a866f5",
+      "out_len": 32
+    },
+    {
+      "desc": "HMAC-DRBG-SHA256 test 2",
+      "entropy_hex": "2241607f9ebddcfb1a39587796b5d4f31231506f8eadcceb0a29486786a5c4e3",
+      "input_hex": "2241607f9ebddcfb1a39587796b5d4f31231506f8eadcceb0a29486786a5c4e3",
+      "expected_hex": "05722e29359cc187ee07e5110ea26cfe7bb6a2bfb899d199ba456d2f751acb3e",
+      "out_len": 32
+    },
+    {
+      "desc": "HMAC-DRBG-SHA256 test 3",
+      "entropy_hex": "33527190afceed0c2b4a6988a7c6e504234261809fbeddfc1b3a597897b6d5f4",
+      "input_hex": "33527190afceed0c2b4a6988a7c6e504234261809fbeddfc1b3a597897b6d5f4",
+      "expected_hex": "a62c53c43e86966a252254b504860549f65e5494ac490f9b1c2dc924bf1dee96",
+      "out_len": 32
+    },
+    {
+      "desc": "HMAC-DRBG-SHA256 test 4",
+      "entropy_hex": "446382a1c0dffe1d3c5b7a99b8d7f61534537291b0cfee0d2c4b6a89a8c7e605",
+      "input_hex": "446382a1c0dffe1d3c5b7a99b8d7f61534537291b0cfee0d2c4b6a89a8c7e605",
+      "expected_hex": "ca94b428c79bda0322aca65ec4c28723b37943e5f58f0734c9c35d5bc70dde42",
+      "out_len": 32
+    },
+    {
+      "desc": "HMAC-DRBG-SHA256 test 5",
+      "entropy_hex": "557493b2d1f00f2e4d6c8baac9e80726456483a2c1e0ff1e3d5c7b9ab9d8f716",
+      "input_hex": "557493b2d1f00f2e4d6c8baac9e80726456483a2c1e0ff1e3d5c7b9ab9d8f716",
+      "expected_hex": "3607d12fde1bf2e07c2385da5662ebb8c9d85fd4a56790fd4d40f46eb5b8ffe6",
+      "out_len": 32
+    },
+    {
+      "desc": "HMAC-DRBG-SHA256 test 6",
+      "entropy_hex": "6685a4c3e201203f5e7d9cbbdaf91837567594b3d2f1102f4e6d8cabcae90827",
+      "input_hex": "6685a4c3e201203f5e7d9cbbdaf91837567594b3d2f1102f4e6d8cabcae90827",
+      "expected_hex": "8b795c704643a006ce073eb929027f5842da33a0528b9e6b8aad5c5e9ebbdcdf",
+      "out_len": 32
+    },
+    {
+      "desc": "HMAC-DRBG-SHA256 test 7",
+      "entropy_hex": "7796b5d4f31231506f8eadcceb0a29486786a5c4e30221405f7e9dbcdbfa1938",
+      "input_hex": "7796b5d4f31231506f8eadcceb0a29486786a5c4e30221405f7e9dbcdbfa1938",
+      "expected_hex": "cc0f60b7b6785333cd40f6b8d9a8d6e5fb6f479fcb5a95cdb2a3adc5cfda59e0",
+      "out_len": 32
+    },
+    {
+      "desc": "HMAC-DRBG-SHA256 test 8",
+      "entropy_hex": "88a7c6e504234261809fbeddfc1b3a597897b6d5f4133251708faecdec0b2a49",
+      "input_hex": "88a7c6e504234261809fbeddfc1b3a597897b6d5f4133251708faecdec0b2a49",
+      "expected_hex": "df19c7d4f8db8e4a3769933eb17d5c7befa621e11941e4e6c831a7ee60ae7fa4",
+      "out_len": 32
+    },
+    {
+      "desc": "HMAC-DRBG-SHA256 test 9",
+      "entropy_hex": "99b8d7f61534537291b0cfee0d2c4b6a89a8c7e60524436281a0bfdefd1c3b5a",
+      "input_hex": "99b8d7f61534537291b0cfee0d2c4b6a89a8c7e60524436281a0bfdefd1c3b5a",
+      "expected_hex": "91142ec8e2340bcb849f85b4a6033d7a51eb67a21557136f2b32af5e8636b2a5",
+      "out_len": 32
+    },
+    {
+      "desc": "HMAC-DRBG-SHA256 test 10",
+      "entropy_hex": "aac9e80726456483a2c1e0ff1e3d5c7b9ab9d8f71635547392b1d0ef0e2d4c6b",
+      "input_hex": "aac9e80726456483a2c1e0ff1e3d5c7b9ab9d8f71635547392b1d0ef0e2d4c6b",
+      "expected_hex": "d69d2cbf77551887efbea7e5dfde6bbd8cf00fe351f5b3908c875ec4f9f3f9f2",
+      "out_len": 32
+    },
+    {
+      "desc": "HMAC-DRBG-SHA256 test 11",
+      "entropy_hex": "bbdaf91837567594b3d2f1102f4e6d8cabcae90827466584a3c2e1001f3e5d7c",
+      "input_hex": "bbdaf91837567594b3d2f1102f4e6d8cabcae90827466584a3c2e1001f3e5d7c",
+      "expected_hex": "8237534f2ae96ef03367b4306ae6457f176ad19d2443aa3d1ad671cedb3adc6e",
+      "out_len": 32
+    },
+    {
+      "desc": "HMAC-DRBG-SHA256 test 12",
+      "entropy_hex": "cceb0a29486786a5c4e30221405f7e9dbcdbfa1938577695b4d3f211304f6e8d",
+      "input_hex": "cceb0a29486786a5c4e30221405f7e9dbcdbfa1938577695b4d3f211304f6e8d",
+      "expected_hex": "418c732cd8c7fb8bc07a116878a93c99fb48dc8d8c86e7d2990a177bbf3c02f9",
+      "out_len": 32
+    },
+    {
+      "desc": "HMAC-DRBG-SHA256 test 13",
+      "entropy_hex": "ddfc1b3a597897b6d5f4133251708faecdec0b2a496887a6c5e4032241607f9e",
+      "input_hex": "ddfc1b3a597897b6d5f4133251708faecdec0b2a496887a6c5e4032241607f9e",
+      "expected_hex": "255aae26b57027047bbff5c3b6206a242eb8e9fd4a2e1fb822997b53aa6136a9",
+      "out_len": 32
+    },
+    {
+      "desc": "HMAC-DRBG-SHA256 test 14",
+      "entropy_hex": "ee0d2c4b6a89a8c7e60524436281a0bfdefd1c3b5a7998b7d6f51433527190af",
+      "input_hex": "ee0d2c4b6a89a8c7e60524436281a0bfdefd1c3b5a7998b7d6f51433527190af",
+      "expected_hex": "aefedb4b64ba9d44d653f7716e4d7ebbdcf7993b441c741dd769ba9874d162ab",
+      "out_len": 32
+    },
+    {
+      "desc": "HMAC-DRBG-SHA256 test 15",
+      "entropy_hex": "ff1e3d5c7b9ab9d8f71635547392b1d0ef0e2d4c6b8aa9c8e70625446382a1c0",
+      "input_hex": "ff1e3d5c7b9ab9d8f71635547392b1d0ef0e2d4c6b8aa9c8e70625446382a1c0",
+      "expected_hex": "5de2f0ff39ab77946c095f829b15042e090ae0e1fc95e865cf03662908c433f4",
+      "out_len": 32
+    },
+    {
+      "desc": "HMAC-DRBG-SHA256 test 16",
+      "entropy_hex": "102f4e6d8cabcae90827466584a3c2e1001f3e5d7c9bbad9f81736557493b2d1",
+      "input_hex": "102f4e6d8cabcae90827466584a3c2e1001f3e5d7c9bbad9f81736557493b2d1",
+      "expected_hex": "2bf3ae513acca39acab03a645f06c3123f41f0207a58918a978120aa94b098bb",
+      "out_len": 32
+    },
+    {
+      "desc": "HMAC-DRBG-SHA256 test 17",
+      "entropy_hex": "21405f7e9dbcdbfa1938577695b4d3f211304f6e8daccbea0928476685a4c3e2",
+      "input_hex": "21405f7e9dbcdbfa1938577695b4d3f211304f6e8daccbea0928476685a4c3e2",
+      "expected_hex": "9290b29cf2e321ea1436eba2a575bd188ebe779ad0ba3261b06788d6da671843",
+      "out_len": 32
+    },
+    {
+      "desc": "HMAC-DRBG-SHA256 test 18",
+      "entropy_hex": "3251708faecdec0b2a496887a6c5e4032241607f9ebddcfb1a39587796b5d4f3",
+      "input_hex": "3251708faecdec0b2a496887a6c5e4032241607f9ebddcfb1a39587796b5d4f3",
+      "expected_hex": "651372511ad02b6fdcd12601813492406ed47db880d9671c4c70ec6538ad2584",
+      "out_len": 32
+    },
+    {
+      "desc": "HMAC-DRBG-SHA256 test 19",
+      "entropy_hex": "436281a0bfdefd1c3b5a7998b7d6f51433527190afceed0c2b4a6988a7c6e504",
+      "input_hex": "436281a0bfdefd1c3b5a7998b7d6f51433527190afceed0c2b4a6988a7c6e504",
+      "expected_hex": "d45b73c587a08c97593133d96401e02991fda3065fbc2f455b41934f59370b13",
+      "out_len": 32
+    }
+  ]
+}

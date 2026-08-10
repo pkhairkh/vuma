@@ -1,0 +1,29 @@
+// scrypt batch 2 (vector 2)
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg};
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/scrypt.vuma"::{scrypt};
+
+transform main() -> i32 {
+    let pass = state_new(HmacKey);
+    let salt = state_new(HmacMsg);
+    let out = state_new(HmacMsg);
+    pass.bytes[0] = 112;
+    pass.bytes[1] = 97;
+    pass.bytes[2] = 115;
+    pass.bytes[3] = 115;
+    pass.bytes[4] = 119;
+    pass.bytes[5] = 111;
+    pass.bytes[6] = 114;
+    pass.bytes[7] = 100;
+    salt.bytes[0] = 78;
+    salt.bytes[1] = 97;
+    salt.bytes[2] = 67;
+    salt.bytes[3] = 108;
+    scrypt(pass, 8, salt, 4, 16, 1, 1, out, 32);
+    let oi: u32 = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

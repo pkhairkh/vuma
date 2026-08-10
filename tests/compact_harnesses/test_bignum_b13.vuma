@@ -5,19 +5,17 @@ transform main() -> i32 {
     let a = state_new(Bn256Ctx);
     let b = state_new(Bn256Ctx);
     let r = state_new(Bn256Ctx);
-    a.limbs[0] = 14178144042647201736;
-    a.limbs[1] = 6275129943002583699;
-    a.limbs[2] = 5414121733845069545;
-    a.limbs[3] = 2917495600126412442;
-    b.limbs[0] = 59865493798337699;
-    b.limbs[1] = 13320247413671020492;
-    b.limbs[2] = 13275765128541234669;
-    b.limbs[3] = 17928171007716980450;
+    a.limbs[0] = ((3301106403 as u64) << 32) | (1146005448 as u64);
+    a.limbs[1] = ((1461042543 as u64) << 32) | (2752909971 as u64);
+    a.limbs[2] = ((1260573448 as u64) << 32) | (479112937 as u64);
+    a.limbs[3] = ((679282378 as u64) << 32) | (1867302554 as u64);
+    b.limbs[0] = ((13938521 as u64) << 32) | (1948728483 as u64);
+    b.limbs[1] = ((3101361778 as u64) << 32) | (4096608204 as u64);
+    b.limbs[2] = ((3091004939 as u64) << 32) | (3761759725 as u64);
+    b.limbs[3] = ((4174227595 as u64) << 32) | (1131247330 as u64);
     bn256_add(r, a, b);
-    // Output 32 bytes (4 or 8 u64 limbs LE)
     let oi: u32 = 0;
-    let nlimbs: u32 = 4;
-    while oi < nlimbs {
+    while oi < 4 {
         let v = r.limbs[oi];
         print_int(1000 + ((v & 255) as u32));
         print_int(1000 + (((v >> 8) & 255) as u32));

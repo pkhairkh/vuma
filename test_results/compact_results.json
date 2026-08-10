@@ -333,5 +333,10 @@
     "status": "FAIL",
     "pass": 0,
     "total": 20
+  },
+  "bignum|x86_64": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
   }
 }
