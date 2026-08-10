@@ -1,0 +1,42 @@
+// hmac batch 4 (vectors 20-21)
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, hmac_sha256};
+
+transform main() -> i32 {
+    let key = state_new(HmacKey);
+    let msg = state_new(HmacMsg);
+    let out = state_new(HmacOut);
+    let oi: u32 = 0;
+    // V20: short
+    msg.bytes[0] = 109;
+    msg.bytes[1] = 115;
+    msg.bytes[2] = 103;
+    key.bytes[0] = 107;
+    key.bytes[1] = 101;
+    key.bytes[2] = 121;
+    hmac_sha256(key, 3, msg, 3, out);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    // V21: typical
+    msg.bytes[0] = 100;
+    msg.bytes[1] = 97;
+    msg.bytes[2] = 116;
+    msg.bytes[3] = 97;
+    key.bytes[0] = 115;
+    key.bytes[1] = 101;
+    key.bytes[2] = 99;
+    key.bytes[3] = 114;
+    key.bytes[4] = 101;
+    key.bytes[5] = 116;
+    hmac_sha256(key, 6, msg, 4, out);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

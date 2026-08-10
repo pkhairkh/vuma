@@ -6,9 +6,11 @@
 // VUMA 2.0 PMT-native: state_new(Layout) / State<T> / [u8;N] arrays.
 // All allocate/free/Address/*ptr removed (arena auto-frees on return).
 // Reuses HmacKey / HmacMsg / HmacOut layouts from hmac.vuma:
-//   HmacKey: 128 bytes  — used as HMAC key (salt, PRK)
+//   HmacKey: 256 bytes  — used as HMAC key (salt, PRK)
 //   HmacMsg: 256 bytes  — used as HMAC message (IKM, info, OKM, input)
 //   HmacOut:  64 bytes  — used as HMAC digest (PRK, T, zeros)
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, hmac_sha256, hmac_sha512};
 
 const HKDF_HASH256_LEN: u32 = 32;
 const HKDF_HASH512_LEN: u32 = 64;

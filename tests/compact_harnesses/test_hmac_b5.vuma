@@ -1,0 +1,104 @@
+// hmac batch 5 (vectors 25-26)
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, hmac_sha256};
+
+transform main() -> i32 {
+    let key = state_new(HmacKey);
+    let msg = state_new(HmacMsg);
+    let out = state_new(HmacOut);
+    let oi: u32 = 0;
+    // V25: 32B zero key
+    msg.bytes[0] = 122;
+    msg.bytes[1] = 101;
+    msg.bytes[2] = 114;
+    msg.bytes[3] = 111;
+    msg.bytes[4] = 45;
+    msg.bytes[5] = 107;
+    msg.bytes[6] = 101;
+    msg.bytes[7] = 121;
+    key.bytes[0] = 0;
+    key.bytes[1] = 0;
+    key.bytes[2] = 0;
+    key.bytes[3] = 0;
+    key.bytes[4] = 0;
+    key.bytes[5] = 0;
+    key.bytes[6] = 0;
+    key.bytes[7] = 0;
+    key.bytes[8] = 0;
+    key.bytes[9] = 0;
+    key.bytes[10] = 0;
+    key.bytes[11] = 0;
+    key.bytes[12] = 0;
+    key.bytes[13] = 0;
+    key.bytes[14] = 0;
+    key.bytes[15] = 0;
+    key.bytes[16] = 0;
+    key.bytes[17] = 0;
+    key.bytes[18] = 0;
+    key.bytes[19] = 0;
+    key.bytes[20] = 0;
+    key.bytes[21] = 0;
+    key.bytes[22] = 0;
+    key.bytes[23] = 0;
+    key.bytes[24] = 0;
+    key.bytes[25] = 0;
+    key.bytes[26] = 0;
+    key.bytes[27] = 0;
+    key.bytes[28] = 0;
+    key.bytes[29] = 0;
+    key.bytes[30] = 0;
+    key.bytes[31] = 0;
+    hmac_sha256(key, 32, msg, 8, out);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    // V26: 32B ff key
+    msg.bytes[0] = 102;
+    msg.bytes[1] = 102;
+    msg.bytes[2] = 45;
+    msg.bytes[3] = 107;
+    msg.bytes[4] = 101;
+    msg.bytes[5] = 121;
+    key.bytes[0] = 255;
+    key.bytes[1] = 255;
+    key.bytes[2] = 255;
+    key.bytes[3] = 255;
+    key.bytes[4] = 255;
+    key.bytes[5] = 255;
+    key.bytes[6] = 255;
+    key.bytes[7] = 255;
+    key.bytes[8] = 255;
+    key.bytes[9] = 255;
+    key.bytes[10] = 255;
+    key.bytes[11] = 255;
+    key.bytes[12] = 255;
+    key.bytes[13] = 255;
+    key.bytes[14] = 255;
+    key.bytes[15] = 255;
+    key.bytes[16] = 255;
+    key.bytes[17] = 255;
+    key.bytes[18] = 255;
+    key.bytes[19] = 255;
+    key.bytes[20] = 255;
+    key.bytes[21] = 255;
+    key.bytes[22] = 255;
+    key.bytes[23] = 255;
+    key.bytes[24] = 255;
+    key.bytes[25] = 255;
+    key.bytes[26] = 255;
+    key.bytes[27] = 255;
+    key.bytes[28] = 255;
+    key.bytes[29] = 255;
+    key.bytes[30] = 255;
+    key.bytes[31] = 255;
+    hmac_sha256(key, 32, msg, 6, out);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

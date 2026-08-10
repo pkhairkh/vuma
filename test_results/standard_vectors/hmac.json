@@ -17,16 +17,16 @@
       "source": "RFC 4231"
     },
     {
-      "key_hex": "c2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aa",
-      "input_hex": "c39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39d",
-      "expected_hex": "bb861233f283aef2ef7aea09785245c9f3c62720c9d04e0c232789f27a586e44",
+      "key_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "input_hex": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "expected_hex": "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe",
       "desc": "RFC4231 Case 3 (50 0xdd)",
       "source": "RFC 4231"
     },
     {
       "key_hex": "0102030405060708090a0b0c0d0e0f10111213141516171819",
-      "input_hex": "c38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38d",
-      "expected_hex": "4988492ffca135453dd3ee0c568c8f2fd1c703f29951e059491f2d8bc403a047",
+      "input_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "expected_hex": "82558a389a443c0ea4cc819899f2083a85f0faa3e578f8077a2e3ff46729665b",
       "desc": "RFC4231 Case 4 (25-byte key)",
       "source": "RFC 4231"
     },
@@ -38,16 +38,16 @@
       "source": "RFC 4231"
     },
     {
-      "key_hex": "c2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aa",
+      "key_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "input_hex": "54657374205573696e67204c6172676572205468616e20426c6f636b2d53697a65204b6579202d2048617368204b6579204669727374",
-      "expected_hex": "936d986e40c610341e6084ea547f22261b9d459052dd613aaf52faf925299dc2",
+      "expected_hex": "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54",
       "desc": "RFC4231 Case 6",
       "source": "RFC 4231"
     },
     {
-      "key_hex": "c2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aa",
+      "key_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "input_hex": "5468697320697320612074657374207573696e672061206c6172676572207468616e20626c6f636b2d73697a65206b657920616e642061206c6172676572207468616e20626c6f636b2d73697a6520646174612e20546865206b6579206e6565647320746f20626520686173686564206265666f7265206265696e6720757365642062792074686520484d414320616c676f726974686d2e",
-      "expected_hex": "a123e24f94bb131283182a203242425914f42b5d53c26e77f56474af23c1d0bc",
+      "expected_hex": "9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e2",
       "desc": "RFC4231 Case 7",
       "source": "RFC 4231"
     },
@@ -80,9 +80,9 @@
       "source": "hashlib"
     },
     {
-      "key_hex": "c3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bf",
+      "key_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
       "input_hex": "66662d6b6579",
-      "expected_hex": "8266a033f521287591c5fec97eeb37582e01cb07025730ac61126f6753818faf",
+      "expected_hex": "0922072ec0f8c438f29dadf3c73ab4b5a43fbac4bb4db1838b647a1dc26caeb3",
       "desc": "32B ff key",
       "source": "hashlib"
     },
@@ -129,9 +129,9 @@
       "source": "hashlib"
     },
     {
-      "key_hex": "c2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aa",
+      "key_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "input_hex": "6d7367",
-      "expected_hex": "30dac98dcea4f8b902dab7d64e06899837eb1b986e89f006b05712c58401bf66",
+      "expected_hex": "c3e47e4925b3bd901e9a550afe9eee6843f509602cf7a9a7a32a49682e54c479",
       "desc": "20B aa key",
       "source": "hashlib"
     },

@@ -11,6 +11,19 @@ os.makedirs(HARNESS_DIR, exist_ok=True)
 
 VECS_PER_HARNESS = 5
 
+# Modules with deep call chains (many state_new allocations) need fewer
+# vectors per harness to avoid arena overflow.
+VECS_PER_HARNESS_OVERRIDE = {
+    "hmac": 2,
+    "hkdf": 2,
+    "pbkdf2": 2,
+    "blake2": 3,
+    "blake3": 3,
+    "chacha20": 3,
+    "salsa20": 3,
+    "poly1305": 3,
+}
+
 MODULE_APIS = {
     "sha1": {
         "import": 'import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha1.vuma"::{Sha1Data, Sha1Digest, sha1_oneshot};',
@@ -146,17 +159,18 @@ MODULE_APIS = {
         "has_key": True, "key_field": "key.bytes", "key_len": 32,
     },
     "hkdf": {
-        "import": 'import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut};\nimport "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hkdf.vuma"::{hkdf_sha256};',
-        "state_setup": "let salt = state_new(HmacKey);\n    let ikm = state_new(HmacMsg);\n    let info = state_new(HmacMsg);\n    let okm = state_new(HmacMsg);",
-        "call": "hkdf_sha256(salt, 0, ikm, {KEYLEN}, info, 0, okm, 32);",
-        "output_field": "okm.bytes", "output_len": 32,
-        "input_field": "ikm.bytes",
+        "import": 'import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut};\nimport "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hkdf.vuma"::{hkdf_extract_sha256, hkdf_expand_sha256};',
+        "state_setup": "let salt = state_new(HmacKey);\n    let ikm = state_new(HmacMsg);\n    let info = state_new(HmacMsg);\n    let okm = state_new(HmacMsg);\n    let prk = state_new(HmacOut);\n    let prk_key = state_new(HmacKey);",
+        "call": "hkdf_extract_sha256(salt, {SALTLEN}, ikm, {KEYLEN}, prk);\n    let ci: u32 = 0;\n    while ci < 32 { prk_key.bytes[ci] = prk.bytes[ci]; ci = ci + 1; }\n    hkdf_expand_sha256(prk_key, info, {INFOLEN}, okm, {OKMLEN});",
+        "output_field": "okm.bytes", "output_len": 42,
+        "input_field": "info.bytes",  # input_hex is info for HKDF
         "has_key": True, "key_field": "ikm.bytes", "key_len": 32,
+        "has_salt": True, "salt_field": "salt.bytes",
     },
     "pbkdf2": {
         "import": 'import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut};\nimport "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/pbkdf2.vuma"::{pbkdf2_hmac_sha256};',
         "state_setup": "let pass = state_new(HmacKey);\n    let salt = state_new(HmacMsg);\n    let out = state_new(HmacMsg);",
-        "call": "pbkdf2_hmac_sha256(pass, {KEYLEN}, salt, {LEN}, 1000, out, 32);",
+        "call": "pbkdf2_hmac_sha256(pass, {KEYLEN}, salt, {LEN}, {ITERS}, out, {OKMLEN});",
         "output_field": "out.bytes", "output_len": 32,
         "input_field": "salt.bytes",
         "has_key": True, "key_field": "pass.bytes", "key_len": 32,
@@ -205,13 +219,37 @@ def gen_harness(module_name, api, vectors, batch_idx):
             iv_bytes = hex_to_bytes(iv_hex)
             for bi, b in enumerate(iv_bytes):
                 lines.append(f"    {iv_field}[{bi}] = {b};")
+        # HKDF salt
+        salt_len_val = 0
+        info_len_val = 0
+        if api.get("has_salt"):
+            salt_hex = vec.get("salt_hex", "")
+            salt_bytes = hex_to_bytes(salt_hex)
+            for bi, b in enumerate(salt_bytes):
+                lines.append(f"    {api['salt_field']}[{bi}] = {b};")
+            salt_len_val = len(salt_bytes)
+        # For HKDF, input_field is info.bytes, so input_len = info_len
+        if api.get("has_salt"):
+            info_len_val = input_len  # input_hex is info for HKDF
+        # HKDF output length from vector
+        okm_len_val = vec.get("length", output_len)
+        # PBKDF2 iterations from vector
+        iters_val = vec.get("iterations", 1000)
         # Use actual key length from vector, not fixed API value
         actual_key_len = len(key_bytes) if has_key else key_len_val
         call = call_template.replace("{LEN}", str(input_len)).replace("{KEYLEN}", str(actual_key_len))
+        call = call.replace("{SALTLEN}", str(salt_len_val)).replace("{INFOLEN}", str(info_len_val))
+        call = call.replace("{OKMLEN}", str(okm_len_val))
+        call = call.replace("{ITERS}", str(iters_val))
         for cl in call.strip().split("\n"):
             lines.append(f"    {cl.strip()}")
         # Output: for variable_output modules, output input_len bytes; else output_len
-        out_len = input_len if api.get("variable_output", False) else output_len
+        if api.get("has_salt") or module_name == "pbkdf2":
+            out_len = okm_len_val  # HKDF/PBKDF2 output okm_len bytes
+        elif api.get("variable_output", False):
+            out_len = input_len
+        else:
+            out_len = output_len
         lines.append(f"    oi = 0;")
         lines.append(f"    while oi < {out_len} {{")
         lines.append(f"        print_int(1000 + ({output_field}[oi] as u32));")
@@ -228,13 +266,14 @@ def main():
         if not os.path.exists(vec_path): continue
         with open(vec_path) as f: vec_data = json.load(f)
         vectors = vec_data["vectors"]
-        num_batches = (len(vectors) + VECS_PER_HARNESS - 1) // VECS_PER_HARNESS
+        vph = VECS_PER_HARNESS_OVERRIDE.get(module_name, VECS_PER_HARNESS)
+        num_batches = (len(vectors) + vph - 1) // vph
         for bi in range(num_batches):
-            batch = vectors[bi*VECS_PER_HARNESS:(bi+1)*VECS_PER_HARNESS]
+            batch = vectors[bi*vph:(bi+1)*vph]
             harness = gen_harness(module_name, api, batch, bi)
             out_path = f"{HARNESS_DIR}/test_{module_name}_b{bi}.vuma"
             with open(out_path, "w") as f: f.write(harness)
-        print(f"  {module_name}: {num_batches} harnesses")
+        print(f"  {module_name}: {num_batches} harnesses ({vph} vecs each)")
 
 if __name__ == "__main__":
     main()

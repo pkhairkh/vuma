@@ -1,0 +1,70 @@
+// hmac batch 9 (vectors 45-46)
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, hmac_sha256};
+
+transform main() -> i32 {
+    let key = state_new(HmacKey);
+    let msg = state_new(HmacMsg);
+    let out = state_new(HmacOut);
+    let oi: u32 = 0;
+    // V45: 20B aa key
+    msg.bytes[0] = 109;
+    msg.bytes[1] = 115;
+    msg.bytes[2] = 103;
+    key.bytes[0] = 170;
+    key.bytes[1] = 170;
+    key.bytes[2] = 170;
+    key.bytes[3] = 170;
+    key.bytes[4] = 170;
+    key.bytes[5] = 170;
+    key.bytes[6] = 170;
+    key.bytes[7] = 170;
+    key.bytes[8] = 170;
+    key.bytes[9] = 170;
+    key.bytes[10] = 170;
+    key.bytes[11] = 170;
+    key.bytes[12] = 170;
+    key.bytes[13] = 170;
+    key.bytes[14] = 170;
+    key.bytes[15] = 170;
+    key.bytes[16] = 170;
+    key.bytes[17] = 170;
+    key.bytes[18] = 170;
+    key.bytes[19] = 170;
+    hmac_sha256(key, 20, msg, 3, out);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    // V46: medium key
+    msg.bytes[0] = 100;
+    msg.bytes[1] = 97;
+    msg.bytes[2] = 116;
+    msg.bytes[3] = 97;
+    key.bytes[0] = 108;
+    key.bytes[1] = 111;
+    key.bytes[2] = 110;
+    key.bytes[3] = 103;
+    key.bytes[4] = 101;
+    key.bytes[5] = 114;
+    key.bytes[6] = 107;
+    key.bytes[7] = 101;
+    key.bytes[8] = 121;
+    key.bytes[9] = 118;
+    key.bytes[10] = 97;
+    key.bytes[11] = 108;
+    key.bytes[12] = 117;
+    key.bytes[13] = 101;
+    key.bytes[14] = 49;
+    key.bytes[15] = 50;
+    key.bytes[16] = 51;
+    hmac_sha256(key, 17, msg, 4, out);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

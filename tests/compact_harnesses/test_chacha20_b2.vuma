@@ -1,4 +1,4 @@
-// chacha20 batch 2 (vectors 10-14)
+// chacha20 batch 2 (vectors 10-12)
 import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/chacha20.vuma"::{ChaCha20Ctx, ChaCha20Key, ChaCha20Nonce, ChaCha20Buf, chacha20_init, chacha20_set_counter, chacha20_encrypt};
 
 transform main() -> i32 {
@@ -8,182 +8,6 @@ transform main() -> i32 {
     let data = state_new(ChaCha20Buf);
     let oi: u32 = 0;
     // V10: ChaCha20 random (len=51)
-    data.bytes[0] = 32;
-    data.bytes[1] = 217;
-    data.bytes[2] = 158;
-    data.bytes[3] = 127;
-    data.bytes[4] = 76;
-    data.bytes[5] = 149;
-    data.bytes[6] = 170;
-    data.bytes[7] = 155;
-    data.bytes[8] = 56;
-    data.bytes[9] = 17;
-    data.bytes[10] = 118;
-    data.bytes[11] = 119;
-    data.bytes[12] = 228;
-    data.bytes[13] = 77;
-    data.bytes[14] = 2;
-    data.bytes[15] = 19;
-    data.bytes[16] = 80;
-    data.bytes[17] = 73;
-    data.bytes[18] = 78;
-    data.bytes[19] = 111;
-    data.bytes[20] = 124;
-    data.bytes[21] = 5;
-    data.bytes[22] = 90;
-    data.bytes[23] = 139;
-    data.bytes[24] = 104;
-    data.bytes[25] = 129;
-    data.bytes[26] = 38;
-    data.bytes[27] = 103;
-    data.bytes[28] = 20;
-    data.bytes[29] = 189;
-    data.bytes[30] = 178;
-    data.bytes[31] = 3;
-    data.bytes[32] = 128;
-    data.bytes[33] = 185;
-    data.bytes[34] = 254;
-    data.bytes[35] = 95;
-    data.bytes[36] = 172;
-    data.bytes[37] = 117;
-    data.bytes[38] = 10;
-    data.bytes[39] = 123;
-    data.bytes[40] = 152;
-    data.bytes[41] = 241;
-    data.bytes[42] = 214;
-    data.bytes[43] = 87;
-    data.bytes[44] = 68;
-    data.bytes[45] = 45;
-    data.bytes[46] = 98;
-    data.bytes[47] = 243;
-    data.bytes[48] = 176;
-    data.bytes[49] = 41;
-    data.bytes[50] = 174;
-    key.bytes[0] = 175;
-    key.bytes[1] = 188;
-    key.bytes[2] = 69;
-    key.bytes[3] = 154;
-    key.bytes[4] = 203;
-    key.bytes[5] = 168;
-    key.bytes[6] = 193;
-    key.bytes[7] = 102;
-    key.bytes[8] = 167;
-    key.bytes[9] = 84;
-    key.bytes[10] = 253;
-    key.bytes[11] = 242;
-    key.bytes[12] = 67;
-    key.bytes[13] = 192;
-    key.bytes[14] = 249;
-    key.bytes[15] = 62;
-    key.bytes[16] = 159;
-    key.bytes[17] = 236;
-    key.bytes[18] = 181;
-    key.bytes[19] = 74;
-    key.bytes[20] = 187;
-    key.bytes[21] = 216;
-    key.bytes[22] = 49;
-    key.bytes[23] = 22;
-    key.bytes[24] = 151;
-    key.bytes[25] = 132;
-    key.bytes[26] = 109;
-    key.bytes[27] = 162;
-    key.bytes[28] = 51;
-    key.bytes[29] = 240;
-    key.bytes[30] = 105;
-    key.bytes[31] = 238;
-    nonce.bytes[0] = 143;
-    nonce.bytes[1] = 28;
-    nonce.bytes[2] = 37;
-    nonce.bytes[3] = 250;
-    nonce.bytes[4] = 171;
-    nonce.bytes[5] = 8;
-    nonce.bytes[6] = 161;
-    nonce.bytes[7] = 198;
-    nonce.bytes[8] = 135;
-    nonce.bytes[9] = 180;
-    nonce.bytes[10] = 221;
-    nonce.bytes[11] = 82;
-    chacha20_init(ctx, key, nonce);
-    chacha20_encrypt(ctx, data, 51);
-    oi = 0;
-    while oi < 51 {
-        print_int(1000 + (data.bytes[oi] as u32));
-        oi = oi + 1;
-    }
-    print_int(999);
-    // V11: ChaCha20 random (len=19)
-    data.bytes[0] = 64;
-    data.bytes[1] = 121;
-    data.bytes[2] = 190;
-    data.bytes[3] = 31;
-    data.bytes[4] = 108;
-    data.bytes[5] = 53;
-    data.bytes[6] = 202;
-    data.bytes[7] = 59;
-    data.bytes[8] = 88;
-    data.bytes[9] = 177;
-    data.bytes[10] = 150;
-    data.bytes[11] = 23;
-    data.bytes[12] = 4;
-    data.bytes[13] = 237;
-    data.bytes[14] = 34;
-    data.bytes[15] = 179;
-    data.bytes[16] = 112;
-    data.bytes[17] = 233;
-    data.bytes[18] = 110;
-    key.bytes[0] = 79;
-    key.bytes[1] = 220;
-    key.bytes[2] = 229;
-    key.bytes[3] = 186;
-    key.bytes[4] = 107;
-    key.bytes[5] = 200;
-    key.bytes[6] = 97;
-    key.bytes[7] = 134;
-    key.bytes[8] = 71;
-    key.bytes[9] = 116;
-    key.bytes[10] = 157;
-    key.bytes[11] = 18;
-    key.bytes[12] = 227;
-    key.bytes[13] = 224;
-    key.bytes[14] = 153;
-    key.bytes[15] = 94;
-    key.bytes[16] = 63;
-    key.bytes[17] = 12;
-    key.bytes[18] = 85;
-    key.bytes[19] = 106;
-    key.bytes[20] = 91;
-    key.bytes[21] = 248;
-    key.bytes[22] = 209;
-    key.bytes[23] = 54;
-    key.bytes[24] = 55;
-    key.bytes[25] = 164;
-    key.bytes[26] = 13;
-    key.bytes[27] = 194;
-    key.bytes[28] = 211;
-    key.bytes[29] = 16;
-    key.bytes[30] = 9;
-    key.bytes[31] = 14;
-    nonce.bytes[0] = 47;
-    nonce.bytes[1] = 60;
-    nonce.bytes[2] = 197;
-    nonce.bytes[3] = 26;
-    nonce.bytes[4] = 75;
-    nonce.bytes[5] = 40;
-    nonce.bytes[6] = 65;
-    nonce.bytes[7] = 230;
-    nonce.bytes[8] = 39;
-    nonce.bytes[9] = 212;
-    nonce.bytes[10] = 125;
-    nonce.bytes[11] = 114;
-    chacha20_init(ctx, key, nonce);
-    chacha20_encrypt(ctx, data, 19);
-    oi = 0;
-    while oi < 19 {
-        print_int(1000 + (data.bytes[oi] as u32));
-        oi = oi + 1;
-    }
-    print_int(999);
-    // V12: ChaCha20 random (len=51)
     data.bytes[0] = 0;
     data.bytes[1] = 57;
     data.bytes[2] = 126;
@@ -287,7 +111,7 @@ transform main() -> i32 {
         oi = oi + 1;
     }
     print_int(999);
-    // V13: ChaCha20 random (len=51)
+    // V11: ChaCha20 random (len=51)
     data.bytes[0] = 32;
     data.bytes[1] = 217;
     data.bytes[2] = 158;
@@ -391,7 +215,7 @@ transform main() -> i32 {
         oi = oi + 1;
     }
     print_int(999);
-    // V14: ChaCha20 random (len=19)
+    // V12: ChaCha20 random (len=19)
     data.bytes[0] = 64;
     data.bytes[1] = 121;
     data.bytes[2] = 190;

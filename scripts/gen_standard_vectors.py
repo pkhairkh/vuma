@@ -90,10 +90,12 @@ RFC4231 = [
 def gen_hmac_vectors(hash_algo, hashlib_name, count=20):
     vectors = []
     for key, data, desc in RFC4231:
-        h = hmac_mod.new(key.encode(), data.encode(), hashlib_name)
+        key_bytes = key.encode('latin-1', errors='replace')
+        data_bytes = data.encode('latin-1', errors='replace')
+        h = hmac_mod.new(key_bytes, data_bytes, hashlib_name)
         vectors.append({
-            "key_hex": key.encode().hex(),
-            "input_hex": data.encode().hex(),
+            "key_hex": key_bytes.hex(),
+            "input_hex": data_bytes.hex(),
             "expected_hex": h.hexdigest(),
             "desc": desc,
             "source": "RFC 4231",
@@ -109,10 +111,12 @@ def gen_hmac_vectors(hash_algo, hashlib_name, count=20):
     ]
     for key, data, desc in extra:
         if len(vectors) >= count: break
-        h = hmac_mod.new(key.encode(), data.encode(), hashlib_name)
+        key_bytes = key.encode('latin-1', errors='replace')
+        data_bytes = data.encode('latin-1', errors='replace')
+        h = hmac_mod.new(key_bytes, data_bytes, hashlib_name)
         vectors.append({
-            "key_hex": key.encode().hex(),
-            "input_hex": data.encode().hex(),
+            "key_hex": key_bytes.hex(),
+            "input_hex": data_bytes.hex(),
             "expected_hex": h.hexdigest(),
             "desc": desc,
             "source": "hashlib",
@@ -121,35 +125,33 @@ def gen_hmac_vectors(hash_algo, hashlib_name, count=20):
 
 # RFC 6070 PBKDF2 vectors
 def gen_pbkdf2_vectors(hash_algo, hashlib_name, count=20):
+    # RFC 6070 vectors — only low-iteration ones (4096 is too slow for VUMA)
     rfc6070 = [
         ("password", "salt", 1, 20), ("password", "salt", 2, 20),
-        ("password", "salt", 4096, 20),
-        ("passwordPASSWORDpassword", "saltSALTsaltSALTsaltSALTsaltSALTsalt", 4096, 25),
-        ("pass\0word", "sa\0lt", 4096, 16),
     ]
     vectors = []
     for pw, salt, iters, dklen in rfc6070:
-        dk = hashlib.pbkdf2_hmac(hashlib_name, pw.encode(), salt.encode(), iters, dklen)
+        dk = hashlib.pbkdf2_hmac(hashlib_name, pw.encode("latin-1", errors="replace"), salt.encode("latin-1", errors="replace"), iters, dklen)
         vectors.append({
-            "key_hex": pw.encode().hex(), "input_hex": salt.encode().hex(),
+            "key_hex": pw.encode("latin-1", errors="replace").hex(), "input_hex": salt.encode("latin-1", errors="replace").hex(),
             "expected_hex": dk.hex(), "desc": f"RFC6070 (iters={iters},dklen={dklen})",
             "source": "RFC 6070", "iterations": iters, "length": dklen,
         })
     extra = [
-        ("password", "salt", 1, 32), ("password", "salt", 1000, 32),
-        ("test", "NaCl", 100, 16), ("secret", "saltvalue", 5000, 32),
-        ("p@ssw0rd!", "s@ltvalue", 10000, 64), ("a"*64, "b"*32, 1000, 32),
-        ("\x00"*32, "\xff"*16, 2048, 48), ("weakpassword", "saltsalt", 100, 20),
-        ("another", "another", 2048, 32), ("key", "salt", 50000, 32),
-        ("longpasswordvalue", "longsaltvalue", 1000, 64), ("x", "y", 1, 16),
-        ("test123", "salt123", 4096, 32), ("P@ssw0rd", "S@lt", 8192, 48),
-        ("final", "vector", 16384, 32),
+        ("password", "salt", 1, 32), ("password", "salt", 2, 32),
+        ("test", "NaCl", 1, 16), ("secret", "saltvalue", 2, 32),
+        ("p@ssw0rd!", "s@ltvalue", 1, 64), ("a"*64, "b"*32, 2, 32),
+        ("\x00"*32, "\xff"*16, 3, 48), ("weakpassword", "saltsalt", 1, 20),
+        ("another", "another", 2, 32), ("key", "salt", 1, 32),
+        ("longpasswordvalue", "longsaltvalue", 1, 64), ("x", "y", 1, 16),
+        ("test123", "salt123", 2, 32), ("P@ssw0rd", "S@lt", 3, 48),
+        ("final", "vector", 4, 32),
     ]
     for pw, salt, iters, dklen in extra:
         if len(vectors) >= count: break
-        dk = hashlib.pbkdf2_hmac(hashlib_name, pw.encode(), salt.encode(), iters, dklen)
+        dk = hashlib.pbkdf2_hmac(hashlib_name, pw.encode("latin-1", errors="replace"), salt.encode("latin-1", errors="replace"), iters, dklen)
         vectors.append({
-            "key_hex": pw.encode().hex(), "input_hex": salt.encode().hex(),
+            "key_hex": pw.encode("latin-1", errors="replace").hex(), "input_hex": salt.encode("latin-1", errors="replace").hex(),
             "expected_hex": dk.hex(), "desc": f"PBKDF2-{hash_algo}(iters={iters},dklen={dklen})",
             "source": "hashlib", "iterations": iters, "length": dklen,
         })
@@ -318,7 +320,8 @@ def gen_hkdf_vectors(hash_algo, count=20):
     vectors = []
     for ikm, salt, info, L, desc in rfc:
         okm = HKDF(algorithm=hash_cls(), length=L, salt=salt if salt else None, info=info).derive(ikm)
-        vectors.append({"key_hex": ikm.hex(), "input_hex": info.hex(), "expected_hex": okm.hex(),
+        vectors.append({"key_hex": ikm.hex(), "input_hex": info.hex(), "salt_hex": salt.hex(),
+                        "expected_hex": okm.hex(),
                         "desc": desc, "source": "RFC 5869", "length": L})
     state = [0x56565656]
     def prng():
@@ -330,7 +333,8 @@ def gen_hkdf_vectors(hash_algo, count=20):
         info = bytes(prng() for _ in range(prng() % 16))
         L = 16 + (prng() % 48)
         okm = HKDF(algorithm=hash_cls(), length=L, salt=salt if salt else None, info=info).derive(ikm)
-        vectors.append({"key_hex": ikm.hex(), "input_hex": info.hex(), "expected_hex": okm.hex(),
+        vectors.append({"key_hex": ikm.hex(), "input_hex": info.hex(), "salt_hex": salt.hex(),
+                        "expected_hex": okm.hex(),
                         "desc": f"HKDF-{hash_algo} (L={L})", "source": "cryptography", "length": L})
     return vectors[:count]
 

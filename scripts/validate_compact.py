@@ -78,6 +78,14 @@ def run_module(module, backends):
     harnesses = sorted(glob.glob(f"{HARNESS_DIR}/test_{module}_b*.vuma"))
     if not harnesses: print(f"  {module}: NO HARNESS"); return
     
+    # Detect vectors per batch from the first harness by counting print_int(999)
+    vph = 5
+    if harnesses:
+        with open(harnesses[0]) as f:
+            content = f.read()
+        vph = content.count("print_int(999);")
+        if vph == 0: vph = 5
+    
     results = load_results()
     t0 = time.time()
     
@@ -92,11 +100,16 @@ def run_module(module, backends):
                                  capture_output=True, text=True, timeout=90)
                 if r.returncode != 0 or not os.path.exists(bin_path):
                     status = "CERR"
-                    total_vecs += VECS_PER_BATCH
+                    # Count vectors in this batch from the harness file
+                    with open(harness) as f:
+                        batch_vph = f.read().count("print_int(999);")
+                    total_vecs += batch_vph
                     continue
             except Exception as e:
                 status = "EXC"
-                total_vecs += VECS_PER_BATCH
+                with open(harness) as f:
+                    batch_vph = f.read().count("print_int(999);")
+                total_vecs += batch_vph
                 continue
             q = QEMU[backend]
             try:
@@ -108,11 +121,16 @@ def run_module(module, backends):
                     r = subprocess.run([q,bin_path],capture_output=True,timeout=30)
             except:
                 status = "TOUT"
-                total_vecs += VECS_PER_BATCH
+                with open(harness) as f:
+                    batch_vph = f.read().count("print_int(999);")
+                total_vecs += batch_vph
                 continue
             actual = parse_output(r.stdout)
-            for vi in range(VECS_PER_BATCH):
-                vec_idx = hi * VECS_PER_BATCH + vi
+            # Count vectors in this batch from the harness file
+            with open(harness) as f:
+                batch_vph = f.read().count("print_int(999);")
+            for vi in range(batch_vph):
+                vec_idx = hi * vph + vi
                 if vec_idx >= len(all_vectors): break
                 total_vecs += 1
                 exp = all_vectors[vec_idx]["expected_hex"]

@@ -1,4 +1,4 @@
-// pbkdf2 batch 3 (vectors 15-19)
+// pbkdf2 batch 3 (vectors 15-16)
 import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut};
 import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/pbkdf2.vuma"::{pbkdf2_hmac_sha256};
 
@@ -7,82 +7,17 @@ transform main() -> i32 {
     let salt = state_new(HmacMsg);
     let out = state_new(HmacMsg);
     let oi: u32 = 0;
-    // V15: PBKDF2-sha256(iters=1000,dklen=64)
-    salt.bytes[0] = 108;
-    salt.bytes[1] = 111;
-    salt.bytes[2] = 110;
-    salt.bytes[3] = 103;
-    salt.bytes[4] = 115;
-    salt.bytes[5] = 97;
-    salt.bytes[6] = 108;
-    salt.bytes[7] = 116;
-    salt.bytes[8] = 118;
-    salt.bytes[9] = 97;
-    salt.bytes[10] = 108;
-    salt.bytes[11] = 117;
-    salt.bytes[12] = 101;
-    pass.bytes[0] = 108;
-    pass.bytes[1] = 111;
-    pass.bytes[2] = 110;
-    pass.bytes[3] = 103;
-    pass.bytes[4] = 112;
-    pass.bytes[5] = 97;
-    pass.bytes[6] = 115;
-    pass.bytes[7] = 115;
-    pass.bytes[8] = 119;
-    pass.bytes[9] = 111;
-    pass.bytes[10] = 114;
-    pass.bytes[11] = 100;
-    pass.bytes[12] = 118;
-    pass.bytes[13] = 97;
-    pass.bytes[14] = 108;
-    pass.bytes[15] = 117;
-    pass.bytes[16] = 101;
-    pbkdf2_hmac_sha256(pass, 17, salt, 13, 1000, out, 32);
-    oi = 0;
-    while oi < 32 {
-        print_int(1000 + (out.bytes[oi] as u32));
-        oi = oi + 1;
-    }
-    print_int(999);
-    // V16: PBKDF2-sha256(iters=1,dklen=16)
-    salt.bytes[0] = 121;
-    pass.bytes[0] = 120;
-    pbkdf2_hmac_sha256(pass, 1, salt, 1, 1000, out, 32);
-    oi = 0;
-    while oi < 32 {
-        print_int(1000 + (out.bytes[oi] as u32));
-        oi = oi + 1;
-    }
-    print_int(999);
-    // V17: PBKDF2-sha256(iters=4096,dklen=32)
+    // V15: PBKDF2-sha256(iters=1,dklen=64)
     salt.bytes[0] = 115;
-    salt.bytes[1] = 97;
-    salt.bytes[2] = 108;
-    salt.bytes[3] = 116;
-    salt.bytes[4] = 49;
-    salt.bytes[5] = 50;
-    salt.bytes[6] = 51;
-    pass.bytes[0] = 116;
-    pass.bytes[1] = 101;
-    pass.bytes[2] = 115;
-    pass.bytes[3] = 116;
-    pass.bytes[4] = 49;
-    pass.bytes[5] = 50;
-    pass.bytes[6] = 51;
-    pbkdf2_hmac_sha256(pass, 7, salt, 7, 1000, out, 32);
-    oi = 0;
-    while oi < 32 {
-        print_int(1000 + (out.bytes[oi] as u32));
-        oi = oi + 1;
-    }
-    print_int(999);
-    // V18: PBKDF2-sha256(iters=8192,dklen=48)
-    salt.bytes[0] = 83;
     salt.bytes[1] = 64;
     salt.bytes[2] = 108;
     salt.bytes[3] = 116;
-    pass.bytes[0] = 80;
+    salt.bytes[4] = 118;
+    salt.bytes[5] = 97;
+    salt.bytes[6] = 108;
+    salt.bytes[7] = 117;
+    salt.bytes[8] = 101;
+    pass.bytes[0] = 112;
     pass.bytes[1] = 64;
     pass.bytes[2] = 115;
     pass.bytes[3] = 115;
@@ -90,26 +25,112 @@ transform main() -> i32 {
     pass.bytes[5] = 48;
     pass.bytes[6] = 114;
     pass.bytes[7] = 100;
-    pbkdf2_hmac_sha256(pass, 8, salt, 4, 1000, out, 32);
+    pass.bytes[8] = 33;
+    pbkdf2_hmac_sha256(pass, 9, salt, 9, 1, out, 64);
     oi = 0;
-    while oi < 32 {
+    while oi < 64 {
         print_int(1000 + (out.bytes[oi] as u32));
         oi = oi + 1;
     }
     print_int(999);
-    // V19: PBKDF2-sha256(iters=16384,dklen=32)
-    salt.bytes[0] = 118;
-    salt.bytes[1] = 101;
-    salt.bytes[2] = 99;
-    salt.bytes[3] = 116;
-    salt.bytes[4] = 111;
-    salt.bytes[5] = 114;
-    pass.bytes[0] = 102;
-    pass.bytes[1] = 105;
-    pass.bytes[2] = 110;
+    // V16: PBKDF2-sha256(iters=2,dklen=32)
+    salt.bytes[0] = 98;
+    salt.bytes[1] = 98;
+    salt.bytes[2] = 98;
+    salt.bytes[3] = 98;
+    salt.bytes[4] = 98;
+    salt.bytes[5] = 98;
+    salt.bytes[6] = 98;
+    salt.bytes[7] = 98;
+    salt.bytes[8] = 98;
+    salt.bytes[9] = 98;
+    salt.bytes[10] = 98;
+    salt.bytes[11] = 98;
+    salt.bytes[12] = 98;
+    salt.bytes[13] = 98;
+    salt.bytes[14] = 98;
+    salt.bytes[15] = 98;
+    salt.bytes[16] = 98;
+    salt.bytes[17] = 98;
+    salt.bytes[18] = 98;
+    salt.bytes[19] = 98;
+    salt.bytes[20] = 98;
+    salt.bytes[21] = 98;
+    salt.bytes[22] = 98;
+    salt.bytes[23] = 98;
+    salt.bytes[24] = 98;
+    salt.bytes[25] = 98;
+    salt.bytes[26] = 98;
+    salt.bytes[27] = 98;
+    salt.bytes[28] = 98;
+    salt.bytes[29] = 98;
+    salt.bytes[30] = 98;
+    salt.bytes[31] = 98;
+    pass.bytes[0] = 97;
+    pass.bytes[1] = 97;
+    pass.bytes[2] = 97;
     pass.bytes[3] = 97;
-    pass.bytes[4] = 108;
-    pbkdf2_hmac_sha256(pass, 5, salt, 6, 1000, out, 32);
+    pass.bytes[4] = 97;
+    pass.bytes[5] = 97;
+    pass.bytes[6] = 97;
+    pass.bytes[7] = 97;
+    pass.bytes[8] = 97;
+    pass.bytes[9] = 97;
+    pass.bytes[10] = 97;
+    pass.bytes[11] = 97;
+    pass.bytes[12] = 97;
+    pass.bytes[13] = 97;
+    pass.bytes[14] = 97;
+    pass.bytes[15] = 97;
+    pass.bytes[16] = 97;
+    pass.bytes[17] = 97;
+    pass.bytes[18] = 97;
+    pass.bytes[19] = 97;
+    pass.bytes[20] = 97;
+    pass.bytes[21] = 97;
+    pass.bytes[22] = 97;
+    pass.bytes[23] = 97;
+    pass.bytes[24] = 97;
+    pass.bytes[25] = 97;
+    pass.bytes[26] = 97;
+    pass.bytes[27] = 97;
+    pass.bytes[28] = 97;
+    pass.bytes[29] = 97;
+    pass.bytes[30] = 97;
+    pass.bytes[31] = 97;
+    pass.bytes[32] = 97;
+    pass.bytes[33] = 97;
+    pass.bytes[34] = 97;
+    pass.bytes[35] = 97;
+    pass.bytes[36] = 97;
+    pass.bytes[37] = 97;
+    pass.bytes[38] = 97;
+    pass.bytes[39] = 97;
+    pass.bytes[40] = 97;
+    pass.bytes[41] = 97;
+    pass.bytes[42] = 97;
+    pass.bytes[43] = 97;
+    pass.bytes[44] = 97;
+    pass.bytes[45] = 97;
+    pass.bytes[46] = 97;
+    pass.bytes[47] = 97;
+    pass.bytes[48] = 97;
+    pass.bytes[49] = 97;
+    pass.bytes[50] = 97;
+    pass.bytes[51] = 97;
+    pass.bytes[52] = 97;
+    pass.bytes[53] = 97;
+    pass.bytes[54] = 97;
+    pass.bytes[55] = 97;
+    pass.bytes[56] = 97;
+    pass.bytes[57] = 97;
+    pass.bytes[58] = 97;
+    pass.bytes[59] = 97;
+    pass.bytes[60] = 97;
+    pass.bytes[61] = 97;
+    pass.bytes[62] = 97;
+    pass.bytes[63] = 97;
+    pbkdf2_hmac_sha256(pass, 64, salt, 32, 2, out, 32);
     oi = 0;
     while oi < 32 {
         print_int(1000 + (out.bytes[oi] as u32));

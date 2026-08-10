@@ -1,0 +1,30 @@
+// pbkdf2 batch 8 (vectors 40-40)
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut};
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/pbkdf2.vuma"::{pbkdf2_hmac_sha256};
+
+transform main() -> i32 {
+    let pass = state_new(HmacKey);
+    let salt = state_new(HmacMsg);
+    let out = state_new(HmacMsg);
+    let oi: u32 = 0;
+    // V40: PBKDF2-sha256(iters=4,dklen=32)
+    salt.bytes[0] = 118;
+    salt.bytes[1] = 101;
+    salt.bytes[2] = 99;
+    salt.bytes[3] = 116;
+    salt.bytes[4] = 111;
+    salt.bytes[5] = 114;
+    pass.bytes[0] = 102;
+    pass.bytes[1] = 105;
+    pass.bytes[2] = 110;
+    pass.bytes[3] = 97;
+    pass.bytes[4] = 108;
+    pbkdf2_hmac_sha256(pass, 5, salt, 6, 4, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}
