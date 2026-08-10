@@ -1258,5 +1258,15 @@
     "status": "PARTIAL",
     "pass": 13,
     "total": 20
+  },
+  "blake3|sparc64": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "blake3|alpha": {
+    "status": "PARTIAL",
+    "pass": 13,
+    "total": 20
   }
 }
