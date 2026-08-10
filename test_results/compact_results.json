@@ -173,5 +173,180 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "sha256_sha224|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha1|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha1|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha512|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha512|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "md5|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "md5|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes128|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes128|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "poly1305|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "poly1305|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|wasm32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha1|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha1|wasm32": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "md5|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "md5|wasm32": {
+    "status": "PARTIAL",
+    "pass": 3,
+    "total": 20
+  },
+  "sha512|wasm32": {
+    "status": "PARTIAL",
+    "pass": 3,
+    "total": 20
+  },
+  "aes128|wasm32": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "chacha20|wasm32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "poly1305|wasm32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha384|wasm32": {
+    "status": "PARTIAL",
+    "pass": 3,
+    "total": 20
+  },
+  "sha384|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha384|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha384|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha512|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha3|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha3|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha3|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha3|wasm32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes128|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes192|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
