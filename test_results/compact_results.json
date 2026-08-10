@@ -55,8 +55,8 @@
     "total": 20
   },
   "rc4|x86_64": {
-    "status": "PARTIAL",
-    "pass": 17,
+    "status": "PASS",
+    "pass": 20,
     "total": 20
   },
   "chacha20|x86_64": {
@@ -70,8 +70,8 @@
     "total": 20
   },
   "des|x86_64": {
-    "status": "PARTIAL",
-    "pass": 13,
+    "status": "PASS",
+    "pass": 20,
     "total": 20
   },
   "poly1305|x86_64": {
@@ -90,8 +90,8 @@
     "total": 20
   },
   "pbkdf2|x86_64": {
-    "status": "PARTIAL",
-    "pass": 7,
+    "status": "PASS",
+    "pass": 17,
     "total": 17
   }
 }

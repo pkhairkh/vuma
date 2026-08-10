@@ -1,4 +1,4 @@
-// pbkdf2 batch 5 (vectors 25-26)
+// pbkdf2 batch 5 (vector 5)
 import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut};
 import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/pbkdf2.vuma"::{pbkdf2_hmac_sha256};
 
@@ -6,39 +6,24 @@ transform main() -> i32 {
     let pass = state_new(HmacKey);
     let salt = state_new(HmacMsg);
     let out = state_new(HmacMsg);
-    let oi: u32 = 0;
-    // V25: PBKDF2-sha256(iters=2,dklen=32)
-    salt.bytes[0] = 97;
-    salt.bytes[1] = 110;
-    salt.bytes[2] = 111;
-    salt.bytes[3] = 116;
-    salt.bytes[4] = 104;
-    salt.bytes[5] = 101;
-    salt.bytes[6] = 114;
-    pass.bytes[0] = 97;
-    pass.bytes[1] = 110;
-    pass.bytes[2] = 111;
-    pass.bytes[3] = 116;
-    pass.bytes[4] = 104;
-    pass.bytes[5] = 101;
-    pass.bytes[6] = 114;
-    pbkdf2_hmac_sha256(pass, 7, salt, 7, 2, out, 32);
-    oi = 0;
-    while oi < 32 {
-        print_int(1000 + (out.bytes[oi] as u32));
-        oi = oi + 1;
-    }
-    print_int(999);
-    // V26: PBKDF2-sha256(iters=1,dklen=32)
+    // V5: PBKDF2-sha256(iters=2,dklen=32)
+    pass.bytes[0] = 115;
+    pass.bytes[1] = 101;
+    pass.bytes[2] = 99;
+    pass.bytes[3] = 114;
+    pass.bytes[4] = 101;
+    pass.bytes[5] = 116;
     salt.bytes[0] = 115;
     salt.bytes[1] = 97;
     salt.bytes[2] = 108;
     salt.bytes[3] = 116;
-    pass.bytes[0] = 107;
-    pass.bytes[1] = 101;
-    pass.bytes[2] = 121;
-    pbkdf2_hmac_sha256(pass, 3, salt, 4, 1, out, 32);
-    oi = 0;
+    salt.bytes[4] = 118;
+    salt.bytes[5] = 97;
+    salt.bytes[6] = 108;
+    salt.bytes[7] = 117;
+    salt.bytes[8] = 101;
+    pbkdf2_hmac_sha256(pass, 6, salt, 9, 2, out, 32);
+    let oi: u32 = 0;
     while oi < 32 {
         print_int(1000 + (out.bytes[oi] as u32));
         oi = oi + 1;

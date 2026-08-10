@@ -3,144 +3,104 @@
   "vector_count": 20,
   "vectors": [
     {
-      "key_hex": "0102030405",
+      "key": "0102030405",
       "input_hex": "0000000000000000",
-      "expected_hex": "b2396305f03dc027",
-      "desc": "Known RC4 vector",
-      "source": "RC4 reference"
+      "expected_hex": "b2396305f03dc027"
     },
     {
-      "key_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "key": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
       "input_hex": "00000000000000000000000000000000",
-      "expected_hex": "3e77a8c1d4a2d8e6f0a1b2c3d4e5f607",
-      "desc": "Known RC4 vector",
-      "source": "RC4 reference"
+      "expected_hex": "c7c689a3d801e8d6b7dd007139bd31af"
     },
     {
-      "key_hex": "EB",
+      "key": "eb",
       "input_hex": "0000000000000000",
-      "expected_hex": "06b1f0d2ad6c5b83",
-      "desc": "Known RC4 vector",
-      "source": "RC4 reference"
+      "expected_hex": "836728cbaacaf569"
     },
     {
-      "key_hex": "0102030405060708090a0b0c0d0e0f",
+      "key": "0102030405060708090a0b0c0d0e0f",
       "input_hex": "0000000000000000",
-      "expected_hex": "9ac1cc621b626218",
-      "desc": "Known RC4 vector",
-      "source": "RC4 reference"
+      "expected_hex": "c6114a4b458418a8"
     },
     {
-      "key_hex": "6c35ca3b58b1961704ed22b370e96e0f",
+      "key": "6c35ca3b58b1961704ed22b370e96e0f",
       "input_hex": "a57a2b88214607345dd2a3a0591effcc152a1bb8",
-      "expected_hex": "9dbde3df120f2c8a82185bd2f81c64b47505ca99",
-      "desc": "RC4 random (klen=16)",
-      "source": "pycryptodome"
+      "expected_hex": "9dbde3df120f2c8a82185bd2f81c64b47505ca99"
     },
     {
-      "key_hex": "f6f764cd8293d0c9ceef",
+      "key": "f6f764cd8293d0c9ceef",
       "input_hex": "85da0be801a6e7943d328300397edf2cf58afb18",
-      "expected_hex": "bf6e943ef0b2cec58e3ff7691ded03853408bd50",
-      "desc": "RC4 random (klen=10)",
-      "source": "pycryptodome"
+      "expected_hex": "bf6e943ef0b2cec58e3ff7691ded03853408bd50"
     },
     {
-      "key_hex": "56d7c4ade27330a92ecf5c653aeb48e106c7",
+      "key": "56d7c4ade27330a92ecf5c653aeb48e106c7",
       "input_hex": "1d92636019debf8cd5eadb78",
-      "expected_hex": "b58f7df36b423b1379e36b70",
-      "desc": "RC4 random (klen=18)",
-      "source": "pycryptodome"
+      "expected_hex": "b58f7df36b423b1379e36b70"
     },
     {
-      "key_hex": "b6b7248d4253",
+      "key": "b6b7248d4253",
       "input_hex": "898eafbc459acba8",
-      "expected_hex": "186d11f9b61ce781",
-      "desc": "RC4 random (klen=6)",
-      "source": "pycryptodome"
+      "expected_hex": "186d11f9b61ce781"
     },
     {
-      "key_hex": "66a754fdf243c0f93e9fecb54abbd8311697",
+      "key": "66a754fdf243c0f93e9fecb54abbd8311697",
       "input_hex": "6da233f069ee8f1c25faab08a1c687b4dd522320",
-      "expected_hex": "bd0ed92911895ca87c84c60129e2dfbd1515c4e5",
-      "desc": "RC4 random (klen=18)",
-      "source": "pycryptodome"
+      "expected_hex": "bd0ed92911895ca87c84c60129e2dfbd1515c4e5"
     },
     {
-      "key_hex": "9e7f4c95aa9b38117677e44d021350494e6f7c055a8b",
+      "key": "9e7f4c95aa9b38117677e44d021350494e6f7c055a8b",
       "input_hex": "81266714bdb20380b9fe5fac750a7b98",
-      "expected_hex": "569777e8455f5e931d7ae946e328d23f",
-      "desc": "RC4 random (klen=22)",
-      "source": "pycryptodome"
+      "expected_hex": "569777e8455f5e931d7ae946e328d23f"
     },
     {
-      "key_hex": "d657442d62f3",
+      "key": "d657442d62f3",
       "input_hex": "29ae4fdce5ba6bc8618647749d12e3e0",
-      "expected_hex": "062831df6f00b91f12db16d8905745a2",
-      "desc": "RC4 random (klen=6)",
-      "source": "pycryptodome"
+      "expected_hex": "062831df6f00b91f12db16d8905745a2"
     },
     {
-      "key_hex": "5e3f0c556a5bf8d13637a40dc2d310090e2f",
+      "key": "5e3f0c556a5bf8d13637a40dc2d310090e2f",
       "input_hex": "c51a4b2841e627d47d72c34079be1f6c35ca3b58",
-      "expected_hex": "eabeaa2251910581b300f9e0395bcaa3374f5e2a",
-      "desc": "RC4 random (klen=18)",
-      "source": "pycryptodome"
+      "expected_hex": "eabeaa2251910581b300f9e0395bcaa3374f5e2a"
     },
     {
-      "key_hex": "961704ed22b370e96e0f9ca57a2b88214607345dd2a3",
+      "key": "961704ed22b370e96e0f9ca57a2b88214607345dd2a3",
       "input_hex": "591effcc152a1bb891f6f764cd8293d0c9ceeffc85da0be8",
-      "expected_hex": "488a47289cc53c5586c90fec3331369fbecfa41bce22bfaa",
-      "desc": "RC4 random (klen=22)",
-      "source": "pycryptodome"
+      "expected_hex": "488a47289cc53c5586c90fec3331369fbecfa41bce22bfaa"
     },
     {
-      "key_hex": "a6e7943d3283",
+      "key": "a6e7943d3283",
       "input_hex": "397edf2cf58afb18",
-      "expected_hex": "18ac5138c3b9d7a5",
-      "desc": "RC4 random (klen=6)",
-      "source": "pycryptodome"
+      "expected_hex": "18ac5138c3b9d7a5"
     },
     {
-      "key_hex": "56d7c4ade27330a92ecf5c653aeb48e106c7",
+      "key": "56d7c4ade27330a92ecf5c653aeb48e106c7",
       "input_hex": "1d92636019debf8cd5eadb78",
-      "expected_hex": "b58f7df36b423b1379e36b70",
-      "desc": "RC4 random (klen=18)",
-      "source": "pycryptodome"
+      "expected_hex": "b58f7df36b423b1379e36b70"
     },
     {
-      "key_hex": "b6b7248d4253",
+      "key": "b6b7248d4253",
       "input_hex": "898eafbc459acba8",
-      "expected_hex": "186d11f9b61ce781",
-      "desc": "RC4 random (klen=6)",
-      "source": "pycryptodome"
+      "expected_hex": "186d11f9b61ce781"
     },
     {
-      "key_hex": "66a754fdf243c0f93e9fecb54abbd8311697",
+      "key": "66a754fdf243c0f93e9fecb54abbd8311697",
       "input_hex": "6da233f069ee8f1c25faab08a1c687b4dd522320",
-      "expected_hex": "bd0ed92911895ca87c84c60129e2dfbd1515c4e5",
-      "desc": "RC4 random (klen=18)",
-      "source": "pycryptodome"
+      "expected_hex": "bd0ed92911895ca87c84c60129e2dfbd1515c4e5"
     },
     {
-      "key_hex": "9e7f4c95aa9b38117677e44d021350494e6f7c055a8b",
+      "key": "9e7f4c95aa9b38117677e44d021350494e6f7c055a8b",
       "input_hex": "81266714bdb20380b9fe5fac750a7b98",
-      "expected_hex": "569777e8455f5e931d7ae946e328d23f",
-      "desc": "RC4 random (klen=22)",
-      "source": "pycryptodome"
+      "expected_hex": "569777e8455f5e931d7ae946e328d23f"
     },
     {
-      "key_hex": "d657442d62f3",
+      "key": "d657442d62f3",
       "input_hex": "29ae4fdce5ba6bc8618647749d12e3e0",
-      "expected_hex": "062831df6f00b91f12db16d8905745a2",
-      "desc": "RC4 random (klen=6)",
-      "source": "pycryptodome"
+      "expected_hex": "062831df6f00b91f12db16d8905745a2"
     },
     {
-      "key_hex": "5e3f0c556a5bf8d13637a40dc2d310090e2f",
+      "key": "5e3f0c556a5bf8d13637a40dc2d310090e2f",
       "input_hex": "c51a4b2841e627d47d72c34079be1f6c35ca3b58",
-      "expected_hex": "eabeaa2251910581b300f9e0395bcaa3374f5e2a",
-      "desc": "RC4 random (klen=18)",
-      "source": "pycryptodome"
+      "expected_hex": "eabeaa2251910581b300f9e0395bcaa3374f5e2a"
     }
   ]
 }

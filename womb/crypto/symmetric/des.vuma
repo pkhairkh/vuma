@@ -177,7 +177,7 @@ transform des_load_sbox(ctx: State<DesCtx>) {
     ctx.sbox[224]=10; ctx.sbox[225]=6; ctx.sbox[226]=9; ctx.sbox[227]=0; ctx.sbox[228]=12; ctx.sbox[229]=11; ctx.sbox[230]=7; ctx.sbox[231]=13;
     ctx.sbox[232]=15; ctx.sbox[233]=1; ctx.sbox[234]=3; ctx.sbox[235]=14; ctx.sbox[236]=5; ctx.sbox[237]=2; ctx.sbox[238]=8; ctx.sbox[239]=4;
     ctx.sbox[240]=3; ctx.sbox[241]=15; ctx.sbox[242]=0; ctx.sbox[243]=6; ctx.sbox[244]=10; ctx.sbox[245]=1; ctx.sbox[246]=13; ctx.sbox[247]=8;
-    ctx.sbox[248]=9; ctx.sbox[249]=4; ctx.sbox[250]=5; ctx.sbox[251]=11; ctx.sbox[252]=12; ctx.sbox[253]=2; ctx.sbox[254]=7; ctx.sbox[255]=14;
+    ctx.sbox[248]=9; ctx.sbox[249]=4; ctx.sbox[250]=5; ctx.sbox[251]=11; ctx.sbox[252]=12; ctx.sbox[253]=7; ctx.sbox[254]=2; ctx.sbox[255]=14;
     // S5 (offset 256)
     ctx.sbox[256]=2; ctx.sbox[257]=12; ctx.sbox[258]=4; ctx.sbox[259]=1; ctx.sbox[260]=7; ctx.sbox[261]=10; ctx.sbox[262]=11; ctx.sbox[263]=6;
     ctx.sbox[264]=8; ctx.sbox[265]=5; ctx.sbox[266]=3; ctx.sbox[267]=15; ctx.sbox[268]=13; ctx.sbox[269]=0; ctx.sbox[270]=14; ctx.sbox[271]=9;

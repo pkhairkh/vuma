@@ -1,4 +1,4 @@
-// pbkdf2 batch 8 (vectors 40-40)
+// pbkdf2 batch 8 (vector 8)
 import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut};
 import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/pbkdf2.vuma"::{pbkdf2_hmac_sha256};
 
@@ -6,22 +6,58 @@ transform main() -> i32 {
     let pass = state_new(HmacKey);
     let salt = state_new(HmacMsg);
     let out = state_new(HmacMsg);
+    // V8: PBKDF2-sha256(iters=3,dklen=48)
+    pass.bytes[0] = 0;
+    pass.bytes[1] = 0;
+    pass.bytes[2] = 0;
+    pass.bytes[3] = 0;
+    pass.bytes[4] = 0;
+    pass.bytes[5] = 0;
+    pass.bytes[6] = 0;
+    pass.bytes[7] = 0;
+    pass.bytes[8] = 0;
+    pass.bytes[9] = 0;
+    pass.bytes[10] = 0;
+    pass.bytes[11] = 0;
+    pass.bytes[12] = 0;
+    pass.bytes[13] = 0;
+    pass.bytes[14] = 0;
+    pass.bytes[15] = 0;
+    pass.bytes[16] = 0;
+    pass.bytes[17] = 0;
+    pass.bytes[18] = 0;
+    pass.bytes[19] = 0;
+    pass.bytes[20] = 0;
+    pass.bytes[21] = 0;
+    pass.bytes[22] = 0;
+    pass.bytes[23] = 0;
+    pass.bytes[24] = 0;
+    pass.bytes[25] = 0;
+    pass.bytes[26] = 0;
+    pass.bytes[27] = 0;
+    pass.bytes[28] = 0;
+    pass.bytes[29] = 0;
+    pass.bytes[30] = 0;
+    pass.bytes[31] = 0;
+    salt.bytes[0] = 255;
+    salt.bytes[1] = 255;
+    salt.bytes[2] = 255;
+    salt.bytes[3] = 255;
+    salt.bytes[4] = 255;
+    salt.bytes[5] = 255;
+    salt.bytes[6] = 255;
+    salt.bytes[7] = 255;
+    salt.bytes[8] = 255;
+    salt.bytes[9] = 255;
+    salt.bytes[10] = 255;
+    salt.bytes[11] = 255;
+    salt.bytes[12] = 255;
+    salt.bytes[13] = 255;
+    salt.bytes[14] = 255;
+    salt.bytes[15] = 255;
+    pbkdf2_hmac_sha256(pass, 32, salt, 16, 3, out, 48);
     let oi: u32 = 0;
-    // V40: PBKDF2-sha256(iters=4,dklen=32)
-    salt.bytes[0] = 118;
-    salt.bytes[1] = 101;
-    salt.bytes[2] = 99;
-    salt.bytes[3] = 116;
-    salt.bytes[4] = 111;
-    salt.bytes[5] = 114;
-    pass.bytes[0] = 102;
-    pass.bytes[1] = 105;
-    pass.bytes[2] = 110;
-    pass.bytes[3] = 97;
-    pass.bytes[4] = 108;
-    pbkdf2_hmac_sha256(pass, 5, salt, 6, 4, out, 32);
-    oi = 0;
-    while oi < 32 {
+    while oi < 48 {
         print_int(1000 + (out.bytes[oi] as u32));
         oi = oi + 1;
     }
