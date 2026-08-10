@@ -1,7 +1,77 @@
 {
+  "sha1|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha384|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha512|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "md5|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha3|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes128|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes192|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes256|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "salsa20|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
   "poly1305|x86_64": {
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "hmac|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hkdf|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "pbkdf2|x86_64": {
+    "status": "PARTIAL",
+    "pass": 7,
+    "total": 17
   }
 }
