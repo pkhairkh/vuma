@@ -438,5 +438,25 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "sha3|arm32": {
+    "status": "TOUT",
+    "pass": 0,
+    "total": 20
+  },
+  "sha3|armeb": {
+    "status": "TOUT",
+    "pass": 0,
+    "total": 20
+  },
+  "sha3|riscv64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha3|riscv32": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
   }
 }
