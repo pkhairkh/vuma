@@ -1,0 +1,34 @@
+// bignum batch 5 (vector 5)
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_add};
+
+transform main() -> i32 {
+    let a = state_new(Bn256Ctx);
+    let b = state_new(Bn256Ctx);
+    let r = state_new(Bn256Ctx);
+    a.limbs[0] = 1283066103397798384;
+    a.limbs[1] = 12198155279199315353;
+    a.limbs[2] = 14260593838171589262;
+    a.limbs[3] = 18174129289355940941;
+    b.limbs[0] = 15777827095392894769;
+    b.limbs[1] = 15983802509111602936;
+    b.limbs[2] = 7012091250016467664;
+    b.limbs[3] = 8363943803604256569;
+    bn256_add(r, a, b);
+    // Output 32 bytes (4 or 8 u64 limbs LE)
+    let oi: u32 = 0;
+    let nlimbs: u32 = 4;
+    while oi < nlimbs {
+        let v = r.limbs[oi];
+        print_int(1000 + ((v & 255) as u32));
+        print_int(1000 + (((v >> 8) & 255) as u32));
+        print_int(1000 + (((v >> 16) & 255) as u32));
+        print_int(1000 + (((v >> 24) & 255) as u32));
+        print_int(1000 + (((v >> 32) & 255) as u32));
+        print_int(1000 + (((v >> 40) & 255) as u32));
+        print_int(1000 + (((v >> 48) & 255) as u32));
+        print_int(1000 + (((v >> 56) & 255) as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

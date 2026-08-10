@@ -118,5 +118,215 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "sha1|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha1|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha1|aarch64_be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha1|arm32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha1|armeb": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha1|riscv64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha1|riscv32": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "sha1|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha1|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha1|ppc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha1|ppc64le": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha1|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha1|s390x": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha1|sparc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha1|alpha": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha1|hppa": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha1|m68k": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha1|wasm32": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "sha256_sha224|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|aarch64_be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|arm32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|armeb": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|riscv64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|riscv32": {
+    "status": "PARTIAL",
+    "pass": 10,
+    "total": 20
+  },
+  "sha256_sha224|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|ppc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|ppc64le": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|s390x": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|sparc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|alpha": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|hppa": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|m68k": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|wasm32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha384|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha384|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha384|aarch64_be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha384|arm32": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "sha384|armeb": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "sha384|riscv64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }

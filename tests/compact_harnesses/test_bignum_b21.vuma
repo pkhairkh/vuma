@@ -1,0 +1,34 @@
+// bignum batch 21 (vector 21)
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, Bn512Ctx, bn256_mul_512};
+
+transform main() -> i32 {
+    let a = state_new(Bn256Ctx);
+    let b = state_new(Bn256Ctx);
+    let r = state_new(Bn512Ctx);
+    a.limbs[0] = 13057360759567981142;
+    a.limbs[1] = 1086029281467823798;
+    a.limbs[2] = 1243316505448017364;
+    a.limbs[3] = 579466799507675942;
+    b.limbs[0] = 6095329886943121601;
+    b.limbs[1] = 9484506392353289491;
+    b.limbs[2] = 5136998843743592237;
+    b.limbs[3] = 8954317038990532775;
+    bn256_mul_512(r, a, b);
+    // Output 64 bytes (4 or 8 u64 limbs LE)
+    let oi: u32 = 0;
+    let nlimbs: u32 = 8;
+    while oi < nlimbs {
+        let v = r.limbs[oi];
+        print_int(1000 + ((v & 255) as u32));
+        print_int(1000 + (((v >> 8) & 255) as u32));
+        print_int(1000 + (((v >> 16) & 255) as u32));
+        print_int(1000 + (((v >> 24) & 255) as u32));
+        print_int(1000 + (((v >> 32) & 255) as u32));
+        print_int(1000 + (((v >> 40) & 255) as u32));
+        print_int(1000 + (((v >> 48) & 255) as u32));
+        print_int(1000 + (((v >> 56) & 255) as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}
