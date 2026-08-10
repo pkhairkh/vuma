@@ -1573,7 +1573,12 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         emit(encode_push(reg), "push_callee_save");
     }
 
-    // Copy function parameters from SystemV arg registers to their stack slots
+    // Copy function parameters from SystemV arg registers to their stack slots.
+    // The first 6 integer args arrive in RDI/RSI/RDX/RCX/R8/R9.
+    // Args 7+ arrive on the caller's stack at [RBP + 16 + (i-6)*8]
+    // (the +16 accounts for the pushed return address and saved RBP).
+    // Without loading these stack args into vreg slots, functions with
+    // more than 6 parameters would read garbage for args 7+.
     let arg_regs = [Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx, Gpr::R8, Gpr::R9];
     for (i, param) in func.params.iter().enumerate() {
         if let Some(id) = param.as_register() {
@@ -1582,6 +1587,19 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
                 emit(
                     encode_mov_mem_reg(Gpr::Rbp, off, arg_regs[i]),
                     "store_param",
+                );
+            } else {
+                // Stack argument: load from [RBP + 16 + (i - num_reg_args) * 8]
+                // into RAX, then store to the param's stack slot.
+                let stack_off = 16 + ((i - arg_regs.len()) as i32) * 8;
+                let off = slot_offset(id);
+                emit(
+                    encode_mov_reg_mem(Gpr::Rax, Gpr::Rbp, stack_off),
+                    "load_stack_param",
+                );
+                emit(
+                    encode_mov_mem_reg(Gpr::Rbp, off, Gpr::Rax),
+                    "store_stack_param",
                 );
             }
         }
