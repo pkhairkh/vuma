@@ -458,5 +458,70 @@
     "status": "PARTIAL",
     "pass": 0,
     "total": 20
+  },
+  "chacha20|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|aarch64_be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|arm32": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "chacha20|armeb": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "chacha20|riscv64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|riscv32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|ppc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|ppc64le": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
