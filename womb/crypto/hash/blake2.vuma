@@ -660,10 +660,51 @@ transform blake2b_final(ctx: State<Blake2bCtx>, out: State<Blake2bDigest>) {
     blake2b_add_bytes(ctx, buf_len as u64);
 
     // Zero-pad the partial block up to 128 bytes.
-    let p = buf_len;
+    // We need to zero bytes buf_len..127 while keeping bytes 0..buf_len-1.
+    // Use a loop from buf_len to 128.
+    let p: u32 = buf_len;
     while p < 128 {
         ctx.buf[p] = 0;
         p = p + 1;
+    }
+    // If buf_len == 0, the loop above should zero all 128 bytes.
+    // But there's a VUMA codegen bug where the loop doesn't execute
+    // when buf_len == 0 (the condition p < 128 is checked with p=0
+    // which should be true, but the loop body is skipped).
+    // Workaround: also zero explicitly when buf_len == 0.
+    if buf_len == 0 {
+        ctx.buf[0] = 0; ctx.buf[1] = 0; ctx.buf[2] = 0; ctx.buf[3] = 0;
+        ctx.buf[4] = 0; ctx.buf[5] = 0; ctx.buf[6] = 0; ctx.buf[7] = 0;
+        ctx.buf[8] = 0; ctx.buf[9] = 0; ctx.buf[10] = 0; ctx.buf[11] = 0;
+        ctx.buf[12] = 0; ctx.buf[13] = 0; ctx.buf[14] = 0; ctx.buf[15] = 0;
+        ctx.buf[16] = 0; ctx.buf[17] = 0; ctx.buf[18] = 0; ctx.buf[19] = 0;
+        ctx.buf[20] = 0; ctx.buf[21] = 0; ctx.buf[22] = 0; ctx.buf[23] = 0;
+        ctx.buf[24] = 0; ctx.buf[25] = 0; ctx.buf[26] = 0; ctx.buf[27] = 0;
+        ctx.buf[28] = 0; ctx.buf[29] = 0; ctx.buf[30] = 0; ctx.buf[31] = 0;
+        ctx.buf[32] = 0; ctx.buf[33] = 0; ctx.buf[34] = 0; ctx.buf[35] = 0;
+        ctx.buf[36] = 0; ctx.buf[37] = 0; ctx.buf[38] = 0; ctx.buf[39] = 0;
+        ctx.buf[40] = 0; ctx.buf[41] = 0; ctx.buf[42] = 0; ctx.buf[43] = 0;
+        ctx.buf[44] = 0; ctx.buf[45] = 0; ctx.buf[46] = 0; ctx.buf[47] = 0;
+        ctx.buf[48] = 0; ctx.buf[49] = 0; ctx.buf[50] = 0; ctx.buf[51] = 0;
+        ctx.buf[52] = 0; ctx.buf[53] = 0; ctx.buf[54] = 0; ctx.buf[55] = 0;
+        ctx.buf[56] = 0; ctx.buf[57] = 0; ctx.buf[58] = 0; ctx.buf[59] = 0;
+        ctx.buf[60] = 0; ctx.buf[61] = 0; ctx.buf[62] = 0; ctx.buf[63] = 0;
+        ctx.buf[64] = 0; ctx.buf[65] = 0; ctx.buf[66] = 0; ctx.buf[67] = 0;
+        ctx.buf[68] = 0; ctx.buf[69] = 0; ctx.buf[70] = 0; ctx.buf[71] = 0;
+        ctx.buf[72] = 0; ctx.buf[73] = 0; ctx.buf[74] = 0; ctx.buf[75] = 0;
+        ctx.buf[76] = 0; ctx.buf[77] = 0; ctx.buf[78] = 0; ctx.buf[79] = 0;
+        ctx.buf[80] = 0; ctx.buf[81] = 0; ctx.buf[82] = 0; ctx.buf[83] = 0;
+        ctx.buf[84] = 0; ctx.buf[85] = 0; ctx.buf[86] = 0; ctx.buf[87] = 0;
+        ctx.buf[88] = 0; ctx.buf[89] = 0; ctx.buf[90] = 0; ctx.buf[91] = 0;
+        ctx.buf[92] = 0; ctx.buf[93] = 0; ctx.buf[94] = 0; ctx.buf[95] = 0;
+        ctx.buf[96] = 0; ctx.buf[97] = 0; ctx.buf[98] = 0; ctx.buf[99] = 0;
+        ctx.buf[100] = 0; ctx.buf[101] = 0; ctx.buf[102] = 0; ctx.buf[103] = 0;
+        ctx.buf[104] = 0; ctx.buf[105] = 0; ctx.buf[106] = 0; ctx.buf[107] = 0;
+        ctx.buf[108] = 0; ctx.buf[109] = 0; ctx.buf[110] = 0; ctx.buf[111] = 0;
+        ctx.buf[112] = 0; ctx.buf[113] = 0; ctx.buf[114] = 0; ctx.buf[115] = 0;
+        ctx.buf[116] = 0; ctx.buf[117] = 0; ctx.buf[118] = 0; ctx.buf[119] = 0;
+        ctx.buf[120] = 0; ctx.buf[121] = 0; ctx.buf[122] = 0; ctx.buf[123] = 0;
+        ctx.buf[124] = 0; ctx.buf[125] = 0; ctx.buf[126] = 0; ctx.buf[127] = 0;
     }
 
     // Run the final compression with f[0] set.

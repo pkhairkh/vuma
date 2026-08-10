@@ -1,7 +1,7 @@
 {
-  "poly1305|x86_64": {
+  "blake2|x86_64": {
     "status": "PARTIAL",
-    "pass": 0,
+    "pass": 19,
     "total": 20
   }
 }
