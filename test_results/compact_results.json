@@ -83,5 +83,10 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "hkdf|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
