@@ -73,5 +73,105 @@
     "status": "PARTIAL",
     "pass": 7,
     "total": 17
+  },
+  "sha256_sha224|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|arm32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|riscv64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|ppc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|s390x": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha256_sha224|alpha": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha512|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha512|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha512|arm32": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "sha512|riscv64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha512|ppc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha512|s390x": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha512|alpha": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "poly1305|x86_32": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "poly1305|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "poly1305|arm32": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "poly1305|riscv64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "poly1305|ppc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "poly1305|s390x": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
