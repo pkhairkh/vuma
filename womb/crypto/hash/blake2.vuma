@@ -630,8 +630,13 @@ transform blake2b_compress(ctx: State<Blake2bCtx>, last: u32) {
 }
 
 // blake2b_update: absorb `len` bytes of data into the hash state.
-// Buffers input bytes into ctx.buf. When ctx.len reaches 128, calls
-// blake2b_compress and resets ctx.len.
+// Buffers input bytes into ctx.buf. When ctx.len reaches 128 AND there
+// is more data to come, calls blake2b_compress and resets ctx.len.
+// The LAST full block is kept buffered (not compressed) so that
+// blake2b_final can compress it with the finalization flag set.
+// Without this, an input whose length is an exact multiple of 128
+// would be compressed twice (once with f=0, once with f=1 on an
+// empty buffer), producing the wrong digest.
 transform blake2b_update(ctx: State<Blake2bCtx>, data: State<Blake2bData>, len: u32) {
     let i: u32 = 0;
     while i < len {
@@ -639,7 +644,7 @@ transform blake2b_update(ctx: State<Blake2bCtx>, data: State<Blake2bData>, len: 
         ctx.buf[bl] = data.data[i];
         ctx.len = bl + 1;
         i = i + 1;
-        if ctx.len == 128 {
+        if ctx.len == 128 && i < len {
             blake2b_add_bytes(ctx, 128);
             blake2b_compress(ctx, 0);
             ctx.len = 0;
@@ -1139,6 +1144,8 @@ transform blake2s_compress(ctx: State<Blake2sCtx>, last: u32) {
 }
 
 // blake2s_update: absorb `len` bytes of data into the hash state.
+// Same fix as blake2b_update: do NOT compress the last full block here
+// — keep it buffered so blake2s_final can compress it with f=1.
 transform blake2s_update(ctx: State<Blake2sCtx>, data: State<Blake2sData>, len: u32) {
     let i: u32 = 0;
     while i < len {
@@ -1146,7 +1153,7 @@ transform blake2s_update(ctx: State<Blake2sCtx>, data: State<Blake2sData>, len: 
         ctx.buf[bl] = data.data[i];
         ctx.len = bl + 1;
         i = i + 1;
-        if ctx.len == 64 {
+        if ctx.len == 64 && i < len {
             blake2s_add_bytes(ctx, 64);
             blake2s_compress(ctx, 0);
             ctx.len = 0;

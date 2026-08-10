@@ -396,6 +396,11 @@ transform blake3_init(ctx: State<Blake3Ctx>) {
 }
 
 // blake3_update: absorb `len` bytes of data into the hash state.
+// NOTE: do NOT compress the last full 64-byte block here — keep it
+// buffered so blake3_final can compress it with CHUNK_END | ROOT.
+// Otherwise an input whose length is an exact multiple of 64 would
+// get an extra empty-block compression at the end, producing the
+// wrong digest. (Same bug pattern as blake2b_update.)
 transform blake3_update(ctx: State<Blake3Ctx>, data: State<Blake3Data>, len: u32) {
     let i = 0;
     while i < len {
@@ -403,7 +408,7 @@ transform blake3_update(ctx: State<Blake3Ctx>, data: State<Blake3Data>, len: u32
         ctx.block[bl] = data.data[i];
         ctx.block_len = bl + 1;
         i = i + 1;
-        if ctx.block_len == 64 {
+        if ctx.block_len == 64 && i < len {
             ctx.counter = ctx.chunk_counter;
             ctx.out_block_len = 64;
             let f = 0 as u32;
@@ -419,8 +424,19 @@ transform blake3_update(ctx: State<Blake3Ctx>, data: State<Blake3Data>, len: u32
 }
 
 // blake3_final: emit the 32-byte BLAKE3 digest into `out`.
+// Zero-pads the final partial block to 64 bytes before compression.
+// (After the first block is compressed in update, ctx.block still
+// holds that block's data. When the second partial block is written,
+// only block[0..bl-1] is overwritten — block[bl..63] retains stale
+// data from the previous block, which would corrupt the hash.)
 transform blake3_final(ctx: State<Blake3Ctx>, out: State<Blake3Digest>) {
     let bl = ctx.block_len;
+    // Zero-pad block[bl..63]
+    let p = bl;
+    while p < 64 {
+        ctx.block[p] = 0;
+        p = p + 1;
+    }
     ctx.counter = ctx.chunk_counter;
     ctx.out_block_len = bl;
     let f = B3_CHUNK_END | B3_ROOT;

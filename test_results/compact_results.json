@@ -30,13 +30,13 @@
     "total": 20
   },
   "blake2|x86_64": {
-    "status": "PARTIAL",
-    "pass": 19,
+    "status": "PASS",
+    "pass": 20,
     "total": 20
   },
   "blake3|x86_64": {
-    "status": "PARTIAL",
-    "pass": 13,
+    "status": "PASS",
+    "pass": 20,
     "total": 20
   },
   "aes128|x86_64": {
@@ -88,5 +88,10 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "pbkdf2|x86_64": {
+    "status": "PARTIAL",
+    "pass": 7,
+    "total": 17
   }
 }
