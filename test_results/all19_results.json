@@ -1173,5 +1173,50 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "hkdf|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "des|x86_64": {
+    "status": "PARTIAL",
+    "pass": 13,
+    "total": 20
+  },
+  "des|x86_32": {
+    "status": "PARTIAL",
+    "pass": 13,
+    "total": 20
+  },
+  "des|aarch64": {
+    "status": "PARTIAL",
+    "pass": 13,
+    "total": 20
+  },
+  "des|aarch64_be": {
+    "status": "PARTIAL",
+    "pass": 13,
+    "total": 20
+  },
+  "des|arm32": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "des|armeb": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "des|riscv64": {
+    "status": "PARTIAL",
+    "pass": 13,
+    "total": 20
+  },
+  "des|riscv32": {
+    "status": "PARTIAL",
+    "pass": 11,
+    "total": 20
   }
 }
