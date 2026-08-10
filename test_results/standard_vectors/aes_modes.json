@@ -1,0 +1,172 @@
+{
+  "vectors": [
+    {
+      "desc": "AES-128-ECB encrypt block 0",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "6bc1bee22e409f96e93d7e117393172a",
+      "iv_hex": "",
+      "mode": "ecb_encrypt",
+      "expected_hex": "3ad77bb40d7a3660a89ecaf32466ef97"
+    },
+    {
+      "desc": "AES-128-ECB encrypt block 1",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "ae2d8a571e03ac9c9eb76fac45af8e51",
+      "iv_hex": "",
+      "mode": "ecb_encrypt",
+      "expected_hex": "f5d3d58503b9699de785895a96fdbaaf"
+    },
+    {
+      "desc": "AES-128-ECB encrypt block 2",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "30c81c46a35ce411e5fbc1191a0a52ef",
+      "iv_hex": "",
+      "mode": "ecb_encrypt",
+      "expected_hex": "43b1cd7f598ece23881b00e3ed030688"
+    },
+    {
+      "desc": "AES-128-ECB encrypt block 3",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "f69f2445df4f9b17ad2b417be66c3710",
+      "iv_hex": "",
+      "mode": "ecb_encrypt",
+      "expected_hex": "7b0c785e27e8ad3f8223207104725dd4"
+    },
+    {
+      "desc": "AES-128-CBC encrypt block 0",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "6bc1bee22e409f96e93d7e117393172a",
+      "iv_hex": "000102030405060708090a0b0c0d0e0f",
+      "mode": "cbc_encrypt",
+      "expected_hex": "7649abac8119b246cee98e9b12e9197d"
+    },
+    {
+      "desc": "AES-128-CBC encrypt block 1",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "ae2d8a571e03ac9c9eb76fac45af8e51",
+      "iv_hex": "7649abac8119b246cee98e9b12e9197d",
+      "mode": "cbc_encrypt",
+      "expected_hex": "5086cb9b507219ee95db113a917678b2"
+    },
+    {
+      "desc": "AES-128-CBC encrypt block 2",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "30c81c46a35ce411e5fbc1191a0a52ef",
+      "iv_hex": "5086cb9b507219ee95db113a917678b2",
+      "mode": "cbc_encrypt",
+      "expected_hex": "73bed6b8e3c1743b7116e69e22229516"
+    },
+    {
+      "desc": "AES-128-CBC encrypt block 3",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "f69f2445df4f9b17ad2b417be66c3710",
+      "iv_hex": "73bed6b8e3c1743b7116e69e22229516",
+      "mode": "cbc_encrypt",
+      "expected_hex": "3ff1caa1681fac09120eca307586e1a7"
+    },
+    {
+      "desc": "AES-128-CTR encrypt block 0",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "6bc1bee22e409f96e93d7e117393172a",
+      "iv_hex": "000102030405060708090a0b0c0d0e0f",
+      "mode": "ctr_crypt",
+      "expected_hex": "3b3fd92eb72dad20333449f8e83cfb4a"
+    },
+    {
+      "desc": "AES-128-CTR encrypt block 1",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "ae2d8a571e03ac9c9eb76fac45af8e51",
+      "iv_hex": "000102030405060708090a0b0c0d0e10",
+      "mode": "ctr_crypt",
+      "expected_hex": "010c041999e03f36448624483e582d0e"
+    },
+    {
+      "desc": "AES-128-CTR encrypt block 2",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "30c81c46a35ce411e5fbc1191a0a52ef",
+      "iv_hex": "000102030405060708090a0b0c0d0e11",
+      "mode": "ctr_crypt",
+      "expected_hex": "a62293cfa6df74535c354181168774df"
+    },
+    {
+      "desc": "AES-128-CTR encrypt block 3",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "f69f2445df4f9b17ad2b417be66c3710",
+      "iv_hex": "000102030405060708090a0b0c0d0e12",
+      "mode": "ctr_crypt",
+      "expected_hex": "2d55a54706273c50d7b4f8a8cddc6ed7"
+    },
+    {
+      "desc": "AES-128-ECB decrypt block 0",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "3ad77bb40d7a3660a89ecaf32466ef97",
+      "iv_hex": "",
+      "mode": "ecb_decrypt",
+      "expected_hex": "6bc1bee22e409f96e93d7e117393172a"
+    },
+    {
+      "desc": "AES-128-ECB decrypt block 1",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "f5d3d58503b9699de785895a96fdbaaf",
+      "iv_hex": "",
+      "mode": "ecb_decrypt",
+      "expected_hex": "ae2d8a571e03ac9c9eb76fac45af8e51"
+    },
+    {
+      "desc": "AES-128-ECB decrypt block 2",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "43b1cd7f598ece23881b00e3ed030688",
+      "iv_hex": "",
+      "mode": "ecb_decrypt",
+      "expected_hex": "30c81c46a35ce411e5fbc1191a0a52ef"
+    },
+    {
+      "desc": "AES-128-ECB decrypt block 3",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "7b0c785e27e8ad3f8223207104725dd4",
+      "iv_hex": "",
+      "mode": "ecb_decrypt",
+      "expected_hex": "f69f2445df4f9b17ad2b417be66c3710"
+    },
+    {
+      "desc": "AES-128-ECB encrypt (key2)",
+      "key_hex": "000102030405060708090a0b0c0d0e0f",
+      "input_hex": "00112233445566778899aabbccddeeff",
+      "iv_hex": "",
+      "mode": "ecb_encrypt",
+      "expected_hex": "69c4e0d86a7b0430d8cdb78070b4c55a"
+    },
+    {
+      "desc": "AES-128-CBC decrypt block 0",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "7649abac8119b246cee98e9b12e9197d",
+      "iv_hex": "000102030405060708090a0b0c0d0e0f",
+      "mode": "cbc_decrypt",
+      "expected_hex": "6bc1bee22e409f96e93d7e117393172a"
+    },
+    {
+      "desc": "AES-128-CBC decrypt block 1",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "5086cb9b507219ee95db113a917678b2",
+      "iv_hex": "7649abac8119b246cee98e9b12e9197d",
+      "mode": "cbc_decrypt",
+      "expected_hex": "ae2d8a571e03ac9c9eb76fac45af8e51"
+    },
+    {
+      "desc": "AES-128-CBC decrypt block 2",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "73bed6b8e3c1743b7116e69e22229516",
+      "iv_hex": "5086cb9b507219ee95db113a917678b2",
+      "mode": "cbc_decrypt",
+      "expected_hex": "30c81c46a35ce411e5fbc1191a0a52ef"
+    },
+    {
+      "desc": "AES-128-CBC decrypt block 3",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "3ff1caa1681fac09120eca307586e1a7",
+      "iv_hex": "73bed6b8e3c1743b7116e69e22229516",
+      "mode": "cbc_decrypt",
+      "expected_hex": "f69f2445df4f9b17ad2b417be66c3710"
+    }
+  ]
+}
