@@ -223,5 +223,55 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "sha3|arm32": {
+    "status": "TOUT",
+    "pass": 0,
+    "total": 20
+  },
+  "sha3|riscv64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes128|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes128|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes128|arm32": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "aes128|riscv64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|arm32": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "chacha20|riscv64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
