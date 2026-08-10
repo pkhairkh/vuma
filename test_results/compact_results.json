@@ -229,46 +229,6 @@
     "pass": 20,
     "total": 20
   },
-  "sha384|ppc64le": {
-    "status": "PASS",
-    "pass": 20,
-    "total": 20
-  },
-  "sha384|loongarch64": {
-    "status": "PASS",
-    "pass": 20,
-    "total": 20
-  },
-  "sha384|s390x": {
-    "status": "PASS",
-    "pass": 20,
-    "total": 20
-  },
-  "sha384|sparc64": {
-    "status": "PARTIAL",
-    "pass": 1,
-    "total": 20
-  },
-  "sha384|alpha": {
-    "status": "PASS",
-    "pass": 20,
-    "total": 20
-  },
-  "sha384|hppa": {
-    "status": "PARTIAL",
-    "pass": 0,
-    "total": 20
-  },
-  "sha384|m68k": {
-    "status": "PARTIAL",
-    "pass": 0,
-    "total": 20
-  },
-  "sha384|wasm32": {
-    "status": "PARTIAL",
-    "pass": 3,
-    "total": 20
-  },
   "sha512|x86_64": {
     "status": "PASS",
     "pass": 20,
@@ -297,46 +257,6 @@
   "sha512|armeb": {
     "status": "PARTIAL",
     "pass": 0,
-    "total": 20
-  },
-  "sha512|riscv64": {
-    "status": "PASS",
-    "pass": 20,
-    "total": 20
-  },
-  "sha512|riscv32": {
-    "status": "PARTIAL",
-    "pass": 0,
-    "total": 20
-  },
-  "sha512|mips64": {
-    "status": "PASS",
-    "pass": 20,
-    "total": 20
-  },
-  "sha512|mips64be": {
-    "status": "PASS",
-    "pass": 20,
-    "total": 20
-  },
-  "sha512|ppc64": {
-    "status": "PASS",
-    "pass": 20,
-    "total": 20
-  },
-  "sha512|ppc64le": {
-    "status": "PASS",
-    "pass": 20,
-    "total": 20
-  },
-  "sha512|loongarch64": {
-    "status": "PASS",
-    "pass": 20,
-    "total": 20
-  },
-  "sha512|s390x": {
-    "status": "PASS",
-    "pass": 20,
     "total": 20
   },
   "md5|x86_64": {
@@ -420,6 +340,51 @@
     "total": 20
   },
   "md5|hppa": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "md5|m68k": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "md5|wasm32": {
+    "status": "PARTIAL",
+    "pass": 3,
+    "total": 20
+  },
+  "sha3|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha3|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha3|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha3|aarch64_be": {
+    "status": "PARTIAL",
+    "pass": 15,
+    "total": 20
+  },
+  "sha3|arm32": {
+    "status": "TOUT",
+    "pass": 0,
+    "total": 20
+  },
+  "sha3|armeb": {
+    "status": "TOUT",
+    "pass": 0,
+    "total": 20
+  },
+  "sha3|riscv64": {
     "status": "PASS",
     "pass": 20,
     "total": 20
