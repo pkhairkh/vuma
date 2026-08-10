@@ -1,0 +1,146 @@
+{
+  "module": "aes256",
+  "vector_count": 20,
+  "vectors": [
+    {
+      "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "input_hex": "00112233445566778899aabbccddeeff",
+      "expected_hex": "8ea2b7ca516745bfeafc49904b496089",
+      "desc": "FIPS-197 App C.2",
+      "source": "NIST FIPS-197"
+    },
+    {
+      "key_hex": "51b6b7248d425390898eafbc459acba8c166a754fdf243c0f93e9fecb54abbd8",
+      "input_hex": "311697846da233f069ee8f1c25faab08",
+      "expected_hex": "542e468471da3d5e04373791b6e2e753",
+      "desc": "AES-256-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "a1c687b4dd522320d99e7f4c95aa9b38117677e44d021350494e6f7c055a8b68",
+      "input_hex": "81266714bdb20380b9fe5fac750a7b98",
+      "expected_hex": "73ffd3fe9912f73c458b3fe7b08a9e39",
+      "desc": "AES-256-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "f1d657442d62f3b029ae4fdce5ba6bc8618647749d12e3e0995e3f0c556a5bf8",
+      "input_hex": "d13637a40dc2d310090e2f3cc51a4b28",
+      "expected_hex": "b38b969027d958143d8e07355c5be5e2",
+      "desc": "AES-256-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "41e627d47d72c34079be1f6c35ca3b58b1961704ed22b370e96e0f9ca57a2b88",
+      "input_hex": "214607345dd2a3a0591effcc152a1bb8",
+      "expected_hex": "ff7c109144a713f8e5b7923c17aa8582",
+      "desc": "AES-256-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "91f6f764cd8293d0c9ceeffc85da0be801a6e7943d328300397edf2cf58afb18",
+      "input_hex": "7156d7c4ade27330a92ecf5c653aeb48",
+      "expected_hex": "9dc4ccef4b06af6c8bb553fba33e5510",
+      "desc": "AES-256-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "e106c7f41d92636019debf8cd5eadb7851b6b7248d425390898eafbc459acba8",
+      "input_hex": "c166a754fdf243c0f93e9fecb54abbd8",
+      "expected_hex": "6460f30d678440f9029942e37a924034",
+      "desc": "AES-256-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "311697846da233f069ee8f1c25faab08a1c687b4dd522320d99e7f4c95aa9b38",
+      "input_hex": "117677e44d021350494e6f7c055a8b68",
+      "expected_hex": "a6e7b01a6d98a9b30252478049bb2cf4",
+      "desc": "AES-256-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "81266714bdb20380b9fe5fac750a7b98f1d657442d62f3b029ae4fdce5ba6bc8",
+      "input_hex": "618647749d12e3e0995e3f0c556a5bf8",
+      "expected_hex": "d13aecfeaba95b9ffbef5c6720592b16",
+      "desc": "AES-256-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "d13637a40dc2d310090e2f3cc51a4b2841e627d47d72c34079be1f6c35ca3b58",
+      "input_hex": "b1961704ed22b370e96e0f9ca57a2b88",
+      "expected_hex": "702dffef6b8d30e896f895c77af31d67",
+      "desc": "AES-256-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "214607345dd2a3a0591effcc152a1bb891f6f764cd8293d0c9ceeffc85da0be8",
+      "input_hex": "01a6e7943d328300397edf2cf58afb18",
+      "expected_hex": "92d45b465458a79e6ddd69bbd3220c3c",
+      "desc": "AES-256-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "7156d7c4ade27330a92ecf5c653aeb48e106c7f41d92636019debf8cd5eadb78",
+      "input_hex": "51b6b7248d425390898eafbc459acba8",
+      "expected_hex": "21d171012a04ee48e0df085dc8516e66",
+      "desc": "AES-256-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "c166a754fdf243c0f93e9fecb54abbd8311697846da233f069ee8f1c25faab08",
+      "input_hex": "a1c687b4dd522320d99e7f4c95aa9b38",
+      "expected_hex": "75c4ca043d0a20dd388b4fe037b8ff1a",
+      "desc": "AES-256-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "117677e44d021350494e6f7c055a8b6881266714bdb20380b9fe5fac750a7b98",
+      "input_hex": "f1d657442d62f3b029ae4fdce5ba6bc8",
+      "expected_hex": "ef14f095937cf42acba2c045e2abcf19",
+      "desc": "AES-256-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "618647749d12e3e0995e3f0c556a5bf8d13637a40dc2d310090e2f3cc51a4b28",
+      "input_hex": "41e627d47d72c34079be1f6c35ca3b58",
+      "expected_hex": "55c73949e61b075aae7e7e05f0dd96cb",
+      "desc": "AES-256-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "b1961704ed22b370e96e0f9ca57a2b88214607345dd2a3a0591effcc152a1bb8",
+      "input_hex": "91f6f764cd8293d0c9ceeffc85da0be8",
+      "expected_hex": "f30553d74e55f2c3d4287469d9d2b8cf",
+      "desc": "AES-256-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "01a6e7943d328300397edf2cf58afb187156d7c4ade27330a92ecf5c653aeb48",
+      "input_hex": "e106c7f41d92636019debf8cd5eadb78",
+      "expected_hex": "83ac15659b29bcdde4b12728fcfacab9",
+      "desc": "AES-256-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "51b6b7248d425390898eafbc459acba8c166a754fdf243c0f93e9fecb54abbd8",
+      "input_hex": "311697846da233f069ee8f1c25faab08",
+      "expected_hex": "542e468471da3d5e04373791b6e2e753",
+      "desc": "AES-256-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "a1c687b4dd522320d99e7f4c95aa9b38117677e44d021350494e6f7c055a8b68",
+      "input_hex": "81266714bdb20380b9fe5fac750a7b98",
+      "expected_hex": "73ffd3fe9912f73c458b3fe7b08a9e39",
+      "desc": "AES-256-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "f1d657442d62f3b029ae4fdce5ba6bc8618647749d12e3e0995e3f0c556a5bf8",
+      "input_hex": "d13637a40dc2d310090e2f3cc51a4b28",
+      "expected_hex": "b38b969027d958143d8e07355c5be5e2",
+      "desc": "AES-256-ECB random",
+      "source": "pycryptodome"
+    }
+  ]
+}

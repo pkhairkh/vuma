@@ -1,0 +1,126 @@
+{
+  "module": "sha256_sha224",
+  "vector_count": 20,
+  "vectors": [
+    {
+      "input_hex": "",
+      "expected_hex": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "desc": "sha256(empty)",
+      "source": "NIST FIPS + hashlib"
+    },
+    {
+      "input_hex": "616263",
+      "expected_hex": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "desc": "sha256(NIST abc)",
+      "source": "NIST FIPS + hashlib"
+    },
+    {
+      "input_hex": "61",
+      "expected_hex": "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb",
+      "desc": "sha256(single byte)",
+      "source": "NIST FIPS + hashlib"
+    },
+    {
+      "input_hex": "6162636462636465636465666465666765666768666768696768696a68696a6b696a6b6c6a6b6c6d6b6c6d6e6c6d6e6f6d6e6f706e6f7071",
+      "expected_hex": "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+      "desc": "sha256(NIST 448-bit)",
+      "source": "NIST FIPS + hashlib"
+    },
+    {
+      "input_hex": "54686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f67",
+      "expected_hex": "d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592",
+      "desc": "sha256(pangram)",
+      "source": "NIST FIPS + hashlib"
+    },
+    {
+      "input_hex": "54686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920636f67",
+      "expected_hex": "e4c4d8f3bf76b692de791a173e05321150f7a345b46484fe427f6acc7ecc81be",
+      "desc": "sha256(1-bit diff)",
+      "source": "NIST FIPS + hashlib"
+    },
+    {
+      "input_hex": "6d65737361676520646967657374",
+      "expected_hex": "f7846f55cf23e14eebeab5b4e1550cad5b509e3348fbc4efa3a1413d393cb650",
+      "desc": "sha256(hashklash)",
+      "source": "NIST FIPS + hashlib"
+    },
+    {
+      "input_hex": "6162636465666768696a6b6c6d6e6f707172737475767778797a",
+      "expected_hex": "71c480df93d6ae2f1efad1447c66c9525e316218cf51fc8d9ed832f2daf18b73",
+      "desc": "sha256(alphabet lower)",
+      "source": "NIST FIPS + hashlib"
+    },
+    {
+      "input_hex": "4142434445464748494a4b4c4d4e4f505152535455565758595a6162636465666768696a6b6c6d6e6f707172737475767778797a30313233343536373839",
+      "expected_hex": "db4bfcbd4da0cd85a60c3c37d3fbd8805c77f15fc6b1fdfe614ee0a7c8fdb4c0",
+      "desc": "sha256(alphanumeric)",
+      "source": "NIST FIPS + hashlib"
+    },
+    {
+      "input_hex": "3132333435363738393031323334353637383930313233343536373839303132333435363738393031323334353637383930313233343536373839303132333435363738393031323334353637383930",
+      "expected_hex": "f371bc4a311f2b009eef952dd83ca80e2b60026c8e935592d0f9c308453c813e",
+      "desc": "sha256(digits x8)",
+      "source": "NIST FIPS + hashlib"
+    },
+    {
+      "input_hex": "61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+      "expected_hex": "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb",
+      "desc": "sha256(64 a's (SHA-256 block))",
+      "source": "NIST FIPS + hashlib"
+    },
+    {
+      "input_hex": "6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+      "expected_hex": "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a",
+      "desc": "sha256(56 a's (SHA-1 boundary))",
+      "source": "NIST FIPS + hashlib"
+    },
+    {
+      "input_hex": "61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+      "expected_hex": "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318",
+      "desc": "sha256(55 a's (SHA-1 edge))",
+      "source": "NIST FIPS + hashlib"
+    },
+    {
+      "input_hex": "6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+      "expected_hex": "31eba51c313a5c08226adf18d4a359cfdfd8d2e816b13f4af952f7ea6584dcfb",
+      "desc": "sha256(119 a's (SHA-512 boundary))",
+      "source": "NIST FIPS + hashlib"
+    },
+    {
+      "input_hex": "616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+      "expected_hex": "2f3d335432c70b580af0e8e1b3674a7c020d683aa5f73aaaedfdc55af904c21c",
+      "desc": "sha256(120 a's (SHA-512+1))",
+      "source": "NIST FIPS + hashlib"
+    },
+    {
+      "input_hex": "616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+      "expected_hex": "6374f73208854473827f6f6a3f43b1f53eaa3b82c21c1a6d69a2110b2a79baad",
+      "desc": "sha256(111 a's (SHA-3 boundary))",
+      "source": "NIST FIPS + hashlib"
+    },
+    {
+      "input_hex": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "expected_hex": "f5a5fd42d16a20302798ef6ed309979b43003d2320d9f0e8ea9831a92759fb4b",
+      "desc": "sha256(64 zero bytes)",
+      "source": "NIST FIPS + hashlib"
+    },
+    {
+      "input_hex": "c3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bf",
+      "expected_hex": "a646bea57d85736fcc04f58b0371ee176b77c397f1a6229b6a8b72231786e301",
+      "desc": "sha256(64 0xff bytes)",
+      "source": "NIST FIPS + hashlib"
+    },
+    {
+      "input_hex": "68656c6c6f20776f726c64",
+      "expected_hex": "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+      "desc": "sha256(common phrase)",
+      "source": "NIST FIPS + hashlib"
+    },
+    {
+      "input_hex": "4f70656e53534c206973206120726f627573742c20636f6d6d65726369616c2d67726164652c2066756c6c2d666561747572656420746f6f6c6b6974",
+      "expected_hex": "039ed41da51bf38de543c0638e29b03477357b47bcfc74a71b39c6631933733c",
+      "desc": "sha256(longer text)",
+      "source": "NIST FIPS + hashlib"
+    }
+  ]
+}

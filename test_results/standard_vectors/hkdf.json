@@ -1,0 +1,166 @@
+{
+  "module": "hkdf",
+  "vector_count": 20,
+  "vectors": [
+    {
+      "key_hex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+      "input_hex": "f0f1f2f3f4f5f6f7f8f9",
+      "expected_hex": "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865",
+      "desc": "RFC5869 Case 1",
+      "source": "RFC 5869",
+      "length": 42
+    },
+    {
+      "key_hex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+      "input_hex": "",
+      "expected_hex": "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8",
+      "desc": "RFC5869 Case 2",
+      "source": "RFC 5869",
+      "length": 42
+    },
+    {
+      "key_hex": "c4ade27330a92ecf5c653aeb48e106c7f41d92636019debf8cd5eadb7851b6b7248d425390898e",
+      "input_hex": "ecb54abbd8311697846da233f069ee",
+      "expected_hex": "54c8fdb2c47e222ec3c5b5304bfd873a1c9b9fa8173dc304fdb86389202048b8ab8153a45cd8fdcc8a66ea8683dfc9ef58b6187c0133c1c9b0fd54d21c771b",
+      "desc": "HKDF-sha256 (L=63)",
+      "source": "cryptography",
+      "length": 63
+    },
+    {
+      "key_hex": "25faab08a1c687b4dd522320d99e7f4c95aa9b38117677e44d021350494e6f7c055a8b6881266714bdb20380",
+      "input_hex": "442d62f3b029ae",
+      "expected_hex": "39a27369952717aeb5103a325176abd7f2fefd82ff1c634aae218d0db13b60414ec49a178b74c3a3d35c7b0cc2ec2a",
+      "desc": "HKDF-sha256 (L=47)",
+      "source": "cryptography",
+      "length": 47
+    },
+    {
+      "key_hex": "e5ba6bc8618647749d12e3e0995e3f0c556a5bf8d13637a40dc2d310090e2f3cc51a4b2841e627d47d72c340",
+      "input_hex": "04ed22b370e96e",
+      "expected_hex": "2b235b4c98eda840342e6864adf3903b95b84699b9c708dcb5699c7783f5f3",
+      "desc": "HKDF-sha256 (L=31)",
+      "source": "cryptography",
+      "length": 31
+    },
+    {
+      "key_hex": "a57a2b88214607345dd2a3a0591effcc152a1bb891f6f764cd8293d0c9ceeffc85da0be801a6e7943d328300",
+      "input_hex": "c4ade27330a92e",
+      "expected_hex": "17a9712f5cec0e7b845e1bc8793e749ff3cabee320f442252bd3e61b6240b0",
+      "desc": "HKDF-sha256 (L=31)",
+      "source": "cryptography",
+      "length": 31
+    },
+    {
+      "key_hex": "653aeb48e106c7f41d92636019debf8cd5eadb7851b6b7248d425390898eafbc459acba8c166a754fdf243c0",
+      "input_hex": "846da233f069ee",
+      "expected_hex": "82b54c871808a3b231faa83d788a3eba86d44a98f784415aac8f16e56f68e95304f86a2d52065375365aa00bf5e7bee385a0e81aab0e6d053e49d4b3a5e84c",
+      "desc": "HKDF-sha256 (L=63)",
+      "source": "cryptography",
+      "length": 63
+    },
+    {
+      "key_hex": "25faab08a1c687b4dd522320d99e7f4c95aa9b38117677e44d021350494e6f7c055a8b6881266714bdb20380",
+      "input_hex": "442d62f3b029ae",
+      "expected_hex": "39a27369952717aeb5103a325176abd7f2fefd82ff1c634aae218d0db13b60414ec49a178b74c3a3d35c7b0cc2ec2a",
+      "desc": "HKDF-sha256 (L=47)",
+      "source": "cryptography",
+      "length": 47
+    },
+    {
+      "key_hex": "e5ba6bc8618647749d12e3e0995e3f0c556a5bf8d13637a40dc2d310090e2f3cc51a4b2841e627d47d72c340",
+      "input_hex": "04ed22b370e96e",
+      "expected_hex": "2b235b4c98eda840342e6864adf3903b95b84699b9c708dcb5699c7783f5f3",
+      "desc": "HKDF-sha256 (L=31)",
+      "source": "cryptography",
+      "length": 31
+    },
+    {
+      "key_hex": "a57a2b88214607345dd2a3a0591effcc152a1bb891f6f764cd8293d0c9ceeffc85da0be801a6e7943d328300",
+      "input_hex": "c4ade27330a92e",
+      "expected_hex": "17a9712f5cec0e7b845e1bc8793e749ff3cabee320f442252bd3e61b6240b0",
+      "desc": "HKDF-sha256 (L=31)",
+      "source": "cryptography",
+      "length": 31
+    },
+    {
+      "key_hex": "653aeb48e106c7f41d92636019debf8cd5eadb7851b6b7248d425390898eafbc459acba8c166a754fdf243c0",
+      "input_hex": "846da233f069ee",
+      "expected_hex": "82b54c871808a3b231faa83d788a3eba86d44a98f784415aac8f16e56f68e95304f86a2d52065375365aa00bf5e7bee385a0e81aab0e6d053e49d4b3a5e84c",
+      "desc": "HKDF-sha256 (L=63)",
+      "source": "cryptography",
+      "length": 63
+    },
+    {
+      "key_hex": "25faab08a1c687b4dd522320d99e7f4c95aa9b38117677e44d021350494e6f7c055a8b6881266714bdb20380",
+      "input_hex": "442d62f3b029ae",
+      "expected_hex": "39a27369952717aeb5103a325176abd7f2fefd82ff1c634aae218d0db13b60414ec49a178b74c3a3d35c7b0cc2ec2a",
+      "desc": "HKDF-sha256 (L=47)",
+      "source": "cryptography",
+      "length": 47
+    },
+    {
+      "key_hex": "e5ba6bc8618647749d12e3e0995e3f0c556a5bf8d13637a40dc2d310090e2f3cc51a4b2841e627d47d72c340",
+      "input_hex": "04ed22b370e96e",
+      "expected_hex": "2b235b4c98eda840342e6864adf3903b95b84699b9c708dcb5699c7783f5f3",
+      "desc": "HKDF-sha256 (L=31)",
+      "source": "cryptography",
+      "length": 31
+    },
+    {
+      "key_hex": "a57a2b88214607345dd2a3a0591effcc152a1bb891f6f764cd8293d0c9ceeffc85da0be801a6e7943d328300",
+      "input_hex": "c4ade27330a92e",
+      "expected_hex": "17a9712f5cec0e7b845e1bc8793e749ff3cabee320f442252bd3e61b6240b0",
+      "desc": "HKDF-sha256 (L=31)",
+      "source": "cryptography",
+      "length": 31
+    },
+    {
+      "key_hex": "653aeb48e106c7f41d92636019debf8cd5eadb7851b6b7248d425390898eafbc459acba8c166a754fdf243c0",
+      "input_hex": "846da233f069ee",
+      "expected_hex": "82b54c871808a3b231faa83d788a3eba86d44a98f784415aac8f16e56f68e95304f86a2d52065375365aa00bf5e7bee385a0e81aab0e6d053e49d4b3a5e84c",
+      "desc": "HKDF-sha256 (L=63)",
+      "source": "cryptography",
+      "length": 63
+    },
+    {
+      "key_hex": "25faab08a1c687b4dd522320d99e7f4c95aa9b38117677e44d021350494e6f7c055a8b6881266714bdb20380",
+      "input_hex": "442d62f3b029ae",
+      "expected_hex": "39a27369952717aeb5103a325176abd7f2fefd82ff1c634aae218d0db13b60414ec49a178b74c3a3d35c7b0cc2ec2a",
+      "desc": "HKDF-sha256 (L=47)",
+      "source": "cryptography",
+      "length": 47
+    },
+    {
+      "key_hex": "e5ba6bc8618647749d12e3e0995e3f0c556a5bf8d13637a40dc2d310090e2f3cc51a4b2841e627d47d72c340",
+      "input_hex": "04ed22b370e96e",
+      "expected_hex": "2b235b4c98eda840342e6864adf3903b95b84699b9c708dcb5699c7783f5f3",
+      "desc": "HKDF-sha256 (L=31)",
+      "source": "cryptography",
+      "length": 31
+    },
+    {
+      "key_hex": "a57a2b88214607345dd2a3a0591effcc152a1bb891f6f764cd8293d0c9ceeffc85da0be801a6e7943d328300",
+      "input_hex": "c4ade27330a92e",
+      "expected_hex": "17a9712f5cec0e7b845e1bc8793e749ff3cabee320f442252bd3e61b6240b0",
+      "desc": "HKDF-sha256 (L=31)",
+      "source": "cryptography",
+      "length": 31
+    },
+    {
+      "key_hex": "653aeb48e106c7f41d92636019debf8cd5eadb7851b6b7248d425390898eafbc459acba8c166a754fdf243c0",
+      "input_hex": "846da233f069ee",
+      "expected_hex": "82b54c871808a3b231faa83d788a3eba86d44a98f784415aac8f16e56f68e95304f86a2d52065375365aa00bf5e7bee385a0e81aab0e6d053e49d4b3a5e84c",
+      "desc": "HKDF-sha256 (L=63)",
+      "source": "cryptography",
+      "length": 63
+    },
+    {
+      "key_hex": "25faab08a1c687b4dd522320d99e7f4c95aa9b38117677e44d021350494e6f7c055a8b6881266714bdb20380",
+      "input_hex": "442d62f3b029ae",
+      "expected_hex": "39a27369952717aeb5103a325176abd7f2fefd82ff1c634aae218d0db13b60414ec49a178b74c3a3d35c7b0cc2ec2a",
+      "desc": "HKDF-sha256 (L=47)",
+      "source": "cryptography",
+      "length": 47
+    }
+  ]
+}

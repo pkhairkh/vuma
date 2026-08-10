@@ -1,0 +1,88 @@
+name: Vector Lint
+
+permissions:
+  contents: read
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - uses: geomys/sandboxed-step@v1.2.1
+        with:
+          run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+  gostaticcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - uses: geomys/sandboxed-step@v1.2.1
+        with:
+          run: go run honnef.co/go/tools/cmd/staticcheck@latest ./...
+  golint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Check if modules are tidy
+        run: |
+          go mod tidy
+          if [ -n "$(git status --porcelain go.mod go.sum)" ]; then
+            echo "go.mod or go.sum are not tidy. Please run 'go mod tidy' locally and commit changes."
+            git diff go.mod go.sum
+            exit 1
+          fi
+
+      - name: Verify Go formatting
+        # 'gofmt -l .' to list files whose formatting differs from gofmt's
+        # 'test -z' to verify that the output is empty
+        run: test -z "$(gofmt -l .)"
+  vectorlint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Verify JSON formatting
+        run: ./tools/reformat_json.py && git diff --exit-code
+
+      - name: Run vectorlint
+        run: go run ./tools/vectorlint
+
+      - name: Run twistcheck
+        run: go run ./tools/twistcheck
+
+      - name: Run schemagen
+        run: go run ./tools/schemagen

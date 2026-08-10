@@ -1,0 +1,146 @@
+{
+  "module": "hmac",
+  "vector_count": 20,
+  "vectors": [
+    {
+      "key_hex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+      "input_hex": "4869205468657265",
+      "expected_hex": "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+      "desc": "RFC4231 Case 1 (20-byte key)",
+      "source": "RFC 4231"
+    },
+    {
+      "key_hex": "4a656665",
+      "input_hex": "7768617420646f2079612077616e7420666f72206e6f7468696e673f",
+      "expected_hex": "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
+      "desc": "RFC4231 Case 2 (Jefe)",
+      "source": "RFC 4231"
+    },
+    {
+      "key_hex": "c2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aa",
+      "input_hex": "c39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39dc39d",
+      "expected_hex": "bb861233f283aef2ef7aea09785245c9f3c62720c9d04e0c232789f27a586e44",
+      "desc": "RFC4231 Case 3 (50 0xdd)",
+      "source": "RFC 4231"
+    },
+    {
+      "key_hex": "0102030405060708090a0b0c0d0e0f10111213141516171819",
+      "input_hex": "c38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38dc38d",
+      "expected_hex": "4988492ffca135453dd3ee0c568c8f2fd1c703f29951e059491f2d8bc403a047",
+      "desc": "RFC4231 Case 4 (25-byte key)",
+      "source": "RFC 4231"
+    },
+    {
+      "key_hex": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+      "input_hex": "546573742057697468205472756e636174696f6e",
+      "expected_hex": "a3b6167473100ee06e0c796c2955552bfa6f7c0a6a8aef8b93f860aab0cd20c5",
+      "desc": "RFC4231 Case 5",
+      "source": "RFC 4231"
+    },
+    {
+      "key_hex": "c2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aa",
+      "input_hex": "54657374205573696e67204c6172676572205468616e20426c6f636b2d53697a65204b6579202d2048617368204b6579204669727374",
+      "expected_hex": "936d986e40c610341e6084ea547f22261b9d459052dd613aaf52faf925299dc2",
+      "desc": "RFC4231 Case 6",
+      "source": "RFC 4231"
+    },
+    {
+      "key_hex": "c2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aa",
+      "input_hex": "5468697320697320612074657374207573696e672061206c6172676572207468616e20626c6f636b2d73697a65206b657920616e642061206c6172676572207468616e20626c6f636b2d73697a6520646174612e20546865206b6579206e6565647320746f20626520686173686564206265666f7265206265696e6720757365642062792074686520484d414320616c676f726974686d2e",
+      "expected_hex": "a123e24f94bb131283182a203242425914f42b5d53c26e77f56474af23c1d0bc",
+      "desc": "RFC4231 Case 7",
+      "source": "RFC 4231"
+    },
+    {
+      "key_hex": "",
+      "input_hex": "",
+      "expected_hex": "b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad",
+      "desc": "empty",
+      "source": "hashlib"
+    },
+    {
+      "key_hex": "6b6579",
+      "input_hex": "6d7367",
+      "expected_hex": "2d93cbc1be167bcb1637a4a23cbff01a7878f0c50ee833954ea5221bb1b8c628",
+      "desc": "short",
+      "source": "hashlib"
+    },
+    {
+      "key_hex": "736563726574",
+      "input_hex": "64617461",
+      "expected_hex": "1b2c16b75bd2a870c114153ccda5bcfca63314bc722fa160d690de133ccbb9db",
+      "desc": "typical",
+      "source": "hashlib"
+    },
+    {
+      "key_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "input_hex": "7a65726f2d6b6579",
+      "expected_hex": "010197f60635495526103b589c7a86a33346645e7acd69d11d30728a3bd6a586",
+      "desc": "32B zero key",
+      "source": "hashlib"
+    },
+    {
+      "key_hex": "c3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bf",
+      "input_hex": "66662d6b6579",
+      "expected_hex": "8266a033f521287591c5fec97eeb37582e01cb07025730ac61126f6753818faf",
+      "desc": "32B ff key",
+      "source": "hashlib"
+    },
+    {
+      "key_hex": "61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+      "input_hex": "626c6f636b2d6b6579",
+      "expected_hex": "115ab00313126744e52aff2e297d2291b8704b982d8e98201cacb28dc3c5da4f",
+      "desc": "64B key",
+      "source": "hashlib"
+    },
+    {
+      "key_hex": "6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+      "input_hex": "32782d626c6f636b2d6b6579",
+      "expected_hex": "ad8a10c8d8ab86e0acd42c3630b9d0b18c1097b799c4f878bf562170c6fbf04f",
+      "desc": "128B key",
+      "source": "hashlib"
+    },
+    {
+      "key_hex": "01010101010101010101010101010101",
+      "input_hex": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
+      "expected_hex": "9c657709306085adb7018f4e8c7ed236203966e46635614e475a0bb6947d8b75",
+      "desc": "16B key+64B msg",
+      "source": "hashlib"
+    },
+    {
+      "key_hex": "74657374206b6579",
+      "input_hex": "74657374206d657373616765",
+      "expected_hex": "038334a2f762587699e66b1d0c56ebbed0a1170648a086914951a6bfc6e63ed7",
+      "desc": "text",
+      "source": "hashlib"
+    },
+    {
+      "key_hex": "4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b",
+      "input_hex": "44444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444",
+      "expected_hex": "b00c6435d3ed99599b2f0c76424dcf7a8387717dd5bfa1cf5c94ee2352dd08f3",
+      "desc": "40B key+100B msg",
+      "source": "hashlib"
+    },
+    {
+      "key_hex": "6b6579313233",
+      "input_hex": "6d657373616765343536",
+      "expected_hex": "8f465085ae3bcf07b1aaa429166fc018e5a031d66a0c69f5259af628f78c1469",
+      "desc": "alnum",
+      "source": "hashlib"
+    },
+    {
+      "key_hex": "c2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aac2aa",
+      "input_hex": "6d7367",
+      "expected_hex": "30dac98dcea4f8b902dab7d64e06899837eb1b986e89f006b05712c58401bf66",
+      "desc": "20B aa key",
+      "source": "hashlib"
+    },
+    {
+      "key_hex": "6c6f6e6765726b657976616c7565313233",
+      "input_hex": "64617461",
+      "expected_hex": "ca3451cc30a116d8c64c57a73a0f9cf7974b68442e7ed5a4cb20545d4535c00b",
+      "desc": "medium key",
+      "source": "hashlib"
+    }
+  ]
+}

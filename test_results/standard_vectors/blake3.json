@@ -1,0 +1,126 @@
+{
+  "module": "blake3",
+  "vector_count": 20,
+  "vectors": [
+    {
+      "input_hex": "",
+      "expected_hex": "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+      "desc": "blake3(empty)",
+      "source": "blake3 crate"
+    },
+    {
+      "input_hex": "616263",
+      "expected_hex": "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85",
+      "desc": "blake3(NIST abc)",
+      "source": "blake3 crate"
+    },
+    {
+      "input_hex": "61",
+      "expected_hex": "17762fddd969a453925d65717ac3eea21320b66b54342fde15128d6caf21215f",
+      "desc": "blake3(single byte)",
+      "source": "blake3 crate"
+    },
+    {
+      "input_hex": "6162636462636465636465666465666765666768666768696768696a68696a6b696a6b6c6a6b6c6d6b6c6d6e6c6d6e6f6d6e6f706e6f7071",
+      "expected_hex": "c19012cc2aaf0dc3d8e5c45a1b79114d2df42abb2a410bf54be09e891af06ff8",
+      "desc": "blake3(NIST 448-bit)",
+      "source": "blake3 crate"
+    },
+    {
+      "input_hex": "54686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f67",
+      "expected_hex": "2f1514181aadccd913abd94cfa592701a5686ab23f8df1dff1b74710febc6d4a",
+      "desc": "blake3(pangram)",
+      "source": "blake3 crate"
+    },
+    {
+      "input_hex": "54686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920636f67",
+      "expected_hex": "dcfa146b91a62f797fd3f82c7fb948dee6b5c14711ecfad94587938e200c1f43",
+      "desc": "blake3(1-bit diff)",
+      "source": "blake3 crate"
+    },
+    {
+      "input_hex": "6d65737361676520646967657374",
+      "expected_hex": "7bc2a2eeb95ddbf9b7ecf6adcb76b453091c58dc43955e1d9482b1942f08d19b",
+      "desc": "blake3(hashklash)",
+      "source": "blake3 crate"
+    },
+    {
+      "input_hex": "6162636465666768696a6b6c6d6e6f707172737475767778797a",
+      "expected_hex": "2468eec8894acfb4e4df3a51ea916ba115d48268287754290aae8e9e6228e85f",
+      "desc": "blake3(alphabet lower)",
+      "source": "blake3 crate"
+    },
+    {
+      "input_hex": "4142434445464748494a4b4c4d4e4f505152535455565758595a6162636465666768696a6b6c6d6e6f707172737475767778797a30313233343536373839",
+      "expected_hex": "8bee3200baa9f3a1acd279f049f914f110e730555ff15109bd59cdd73895e239",
+      "desc": "blake3(alphanumeric)",
+      "source": "blake3 crate"
+    },
+    {
+      "input_hex": "3132333435363738393031323334353637383930313233343536373839303132333435363738393031323334353637383930313233343536373839303132333435363738393031323334353637383930",
+      "expected_hex": "f263acf51621980b9c8de5da4a17d314984e05abe4a21cc83a07fe3e1e366dd1",
+      "desc": "blake3(digits x8)",
+      "source": "blake3 crate"
+    },
+    {
+      "input_hex": "61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+      "expected_hex": "472c51290d607f100d2036fdcedd7590bba245e9adeb21364a063b7bb4ca81c7",
+      "desc": "blake3(64 a's (SHA-256 block))",
+      "source": "blake3 crate"
+    },
+    {
+      "input_hex": "6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+      "expected_hex": "86dd7cd514f2b1f6aaa34688ead22746f453e9d9ddeeca1ef124477507aefc9f",
+      "desc": "blake3(56 a's (SHA-1 boundary))",
+      "source": "blake3 crate"
+    },
+    {
+      "input_hex": "61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+      "expected_hex": "8e0494b8aa1fa7fc245b4de5ecfb343f35550e6cc3c051e1e872c4a0a4105f83",
+      "desc": "blake3(55 a's (SHA-1 edge))",
+      "source": "blake3 crate"
+    },
+    {
+      "input_hex": "6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+      "expected_hex": "bd2e1189ff4e612ba158590660947d72eb56cf8fc6eed02bb8c429be01ebda77",
+      "desc": "blake3(119 a's (SHA-512 boundary))",
+      "source": "blake3 crate"
+    },
+    {
+      "input_hex": "616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+      "expected_hex": "8bd72bfb5a86d6e97c01aba583b73794fb37d768b86c525867ceae66efd90bf0",
+      "desc": "blake3(120 a's (SHA-512+1))",
+      "source": "blake3 crate"
+    },
+    {
+      "input_hex": "616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+      "expected_hex": "e7f1ec23cc83137440c010ce04476a7a543e942b2617a1c3aa2f5199edf076ac",
+      "desc": "blake3(111 a's (SHA-3 boundary))",
+      "source": "blake3 crate"
+    },
+    {
+      "input_hex": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "expected_hex": "4d006976636a8696d909a630a4081aad4d7c50f81afdee04020bf05086ab6a55",
+      "desc": "blake3(64 zero bytes)",
+      "source": "blake3 crate"
+    },
+    {
+      "input_hex": "c3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bf",
+      "expected_hex": "ec645fba6bfdd677b0d14375359cf4597cf76483a44a1bb245c39b769b791428",
+      "desc": "blake3(64 0xff bytes)",
+      "source": "blake3 crate"
+    },
+    {
+      "input_hex": "68656c6c6f20776f726c64",
+      "expected_hex": "d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24",
+      "desc": "blake3(common phrase)",
+      "source": "blake3 crate"
+    },
+    {
+      "input_hex": "4f70656e53534c206973206120726f627573742c20636f6d6d65726369616c2d67726164652c2066756c6c2d666561747572656420746f6f6c6b6974",
+      "expected_hex": "f6b394b814605ce5ead74d6ec93ac7805d0e907cbad484888e91b95f18895b7a",
+      "desc": "blake3(longer text)",
+      "source": "blake3 crate"
+    }
+  ]
+}

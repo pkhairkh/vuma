@@ -1,0 +1,106 @@
+{
+  "type": "object",
+  "definitions": {
+    "XdhJwkTestGroup": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "enum": [
+            "XdhJwkComp"
+          ]
+        },
+        "source": {
+          "$ref": "common.json#/definitions/Source"
+        },
+        "curve": {
+          "type": "string",
+          "description": "the name of the curve"
+        },
+        "tests": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/XdhJwkTestVector"
+          }
+        }
+      },
+      "required": ["type", "source", "curve", "tests"],
+      "additionalProperties": false
+    },
+    "XdhJwkTestVector": {
+      "type": "object",
+      "properties": {
+        "tcId": {
+          "type": "integer",
+          "description": "Identifier of the test case"
+        },
+        "comment": {
+          "type": "string",
+          "description": "A brief description of the test case"
+        },
+        "public": {
+          "$ref": "json_web_crypto_common.json#/definitions/JsonWebKey",
+          "description": "the public key in jwk format"
+        },
+        "private": {
+          "$ref": "json_web_crypto_common.json#/definitions/JsonWebKey",
+          "description": "the private key in jwk format"
+        },
+        "shared": {
+          "type": "string",
+          "format": "HexBytes",
+          "description": "the shared secret"
+        },
+        "result": {
+          "$ref": "common.json#/definitions/Result"
+        },
+        "flags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "A list of flags"
+        }
+      },
+      "required": ["tcId", "comment", "public", "private", "shared", "result", "flags"],
+      "additionalProperties": false
+    }
+  },
+  "properties": {
+    "algorithm": {
+      "type": "string",
+      "description": "the primitive tested in the test file"
+    },
+    "generatorVersion": {
+      "type": "string",
+      "description": "DEPRECATED: prefer \"source\" property in test group",
+      "deprecated": true
+    },
+    "header": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "additional documentation"
+    },
+    "notes": {
+      "$ref": "common.json#/definitions/Notes"
+    },
+    "numberOfTests": {
+      "type": "integer",
+      "description": "the number of test vectors in this test"
+    },
+    "schema": {
+      "enum": [
+        "xdh_jwk_comp_schema_v1.json"
+      ]
+    },
+    "testGroups": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/XdhJwkTestGroup"
+      }
+    }
+  },
+  "required": ["algorithm", "header", "notes", "numberOfTests", "schema", "testGroups"],
+  "additionalProperties": false
+}

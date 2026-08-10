@@ -1,0 +1,82 @@
+{
+  "type": "object",
+  "definitions": {
+    "DsaTestGroup": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "enum": [
+            "DsaVerify"
+          ]
+        },
+        "source": {
+          "$ref": "common.json#/definitions/Source"
+        },
+        "publicKey": {
+          "$ref": "dsa_common.json#/definitions/DsaPublicKey",
+          "description": "unenocded DSA public key"
+        },
+        "publicKeyDer": {
+          "type": "string",
+          "format": "Der",
+          "description": "DER encoded public key"
+        },
+        "publicKeyPem": {
+          "type": "string",
+          "format": "Pem",
+          "description": "Pem encoded public key"
+        },
+        "sha": {
+          "type": "string",
+          "description": "the hash function used for DSA"
+        },
+        "tests": {
+          "type": "array",
+          "items": {
+            "$ref": "signatures_common.json#/definitions/AsnSignatureTestVector"
+          }
+        }
+      },
+      "required": ["type", "source", "publicKey", "publicKeyDer", "publicKeyPem", "sha", "tests"],
+      "additionalProperties": false
+    }
+  },
+  "properties": {
+    "algorithm": {
+      "type": "string",
+      "description": "the primitive tested in the test file"
+    },
+    "generatorVersion": {
+      "type": "string",
+      "description": "DEPRECATED: prefer \"source\" property in test group",
+      "deprecated": true
+    },
+    "header": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "additional documentation"
+    },
+    "notes": {
+      "$ref": "common.json#/definitions/Notes"
+    },
+    "numberOfTests": {
+      "type": "integer",
+      "description": "the number of test vectors in this test"
+    },
+    "schema": {
+      "enum": [
+        "dsa_verify_schema_v1.json"
+      ]
+    },
+    "testGroups": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/DsaTestGroup"
+      }
+    }
+  },
+  "required": ["algorithm", "header", "notes", "numberOfTests", "schema", "testGroups"],
+  "additionalProperties": false
+}

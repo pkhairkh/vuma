@@ -1,0 +1,146 @@
+{
+  "module": "poly1305",
+  "vector_count": 20,
+  "vectors": [
+    {
+      "key_hex": "85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b",
+      "input_hex": "43727970746f6772617068696320466f72756d2052657365617263682047726f7570",
+      "expected_hex": "a8061dc1305136c6c22b8baf0c0127a9",
+      "desc": "RFC 8439 Section 2.5.2",
+      "source": "RFC 8439"
+    },
+    {
+      "key_hex": "b6b7248d425390898eafbc459acba8c166a754fdf243c0f93e9fecb54abbd831",
+      "input_hex": "97846da233f069ee8f1c25faab08a1c687b4dd522320d9",
+      "expected_hex": "1afad11a5ad8724949b2bbf75353cabb",
+      "desc": "Poly1305 random (len=23)",
+      "source": "cryptography"
+    },
+    {
+      "key_hex": "9e7f4c95aa9b38117677e44d021350494e6f7c055a8b6881266714bdb20380b9",
+      "input_hex": "5fac750a7b98f1d657442d62f3b029ae4fdce5ba6bc8618647749d12e3e0995e3f0c556a5bf8d13637a40dc2d310090e2f3cc51a4b2841e627d47d72c34079",
+      "expected_hex": "1c239d50d2b5614558357a879fd36ccc",
+      "desc": "Poly1305 random (len=63)",
+      "source": "cryptography"
+    },
+    {
+      "key_hex": "be1f6c35ca3b58b1961704ed22b370e96e0f9ca57a2b88214607345dd2a3a059",
+      "input_hex": "ffcc152a1bb891f6f764cd8293d0c9ceeffc85da0be801a6e7943d32830039",
+      "expected_hex": "68138d508a5da30b4abec8c0f937dd08",
+      "desc": "Poly1305 random (len=31)",
+      "source": "cryptography"
+    },
+    {
+      "key_hex": "7edf2cf58afb187156d7c4ade27330a92ecf5c653aeb48e106c7f41d92636019",
+      "input_hex": "bf8cd5eadb7851b6b7248d425390898eafbc459acba8c166a754fdf243c0f9",
+      "expected_hex": "e77da4c0727f7fdd89f2b51f169f33e7",
+      "desc": "Poly1305 random (len=31)",
+      "source": "cryptography"
+    },
+    {
+      "key_hex": "3e9fecb54abbd8311697846da233f069ee8f1c25faab08a1c687b4dd522320d9",
+      "input_hex": "7f4c95aa9b38117677e44d021350494e6f7c055a8b6881266714bdb20380b9",
+      "expected_hex": "d0cae894e779f22a4c0903baa98e1d2b",
+      "desc": "Poly1305 random (len=31)",
+      "source": "cryptography"
+    },
+    {
+      "key_hex": "fe5fac750a7b98f1d657442d62f3b029ae4fdce5ba6bc8618647749d12e3e099",
+      "input_hex": "3f0c556a5bf8d13637a40dc2d310090e2f3cc51a4b2841e627d47d72c34079",
+      "expected_hex": "30139da77aefb35c9ef3b457f280f472",
+      "desc": "Poly1305 random (len=31)",
+      "source": "cryptography"
+    },
+    {
+      "key_hex": "be1f6c35ca3b58b1961704ed22b370e96e0f9ca57a2b88214607345dd2a3a059",
+      "input_hex": "ffcc152a1bb891f6f764cd8293d0c9ceeffc85da0be801a6e7943d32830039",
+      "expected_hex": "68138d508a5da30b4abec8c0f937dd08",
+      "desc": "Poly1305 random (len=31)",
+      "source": "cryptography"
+    },
+    {
+      "key_hex": "7edf2cf58afb187156d7c4ade27330a92ecf5c653aeb48e106c7f41d92636019",
+      "input_hex": "bf8cd5eadb7851b6b7248d425390898eafbc459acba8c166a754fdf243c0f9",
+      "expected_hex": "e77da4c0727f7fdd89f2b51f169f33e7",
+      "desc": "Poly1305 random (len=31)",
+      "source": "cryptography"
+    },
+    {
+      "key_hex": "3e9fecb54abbd8311697846da233f069ee8f1c25faab08a1c687b4dd522320d9",
+      "input_hex": "7f4c95aa9b38117677e44d021350494e6f7c055a8b6881266714bdb20380b9",
+      "expected_hex": "d0cae894e779f22a4c0903baa98e1d2b",
+      "desc": "Poly1305 random (len=31)",
+      "source": "cryptography"
+    },
+    {
+      "key_hex": "fe5fac750a7b98f1d657442d62f3b029ae4fdce5ba6bc8618647749d12e3e099",
+      "input_hex": "3f0c556a5bf8d13637a40dc2d310090e2f3cc51a4b2841e627d47d72c34079",
+      "expected_hex": "30139da77aefb35c9ef3b457f280f472",
+      "desc": "Poly1305 random (len=31)",
+      "source": "cryptography"
+    },
+    {
+      "key_hex": "be1f6c35ca3b58b1961704ed22b370e96e0f9ca57a2b88214607345dd2a3a059",
+      "input_hex": "ffcc152a1bb891f6f764cd8293d0c9ceeffc85da0be801a6e7943d32830039",
+      "expected_hex": "68138d508a5da30b4abec8c0f937dd08",
+      "desc": "Poly1305 random (len=31)",
+      "source": "cryptography"
+    },
+    {
+      "key_hex": "7edf2cf58afb187156d7c4ade27330a92ecf5c653aeb48e106c7f41d92636019",
+      "input_hex": "bf8cd5eadb7851b6b7248d425390898eafbc459acba8c166a754fdf243c0f9",
+      "expected_hex": "e77da4c0727f7fdd89f2b51f169f33e7",
+      "desc": "Poly1305 random (len=31)",
+      "source": "cryptography"
+    },
+    {
+      "key_hex": "3e9fecb54abbd8311697846da233f069ee8f1c25faab08a1c687b4dd522320d9",
+      "input_hex": "7f4c95aa9b38117677e44d021350494e6f7c055a8b6881266714bdb20380b9",
+      "expected_hex": "d0cae894e779f22a4c0903baa98e1d2b",
+      "desc": "Poly1305 random (len=31)",
+      "source": "cryptography"
+    },
+    {
+      "key_hex": "fe5fac750a7b98f1d657442d62f3b029ae4fdce5ba6bc8618647749d12e3e099",
+      "input_hex": "3f0c556a5bf8d13637a40dc2d310090e2f3cc51a4b2841e627d47d72c34079",
+      "expected_hex": "30139da77aefb35c9ef3b457f280f472",
+      "desc": "Poly1305 random (len=31)",
+      "source": "cryptography"
+    },
+    {
+      "key_hex": "be1f6c35ca3b58b1961704ed22b370e96e0f9ca57a2b88214607345dd2a3a059",
+      "input_hex": "ffcc152a1bb891f6f764cd8293d0c9ceeffc85da0be801a6e7943d32830039",
+      "expected_hex": "68138d508a5da30b4abec8c0f937dd08",
+      "desc": "Poly1305 random (len=31)",
+      "source": "cryptography"
+    },
+    {
+      "key_hex": "7edf2cf58afb187156d7c4ade27330a92ecf5c653aeb48e106c7f41d92636019",
+      "input_hex": "bf8cd5eadb7851b6b7248d425390898eafbc459acba8c166a754fdf243c0f9",
+      "expected_hex": "e77da4c0727f7fdd89f2b51f169f33e7",
+      "desc": "Poly1305 random (len=31)",
+      "source": "cryptography"
+    },
+    {
+      "key_hex": "3e9fecb54abbd8311697846da233f069ee8f1c25faab08a1c687b4dd522320d9",
+      "input_hex": "7f4c95aa9b38117677e44d021350494e6f7c055a8b6881266714bdb20380b9",
+      "expected_hex": "d0cae894e779f22a4c0903baa98e1d2b",
+      "desc": "Poly1305 random (len=31)",
+      "source": "cryptography"
+    },
+    {
+      "key_hex": "fe5fac750a7b98f1d657442d62f3b029ae4fdce5ba6bc8618647749d12e3e099",
+      "input_hex": "3f0c556a5bf8d13637a40dc2d310090e2f3cc51a4b2841e627d47d72c34079",
+      "expected_hex": "30139da77aefb35c9ef3b457f280f472",
+      "desc": "Poly1305 random (len=31)",
+      "source": "cryptography"
+    },
+    {
+      "key_hex": "be1f6c35ca3b58b1961704ed22b370e96e0f9ca57a2b88214607345dd2a3a059",
+      "input_hex": "ffcc152a1bb891f6f764cd8293d0c9ceeffc85da0be801a6e7943d32830039",
+      "expected_hex": "68138d508a5da30b4abec8c0f937dd08",
+      "desc": "Poly1305 random (len=31)",
+      "source": "cryptography"
+    }
+  ]
+}

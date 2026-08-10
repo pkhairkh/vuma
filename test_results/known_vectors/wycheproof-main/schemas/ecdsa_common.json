@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "EcPublicKey": {
+      "type": "object",
+      "properties": {
+        "curve": {
+          "type": "string",
+          "description": "the EC group used by this public key"
+        },
+        "keySize": {
+          "type": "integer",
+          "description": "the key size in bits"
+        },
+        "type": {
+          "type": "string",
+          "description": "the key type",
+          "enum": [
+            "EcPublicKey"
+          ]
+        },
+        "uncompressed": {
+          "type": "string",
+          "format": "HexBytes",
+          "description": "encoded public key point"
+        },
+        "wx": {
+          "type": "string",
+          "format": "BigInt",
+          "description": "the x-coordinate of the public key point"
+        },
+        "wy": {
+          "type": "string",
+          "format": "BigInt",
+          "description": "the y-coordinate of the public key point"
+        }
+      },
+      "required": ["curve", "keySize", "type", "uncompressed", "wx", "wy"],
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,166 @@
+{
+  "module": "salsa20",
+  "vector_count": 20,
+  "vectors": [
+    {
+      "key_hex": "30a92ecf5c653aeb48e106c7f41d92636019debf8cd5eadb7851b6b7248d4253",
+      "input_hex": "c166a754fdf243c0f93e9fecb54abbd8311697846da233f069ee8f1c25faab08a1c687b4dd522320",
+      "expected_hex": "722e50adce3cc3c95de0efa59249d923cd0ad9a7b4b696326fa8412020a9f988361c10c604352aeb",
+      "iv_hex": "90898eafbc459acb",
+      "desc": "Salsa20 random (len=40)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "d99e7f4c95aa9b38117677e44d021350494e6f7c055a8b6881266714bdb20380",
+      "input_hex": "d657442d62f3b029ae4fdce5ba6bc86186",
+      "expected_hex": "7fa3ed3cdabe260c1efbaee99a7b2df5ab",
+      "iv_hex": "b9fe5fac750a7b98",
+      "desc": "Salsa20 random (len=17)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "47749d12e3e0995e3f0c556a5bf8d13637a40dc2d310090e2f3cc51a4b2841e6",
+      "input_hex": "6c35ca3b58b1961704ed22b370e96e0f9ca57a2b88214607345dd2a3a0591effcc152a1bb891f6f764cd8293d0c9ce",
+      "expected_hex": "c61b0369e63f49e6892f27d20a83b53e5da4d6ca3ca2735fe0e7ea5c6b990016d9bc66e856c97bb98dfea572759966",
+      "iv_hex": "27d47d72c34079be",
+      "desc": "Salsa20 random (len=47)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "effc85da0be801a6e7943d328300397edf2cf58afb187156d7c4ade27330a92e",
+      "input_hex": "f41d92636019debf8cd5eadb7851b6b7248d425390898e",
+      "expected_hex": "d81a72474159a48c611fd1a1164abc274fe7389301a51d",
+      "iv_hex": "cf5c653aeb48e106",
+      "desc": "Salsa20 random (len=23)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "afbc459acba8c166a754fdf243c0f93e9fecb54abbd8311697846da233f069ee",
+      "input_hex": "b4dd522320d99e7f4c95aa9b38117677e44d021350494e6f7c055a8b6881266714bdb20380b9fe5fac750a7b98f1d657442d62f3b029ae",
+      "expected_hex": "040886ceb09428cd81680c12216e29e101c920624bf659f39df64523de401a11b4bd7f36166fa87b94ef072dfcd8dd06daa5ae2b6119aa",
+      "iv_hex": "8f1c25faab08a1c6",
+      "desc": "Salsa20 random (len=55)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "4fdce5ba6bc8618647749d12e3e0995e3f0c556a5bf8d13637a40dc2d310090e",
+      "input_hex": "d47d72c34079be1f6c35ca3b58b1961704ed22b370e96e0f9ca57a2b88214607345dd2a3a0591effcc152a1bb891f6f764cd8293d0c9ce",
+      "expected_hex": "6d03bd7dab61a1833ffd92dd1f49b721b308e197ef22253d2f6cea99e9cf8377266536153c889acb4385f388173f881d1e2da00b423a32",
+      "iv_hex": "2f3cc51a4b2841e6",
+      "desc": "Salsa20 random (len=55)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "effc85da0be801a6e7943d328300397edf2cf58afb187156d7c4ade27330a92e",
+      "input_hex": "f41d92636019debf8cd5eadb7851b6b7248d425390898e",
+      "expected_hex": "d81a72474159a48c611fd1a1164abc274fe7389301a51d",
+      "iv_hex": "cf5c653aeb48e106",
+      "desc": "Salsa20 random (len=23)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "afbc459acba8c166a754fdf243c0f93e9fecb54abbd8311697846da233f069ee",
+      "input_hex": "b4dd522320d99e7f4c95aa9b38117677e44d021350494e6f7c055a8b6881266714bdb20380b9fe5fac750a7b98f1d657442d62f3b029ae",
+      "expected_hex": "040886ceb09428cd81680c12216e29e101c920624bf659f39df64523de401a11b4bd7f36166fa87b94ef072dfcd8dd06daa5ae2b6119aa",
+      "iv_hex": "8f1c25faab08a1c6",
+      "desc": "Salsa20 random (len=55)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "4fdce5ba6bc8618647749d12e3e0995e3f0c556a5bf8d13637a40dc2d310090e",
+      "input_hex": "d47d72c34079be1f6c35ca3b58b1961704ed22b370e96e0f9ca57a2b88214607345dd2a3a0591effcc152a1bb891f6f764cd8293d0c9ce",
+      "expected_hex": "6d03bd7dab61a1833ffd92dd1f49b721b308e197ef22253d2f6cea99e9cf8377266536153c889acb4385f388173f881d1e2da00b423a32",
+      "iv_hex": "2f3cc51a4b2841e6",
+      "desc": "Salsa20 random (len=55)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "effc85da0be801a6e7943d328300397edf2cf58afb187156d7c4ade27330a92e",
+      "input_hex": "f41d92636019debf8cd5eadb7851b6b7248d425390898e",
+      "expected_hex": "d81a72474159a48c611fd1a1164abc274fe7389301a51d",
+      "iv_hex": "cf5c653aeb48e106",
+      "desc": "Salsa20 random (len=23)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "afbc459acba8c166a754fdf243c0f93e9fecb54abbd8311697846da233f069ee",
+      "input_hex": "b4dd522320d99e7f4c95aa9b38117677e44d021350494e6f7c055a8b6881266714bdb20380b9fe5fac750a7b98f1d657442d62f3b029ae",
+      "expected_hex": "040886ceb09428cd81680c12216e29e101c920624bf659f39df64523de401a11b4bd7f36166fa87b94ef072dfcd8dd06daa5ae2b6119aa",
+      "iv_hex": "8f1c25faab08a1c6",
+      "desc": "Salsa20 random (len=55)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "4fdce5ba6bc8618647749d12e3e0995e3f0c556a5bf8d13637a40dc2d310090e",
+      "input_hex": "d47d72c34079be1f6c35ca3b58b1961704ed22b370e96e0f9ca57a2b88214607345dd2a3a0591effcc152a1bb891f6f764cd8293d0c9ce",
+      "expected_hex": "6d03bd7dab61a1833ffd92dd1f49b721b308e197ef22253d2f6cea99e9cf8377266536153c889acb4385f388173f881d1e2da00b423a32",
+      "iv_hex": "2f3cc51a4b2841e6",
+      "desc": "Salsa20 random (len=55)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "effc85da0be801a6e7943d328300397edf2cf58afb187156d7c4ade27330a92e",
+      "input_hex": "f41d92636019debf8cd5eadb7851b6b7248d425390898e",
+      "expected_hex": "d81a72474159a48c611fd1a1164abc274fe7389301a51d",
+      "iv_hex": "cf5c653aeb48e106",
+      "desc": "Salsa20 random (len=23)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "afbc459acba8c166a754fdf243c0f93e9fecb54abbd8311697846da233f069ee",
+      "input_hex": "b4dd522320d99e7f4c95aa9b38117677e44d021350494e6f7c055a8b6881266714bdb20380b9fe5fac750a7b98f1d657442d62f3b029ae",
+      "expected_hex": "040886ceb09428cd81680c12216e29e101c920624bf659f39df64523de401a11b4bd7f36166fa87b94ef072dfcd8dd06daa5ae2b6119aa",
+      "iv_hex": "8f1c25faab08a1c6",
+      "desc": "Salsa20 random (len=55)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "4fdce5ba6bc8618647749d12e3e0995e3f0c556a5bf8d13637a40dc2d310090e",
+      "input_hex": "d47d72c34079be1f6c35ca3b58b1961704ed22b370e96e0f9ca57a2b88214607345dd2a3a0591effcc152a1bb891f6f764cd8293d0c9ce",
+      "expected_hex": "6d03bd7dab61a1833ffd92dd1f49b721b308e197ef22253d2f6cea99e9cf8377266536153c889acb4385f388173f881d1e2da00b423a32",
+      "iv_hex": "2f3cc51a4b2841e6",
+      "desc": "Salsa20 random (len=55)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "effc85da0be801a6e7943d328300397edf2cf58afb187156d7c4ade27330a92e",
+      "input_hex": "f41d92636019debf8cd5eadb7851b6b7248d425390898e",
+      "expected_hex": "d81a72474159a48c611fd1a1164abc274fe7389301a51d",
+      "iv_hex": "cf5c653aeb48e106",
+      "desc": "Salsa20 random (len=23)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "afbc459acba8c166a754fdf243c0f93e9fecb54abbd8311697846da233f069ee",
+      "input_hex": "b4dd522320d99e7f4c95aa9b38117677e44d021350494e6f7c055a8b6881266714bdb20380b9fe5fac750a7b98f1d657442d62f3b029ae",
+      "expected_hex": "040886ceb09428cd81680c12216e29e101c920624bf659f39df64523de401a11b4bd7f36166fa87b94ef072dfcd8dd06daa5ae2b6119aa",
+      "iv_hex": "8f1c25faab08a1c6",
+      "desc": "Salsa20 random (len=55)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "4fdce5ba6bc8618647749d12e3e0995e3f0c556a5bf8d13637a40dc2d310090e",
+      "input_hex": "d47d72c34079be1f6c35ca3b58b1961704ed22b370e96e0f9ca57a2b88214607345dd2a3a0591effcc152a1bb891f6f764cd8293d0c9ce",
+      "expected_hex": "6d03bd7dab61a1833ffd92dd1f49b721b308e197ef22253d2f6cea99e9cf8377266536153c889acb4385f388173f881d1e2da00b423a32",
+      "iv_hex": "2f3cc51a4b2841e6",
+      "desc": "Salsa20 random (len=55)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "effc85da0be801a6e7943d328300397edf2cf58afb187156d7c4ade27330a92e",
+      "input_hex": "f41d92636019debf8cd5eadb7851b6b7248d425390898e",
+      "expected_hex": "d81a72474159a48c611fd1a1164abc274fe7389301a51d",
+      "iv_hex": "cf5c653aeb48e106",
+      "desc": "Salsa20 random (len=23)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "afbc459acba8c166a754fdf243c0f93e9fecb54abbd8311697846da233f069ee",
+      "input_hex": "b4dd522320d99e7f4c95aa9b38117677e44d021350494e6f7c055a8b6881266714bdb20380b9fe5fac750a7b98f1d657442d62f3b029ae",
+      "expected_hex": "040886ceb09428cd81680c12216e29e101c920624bf659f39df64523de401a11b4bd7f36166fa87b94ef072dfcd8dd06daa5ae2b6119aa",
+      "iv_hex": "8f1c25faab08a1c6",
+      "desc": "Salsa20 random (len=55)",
+      "source": "pycryptodome"
+    }
+  ]
+}

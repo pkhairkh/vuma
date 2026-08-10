@@ -1,0 +1,166 @@
+{
+  "module": "chacha20",
+  "vector_count": 20,
+  "vectors": [
+    {
+      "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "input_hex": "4c616469657320616e642047656e746c656d656e206f662074686520636c617373206f66202739393a204966204920636f756c64206f6666657220796f75206f6e6c79206f6e652074697020666f7220746865206675747572652c2073756e73637265656e20776f756c642062652069742e",
+      "expected_hex": "c6bdf594fa87d094756b8d179a7ba25b816398cc26a334e7f7cf2720335074f1beb85c505d2d6dec471cd7ffaf002e85f3d6207bd9865fc130f6e554067f15bb7e9d9ec4be553c352466ad3fc54f03e4b3b991e755b51c76764786bab0a1023db1f0012369bfdd6661aeb325bbee22cbc13c",
+      "iv_hex": "000000090000004a00000000",
+      "desc": "RFC 8439 Section 2.4.2",
+      "source": "RFC 8439"
+    },
+    {
+      "key_hex": "5390898eafbc459acba8c166a754fdf243c0f93e9fecb54abbd8311697846da2",
+      "input_hex": "b4dd522320d99e7f4c95aa9b38117677e44d021350494e6f7c055a8b6881266714bdb20380b9fe5fac750a7b98f1d657442d62f3b029ae",
+      "expected_hex": "4ae12d63f99650020c9827eb95d2214b56bc9a95cac5d879e9aa2994a82d641d772366cbce3b5590f09b95f8f676df9e2a8c03867b016b",
+      "iv_hex": "33f069ee8f1c25faab08a1c6",
+      "desc": "ChaCha20 random (len=55)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "4fdce5ba6bc8618647749d12e3e0995e3f0c556a5bf8d13637a40dc2d310090e",
+      "input_hex": "4079be1f6c35ca3b58b1961704ed22b370e96e",
+      "expected_hex": "d39cecfbadab4e1651d276d698755438eb573f",
+      "iv_hex": "2f3cc51a4b2841e627d47d72",
+      "desc": "ChaCha20 random (len=19)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "0f9ca57a2b88214607345dd2a3a0591effcc152a1bb891f6f764cd8293d0c9ce",
+      "input_hex": "00397edf2cf58afb187156d7c4ade27330a92ecf5c653aeb48e106c7f41d92636019debf8cd5eadb7851b6b7248d425390898e",
+      "expected_hex": "8140a9c1a58d88936528337593cd69f0ca3e8ddbbe9437ca00d4a3b52930e2a84140bb98e7566f33891b710c4e46ad95a1be59",
+      "iv_hex": "effc85da0be801a6e7943d32",
+      "desc": "ChaCha20 random (len=51)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "afbc459acba8c166a754fdf243c0f93e9fecb54abbd8311697846da233f069ee",
+      "input_hex": "20d99e7f4c95aa9b38117677e44d021350494e6f7c055a8b6881266714bdb20380b9fe5fac750a7b98f1d657442d62f3b029ae",
+      "expected_hex": "823ff0e67e1e9f4b69221d296ec5182de264c81f51bd935d6c49dd670ce2ab193646effe55272f3c881e0ff7945797c7774628",
+      "iv_hex": "8f1c25faab08a1c687b4dd52",
+      "desc": "ChaCha20 random (len=51)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "4fdce5ba6bc8618647749d12e3e0995e3f0c556a5bf8d13637a40dc2d310090e",
+      "input_hex": "4079be1f6c35ca3b58b1961704ed22b370e96e",
+      "expected_hex": "d39cecfbadab4e1651d276d698755438eb573f",
+      "iv_hex": "2f3cc51a4b2841e627d47d72",
+      "desc": "ChaCha20 random (len=19)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "0f9ca57a2b88214607345dd2a3a0591effcc152a1bb891f6f764cd8293d0c9ce",
+      "input_hex": "00397edf2cf58afb187156d7c4ade27330a92ecf5c653aeb48e106c7f41d92636019debf8cd5eadb7851b6b7248d425390898e",
+      "expected_hex": "8140a9c1a58d88936528337593cd69f0ca3e8ddbbe9437ca00d4a3b52930e2a84140bb98e7566f33891b710c4e46ad95a1be59",
+      "iv_hex": "effc85da0be801a6e7943d32",
+      "desc": "ChaCha20 random (len=51)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "afbc459acba8c166a754fdf243c0f93e9fecb54abbd8311697846da233f069ee",
+      "input_hex": "20d99e7f4c95aa9b38117677e44d021350494e6f7c055a8b6881266714bdb20380b9fe5fac750a7b98f1d657442d62f3b029ae",
+      "expected_hex": "823ff0e67e1e9f4b69221d296ec5182de264c81f51bd935d6c49dd670ce2ab193646effe55272f3c881e0ff7945797c7774628",
+      "iv_hex": "8f1c25faab08a1c687b4dd52",
+      "desc": "ChaCha20 random (len=51)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "4fdce5ba6bc8618647749d12e3e0995e3f0c556a5bf8d13637a40dc2d310090e",
+      "input_hex": "4079be1f6c35ca3b58b1961704ed22b370e96e",
+      "expected_hex": "d39cecfbadab4e1651d276d698755438eb573f",
+      "iv_hex": "2f3cc51a4b2841e627d47d72",
+      "desc": "ChaCha20 random (len=19)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "0f9ca57a2b88214607345dd2a3a0591effcc152a1bb891f6f764cd8293d0c9ce",
+      "input_hex": "00397edf2cf58afb187156d7c4ade27330a92ecf5c653aeb48e106c7f41d92636019debf8cd5eadb7851b6b7248d425390898e",
+      "expected_hex": "8140a9c1a58d88936528337593cd69f0ca3e8ddbbe9437ca00d4a3b52930e2a84140bb98e7566f33891b710c4e46ad95a1be59",
+      "iv_hex": "effc85da0be801a6e7943d32",
+      "desc": "ChaCha20 random (len=51)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "afbc459acba8c166a754fdf243c0f93e9fecb54abbd8311697846da233f069ee",
+      "input_hex": "20d99e7f4c95aa9b38117677e44d021350494e6f7c055a8b6881266714bdb20380b9fe5fac750a7b98f1d657442d62f3b029ae",
+      "expected_hex": "823ff0e67e1e9f4b69221d296ec5182de264c81f51bd935d6c49dd670ce2ab193646effe55272f3c881e0ff7945797c7774628",
+      "iv_hex": "8f1c25faab08a1c687b4dd52",
+      "desc": "ChaCha20 random (len=51)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "4fdce5ba6bc8618647749d12e3e0995e3f0c556a5bf8d13637a40dc2d310090e",
+      "input_hex": "4079be1f6c35ca3b58b1961704ed22b370e96e",
+      "expected_hex": "d39cecfbadab4e1651d276d698755438eb573f",
+      "iv_hex": "2f3cc51a4b2841e627d47d72",
+      "desc": "ChaCha20 random (len=19)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "0f9ca57a2b88214607345dd2a3a0591effcc152a1bb891f6f764cd8293d0c9ce",
+      "input_hex": "00397edf2cf58afb187156d7c4ade27330a92ecf5c653aeb48e106c7f41d92636019debf8cd5eadb7851b6b7248d425390898e",
+      "expected_hex": "8140a9c1a58d88936528337593cd69f0ca3e8ddbbe9437ca00d4a3b52930e2a84140bb98e7566f33891b710c4e46ad95a1be59",
+      "iv_hex": "effc85da0be801a6e7943d32",
+      "desc": "ChaCha20 random (len=51)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "afbc459acba8c166a754fdf243c0f93e9fecb54abbd8311697846da233f069ee",
+      "input_hex": "20d99e7f4c95aa9b38117677e44d021350494e6f7c055a8b6881266714bdb20380b9fe5fac750a7b98f1d657442d62f3b029ae",
+      "expected_hex": "823ff0e67e1e9f4b69221d296ec5182de264c81f51bd935d6c49dd670ce2ab193646effe55272f3c881e0ff7945797c7774628",
+      "iv_hex": "8f1c25faab08a1c687b4dd52",
+      "desc": "ChaCha20 random (len=51)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "4fdce5ba6bc8618647749d12e3e0995e3f0c556a5bf8d13637a40dc2d310090e",
+      "input_hex": "4079be1f6c35ca3b58b1961704ed22b370e96e",
+      "expected_hex": "d39cecfbadab4e1651d276d698755438eb573f",
+      "iv_hex": "2f3cc51a4b2841e627d47d72",
+      "desc": "ChaCha20 random (len=19)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "0f9ca57a2b88214607345dd2a3a0591effcc152a1bb891f6f764cd8293d0c9ce",
+      "input_hex": "00397edf2cf58afb187156d7c4ade27330a92ecf5c653aeb48e106c7f41d92636019debf8cd5eadb7851b6b7248d425390898e",
+      "expected_hex": "8140a9c1a58d88936528337593cd69f0ca3e8ddbbe9437ca00d4a3b52930e2a84140bb98e7566f33891b710c4e46ad95a1be59",
+      "iv_hex": "effc85da0be801a6e7943d32",
+      "desc": "ChaCha20 random (len=51)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "afbc459acba8c166a754fdf243c0f93e9fecb54abbd8311697846da233f069ee",
+      "input_hex": "20d99e7f4c95aa9b38117677e44d021350494e6f7c055a8b6881266714bdb20380b9fe5fac750a7b98f1d657442d62f3b029ae",
+      "expected_hex": "823ff0e67e1e9f4b69221d296ec5182de264c81f51bd935d6c49dd670ce2ab193646effe55272f3c881e0ff7945797c7774628",
+      "iv_hex": "8f1c25faab08a1c687b4dd52",
+      "desc": "ChaCha20 random (len=51)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "4fdce5ba6bc8618647749d12e3e0995e3f0c556a5bf8d13637a40dc2d310090e",
+      "input_hex": "4079be1f6c35ca3b58b1961704ed22b370e96e",
+      "expected_hex": "d39cecfbadab4e1651d276d698755438eb573f",
+      "iv_hex": "2f3cc51a4b2841e627d47d72",
+      "desc": "ChaCha20 random (len=19)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "0f9ca57a2b88214607345dd2a3a0591effcc152a1bb891f6f764cd8293d0c9ce",
+      "input_hex": "00397edf2cf58afb187156d7c4ade27330a92ecf5c653aeb48e106c7f41d92636019debf8cd5eadb7851b6b7248d425390898e",
+      "expected_hex": "8140a9c1a58d88936528337593cd69f0ca3e8ddbbe9437ca00d4a3b52930e2a84140bb98e7566f33891b710c4e46ad95a1be59",
+      "iv_hex": "effc85da0be801a6e7943d32",
+      "desc": "ChaCha20 random (len=51)",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "afbc459acba8c166a754fdf243c0f93e9fecb54abbd8311697846da233f069ee",
+      "input_hex": "20d99e7f4c95aa9b38117677e44d021350494e6f7c055a8b6881266714bdb20380b9fe5fac750a7b98f1d657442d62f3b029ae",
+      "expected_hex": "823ff0e67e1e9f4b69221d296ec5182de264c81f51bd935d6c49dd670ce2ab193646effe55272f3c881e0ff7945797c7774628",
+      "iv_hex": "8f1c25faab08a1c687b4dd52",
+      "desc": "ChaCha20 random (len=51)",
+      "source": "pycryptodome"
+    }
+  ]
+}

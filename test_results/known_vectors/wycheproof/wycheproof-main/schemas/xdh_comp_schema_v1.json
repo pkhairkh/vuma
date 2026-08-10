@@ -1,0 +1,108 @@
+{
+  "type": "object",
+  "definitions": {
+    "XdhTestGroup": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "enum": [
+            "XdhComp"
+          ]
+        },
+        "source": {
+          "$ref": "common.json#/definitions/Source"
+        },
+        "curve": {
+          "type": "string",
+          "description": "the name of the curve"
+        },
+        "tests": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/XdhTestVector"
+          }
+        }
+      },
+      "required": ["type", "source", "curve", "tests"],
+      "additionalProperties": false
+    },
+    "XdhTestVector": {
+      "type": "object",
+      "properties": {
+        "tcId": {
+          "type": "integer",
+          "description": "Identifier of the test case"
+        },
+        "comment": {
+          "type": "string",
+          "description": "A brief description of the test case"
+        },
+        "public": {
+          "type": "string",
+          "format": "HexBytes",
+          "description": "the raw bytes of the public key"
+        },
+        "private": {
+          "type": "string",
+          "format": "HexBytes",
+          "description": "the raw bytes of private key"
+        },
+        "shared": {
+          "type": "string",
+          "format": "HexBytes",
+          "description": "the shared secret"
+        },
+        "result": {
+          "$ref": "common.json#/definitions/Result"
+        },
+        "flags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "A list of flags"
+        }
+      },
+      "required": ["tcId", "comment", "public", "private", "shared", "result", "flags"],
+      "additionalProperties": false
+    }
+  },
+  "properties": {
+    "algorithm": {
+      "type": "string",
+      "description": "the primitive tested in the test file"
+    },
+    "generatorVersion": {
+      "type": "string",
+      "description": "DEPRECATED: prefer \"source\" property in test group",
+      "deprecated": true
+    },
+    "header": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "additional documentation"
+    },
+    "notes": {
+      "$ref": "common.json#/definitions/Notes"
+    },
+    "numberOfTests": {
+      "type": "integer",
+      "description": "the number of test vectors in this test"
+    },
+    "schema": {
+      "enum": [
+        "xdh_comp_schema_v1.json"
+      ]
+    },
+    "testGroups": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/XdhTestGroup"
+      }
+    }
+  },
+  "required": ["algorithm", "header", "notes", "numberOfTests", "schema", "testGroups"],
+  "additionalProperties": false
+}

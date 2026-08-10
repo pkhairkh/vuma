@@ -1,0 +1,146 @@
+{
+  "module": "des",
+  "vector_count": 20,
+  "vectors": [
+    {
+      "key_hex": "01345799bcd62f00",
+      "input_hex": "0123456789abcdef",
+      "expected_hex": "fca9b7352452d677",
+      "desc": "FIPS-81 App B",
+      "source": "FIPS-81"
+    },
+    {
+      "key_hex": "fc85da0be801a6e7",
+      "input_hex": "943d328300397edf",
+      "expected_hex": "3ac49ceda6b6e95d",
+      "desc": "DES-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "2cf58afb187156d7",
+      "input_hex": "c4ade27330a92ecf",
+      "expected_hex": "8380ca9158257c49",
+      "desc": "DES-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "5c653aeb48e106c7",
+      "input_hex": "f41d92636019debf",
+      "expected_hex": "858d93b9aa523c66",
+      "desc": "DES-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "8cd5eadb7851b6b7",
+      "input_hex": "248d425390898eaf",
+      "expected_hex": "ca9fef5d6e670e0a",
+      "desc": "DES-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "bc459acba8c166a7",
+      "input_hex": "54fdf243c0f93e9f",
+      "expected_hex": "5a0e4f93d79f46bc",
+      "desc": "DES-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "ecb54abbd8311697",
+      "input_hex": "846da233f069ee8f",
+      "expected_hex": "c4c0a114e6190e39",
+      "desc": "DES-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "1c25faab08a1c687",
+      "input_hex": "b4dd522320d99e7f",
+      "expected_hex": "41c497211d1208aa",
+      "desc": "DES-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "4c95aa9b38117677",
+      "input_hex": "e44d021350494e6f",
+      "expected_hex": "847697785b0d5248",
+      "desc": "DES-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "7c055a8b68812667",
+      "input_hex": "14bdb20380b9fe5f",
+      "expected_hex": "2dc609677311e39a",
+      "desc": "DES-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "ac750a7b98f1d657",
+      "input_hex": "442d62f3b029ae4f",
+      "expected_hex": "8b26f0ba4f1d4b62",
+      "desc": "DES-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "dce5ba6bc8618647",
+      "input_hex": "749d12e3e0995e3f",
+      "expected_hex": "98f4842c7a4adb9c",
+      "desc": "DES-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "0c556a5bf8d13637",
+      "input_hex": "a40dc2d310090e2f",
+      "expected_hex": "e15162de67ffe415",
+      "desc": "DES-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "3cc51a4b2841e627",
+      "input_hex": "d47d72c34079be1f",
+      "expected_hex": "5cfaeab8e2a12be7",
+      "desc": "DES-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "6c35ca3b58b19617",
+      "input_hex": "04ed22b370e96e0f",
+      "expected_hex": "52a3e57c69f0c5cf",
+      "desc": "DES-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "9ca57a2b88214607",
+      "input_hex": "345dd2a3a0591eff",
+      "expected_hex": "f4f8900710e8f278",
+      "desc": "DES-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "cc152a1bb891f6f7",
+      "input_hex": "64cd8293d0c9ceef",
+      "expected_hex": "42542c4877ce5f29",
+      "desc": "DES-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "fc85da0be801a6e7",
+      "input_hex": "943d328300397edf",
+      "expected_hex": "3ac49ceda6b6e95d",
+      "desc": "DES-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "2cf58afb187156d7",
+      "input_hex": "c4ade27330a92ecf",
+      "expected_hex": "8380ca9158257c49",
+      "desc": "DES-ECB random",
+      "source": "pycryptodome"
+    },
+    {
+      "key_hex": "5c653aeb48e106c7",
+      "input_hex": "f41d92636019debf",
+      "expected_hex": "858d93b9aa523c66",
+      "desc": "DES-ECB random",
+      "source": "pycryptodome"
+    }
+  ]
+}
