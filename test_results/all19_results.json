@@ -1068,5 +1068,110 @@
     "status": "PARTIAL",
     "pass": 0,
     "total": 20
+  },
+  "hmac|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hmac|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hmac|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hmac|aarch64_be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hmac|arm32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hmac|armeb": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hmac|riscv64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hmac|riscv32": {
+    "status": "PARTIAL",
+    "pass": 2,
+    "total": 20
+  },
+  "hmac|mips64": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "hmac|mips64be": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "hmac|ppc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hmac|ppc64le": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hmac|loongarch64": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "hmac|s390x": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hmac|sparc64": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "hmac|alpha": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hmac|hppa": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hmac|m68k": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hmac|wasm32": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "hkdf|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hkdf|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
