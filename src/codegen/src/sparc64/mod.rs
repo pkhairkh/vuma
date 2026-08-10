@@ -159,7 +159,7 @@ const COND_BE: u32 = 0x01;   // Fixed: was 0x09 (which is BNE, not BE)
 const COND_BG: u32 = 0x0A;  // Fixed: was 0x02 (which is BLE, not BG)
 const COND_BLE: u32 = 0x02;  // Fixed: was 0x0A (which is BG, not BLE)
 const COND_BGE: u32 = 0x0B;  // Fixed: was 0x03 (which is BL, not BGE)
-const COND_BL: u32 = 0x03;  // Fixed: was 0x0B (which is BGE, not BL)
+const COND_BL: u32 = 0x09;  // BL = branch on less (N xor V). Was 0x03 (BE) then 0x0B (BGE)
 const COND_BGU: u32 = 0x0C;
 const COND_BLEU: u32 = 0x04;
 const COND_BCC: u32 = 0x0D;
@@ -5850,11 +5850,11 @@ impl Backend for Sparc64Backend {
                 }
                 .encode(),
             );
-            // Save %o0 (input) to %l0
+            // Save %i0 (input — after SAVE, caller's %o0 is in %i0) to %l0
             code.extend_from_slice(
                 &Instruction::Or {
                     rd: Gpr::L0,
-                    rs1: Gpr::O0,
+                    rs1: Gpr::I0,
                     rs2: Gpr::G0,
                 }
                 .encode(),
@@ -5868,9 +5868,9 @@ impl Backend for Sparc64Backend {
                 }
                 .encode(),
             );
-            // BA skip_neg (always skip the "print minus" block — all test values are positive)
+            // BL skip_neg (skip the "print minus" block if value >= 0)
             let bneg_off = code.len();
-            code.extend_from_slice(&Instruction::Ba { offset: 0 }.encode());
+            code.extend_from_slice(&Instruction::Bl { offset: 0 }.encode());
             code.extend_from_slice(&encode_nop()); // delay slot
                                                    // ... negative handling: print '-', negate %l0
                                                    // OR %g0, 45, %l1 (ASCII '-')
