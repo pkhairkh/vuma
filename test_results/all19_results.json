@@ -1179,44 +1179,84 @@
     "pass": 20,
     "total": 20
   },
-  "des|x86_64": {
+  "hkdf|aarch64_be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hkdf|arm32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "blake3|x86_64": {
     "status": "PARTIAL",
     "pass": 13,
     "total": 20
   },
-  "des|x86_32": {
+  "blake3|x86_32": {
     "status": "PARTIAL",
     "pass": 13,
     "total": 20
   },
-  "des|aarch64": {
+  "blake3|aarch64": {
     "status": "PARTIAL",
     "pass": 13,
     "total": 20
   },
-  "des|aarch64_be": {
+  "blake3|aarch64_be": {
     "status": "PARTIAL",
     "pass": 13,
     "total": 20
   },
-  "des|arm32": {
+  "blake3|arm32": {
     "status": "PARTIAL",
     "pass": 0,
     "total": 20
   },
-  "des|armeb": {
+  "blake3|armeb": {
     "status": "PARTIAL",
     "pass": 0,
     "total": 20
   },
-  "des|riscv64": {
+  "blake3|riscv64": {
     "status": "PARTIAL",
     "pass": 13,
     "total": 20
   },
-  "des|riscv32": {
+  "blake3|riscv32": {
     "status": "PARTIAL",
-    "pass": 11,
+    "pass": 13,
+    "total": 20
+  },
+  "blake3|mips64": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "blake3|mips64be": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "blake3|ppc64": {
+    "status": "PARTIAL",
+    "pass": 13,
+    "total": 20
+  },
+  "blake3|ppc64le": {
+    "status": "PARTIAL",
+    "pass": 13,
+    "total": 20
+  },
+  "blake3|loongarch64": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "blake3|s390x": {
+    "status": "PARTIAL",
+    "pass": 13,
     "total": 20
   }
 }
