@@ -240,5 +240,35 @@
     "status": "PARTIAL",
     "pass": 0,
     "total": 20
+  },
+  "chacha20|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|arm32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|riscv64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "rc4|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "rc4|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
