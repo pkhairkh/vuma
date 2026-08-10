@@ -6,6 +6,7 @@ transform main() -> i32 {
     let key = state_new(Salsa20Key);
     let nonce = state_new(Salsa20Nonce);
     let data = state_new(Salsa20Buf);
+    let output = state_new(Salsa20Buf);
     let oi: u32 = 0;
     // V10: Salsa20 random (len=23)
     data.bytes[0] = 244;
@@ -72,10 +73,10 @@ transform main() -> i32 {
     nonce.bytes[6] = 225;
     nonce.bytes[7] = 6;
     salsa20_init(ctx, key, nonce);
-    salsa20_encrypt(ctx, data, 23);
+    salsa20_encrypt(ctx, data, 23, output, key, nonce);
     oi = 0;
     while oi < 23 {
-        print_int(1000 + (data.bytes[oi] as u32));
+        print_int(1000 + (output.bytes[oi] as u32));
         oi = oi + 1;
     }
     print_int(999);
@@ -176,10 +177,10 @@ transform main() -> i32 {
     nonce.bytes[6] = 161;
     nonce.bytes[7] = 198;
     salsa20_init(ctx, key, nonce);
-    salsa20_encrypt(ctx, data, 55);
+    salsa20_encrypt(ctx, data, 55, output, key, nonce);
     oi = 0;
     while oi < 55 {
-        print_int(1000 + (data.bytes[oi] as u32));
+        print_int(1000 + (output.bytes[oi] as u32));
         oi = oi + 1;
     }
     print_int(999);
@@ -280,10 +281,10 @@ transform main() -> i32 {
     nonce.bytes[6] = 65;
     nonce.bytes[7] = 230;
     salsa20_init(ctx, key, nonce);
-    salsa20_encrypt(ctx, data, 55);
+    salsa20_encrypt(ctx, data, 55, output, key, nonce);
     oi = 0;
     while oi < 55 {
-        print_int(1000 + (data.bytes[oi] as u32));
+        print_int(1000 + (output.bytes[oi] as u32));
         oi = oi + 1;
     }
     print_int(999);
