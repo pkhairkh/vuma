@@ -493,5 +493,100 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "aes192|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes192|aarch64_be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes192|arm32": {
+    "status": "PARTIAL",
+    "pass": 1,
+    "total": 20
+  },
+  "aes192|armeb": {
+    "status": "PARTIAL",
+    "pass": 1,
+    "total": 20
+  },
+  "aes192|riscv64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes192|riscv32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes192|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes192|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes192|ppc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes192|ppc64le": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes192|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes192|s390x": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes192|sparc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes192|alpha": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes192|hppa": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes192|m68k": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes192|wasm32": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "aes256|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes256|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
