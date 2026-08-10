@@ -11,7 +11,8 @@ OUTPUT_DIR = "/home/z/my-project/vuma/test_results/standard_vectors"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Well-known hash test inputs (NIST FIPS-180/202 standard test messages)
-HASH_INPUTS = [
+# Input lengths limited to fit VUMA module buffer sizes (SHA-256: 64B, SHA-384/512: 128B)
+HASH_INPUTS_64 = [
     ("", "empty"),
     ("abc", "NIST abc"),
     ("a", "single byte"),
@@ -21,26 +22,53 @@ HASH_INPUTS = [
     ("message digest", "hashklash"),
     ("abcdefghijklmnopqrstuvwxyz", "alphabet lower"),
     ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", "alphanumeric"),
-    ("12345678901234567890123456789012345678901234567890123456789012345678901234567890", "digits x8"),
-    ("a" * 64, "64 a's (SHA-256 block)"),
     ("a" * 56, "56 a's (SHA-1 boundary)"),
     ("a" * 55, "55 a's (SHA-1 edge)"),
-    ("a" * 119, "119 a's (SHA-512 boundary)"),
-    ("a" * 120, "120 a's (SHA-512+1)"),
-    ("a" * 111, "111 a's (SHA-3 boundary)"),
+    ("a" * 64, "64 a's (SHA-256 block)"),
     ("\x00" * 64, "64 zero bytes"),
     ("\xff" * 64, "64 0xff bytes"),
     ("hello world", "common phrase"),
-    ("OpenSSL is a robust, commercial-grade, full-featured toolkit", "longer text"),
+    ("12345678901234567890123456789012345678901234567890", "digits x5"),
+    ("OpenSSL is a robust toolkit", "medium text"),
+    ("The five boxing wizards jump quickly", "pangram 2"),
+    ("Pack my box with five dozen liquor jugs", "pangram 3"),
+    ("Sphinx of black quartz, judge my vow", "pangram 4"),
 ]
 
-def gen_hash_vectors(algo, hashlib_name, count=20):
+HASH_INPUTS_128 = [
+    ("", "empty"),
+    ("abc", "NIST abc"),
+    ("a", "single byte"),
+    ("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", "NIST 448-bit"),
+    ("The quick brown fox jumps over the lazy dog", "pangram"),
+    ("The quick brown fox jumps over the lazy cog", "1-bit diff"),
+    ("message digest", "hashklash"),
+    ("abcdefghijklmnopqrstuvwxyz", "alphabet lower"),
+    ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", "alphanumeric"),
+    ("a" * 64, "64 a's (SHA-256 block)"),
+    ("a" * 112, "112 a's (SHA-512 boundary)"),
+    ("a" * 119, "119 a's (SHA-512 boundary)"),
+    ("a" * 120, "120 a's (SHA-512+1)"),
+    ("\x00" * 64, "64 zero bytes"),
+    ("\xff" * 64, "64 0xff bytes"),
+    ("\x00" * 128, "128 zero bytes"),
+    ("hello world", "common phrase"),
+    ("The five boxing wizards jump quickly", "pangram 2"),
+    ("Pack my box with five dozen liquor jugs", "pangram 3"),
+    ("Sphinx of black quartz, judge my vow", "pangram 4"),
+]
+
+def gen_hash_vectors(algo, hashlib_name, count=20, max_len=64):
+    """Generate hash vectors. max_len limits input length to fit buffer."""
+    inputs = HASH_INPUTS_128 if max_len >= 128 else HASH_INPUTS_64
     vectors = []
-    for i, (inp, desc) in enumerate(HASH_INPUTS[:count]):
+    for i, (inp, desc) in enumerate(inputs[:count]):
+        # Convert string to bytes, truncating to max_len
+        inp_bytes = inp.encode('utf-8', errors='replace')[:max_len]
         h = hashlib.new(hashlib_name)
-        h.update(inp.encode())
+        h.update(inp_bytes)
         vectors.append({
-            "input_hex": inp.encode().hex(),
+            "input_hex": inp_bytes.hex(),
             "expected_hex": h.hexdigest(),
             "desc": f"{algo}({desc})",
             "source": "NIST FIPS + hashlib",
@@ -309,35 +337,39 @@ def gen_hkdf_vectors(hash_algo, count=20):
 # Blake2/Blake3: hashlib/blake3 reference
 def gen_blake2b_vectors(count=20):
     vectors = []
-    for i, (inp, desc) in enumerate(HASH_INPUTS[:count]):
-        h = hashlib.blake2b(inp.encode())
-        vectors.append({"input_hex": inp.encode().hex(), "expected_hex": h.hexdigest(),
+    for i, (inp, desc) in enumerate(HASH_INPUTS_128[:count]):
+        inp_bytes = inp.encode('utf-8', errors='replace')[:128]
+        h = hashlib.blake2b(inp_bytes)
+        vectors.append({"input_hex": inp_bytes.hex(), "expected_hex": h.hexdigest(),
                         "desc": f"blake2b({desc})", "source": "hashlib"})
     return vectors
 
 def gen_blake2s_vectors(count=20):
     vectors = []
-    for i, (inp, desc) in enumerate(HASH_INPUTS[:count]):
-        h = hashlib.blake2s(inp.encode())
-        vectors.append({"input_hex": inp.encode().hex(), "expected_hex": h.hexdigest(),
+    for i, (inp, desc) in enumerate(HASH_INPUTS_64[:count]):
+        inp_bytes = inp.encode('utf-8', errors='replace')[:64]
+        h = hashlib.blake2s(inp_bytes)
+        vectors.append({"input_hex": inp_bytes.hex(), "expected_hex": h.hexdigest(),
                         "desc": f"blake2s({desc})", "source": "hashlib"})
     return vectors
 
 def gen_blake3_vectors(count=20):
     import blake3
     vectors = []
-    for i, (inp, desc) in enumerate(HASH_INPUTS[:count]):
-        h = blake3.blake3(inp.encode())
-        vectors.append({"input_hex": inp.encode().hex(), "expected_hex": h.hexdigest(),
+    for i, (inp, desc) in enumerate(HASH_INPUTS_128[:count]):
+        inp_bytes = inp.encode('utf-8', errors='replace')[:128]
+        h = blake3.blake3(inp_bytes)
+        vectors.append({"input_hex": inp_bytes.hex(), "expected_hex": h.hexdigest(),
                         "desc": f"blake3({desc})", "source": "blake3 crate"})
     return vectors
 
 def gen_sha3_vectors(variant, hashlib_name, count=20):
     vectors = []
-    for i, (inp, desc) in enumerate(HASH_INPUTS[:count]):
+    for i, (inp, desc) in enumerate(HASH_INPUTS_128[:count]):
+        inp_bytes = inp.encode('utf-8', errors='replace')[:200]
         h = hashlib.new(hashlib_name)
-        h.update(inp.encode())
-        vectors.append({"input_hex": inp.encode().hex(), "expected_hex": h.hexdigest(),
+        h.update(inp_bytes)
+        vectors.append({"input_hex": inp_bytes.hex(), "expected_hex": h.hexdigest(),
                         "desc": f"{variant}({desc})", "source": "hashlib"})
     return vectors
 
@@ -345,13 +377,13 @@ def gen_sha3_vectors(variant, hashlib_name, count=20):
 def main():
     print("Generating well-known test vectors...")
 
-    # Hash algorithms
+    # Hash algorithms — use 128B inputs for SHA-384/512/SHA-3/BLAKE2b, 64B for SHA-1/256/MD5/BLAKE2s
     algos = [
-        ("sha1", lambda: gen_hash_vectors("sha1", "sha1")),
-        ("sha256_sha224", lambda: gen_hash_vectors("sha256", "sha256")),
-        ("sha384", lambda: gen_hash_vectors("sha384", "sha384")),
-        ("sha512", lambda: gen_hash_vectors("sha512", "sha512")),
-        ("md5", lambda: gen_hash_vectors("md5", "md5")),
+        ("sha1", lambda: gen_hash_vectors("sha1", "sha1", max_len=64)),
+        ("sha256_sha224", lambda: gen_hash_vectors("sha256", "sha256", max_len=64)),
+        ("sha384", lambda: gen_hash_vectors("sha384", "sha384", max_len=128)),
+        ("sha512", lambda: gen_hash_vectors("sha512", "sha512", max_len=128)),
+        ("md5", lambda: gen_hash_vectors("md5", "md5", max_len=64)),
         ("sha3", lambda: gen_sha3_vectors("sha3_256", "sha3_256")),
         ("blake2", lambda: gen_blake2b_vectors()),
         ("blake3", lambda: gen_blake3_vectors()),

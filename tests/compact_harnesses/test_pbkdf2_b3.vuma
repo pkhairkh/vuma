@@ -1,0 +1,120 @@
+// pbkdf2 batch 3 (vectors 15-19)
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut};
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/pbkdf2.vuma"::{pbkdf2_hmac_sha256};
+
+transform main() -> i32 {
+    let pass = state_new(HmacKey);
+    let salt = state_new(HmacMsg);
+    let out = state_new(HmacMsg);
+    let oi: u32 = 0;
+    // V15: PBKDF2-sha256(iters=1000,dklen=64)
+    salt.data[0] = 108;
+    salt.data[1] = 111;
+    salt.data[2] = 110;
+    salt.data[3] = 103;
+    salt.data[4] = 115;
+    salt.data[5] = 97;
+    salt.data[6] = 108;
+    salt.data[7] = 116;
+    salt.data[8] = 118;
+    salt.data[9] = 97;
+    salt.data[10] = 108;
+    salt.data[11] = 117;
+    salt.data[12] = 101;
+    pass.data[0] = 108;
+    pass.data[1] = 111;
+    pass.data[2] = 110;
+    pass.data[3] = 103;
+    pass.data[4] = 112;
+    pass.data[5] = 97;
+    pass.data[6] = 115;
+    pass.data[7] = 115;
+    pass.data[8] = 119;
+    pass.data[9] = 111;
+    pass.data[10] = 114;
+    pass.data[11] = 100;
+    pass.data[12] = 118;
+    pass.data[13] = 97;
+    pass.data[14] = 108;
+    pass.data[15] = 117;
+    pass.data[16] = 101;
+    pbkdf2_hmac_sha256(pass, 17, salt, 13, 1000, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    // V16: PBKDF2-sha256(iters=1,dklen=16)
+    salt.data[0] = 121;
+    pass.data[0] = 120;
+    pbkdf2_hmac_sha256(pass, 1, salt, 1, 1000, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    // V17: PBKDF2-sha256(iters=4096,dklen=32)
+    salt.data[0] = 115;
+    salt.data[1] = 97;
+    salt.data[2] = 108;
+    salt.data[3] = 116;
+    salt.data[4] = 49;
+    salt.data[5] = 50;
+    salt.data[6] = 51;
+    pass.data[0] = 116;
+    pass.data[1] = 101;
+    pass.data[2] = 115;
+    pass.data[3] = 116;
+    pass.data[4] = 49;
+    pass.data[5] = 50;
+    pass.data[6] = 51;
+    pbkdf2_hmac_sha256(pass, 7, salt, 7, 1000, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    // V18: PBKDF2-sha256(iters=8192,dklen=48)
+    salt.data[0] = 83;
+    salt.data[1] = 64;
+    salt.data[2] = 108;
+    salt.data[3] = 116;
+    pass.data[0] = 80;
+    pass.data[1] = 64;
+    pass.data[2] = 115;
+    pass.data[3] = 115;
+    pass.data[4] = 119;
+    pass.data[5] = 48;
+    pass.data[6] = 114;
+    pass.data[7] = 100;
+    pbkdf2_hmac_sha256(pass, 8, salt, 4, 1000, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    // V19: PBKDF2-sha256(iters=16384,dklen=32)
+    salt.data[0] = 118;
+    salt.data[1] = 101;
+    salt.data[2] = 99;
+    salt.data[3] = 116;
+    salt.data[4] = 111;
+    salt.data[5] = 114;
+    pass.data[0] = 102;
+    pass.data[1] = 105;
+    pass.data[2] = 110;
+    pass.data[3] = 97;
+    pass.data[4] = 108;
+    pbkdf2_hmac_sha256(pass, 5, salt, 6, 1000, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

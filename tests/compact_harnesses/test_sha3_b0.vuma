@@ -1,0 +1,152 @@
+// sha3 batch 0 (vectors 0-4)
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha3.vuma"::{KeccakIn, KeccakOut, sha3_256_oneshot};
+
+transform main() -> i32 {
+    let data = state_new(KeccakIn);
+    let out = state_new(KeccakOut);
+    let oi: u32 = 0;
+    // V0: sha3_256(empty)
+    sha3_256_oneshot(data, 0, out);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    // V1: sha3_256(NIST abc)
+    data.data[0] = 97;
+    data.data[1] = 98;
+    data.data[2] = 99;
+    sha3_256_oneshot(data, 3, out);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    // V2: sha3_256(single byte)
+    data.data[0] = 97;
+    sha3_256_oneshot(data, 1, out);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    // V3: sha3_256(NIST 448-bit)
+    data.data[0] = 97;
+    data.data[1] = 98;
+    data.data[2] = 99;
+    data.data[3] = 100;
+    data.data[4] = 98;
+    data.data[5] = 99;
+    data.data[6] = 100;
+    data.data[7] = 101;
+    data.data[8] = 99;
+    data.data[9] = 100;
+    data.data[10] = 101;
+    data.data[11] = 102;
+    data.data[12] = 100;
+    data.data[13] = 101;
+    data.data[14] = 102;
+    data.data[15] = 103;
+    data.data[16] = 101;
+    data.data[17] = 102;
+    data.data[18] = 103;
+    data.data[19] = 104;
+    data.data[20] = 102;
+    data.data[21] = 103;
+    data.data[22] = 104;
+    data.data[23] = 105;
+    data.data[24] = 103;
+    data.data[25] = 104;
+    data.data[26] = 105;
+    data.data[27] = 106;
+    data.data[28] = 104;
+    data.data[29] = 105;
+    data.data[30] = 106;
+    data.data[31] = 107;
+    data.data[32] = 105;
+    data.data[33] = 106;
+    data.data[34] = 107;
+    data.data[35] = 108;
+    data.data[36] = 106;
+    data.data[37] = 107;
+    data.data[38] = 108;
+    data.data[39] = 109;
+    data.data[40] = 107;
+    data.data[41] = 108;
+    data.data[42] = 109;
+    data.data[43] = 110;
+    data.data[44] = 108;
+    data.data[45] = 109;
+    data.data[46] = 110;
+    data.data[47] = 111;
+    data.data[48] = 109;
+    data.data[49] = 110;
+    data.data[50] = 111;
+    data.data[51] = 112;
+    data.data[52] = 110;
+    data.data[53] = 111;
+    data.data[54] = 112;
+    data.data[55] = 113;
+    sha3_256_oneshot(data, 56, out);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    // V4: sha3_256(pangram)
+    data.data[0] = 84;
+    data.data[1] = 104;
+    data.data[2] = 101;
+    data.data[3] = 32;
+    data.data[4] = 113;
+    data.data[5] = 117;
+    data.data[6] = 105;
+    data.data[7] = 99;
+    data.data[8] = 107;
+    data.data[9] = 32;
+    data.data[10] = 98;
+    data.data[11] = 114;
+    data.data[12] = 111;
+    data.data[13] = 119;
+    data.data[14] = 110;
+    data.data[15] = 32;
+    data.data[16] = 102;
+    data.data[17] = 111;
+    data.data[18] = 120;
+    data.data[19] = 32;
+    data.data[20] = 106;
+    data.data[21] = 117;
+    data.data[22] = 109;
+    data.data[23] = 112;
+    data.data[24] = 115;
+    data.data[25] = 32;
+    data.data[26] = 111;
+    data.data[27] = 118;
+    data.data[28] = 101;
+    data.data[29] = 114;
+    data.data[30] = 32;
+    data.data[31] = 116;
+    data.data[32] = 104;
+    data.data[33] = 101;
+    data.data[34] = 32;
+    data.data[35] = 108;
+    data.data[36] = 97;
+    data.data[37] = 122;
+    data.data[38] = 121;
+    data.data[39] = 32;
+    data.data[40] = 100;
+    data.data[41] = 111;
+    data.data[42] = 103;
+    sha3_256_oneshot(data, 43, out);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

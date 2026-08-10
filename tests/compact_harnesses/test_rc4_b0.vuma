@@ -1,0 +1,183 @@
+// rc4 batch 0 (vectors 0-4)
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/rc4.vuma"::{Rc4Ctx, Rc4Key, Rc4Buf, rc4_init, rc4_crypt};
+
+transform main() -> i32 {
+    let ctx = state_new(Rc4Ctx);
+    let key = state_new(Rc4Key);
+    let data = state_new(Rc4Buf);
+    let oi: u32 = 0;
+    // V0: Known RC4 vector
+    data.bytes[0] = 0;
+    data.bytes[1] = 0;
+    data.bytes[2] = 0;
+    data.bytes[3] = 0;
+    data.bytes[4] = 0;
+    data.bytes[5] = 0;
+    data.bytes[6] = 0;
+    data.bytes[7] = 0;
+    key.bytes[0] = 1;
+    key.bytes[1] = 2;
+    key.bytes[2] = 3;
+    key.bytes[3] = 4;
+    key.bytes[4] = 5;
+    rc4_init(ctx, key, 5);
+    rc4_crypt(ctx, data, 8);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (data.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    // V1: Known RC4 vector
+    data.bytes[0] = 0;
+    data.bytes[1] = 0;
+    data.bytes[2] = 0;
+    data.bytes[3] = 0;
+    data.bytes[4] = 0;
+    data.bytes[5] = 0;
+    data.bytes[6] = 0;
+    data.bytes[7] = 0;
+    data.bytes[8] = 0;
+    data.bytes[9] = 0;
+    data.bytes[10] = 0;
+    data.bytes[11] = 0;
+    data.bytes[12] = 0;
+    data.bytes[13] = 0;
+    data.bytes[14] = 0;
+    data.bytes[15] = 0;
+    key.bytes[0] = 1;
+    key.bytes[1] = 2;
+    key.bytes[2] = 3;
+    key.bytes[3] = 4;
+    key.bytes[4] = 5;
+    key.bytes[5] = 6;
+    key.bytes[6] = 7;
+    key.bytes[7] = 8;
+    key.bytes[8] = 9;
+    key.bytes[9] = 10;
+    key.bytes[10] = 11;
+    key.bytes[11] = 12;
+    key.bytes[12] = 13;
+    key.bytes[13] = 14;
+    key.bytes[14] = 15;
+    key.bytes[15] = 16;
+    key.bytes[16] = 17;
+    key.bytes[17] = 18;
+    key.bytes[18] = 19;
+    key.bytes[19] = 20;
+    key.bytes[20] = 21;
+    key.bytes[21] = 22;
+    key.bytes[22] = 23;
+    key.bytes[23] = 24;
+    key.bytes[24] = 25;
+    key.bytes[25] = 26;
+    key.bytes[26] = 27;
+    key.bytes[27] = 28;
+    key.bytes[28] = 29;
+    key.bytes[29] = 30;
+    key.bytes[30] = 31;
+    rc4_init(ctx, key, 31);
+    rc4_crypt(ctx, data, 16);
+    oi = 0;
+    while oi < 16 {
+        print_int(1000 + (data.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    // V2: Known RC4 vector
+    data.bytes[0] = 0;
+    data.bytes[1] = 0;
+    data.bytes[2] = 0;
+    data.bytes[3] = 0;
+    data.bytes[4] = 0;
+    data.bytes[5] = 0;
+    data.bytes[6] = 0;
+    data.bytes[7] = 0;
+    key.bytes[0] = 235;
+    rc4_init(ctx, key, 1);
+    rc4_crypt(ctx, data, 8);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (data.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    // V3: Known RC4 vector
+    data.bytes[0] = 0;
+    data.bytes[1] = 0;
+    data.bytes[2] = 0;
+    data.bytes[3] = 0;
+    data.bytes[4] = 0;
+    data.bytes[5] = 0;
+    data.bytes[6] = 0;
+    data.bytes[7] = 0;
+    key.bytes[0] = 1;
+    key.bytes[1] = 2;
+    key.bytes[2] = 3;
+    key.bytes[3] = 4;
+    key.bytes[4] = 5;
+    key.bytes[5] = 6;
+    key.bytes[6] = 7;
+    key.bytes[7] = 8;
+    key.bytes[8] = 9;
+    key.bytes[9] = 10;
+    key.bytes[10] = 11;
+    key.bytes[11] = 12;
+    key.bytes[12] = 13;
+    key.bytes[13] = 14;
+    key.bytes[14] = 15;
+    rc4_init(ctx, key, 15);
+    rc4_crypt(ctx, data, 8);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (data.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    // V4: RC4 random (klen=16)
+    data.bytes[0] = 165;
+    data.bytes[1] = 122;
+    data.bytes[2] = 43;
+    data.bytes[3] = 136;
+    data.bytes[4] = 33;
+    data.bytes[5] = 70;
+    data.bytes[6] = 7;
+    data.bytes[7] = 52;
+    data.bytes[8] = 93;
+    data.bytes[9] = 210;
+    data.bytes[10] = 163;
+    data.bytes[11] = 160;
+    data.bytes[12] = 89;
+    data.bytes[13] = 30;
+    data.bytes[14] = 255;
+    data.bytes[15] = 204;
+    data.bytes[16] = 21;
+    data.bytes[17] = 42;
+    data.bytes[18] = 27;
+    data.bytes[19] = 184;
+    key.bytes[0] = 108;
+    key.bytes[1] = 53;
+    key.bytes[2] = 202;
+    key.bytes[3] = 59;
+    key.bytes[4] = 88;
+    key.bytes[5] = 177;
+    key.bytes[6] = 150;
+    key.bytes[7] = 23;
+    key.bytes[8] = 4;
+    key.bytes[9] = 237;
+    key.bytes[10] = 34;
+    key.bytes[11] = 179;
+    key.bytes[12] = 112;
+    key.bytes[13] = 233;
+    key.bytes[14] = 110;
+    key.bytes[15] = 15;
+    rc4_init(ctx, key, 16);
+    rc4_crypt(ctx, data, 20);
+    oi = 0;
+    while oi < 20 {
+        print_int(1000 + (data.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

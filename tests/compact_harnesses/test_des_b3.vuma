@@ -1,0 +1,136 @@
+// des batch 3 (vectors 15-19)
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/des.vuma"::{DesCtx, DesKey, DesBlock, des_init, des_encrypt_block};
+
+transform main() -> i32 {
+    let ctx = state_new(DesCtx);
+    let key = state_new(DesKey);
+    let pt = state_new(DesBlock);
+    let ct = state_new(DesBlock);
+    let oi: u32 = 0;
+    // V15: DES-ECB random
+    pt.data[0] = 52;
+    pt.data[1] = 93;
+    pt.data[2] = 210;
+    pt.data[3] = 163;
+    pt.data[4] = 160;
+    pt.data[5] = 89;
+    pt.data[6] = 30;
+    pt.data[7] = 255;
+    key.data[0] = 156;
+    key.data[1] = 165;
+    key.data[2] = 122;
+    key.data[3] = 43;
+    key.data[4] = 136;
+    key.data[5] = 33;
+    key.data[6] = 70;
+    key.data[7] = 7;
+    des_init(ctx, key);
+    des_encrypt_block(ctx, pt, ct);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (ct.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    // V16: DES-ECB random
+    pt.data[0] = 100;
+    pt.data[1] = 205;
+    pt.data[2] = 130;
+    pt.data[3] = 147;
+    pt.data[4] = 208;
+    pt.data[5] = 201;
+    pt.data[6] = 206;
+    pt.data[7] = 239;
+    key.data[0] = 204;
+    key.data[1] = 21;
+    key.data[2] = 42;
+    key.data[3] = 27;
+    key.data[4] = 184;
+    key.data[5] = 145;
+    key.data[6] = 246;
+    key.data[7] = 247;
+    des_init(ctx, key);
+    des_encrypt_block(ctx, pt, ct);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (ct.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    // V17: DES-ECB random
+    pt.data[0] = 148;
+    pt.data[1] = 61;
+    pt.data[2] = 50;
+    pt.data[3] = 131;
+    pt.data[4] = 0;
+    pt.data[5] = 57;
+    pt.data[6] = 126;
+    pt.data[7] = 223;
+    key.data[0] = 252;
+    key.data[1] = 133;
+    key.data[2] = 218;
+    key.data[3] = 11;
+    key.data[4] = 232;
+    key.data[5] = 1;
+    key.data[6] = 166;
+    key.data[7] = 231;
+    des_init(ctx, key);
+    des_encrypt_block(ctx, pt, ct);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (ct.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    // V18: DES-ECB random
+    pt.data[0] = 196;
+    pt.data[1] = 173;
+    pt.data[2] = 226;
+    pt.data[3] = 115;
+    pt.data[4] = 48;
+    pt.data[5] = 169;
+    pt.data[6] = 46;
+    pt.data[7] = 207;
+    key.data[0] = 44;
+    key.data[1] = 245;
+    key.data[2] = 138;
+    key.data[3] = 251;
+    key.data[4] = 24;
+    key.data[5] = 113;
+    key.data[6] = 86;
+    key.data[7] = 215;
+    des_init(ctx, key);
+    des_encrypt_block(ctx, pt, ct);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (ct.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    // V19: DES-ECB random
+    pt.data[0] = 244;
+    pt.data[1] = 29;
+    pt.data[2] = 146;
+    pt.data[3] = 99;
+    pt.data[4] = 96;
+    pt.data[5] = 25;
+    pt.data[6] = 222;
+    pt.data[7] = 191;
+    key.data[0] = 92;
+    key.data[1] = 101;
+    key.data[2] = 58;
+    key.data[3] = 235;
+    key.data[4] = 72;
+    key.data[5] = 225;
+    key.data[6] = 6;
+    key.data[7] = 199;
+    des_init(ctx, key);
+    des_encrypt_block(ctx, pt, ct);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (ct.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}
