@@ -1,0 +1,144 @@
+{
+  "vectors": [
+    {
+      "desc": "AES-128-CMAC empty",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "",
+      "msg_len": 0,
+      "expected_hex": "bb1d6929e95937287fa37d129b756746"
+    },
+    {
+      "desc": "AES-128-CMAC 16 bytes",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "6bc1bee22e409f96e93d7e117393172a",
+      "msg_len": 16,
+      "expected_hex": "070a16b46b4d4144f79bdd9dd04a287c"
+    },
+    {
+      "desc": "AES-128-CMAC 40 bytes",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411",
+      "msg_len": 40,
+      "expected_hex": "dfa66747de9ae63030ca32611497c827"
+    },
+    {
+      "desc": "AES-128-CMAC 64 bytes",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710",
+      "msg_len": 64,
+      "expected_hex": "51f0bebf7e3b9d92fc49741779363cfe"
+    },
+    {
+      "desc": "AES-128-CMAC random 0",
+      "key_hex": "001f3e5d7c9bbad9f81736557493b2d1",
+      "input_hex": "00",
+      "msg_len": 1,
+      "expected_hex": "ca5abb9773c76dc676875abbc0c0e667"
+    },
+    {
+      "desc": "AES-128-CMAC random 1",
+      "key_hex": "11304f6e8daccbea0928476685a4c3e2",
+      "input_hex": "17426d98c3ee19446f9ac5f01b46719cc7",
+      "msg_len": 17,
+      "expected_hex": "ab59d0fec8e582222049a197e578162b"
+    },
+    {
+      "desc": "AES-128-CMAC random 2",
+      "key_hex": "2241607f9ebddcfb1a39587796b5d4f3",
+      "input_hex": "2e5984afda05305b86b1dc07325d88b3de09345f8ab5e00b36618cb7e20d38638e",
+      "msg_len": 33,
+      "expected_hex": "921508cddd82930fbb827d9d5c863406"
+    },
+    {
+      "desc": "AES-128-CMAC random 3",
+      "key_hex": "33527190afceed0c2b4a6988a7c6e504",
+      "input_hex": "45709bc6f11c47729dc8f31e49749fcaf5204b76a1ccf7224d78a3cef9244f7aa5d0fb26517ca7d2fd28537ea9d4ff2a55",
+      "msg_len": 49,
+      "expected_hex": "cf4b4e9ae0a86c7b64896845cfe7d1af"
+    },
+    {
+      "desc": "AES-128-CMAC random 4",
+      "key_hex": "446382a1c0dffe1d3c5b7a99b8d7f615",
+      "input_hex": "5c",
+      "msg_len": 1,
+      "expected_hex": "c132e04c487552f87b3e3f7d0b909ff7"
+    },
+    {
+      "desc": "AES-128-CMAC random 5",
+      "key_hex": "557493b2d1f00f2e4d6c8baac9e80726",
+      "input_hex": "739ec9f41f4a75a0cbf6214c77a2cdf823",
+      "msg_len": 17,
+      "expected_hex": "2d25f89c9b6dac8167dd2fcd1b0ddfc0"
+    },
+    {
+      "desc": "AES-128-CMAC random 6",
+      "key_hex": "6685a4c3e201203f5e7d9cbbdaf91837",
+      "input_hex": "8ab5e00b36618cb7e20d38638eb9e40f3a6590bbe6113c6792bde8133e6994bfea",
+      "msg_len": 33,
+      "expected_hex": "55b156e7c1f2a37320918ec5b485585c"
+    },
+    {
+      "desc": "AES-128-CMAC random 7",
+      "key_hex": "7796b5d4f31231506f8eadcceb0a2948",
+      "input_hex": "a1ccf7224d78a3cef9244f7aa5d0fb26517ca7d2fd28537ea9d4ff2a5580abd6012c5782add8032e5984afda05305b86b1",
+      "msg_len": 49,
+      "expected_hex": "90b19eec81e2f5f5b6876f93bb8a3349"
+    },
+    {
+      "desc": "AES-128-CMAC random 8",
+      "key_hex": "88a7c6e504234261809fbeddfc1b3a59",
+      "input_hex": "b8",
+      "msg_len": 1,
+      "expected_hex": "73c3462a7185ad34ca140daaf0942e84"
+    },
+    {
+      "desc": "AES-128-CMAC random 9",
+      "key_hex": "99b8d7f61534537291b0cfee0d2c4b6a",
+      "input_hex": "cffa25507ba6d1fc27527da8d3fe29547f",
+      "msg_len": 17,
+      "expected_hex": "93355a9580fc6c5610f707e8f88b1087"
+    },
+    {
+      "desc": "AES-128-CMAC random 10",
+      "key_hex": "aac9e80726456483a2c1e0ff1e3d5c7b",
+      "input_hex": "e6113c6792bde8133e6994bfea15406b96c1ec17426d98c3ee19446f9ac5f01b46",
+      "msg_len": 33,
+      "expected_hex": "b6ca6dbd6e269dd73939dc1dc962a002"
+    },
+    {
+      "desc": "AES-128-CMAC random 11",
+      "key_hex": "bbdaf91837567594b3d2f1102f4e6d8c",
+      "input_hex": "fd28537ea9d4ff2a5580abd6012c5782add8032e5984afda05305b86b1dc07325d88b3de09345f8ab5e00b36618cb7e20d",
+      "msg_len": 49,
+      "expected_hex": "366a4902d325e0f38b1d9df84e83e778"
+    },
+    {
+      "desc": "AES-128-CMAC random 12",
+      "key_hex": "cceb0a29486786a5c4e30221405f7e9d",
+      "input_hex": "14",
+      "msg_len": 1,
+      "expected_hex": "e7462ae961f02e4801eb9ea56f321e43"
+    },
+    {
+      "desc": "AES-128-CMAC random 13",
+      "key_hex": "ddfc1b3a597897b6d5f4133251708fae",
+      "input_hex": "2b5681acd7022d5883aed9042f5a85b0db",
+      "msg_len": 17,
+      "expected_hex": "173de2918de4ba82168ceb9d7460337f"
+    },
+    {
+      "desc": "AES-128-CMAC random 14",
+      "key_hex": "ee0d2c4b6a89a8c7e60524436281a0bf",
+      "input_hex": "426d98c3ee19446f9ac5f01b46719cc7f21d48739ec9f41f4a75a0cbf6214c77a2",
+      "msg_len": 33,
+      "expected_hex": "a6b663cba26ffca49a329d57c576eff2"
+    },
+    {
+      "desc": "AES-128-CMAC random 15",
+      "key_hex": "ff1e3d5c7b9ab9d8f71635547392b1d0",
+      "input_hex": "5984afda05305b86b1dc07325d88b3de09345f8ab5e00b36618cb7e20d38638eb9e40f3a6590bbe6113c6792bde8133e69",
+      "msg_len": 49,
+      "expected_hex": "2e2725d46b71e1c6d223c555edc99667"
+    }
+  ]
+}

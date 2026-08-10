@@ -1,0 +1,66 @@
+// aes_extra_modes batch 14 (vector 14)
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/aes128.vuma"::{AesCtx, AesKey, aes128_init};
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/aes_extra_modes.vuma"::{AesXBuf, AesXBlock, aes_cmac};
+
+transform main() -> i32 {
+    let key = state_new(AesKey);
+    let msg = state_new(AesXBuf);
+    let out = state_new(AesXBuf);
+    key.data[0] = 170;
+    key.data[1] = 201;
+    key.data[2] = 232;
+    key.data[3] = 7;
+    key.data[4] = 38;
+    key.data[5] = 69;
+    key.data[6] = 100;
+    key.data[7] = 131;
+    key.data[8] = 162;
+    key.data[9] = 193;
+    key.data[10] = 224;
+    key.data[11] = 255;
+    key.data[12] = 30;
+    key.data[13] = 61;
+    key.data[14] = 92;
+    key.data[15] = 123;
+    msg.bytes[0] = 230;
+    msg.bytes[1] = 17;
+    msg.bytes[2] = 60;
+    msg.bytes[3] = 103;
+    msg.bytes[4] = 146;
+    msg.bytes[5] = 189;
+    msg.bytes[6] = 232;
+    msg.bytes[7] = 19;
+    msg.bytes[8] = 62;
+    msg.bytes[9] = 105;
+    msg.bytes[10] = 148;
+    msg.bytes[11] = 191;
+    msg.bytes[12] = 234;
+    msg.bytes[13] = 21;
+    msg.bytes[14] = 64;
+    msg.bytes[15] = 107;
+    msg.bytes[16] = 150;
+    msg.bytes[17] = 193;
+    msg.bytes[18] = 236;
+    msg.bytes[19] = 23;
+    msg.bytes[20] = 66;
+    msg.bytes[21] = 109;
+    msg.bytes[22] = 152;
+    msg.bytes[23] = 195;
+    msg.bytes[24] = 238;
+    msg.bytes[25] = 25;
+    msg.bytes[26] = 68;
+    msg.bytes[27] = 111;
+    msg.bytes[28] = 154;
+    msg.bytes[29] = 197;
+    msg.bytes[30] = 240;
+    msg.bytes[31] = 27;
+    msg.bytes[32] = 70;
+    aes_cmac(key, msg, 33, out);
+    let oi: u32 = 0;
+    while oi < 16 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

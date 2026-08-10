@@ -1,0 +1,109 @@
+// chacha20_poly1305 batch 4 (vector 4)
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/chacha20.vuma"::{ChaCha20Key, ChaCha20Nonce, ChaCha20Buf};
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/poly1305.vuma"::{Poly1305Tag};
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/chacha20_poly1305.vuma"::{chacha20_poly1305_encrypt};
+
+transform main() -> i32 {
+    let key = state_new(ChaCha20Key);
+    let nonce = state_new(ChaCha20Nonce);
+    let aad = state_new(ChaCha20Buf);
+    let pt = state_new(ChaCha20Buf);
+    let ct = state_new(ChaCha20Buf);
+    let tag = state_new(Poly1305Tag);
+    key.bytes[0] = 0;
+    key.bytes[1] = 1;
+    key.bytes[2] = 2;
+    key.bytes[3] = 3;
+    key.bytes[4] = 4;
+    key.bytes[5] = 5;
+    key.bytes[6] = 6;
+    key.bytes[7] = 7;
+    key.bytes[8] = 8;
+    key.bytes[9] = 9;
+    key.bytes[10] = 10;
+    key.bytes[11] = 11;
+    key.bytes[12] = 12;
+    key.bytes[13] = 13;
+    key.bytes[14] = 14;
+    key.bytes[15] = 15;
+    key.bytes[16] = 16;
+    key.bytes[17] = 17;
+    key.bytes[18] = 18;
+    key.bytes[19] = 19;
+    key.bytes[20] = 20;
+    key.bytes[21] = 21;
+    key.bytes[22] = 22;
+    key.bytes[23] = 23;
+    key.bytes[24] = 24;
+    key.bytes[25] = 25;
+    key.bytes[26] = 26;
+    key.bytes[27] = 27;
+    key.bytes[28] = 28;
+    key.bytes[29] = 29;
+    key.bytes[30] = 30;
+    key.bytes[31] = 31;
+    nonce.bytes[0] = 0;
+    nonce.bytes[1] = 1;
+    nonce.bytes[2] = 2;
+    nonce.bytes[3] = 3;
+    nonce.bytes[4] = 4;
+    nonce.bytes[5] = 5;
+    nonce.bytes[6] = 6;
+    nonce.bytes[7] = 7;
+    nonce.bytes[8] = 8;
+    nonce.bytes[9] = 9;
+    nonce.bytes[10] = 10;
+    nonce.bytes[11] = 11;
+    aad.bytes[0] = 97;
+    aad.bytes[1] = 97;
+    aad.bytes[2] = 100;
+    aad.bytes[3] = 95;
+    aad.bytes[4] = 100;
+    aad.bytes[5] = 97;
+    aad.bytes[6] = 116;
+    aad.bytes[7] = 97;
+    pt.bytes[0] = 115;
+    pt.bytes[1] = 111;
+    pt.bytes[2] = 109;
+    pt.bytes[3] = 101;
+    pt.bytes[4] = 32;
+    pt.bytes[5] = 108;
+    pt.bytes[6] = 111;
+    pt.bytes[7] = 110;
+    pt.bytes[8] = 103;
+    pt.bytes[9] = 101;
+    pt.bytes[10] = 114;
+    pt.bytes[11] = 32;
+    pt.bytes[12] = 112;
+    pt.bytes[13] = 108;
+    pt.bytes[14] = 97;
+    pt.bytes[15] = 105;
+    pt.bytes[16] = 110;
+    pt.bytes[17] = 116;
+    pt.bytes[18] = 101;
+    pt.bytes[19] = 120;
+    pt.bytes[20] = 116;
+    pt.bytes[21] = 32;
+    pt.bytes[22] = 116;
+    pt.bytes[23] = 111;
+    pt.bytes[24] = 32;
+    pt.bytes[25] = 116;
+    pt.bytes[26] = 101;
+    pt.bytes[27] = 115;
+    pt.bytes[28] = 116;
+    chacha20_poly1305_encrypt(key, nonce, aad, 8, pt, 29, ct, tag);
+    // Output ct
+    let oi: u32 = 0;
+    while oi < 29 {
+        print_int(1000 + (ct.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    // Output tag (16 bytes)
+    oi = 0;
+    while oi < 16 {
+        print_int(1000 + (tag.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

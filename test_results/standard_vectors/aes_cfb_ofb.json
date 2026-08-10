@@ -1,0 +1,112 @@
+{
+  "vectors": [
+    {
+      "desc": "AES-128-CFB128 encrypt block 0",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "6bc1bee22e409f96e93d7e117393172a",
+      "iv_hex": "000102030405060708090a0b0c0d0e0f",
+      "mode": "cfb128_encrypt",
+      "num_blocks": 1,
+      "expected_hex": "3b3fd92eb72dad20333449f8e83cfb4a"
+    },
+    {
+      "desc": "AES-128-CFB128 encrypt block 1",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "ae2d8a571e03ac9c9eb76fac45af8e51",
+      "iv_hex": "3b3fd92eb72dad20333449f8e83cfb4a",
+      "mode": "cfb128_encrypt",
+      "num_blocks": 1,
+      "expected_hex": "c8a64537a0b3a93fcde3cdad9f1ce58b"
+    },
+    {
+      "desc": "AES-128-CFB128 encrypt block 2",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "30c81c46a35ce411e5fbc1191a0a52ef",
+      "iv_hex": "c8a64537a0b3a93fcde3cdad9f1ce58b",
+      "mode": "cfb128_encrypt",
+      "num_blocks": 1,
+      "expected_hex": "26751f67a3cbb140b1808cf187a4f4df"
+    },
+    {
+      "desc": "AES-128-CFB128 encrypt block 3",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "f69f2445df4f9b17ad2b417be66c3710",
+      "iv_hex": "26751f67a3cbb140b1808cf187a4f4df",
+      "mode": "cfb128_encrypt",
+      "num_blocks": 1,
+      "expected_hex": "c04b05357c5d1c0eeac4c66f9ff7f2e6"
+    },
+    {
+      "desc": "AES-128-CFB128 decrypt block 0",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "3b3fd92eb72dad20333449f8e83cfb4a",
+      "iv_hex": "000102030405060708090a0b0c0d0e0f",
+      "mode": "cfb128_decrypt",
+      "num_blocks": 1,
+      "expected_hex": "6bc1bee22e409f96e93d7e117393172a"
+    },
+    {
+      "desc": "AES-128-CFB128 decrypt block 1",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "c8a64537a0b3a93fcde3cdad9f1ce58b",
+      "iv_hex": "3b3fd92eb72dad20333449f8e83cfb4a",
+      "mode": "cfb128_decrypt",
+      "num_blocks": 1,
+      "expected_hex": "ae2d8a571e03ac9c9eb76fac45af8e51"
+    },
+    {
+      "desc": "AES-128-CFB128 decrypt block 2",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "26751f67a3cbb140b1808cf187a4f4df",
+      "iv_hex": "c8a64537a0b3a93fcde3cdad9f1ce58b",
+      "mode": "cfb128_decrypt",
+      "num_blocks": 1,
+      "expected_hex": "30c81c46a35ce411e5fbc1191a0a52ef"
+    },
+    {
+      "desc": "AES-128-CFB128 decrypt block 3",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "c04b05357c5d1c0eeac4c66f9ff7f2e6",
+      "iv_hex": "26751f67a3cbb140b1808cf187a4f4df",
+      "mode": "cfb128_decrypt",
+      "num_blocks": 1,
+      "expected_hex": "f69f2445df4f9b17ad2b417be66c3710"
+    },
+    {
+      "desc": "AES-128-OFB encrypt 4 blocks",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710",
+      "iv_hex": "000102030405060708090a0b0c0d0e0f",
+      "mode": "ofb_crypt",
+      "num_blocks": 4,
+      "expected_hex": "3b3fd92eb72dad20333449f8e83cfb4a7789508d16918f03f53c52dac54ed8259740051e9c5fecf64344f7a82260edcc304c6528f659c77866a510d9c1d6ae5e"
+    },
+    {
+      "desc": "AES-128-OFB decrypt 4 blocks",
+      "key_hex": "2b7e151628aed2a6abf7158809cf4f3c",
+      "input_hex": "3b3fd92eb72dad20333449f8e83cfb4a7789508d16918f03f53c52dac54ed8259740051e9c5fecf64344f7a82260edcc304c6528f659c77866a510d9c1d6ae5e",
+      "iv_hex": "000102030405060708090a0b0c0d0e0f",
+      "mode": "ofb_crypt",
+      "num_blocks": 4,
+      "expected_hex": "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710"
+    },
+    {
+      "desc": "AES-128-CFB128 encrypt (key2)",
+      "key_hex": "000102030405060708090a0b0c0d0e0f",
+      "input_hex": "00112233445566778899aabbccddeeff",
+      "iv_hex": "11111111111111111111111111111111",
+      "mode": "cfb128_encrypt",
+      "num_blocks": 1,
+      "expected_hex": "35c06c5e7a6f41eb78879e85f83a302c"
+    },
+    {
+      "desc": "AES-128-OFB encrypt (key2)",
+      "key_hex": "000102030405060708090a0b0c0d0e0f",
+      "input_hex": "00112233445566778899aabbccddeeff",
+      "iv_hex": "11111111111111111111111111111111",
+      "mode": "ofb_crypt",
+      "num_blocks": 1,
+      "expected_hex": "35c06c5e7a6f41eb78879e85f83a302c"
+    }
+  ]
+}

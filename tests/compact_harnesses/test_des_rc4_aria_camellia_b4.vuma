@@ -1,0 +1,32 @@
+// des_rc4_aria_camellia batch 4 (vector 4)
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/des_rc4_aria_camellia.vuma"::{DesWord, des_encrypt_block};
+
+transform main() -> i32 {
+    let buf = state_new(DesWord);
+    let out = state_new(DesWord);
+    let key = state_new(DesWord);
+    key.bytes[0] = 111;
+    key.bytes[1] = 184;
+    key.bytes[2] = 1;
+    key.bytes[3] = 74;
+    key.bytes[4] = 147;
+    key.bytes[5] = 220;
+    key.bytes[6] = 37;
+    key.bytes[7] = 110;
+    buf.bytes[0] = 159;
+    buf.bytes[1] = 0;
+    buf.bytes[2] = 97;
+    buf.bytes[3] = 194;
+    buf.bytes[4] = 35;
+    buf.bytes[5] = 132;
+    buf.bytes[6] = 229;
+    buf.bytes[7] = 70;
+    des_encrypt_block(buf, key, out);
+    let oi: u32 = 0;
+    while oi < 8 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

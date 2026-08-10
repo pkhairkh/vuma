@@ -1,0 +1,124 @@
+{
+  "vectors": [
+    {
+      "desc": "DES ECB encrypt (FIPS 81)",
+      "key_hex": "0123456789abcdef",
+      "input_hex": "0123456789abcdef",
+      "algo": "des_encrypt",
+      "key_len": 8,
+      "expected_hex": "56cc09e7cfdc4cef"
+    },
+    {
+      "desc": "DES ECB encrypt random 0",
+      "key_hex": "004992db246db6ff",
+      "input_hex": "0061c22384e546a7",
+      "algo": "des_encrypt",
+      "key_len": 8,
+      "expected_hex": "7866c2b9d89fbba7"
+    },
+    {
+      "desc": "DES ECB encrypt random 1",
+      "key_hex": "256eb7004992db24",
+      "input_hex": "3596f758b91a7bdc",
+      "algo": "des_encrypt",
+      "key_len": 8,
+      "expected_hex": "caaafd4a359197e1"
+    },
+    {
+      "desc": "DES ECB encrypt random 2",
+      "key_hex": "4a93dc256eb70049",
+      "input_hex": "6acb2c8dee4fb011",
+      "algo": "des_encrypt",
+      "key_len": 8,
+      "expected_hex": "dff5aa44c8e524cc"
+    },
+    {
+      "desc": "DES ECB encrypt random 3",
+      "key_hex": "6fb8014a93dc256e",
+      "input_hex": "9f0061c22384e546",
+      "algo": "des_encrypt",
+      "key_len": 8,
+      "expected_hex": "68659479c549f6b2"
+    },
+    {
+      "desc": "RC4 encrypt key_len=5",
+      "key_hex": "004386c90c",
+      "input_hex": "0059b20b64bd166f",
+      "algo": "rc4_crypt",
+      "key_len": 5,
+      "expected_hex": "2ba79b1440fa83ee"
+    },
+    {
+      "desc": "RC4 encrypt key_len=8",
+      "key_hex": "296caff23578bbfe",
+      "input_hex": "2b84dd368fe8419af34ca5fe",
+      "algo": "rc4_crypt",
+      "key_len": 8,
+      "expected_hex": "14c9eb7c94deb461d31a77ef"
+    },
+    {
+      "desc": "RC4 encrypt key_len=11",
+      "key_hex": "5295d81b5ea1e4276aadf0",
+      "input_hex": "56af0861ba136cc51e77d02982db348d",
+      "algo": "rc4_crypt",
+      "key_len": 11,
+      "expected_hex": "499df64f5786099f1a549d0a325e521b"
+    },
+    {
+      "desc": "RC4 encrypt key_len=14",
+      "key_hex": "7bbe014487ca0d5093d6195c9fe2",
+      "input_hex": "81da338ce53e97f049a2fb54ad065fb8116ac31c",
+      "algo": "rc4_crypt",
+      "key_len": 14,
+      "expected_hex": "64fafc96acb6dff66b3c2a7dad7c5bb297e65708"
+    },
+    {
+      "desc": "RC4 encrypt key_len=17",
+      "key_hex": "a4e72a6db0f33679bcff4285c80b4e91d4",
+      "input_hex": "ac055eb71069c21b74cd267fd8318ae33c95ee47a0f952ab",
+      "algo": "rc4_crypt",
+      "key_len": 17,
+      "expected_hex": "8eabea579952077129187af491fc02b07d7c3c8ecc2f76ca"
+    },
+    {
+      "desc": "3DES EDE3 encrypt 0",
+      "key_hex": "003d7ab7f4316eabe825629fdc195693d00d4a87c4013e7b",
+      "input_hex": "0053a6f94c9ff245",
+      "algo": "tdes_encrypt",
+      "key_len": 24,
+      "expected_hex": "4990d4919f9b8212"
+    },
+    {
+      "desc": "3DES EDE3 encrypt 1",
+      "key_hex": "1f5c99d613508dca074481befb3875b2ef2c69a6e3205d9a",
+      "input_hex": "2f82d5287bce2174",
+      "algo": "tdes_encrypt",
+      "key_len": 24,
+      "expected_hex": "c0e78570091e7fb6"
+    },
+    {
+      "desc": "3DES EDE3 encrypt 2",
+      "key_hex": "3e7bb8f5326face92663a0dd1a5794d10e4b88c5023f7cb9",
+      "input_hex": "5eb10457aafd50a3",
+      "algo": "tdes_encrypt",
+      "key_len": 24,
+      "expected_hex": "48eff4d2ae673d54"
+    },
+    {
+      "desc": "3DES EDE3 encrypt 3",
+      "key_hex": "5d9ad714518ecb084582bffc3976b3f02d6aa7e4215e9bd8",
+      "input_hex": "8de03386d92c7fd2",
+      "algo": "tdes_encrypt",
+      "key_len": 24,
+      "expected_hex": "ba3487ead5c584d3"
+    },
+    {
+      "desc": "3DES EDE3 encrypt 4",
+      "key_hex": "7cb9f63370adea2764a1de1b5895d20f4c89c603407dbaf7",
+      "input_hex": "bc0f62b5085bae01",
+      "algo": "tdes_encrypt",
+      "key_len": 24,
+      "expected_hex": "1db623286c97b430"
+    }
+  ]
+}

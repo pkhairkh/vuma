@@ -1,0 +1,68 @@
+// aes_cfb_ofb batch 2 (vector 2)
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/aes128.vuma"::{AesCtx, AesKey, aes128_init};
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/aes_cfb_ofb.vuma"::{CfbOfbBuf, CfbOfbIv, aes_cfb128_encrypt, aes_cfb128_decrypt, aes_ofb_crypt};
+
+transform main() -> i32 {
+    let ctx = state_new(AesCtx);
+    let key = state_new(AesKey);
+    let iv = state_new(CfbOfbIv);
+    let buf = state_new(CfbOfbBuf);
+    let out = state_new(CfbOfbBuf);
+    key.data[0] = 43;
+    key.data[1] = 126;
+    key.data[2] = 21;
+    key.data[3] = 22;
+    key.data[4] = 40;
+    key.data[5] = 174;
+    key.data[6] = 210;
+    key.data[7] = 166;
+    key.data[8] = 171;
+    key.data[9] = 247;
+    key.data[10] = 21;
+    key.data[11] = 136;
+    key.data[12] = 9;
+    key.data[13] = 207;
+    key.data[14] = 79;
+    key.data[15] = 60;
+    iv.bytes[0] = 200;
+    iv.bytes[1] = 166;
+    iv.bytes[2] = 69;
+    iv.bytes[3] = 55;
+    iv.bytes[4] = 160;
+    iv.bytes[5] = 179;
+    iv.bytes[6] = 169;
+    iv.bytes[7] = 63;
+    iv.bytes[8] = 205;
+    iv.bytes[9] = 227;
+    iv.bytes[10] = 205;
+    iv.bytes[11] = 173;
+    iv.bytes[12] = 159;
+    iv.bytes[13] = 28;
+    iv.bytes[14] = 229;
+    iv.bytes[15] = 139;
+    buf.bytes[0] = 48;
+    buf.bytes[1] = 200;
+    buf.bytes[2] = 28;
+    buf.bytes[3] = 70;
+    buf.bytes[4] = 163;
+    buf.bytes[5] = 92;
+    buf.bytes[6] = 228;
+    buf.bytes[7] = 17;
+    buf.bytes[8] = 229;
+    buf.bytes[9] = 251;
+    buf.bytes[10] = 193;
+    buf.bytes[11] = 25;
+    buf.bytes[12] = 26;
+    buf.bytes[13] = 10;
+    buf.bytes[14] = 82;
+    buf.bytes[15] = 239;
+    aes128_init(ctx, key);
+    aes_cfb128_encrypt(ctx, iv, buf, out, 1);
+    let oi: u32 = 0;
+    while oi < 16 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

@@ -98,5 +98,25 @@
     "status": "PASS",
     "pass": 21,
     "total": 21
+  },
+  "aes_cfb_ofb|x86_64": {
+    "status": "PASS",
+    "pass": 12,
+    "total": 12
+  },
+  "chacha20_poly1305|x86_64": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 5
+  },
+  "des_rc4_aria_camellia|x86_64": {
+    "status": "PARTIAL",
+    "pass": 10,
+    "total": 15
+  },
+  "aes_extra_modes|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }

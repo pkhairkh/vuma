@@ -1,0 +1,43 @@
+// des_rc4_aria_camellia batch 7 (vector 7)
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/des_rc4_aria_camellia.vuma"::{Rc4Buf, Rc4Sbox, rc4_crypt};
+
+transform main() -> i32 {
+    let buf = state_new(Rc4Buf);
+    let out = state_new(Rc4Buf);
+    let key = state_new(Rc4Buf);
+    key.bytes[0] = 82;
+    key.bytes[1] = 149;
+    key.bytes[2] = 216;
+    key.bytes[3] = 27;
+    key.bytes[4] = 94;
+    key.bytes[5] = 161;
+    key.bytes[6] = 228;
+    key.bytes[7] = 39;
+    key.bytes[8] = 106;
+    key.bytes[9] = 173;
+    key.bytes[10] = 240;
+    buf.bytes[0] = 86;
+    buf.bytes[1] = 175;
+    buf.bytes[2] = 8;
+    buf.bytes[3] = 97;
+    buf.bytes[4] = 186;
+    buf.bytes[5] = 19;
+    buf.bytes[6] = 108;
+    buf.bytes[7] = 197;
+    buf.bytes[8] = 30;
+    buf.bytes[9] = 119;
+    buf.bytes[10] = 208;
+    buf.bytes[11] = 41;
+    buf.bytes[12] = 130;
+    buf.bytes[13] = 219;
+    buf.bytes[14] = 52;
+    buf.bytes[15] = 141;
+    rc4_crypt(key, 11, buf, 16, out);
+    let oi: u32 = 0;
+    while oi < 16 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

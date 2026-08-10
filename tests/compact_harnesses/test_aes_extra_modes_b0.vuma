@@ -1,0 +1,33 @@
+// aes_extra_modes batch 0 (vector 0)
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/aes128.vuma"::{AesCtx, AesKey, aes128_init};
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/aes_extra_modes.vuma"::{AesXBuf, AesXBlock, aes_cmac};
+
+transform main() -> i32 {
+    let key = state_new(AesKey);
+    let msg = state_new(AesXBuf);
+    let out = state_new(AesXBuf);
+    key.data[0] = 43;
+    key.data[1] = 126;
+    key.data[2] = 21;
+    key.data[3] = 22;
+    key.data[4] = 40;
+    key.data[5] = 174;
+    key.data[6] = 210;
+    key.data[7] = 166;
+    key.data[8] = 171;
+    key.data[9] = 247;
+    key.data[10] = 21;
+    key.data[11] = 136;
+    key.data[12] = 9;
+    key.data[13] = 207;
+    key.data[14] = 79;
+    key.data[15] = 60;
+    aes_cmac(key, msg, 0, out);
+    let oi: u32 = 0;
+    while oi < 16 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}
