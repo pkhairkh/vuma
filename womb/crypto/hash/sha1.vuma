@@ -340,7 +340,7 @@ transform sha1_final(ctx: State<Sha1Ctx>, out: State<Sha1Digest>) {
     let pos = ctx.len + 1;
 
     // Step 2: zero-pad to offset 56 (mod 64).
-    if pos < 56 {
+    if pos <= 56 {
         // Single-block padding: zero bytes pos..55, then bit count at
         // 56..63 — all in the current block.
         let p = pos;
