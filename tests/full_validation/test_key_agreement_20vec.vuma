@@ -1,0 +1,733 @@
+// Auto-generated VUMA harness for key_agreement
+// Tests 20 vectors against C reference (OpenSSL)
+// Reuses state variables to avoid arena overflow
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/x25519.vuma"::{X25519Bytes};
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/key_agreement.vuma"::{x25519_keygen};
+
+transform main() -> i32 {
+    // Shared state (reused for all vectors)
+    let privkey = state_new(X25519Bytes);
+    let pubkey = state_new(X25519Bytes);
+    let oi: u32 = 0;
+
+    // Vector 0: hkdf_sha256(key_0, msg_0)
+    x25519_keygen(privkey, pubkey);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pubkey.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 1: hkdf_sha256(key_1, msg_1)
+    privkey.data[0] = 0;
+    x25519_keygen(privkey, pubkey);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pubkey.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 2: hkdf_sha256(key_2, msg_2)
+    privkey.data[0] = 255;
+    x25519_keygen(privkey, pubkey);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pubkey.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 3: hkdf_sha256(key_3, msg_3)
+    privkey.data[0] = 97;
+    privkey.data[1] = 98;
+    privkey.data[2] = 99;
+    x25519_keygen(privkey, pubkey);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pubkey.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 4: hkdf_sha256(key_4, msg_4)
+    privkey.data[0] = 97;
+    privkey.data[1] = 98;
+    privkey.data[2] = 99;
+    privkey.data[3] = 100;
+    privkey.data[4] = 101;
+    privkey.data[5] = 102;
+    privkey.data[6] = 103;
+    privkey.data[7] = 104;
+    privkey.data[8] = 105;
+    privkey.data[9] = 106;
+    privkey.data[10] = 107;
+    privkey.data[11] = 108;
+    privkey.data[12] = 109;
+    privkey.data[13] = 110;
+    privkey.data[14] = 111;
+    privkey.data[15] = 112;
+    privkey.data[16] = 113;
+    privkey.data[17] = 114;
+    privkey.data[18] = 115;
+    privkey.data[19] = 116;
+    privkey.data[20] = 117;
+    privkey.data[21] = 118;
+    privkey.data[22] = 119;
+    privkey.data[23] = 120;
+    privkey.data[24] = 121;
+    privkey.data[25] = 122;
+    x25519_keygen(privkey, pubkey);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pubkey.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 5: hkdf_sha256(key_5, msg_5)
+    privkey.data[0] = 0;
+    privkey.data[1] = 0;
+    privkey.data[2] = 0;
+    privkey.data[3] = 0;
+    privkey.data[4] = 0;
+    privkey.data[5] = 0;
+    privkey.data[6] = 0;
+    privkey.data[7] = 0;
+    privkey.data[8] = 0;
+    privkey.data[9] = 0;
+    privkey.data[10] = 0;
+    privkey.data[11] = 0;
+    privkey.data[12] = 0;
+    privkey.data[13] = 0;
+    privkey.data[14] = 0;
+    privkey.data[15] = 0;
+    x25519_keygen(privkey, pubkey);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pubkey.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 6: hkdf_sha256(key_6, msg_6)
+    privkey.data[0] = 0;
+    privkey.data[1] = 0;
+    privkey.data[2] = 0;
+    privkey.data[3] = 0;
+    privkey.data[4] = 0;
+    privkey.data[5] = 0;
+    privkey.data[6] = 0;
+    privkey.data[7] = 0;
+    privkey.data[8] = 0;
+    privkey.data[9] = 0;
+    privkey.data[10] = 0;
+    privkey.data[11] = 0;
+    privkey.data[12] = 0;
+    privkey.data[13] = 0;
+    privkey.data[14] = 0;
+    privkey.data[15] = 0;
+    privkey.data[16] = 0;
+    privkey.data[17] = 0;
+    privkey.data[18] = 0;
+    privkey.data[19] = 0;
+    privkey.data[20] = 0;
+    privkey.data[21] = 0;
+    privkey.data[22] = 0;
+    privkey.data[23] = 0;
+    privkey.data[24] = 0;
+    privkey.data[25] = 0;
+    privkey.data[26] = 0;
+    privkey.data[27] = 0;
+    privkey.data[28] = 0;
+    privkey.data[29] = 0;
+    privkey.data[30] = 0;
+    privkey.data[31] = 0;
+    x25519_keygen(privkey, pubkey);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pubkey.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 7: hkdf_sha256(key_7, msg_7)
+    privkey.data[0] = 0;
+    privkey.data[1] = 0;
+    privkey.data[2] = 0;
+    privkey.data[3] = 0;
+    privkey.data[4] = 0;
+    privkey.data[5] = 0;
+    privkey.data[6] = 0;
+    privkey.data[7] = 0;
+    privkey.data[8] = 0;
+    privkey.data[9] = 0;
+    privkey.data[10] = 0;
+    privkey.data[11] = 0;
+    privkey.data[12] = 0;
+    privkey.data[13] = 0;
+    privkey.data[14] = 0;
+    privkey.data[15] = 0;
+    privkey.data[16] = 0;
+    privkey.data[17] = 0;
+    privkey.data[18] = 0;
+    privkey.data[19] = 0;
+    privkey.data[20] = 0;
+    privkey.data[21] = 0;
+    privkey.data[22] = 0;
+    privkey.data[23] = 0;
+    privkey.data[24] = 0;
+    privkey.data[25] = 0;
+    privkey.data[26] = 0;
+    privkey.data[27] = 0;
+    privkey.data[28] = 0;
+    privkey.data[29] = 0;
+    privkey.data[30] = 0;
+    privkey.data[31] = 0;
+    privkey.data[32] = 0;
+    privkey.data[33] = 0;
+    privkey.data[34] = 0;
+    privkey.data[35] = 0;
+    privkey.data[36] = 0;
+    privkey.data[37] = 0;
+    privkey.data[38] = 0;
+    privkey.data[39] = 0;
+    privkey.data[40] = 0;
+    privkey.data[41] = 0;
+    privkey.data[42] = 0;
+    privkey.data[43] = 0;
+    privkey.data[44] = 0;
+    privkey.data[45] = 0;
+    privkey.data[46] = 0;
+    privkey.data[47] = 0;
+    privkey.data[48] = 0;
+    privkey.data[49] = 0;
+    privkey.data[50] = 0;
+    privkey.data[51] = 0;
+    privkey.data[52] = 0;
+    privkey.data[53] = 0;
+    privkey.data[54] = 0;
+    privkey.data[55] = 0;
+    privkey.data[56] = 0;
+    privkey.data[57] = 0;
+    privkey.data[58] = 0;
+    privkey.data[59] = 0;
+    privkey.data[60] = 0;
+    privkey.data[61] = 0;
+    privkey.data[62] = 0;
+    privkey.data[63] = 0;
+    x25519_keygen(privkey, pubkey);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pubkey.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 8: hkdf_sha256(key_8, msg_8)
+    privkey.data[0] = 255;
+    privkey.data[1] = 255;
+    privkey.data[2] = 255;
+    privkey.data[3] = 255;
+    privkey.data[4] = 255;
+    privkey.data[5] = 255;
+    privkey.data[6] = 255;
+    privkey.data[7] = 255;
+    privkey.data[8] = 255;
+    privkey.data[9] = 255;
+    privkey.data[10] = 255;
+    privkey.data[11] = 255;
+    privkey.data[12] = 255;
+    privkey.data[13] = 255;
+    privkey.data[14] = 255;
+    privkey.data[15] = 255;
+    x25519_keygen(privkey, pubkey);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pubkey.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 9: hkdf_sha256(key_9, msg_9)
+    privkey.data[0] = 255;
+    privkey.data[1] = 255;
+    privkey.data[2] = 255;
+    privkey.data[3] = 255;
+    privkey.data[4] = 255;
+    privkey.data[5] = 255;
+    privkey.data[6] = 255;
+    privkey.data[7] = 255;
+    privkey.data[8] = 255;
+    privkey.data[9] = 255;
+    privkey.data[10] = 255;
+    privkey.data[11] = 255;
+    privkey.data[12] = 255;
+    privkey.data[13] = 255;
+    privkey.data[14] = 255;
+    privkey.data[15] = 255;
+    privkey.data[16] = 255;
+    privkey.data[17] = 255;
+    privkey.data[18] = 255;
+    privkey.data[19] = 255;
+    privkey.data[20] = 255;
+    privkey.data[21] = 255;
+    privkey.data[22] = 255;
+    privkey.data[23] = 255;
+    privkey.data[24] = 255;
+    privkey.data[25] = 255;
+    privkey.data[26] = 255;
+    privkey.data[27] = 255;
+    privkey.data[28] = 255;
+    privkey.data[29] = 255;
+    privkey.data[30] = 255;
+    privkey.data[31] = 255;
+    x25519_keygen(privkey, pubkey);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pubkey.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 10: hkdf_sha256(key_10, msg_10)
+    privkey.data[0] = 0;
+    privkey.data[1] = 1;
+    privkey.data[2] = 2;
+    privkey.data[3] = 3;
+    privkey.data[4] = 4;
+    privkey.data[5] = 5;
+    privkey.data[6] = 6;
+    privkey.data[7] = 7;
+    privkey.data[8] = 8;
+    privkey.data[9] = 9;
+    privkey.data[10] = 10;
+    privkey.data[11] = 11;
+    privkey.data[12] = 12;
+    privkey.data[13] = 13;
+    privkey.data[14] = 14;
+    privkey.data[15] = 15;
+    x25519_keygen(privkey, pubkey);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pubkey.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 11: hkdf_sha256(key_11, msg_11)
+    privkey.data[0] = 0;
+    privkey.data[1] = 1;
+    privkey.data[2] = 2;
+    privkey.data[3] = 3;
+    privkey.data[4] = 4;
+    privkey.data[5] = 5;
+    privkey.data[6] = 6;
+    privkey.data[7] = 7;
+    privkey.data[8] = 8;
+    privkey.data[9] = 9;
+    privkey.data[10] = 10;
+    privkey.data[11] = 11;
+    privkey.data[12] = 12;
+    privkey.data[13] = 13;
+    privkey.data[14] = 14;
+    privkey.data[15] = 15;
+    privkey.data[16] = 16;
+    privkey.data[17] = 17;
+    privkey.data[18] = 18;
+    privkey.data[19] = 19;
+    privkey.data[20] = 20;
+    privkey.data[21] = 21;
+    privkey.data[22] = 22;
+    privkey.data[23] = 23;
+    privkey.data[24] = 24;
+    privkey.data[25] = 25;
+    privkey.data[26] = 26;
+    privkey.data[27] = 27;
+    privkey.data[28] = 28;
+    privkey.data[29] = 29;
+    privkey.data[30] = 30;
+    privkey.data[31] = 31;
+    x25519_keygen(privkey, pubkey);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pubkey.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 12: hkdf_sha256(key_12, msg_12)
+    privkey.data[0] = 0;
+    privkey.data[1] = 1;
+    privkey.data[2] = 2;
+    privkey.data[3] = 3;
+    privkey.data[4] = 4;
+    privkey.data[5] = 5;
+    privkey.data[6] = 6;
+    privkey.data[7] = 7;
+    privkey.data[8] = 8;
+    privkey.data[9] = 9;
+    privkey.data[10] = 10;
+    privkey.data[11] = 11;
+    privkey.data[12] = 12;
+    privkey.data[13] = 13;
+    privkey.data[14] = 14;
+    privkey.data[15] = 15;
+    privkey.data[16] = 16;
+    privkey.data[17] = 17;
+    privkey.data[18] = 18;
+    privkey.data[19] = 19;
+    privkey.data[20] = 20;
+    privkey.data[21] = 21;
+    privkey.data[22] = 22;
+    privkey.data[23] = 23;
+    privkey.data[24] = 24;
+    privkey.data[25] = 25;
+    privkey.data[26] = 26;
+    privkey.data[27] = 27;
+    privkey.data[28] = 28;
+    privkey.data[29] = 29;
+    privkey.data[30] = 30;
+    privkey.data[31] = 31;
+    privkey.data[32] = 32;
+    privkey.data[33] = 33;
+    privkey.data[34] = 34;
+    privkey.data[35] = 35;
+    privkey.data[36] = 36;
+    privkey.data[37] = 37;
+    privkey.data[38] = 38;
+    privkey.data[39] = 39;
+    privkey.data[40] = 40;
+    privkey.data[41] = 41;
+    privkey.data[42] = 42;
+    privkey.data[43] = 43;
+    privkey.data[44] = 44;
+    privkey.data[45] = 45;
+    privkey.data[46] = 46;
+    privkey.data[47] = 47;
+    privkey.data[48] = 48;
+    privkey.data[49] = 49;
+    privkey.data[50] = 50;
+    privkey.data[51] = 51;
+    privkey.data[52] = 52;
+    privkey.data[53] = 53;
+    privkey.data[54] = 54;
+    privkey.data[55] = 55;
+    privkey.data[56] = 56;
+    privkey.data[57] = 57;
+    privkey.data[58] = 58;
+    privkey.data[59] = 59;
+    privkey.data[60] = 60;
+    privkey.data[61] = 61;
+    privkey.data[62] = 62;
+    privkey.data[63] = 63;
+    x25519_keygen(privkey, pubkey);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pubkey.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 13: hkdf_sha256(key_13, msg_13)
+    privkey.data[0] = 57;
+    x25519_keygen(privkey, pubkey);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pubkey.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 14: hkdf_sha256(key_14, msg_14)
+    privkey.data[0] = 12;
+    privkey.data[1] = 140;
+    privkey.data[2] = 125;
+    privkey.data[3] = 114;
+    privkey.data[4] = 71;
+    privkey.data[5] = 52;
+    privkey.data[6] = 44;
+    x25519_keygen(privkey, pubkey);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pubkey.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 15: hkdf_sha256(key_15, msg_15)
+    privkey.data[0] = 216;
+    privkey.data[1] = 16;
+    privkey.data[2] = 15;
+    privkey.data[3] = 47;
+    privkey.data[4] = 111;
+    privkey.data[5] = 119;
+    privkey.data[6] = 13;
+    privkey.data[7] = 101;
+    privkey.data[8] = 214;
+    privkey.data[9] = 112;
+    privkey.data[10] = 229;
+    privkey.data[11] = 142;
+    privkey.data[12] = 3;
+    privkey.data[13] = 81;
+    privkey.data[14] = 216;
+    x25519_keygen(privkey, pubkey);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pubkey.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 16: hkdf_sha256(key_16, msg_16)
+    privkey.data[0] = 174;
+    privkey.data[1] = 142;
+    privkey.data[2] = 79;
+    privkey.data[3] = 110;
+    privkey.data[4] = 172;
+    privkey.data[5] = 52;
+    privkey.data[6] = 47;
+    privkey.data[7] = 194;
+    privkey.data[8] = 49;
+    privkey.data[9] = 183;
+    privkey.data[10] = 176;
+    privkey.data[11] = 135;
+    privkey.data[12] = 22;
+    privkey.data[13] = 235;
+    privkey.data[14] = 63;
+    privkey.data[15] = 193;
+    privkey.data[16] = 40;
+    privkey.data[17] = 150;
+    privkey.data[18] = 185;
+    privkey.data[19] = 98;
+    privkey.data[20] = 35;
+    privkey.data[21] = 23;
+    privkey.data[22] = 116;
+    privkey.data[23] = 148;
+    privkey.data[24] = 40;
+    privkey.data[25] = 119;
+    privkey.data[26] = 51;
+    privkey.data[27] = 194;
+    privkey.data[28] = 142;
+    privkey.data[29] = 232;
+    privkey.data[30] = 186;
+    x25519_keygen(privkey, pubkey);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pubkey.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 17: hkdf_sha256(key_17, msg_17)
+    privkey.data[0] = 83;
+    privkey.data[1] = 189;
+    privkey.data[2] = 181;
+    privkey.data[3] = 107;
+    privkey.data[4] = 136;
+    privkey.data[5] = 36;
+    privkey.data[6] = 87;
+    privkey.data[7] = 125;
+    privkey.data[8] = 83;
+    privkey.data[9] = 236;
+    privkey.data[10] = 194;
+    privkey.data[11] = 138;
+    privkey.data[12] = 112;
+    privkey.data[13] = 166;
+    privkey.data[14] = 28;
+    privkey.data[15] = 117;
+    privkey.data[16] = 16;
+    privkey.data[17] = 161;
+    privkey.data[18] = 205;
+    privkey.data[19] = 137;
+    privkey.data[20] = 33;
+    privkey.data[21] = 108;
+    privkey.data[22] = 161;
+    privkey.data[23] = 108;
+    privkey.data[24] = 255;
+    privkey.data[25] = 202;
+    privkey.data[26] = 234;
+    privkey.data[27] = 73;
+    privkey.data[28] = 135;
+    privkey.data[29] = 71;
+    privkey.data[30] = 126;
+    privkey.data[31] = 134;
+    privkey.data[32] = 219;
+    privkey.data[33] = 204;
+    privkey.data[34] = 185;
+    privkey.data[35] = 112;
+    privkey.data[36] = 70;
+    privkey.data[37] = 252;
+    privkey.data[38] = 46;
+    privkey.data[39] = 24;
+    privkey.data[40] = 56;
+    privkey.data[41] = 78;
+    privkey.data[42] = 81;
+    privkey.data[43] = 216;
+    privkey.data[44] = 32;
+    privkey.data[45] = 197;
+    privkey.data[46] = 195;
+    privkey.data[47] = 239;
+    privkey.data[48] = 128;
+    privkey.data[49] = 5;
+    privkey.data[50] = 58;
+    privkey.data[51] = 136;
+    privkey.data[52] = 174;
+    privkey.data[53] = 57;
+    privkey.data[54] = 150;
+    x25519_keygen(privkey, pubkey);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pubkey.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 18: hkdf_sha256(key_18, msg_18)
+    privkey.data[0] = 222;
+    privkey.data[1] = 80;
+    privkey.data[2] = 232;
+    privkey.data[3] = 1;
+    privkey.data[4] = 134;
+    privkey.data[5] = 91;
+    privkey.data[6] = 54;
+    privkey.data[7] = 152;
+    privkey.data[8] = 101;
+    privkey.data[9] = 78;
+    privkey.data[10] = 191;
+    privkey.data[11] = 82;
+    privkey.data[12] = 0;
+    privkey.data[13] = 165;
+    privkey.data[14] = 250;
+    privkey.data[15] = 9;
+    privkey.data[16] = 57;
+    privkey.data[17] = 185;
+    privkey.data[18] = 157;
+    privkey.data[19] = 122;
+    privkey.data[20] = 29;
+    privkey.data[21] = 123;
+    privkey.data[22] = 40;
+    privkey.data[23] = 43;
+    privkey.data[24] = 248;
+    privkey.data[25] = 35;
+    privkey.data[26] = 64;
+    privkey.data[27] = 65;
+    privkey.data[28] = 243;
+    privkey.data[29] = 84;
+    privkey.data[30] = 135;
+    privkey.data[31] = 216;
+    privkey.data[32] = 108;
+    privkey.data[33] = 102;
+    privkey.data[34] = 159;
+    privkey.data[35] = 204;
+    privkey.data[36] = 191;
+    privkey.data[37] = 224;
+    privkey.data[38] = 231;
+    privkey.data[39] = 61;
+    privkey.data[40] = 126;
+    privkey.data[41] = 115;
+    privkey.data[42] = 32;
+    privkey.data[43] = 173;
+    privkey.data[44] = 10;
+    privkey.data[45] = 117;
+    privkey.data[46] = 112;
+    privkey.data[47] = 3;
+    privkey.data[48] = 36;
+    privkey.data[49] = 30;
+    privkey.data[50] = 117;
+    privkey.data[51] = 34;
+    privkey.data[52] = 16;
+    privkey.data[53] = 169;
+    privkey.data[54] = 36;
+    privkey.data[55] = 121;
+    privkey.data[56] = 142;
+    privkey.data[57] = 248;
+    privkey.data[58] = 109;
+    privkey.data[59] = 67;
+    privkey.data[60] = 242;
+    privkey.data[61] = 124;
+    privkey.data[62] = 242;
+    x25519_keygen(privkey, pubkey);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pubkey.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 19: hkdf_sha256(key_19, msg_19)
+    privkey.data[0] = 208;
+    privkey.data[1] = 97;
+    privkey.data[2] = 48;
+    privkey.data[3] = 49;
+    privkey.data[4] = 220;
+    privkey.data[5] = 181;
+    privkey.data[6] = 216;
+    privkey.data[7] = 210;
+    privkey.data[8] = 239;
+    privkey.data[9] = 27;
+    privkey.data[10] = 50;
+    privkey.data[11] = 31;
+    privkey.data[12] = 206;
+    privkey.data[13] = 173;
+    privkey.data[14] = 55;
+    privkey.data[15] = 127;
+    privkey.data[16] = 98;
+    privkey.data[17] = 97;
+    privkey.data[18] = 229;
+    privkey.data[19] = 71;
+    privkey.data[20] = 216;
+    privkey.data[21] = 93;
+    privkey.data[22] = 142;
+    privkey.data[23] = 236;
+    privkey.data[24] = 127;
+    privkey.data[25] = 38;
+    privkey.data[26] = 226;
+    privkey.data[27] = 50;
+    privkey.data[28] = 25;
+    privkey.data[29] = 7;
+    privkey.data[30] = 47;
+    privkey.data[31] = 121;
+    privkey.data[32] = 85;
+    privkey.data[33] = 208;
+    privkey.data[34] = 248;
+    privkey.data[35] = 246;
+    privkey.data[36] = 109;
+    privkey.data[37] = 205;
+    privkey.data[38] = 30;
+    privkey.data[39] = 84;
+    privkey.data[40] = 194;
+    privkey.data[41] = 1;
+    privkey.data[42] = 199;
+    privkey.data[43] = 135;
+    privkey.data[44] = 232;
+    privkey.data[45] = 146;
+    privkey.data[46] = 216;
+    privkey.data[47] = 249;
+    privkey.data[48] = 79;
+    privkey.data[49] = 97;
+    privkey.data[50] = 151;
+    privkey.data[51] = 111;
+    privkey.data[52] = 29;
+    privkey.data[53] = 31;
+    privkey.data[54] = 160;
+    privkey.data[55] = 29;
+    privkey.data[56] = 25;
+    privkey.data[57] = 244;
+    privkey.data[58] = 80;
+    privkey.data[59] = 29;
+    privkey.data[60] = 41;
+    privkey.data[61] = 95;
+    privkey.data[62] = 35;
+    privkey.data[63] = 34;
+    x25519_keygen(privkey, pubkey);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pubkey.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

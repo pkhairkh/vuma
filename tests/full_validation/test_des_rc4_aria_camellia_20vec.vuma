@@ -1,0 +1,604 @@
+// Auto-generated VUMA harness for des_rc4_aria_camellia
+// Tests 20 vectors against C reference (OpenSSL)
+// Reuses state variables to avoid arena overflow
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/des_rc4_aria_camellia.vuma"::{DesWord, des_encrypt_block};
+
+transform main() -> i32 {
+    // Shared state (reused for all vectors)
+    let pt = state_new(DesWord);
+    let key = state_new(DesWord);
+    let ct = state_new(DesWord);
+    let oi: u32 = 0;
+
+    // Vector 0: des_ecb(key_0, pt_0)
+    pt.bytes[0] = 0;
+    pt.bytes[1] = 0;
+    pt.bytes[2] = 0;
+    pt.bytes[3] = 0;
+    key.bytes[0] = 0;
+    key.bytes[1] = 1;
+    key.bytes[2] = 2;
+    key.bytes[3] = 3;
+    key.bytes[4] = 4;
+    key.bytes[5] = 5;
+    key.bytes[6] = 6;
+    key.bytes[7] = 7;
+    des_encrypt_block(pt, key, ct);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (ct.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 1: des_ecb(key_1, pt_1)
+    pt.bytes[0] = 0;
+    pt.bytes[1] = 0;
+    pt.bytes[2] = 0;
+    pt.bytes[3] = 0;
+    key.bytes[0] = 0;
+    key.bytes[1] = 0;
+    key.bytes[2] = 0;
+    key.bytes[3] = 0;
+    key.bytes[4] = 0;
+    key.bytes[5] = 0;
+    key.bytes[6] = 0;
+    key.bytes[7] = 0;
+    des_encrypt_block(pt, key, ct);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (ct.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 2: des_ecb(key_2, pt_2)
+    pt.bytes[0] = 255;
+    pt.bytes[1] = 0;
+    pt.bytes[2] = 0;
+    pt.bytes[3] = 0;
+    key.bytes[0] = 255;
+    key.bytes[1] = 255;
+    key.bytes[2] = 255;
+    key.bytes[3] = 255;
+    key.bytes[4] = 255;
+    key.bytes[5] = 255;
+    key.bytes[6] = 255;
+    key.bytes[7] = 255;
+    des_encrypt_block(pt, key, ct);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (ct.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 3: des_ecb(key_3, pt_3)
+    pt.bytes[0] = 97;
+    pt.bytes[1] = 98;
+    pt.bytes[2] = 99;
+    pt.bytes[3] = 0;
+    key.bytes[0] = 0;
+    key.bytes[1] = 1;
+    key.bytes[2] = 2;
+    key.bytes[3] = 3;
+    key.bytes[4] = 4;
+    key.bytes[5] = 5;
+    key.bytes[6] = 6;
+    key.bytes[7] = 7;
+    des_encrypt_block(pt, key, ct);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (ct.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 4: des_ecb(key_4, pt_4)
+    pt.bytes[0] = 97;
+    pt.bytes[1] = 98;
+    pt.bytes[2] = 99;
+    pt.bytes[3] = 100;
+    pt.bytes[4] = 101;
+    pt.bytes[5] = 102;
+    pt.bytes[6] = 103;
+    pt.bytes[7] = 104;
+    pt.bytes[8] = 105;
+    pt.bytes[9] = 106;
+    pt.bytes[10] = 107;
+    pt.bytes[11] = 108;
+    pt.bytes[12] = 109;
+    pt.bytes[13] = 110;
+    pt.bytes[14] = 111;
+    pt.bytes[15] = 112;
+    key.bytes[0] = 26;
+    key.bytes[1] = 137;
+    key.bytes[2] = 44;
+    key.bytes[3] = 208;
+    key.bytes[4] = 136;
+    key.bytes[5] = 55;
+    key.bytes[6] = 19;
+    key.bytes[7] = 194;
+    des_encrypt_block(pt, key, ct);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (ct.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 5: des_ecb(key_5, pt_5)
+    pt.bytes[0] = 0;
+    pt.bytes[1] = 0;
+    pt.bytes[2] = 0;
+    pt.bytes[3] = 0;
+    pt.bytes[4] = 0;
+    pt.bytes[5] = 0;
+    pt.bytes[6] = 0;
+    pt.bytes[7] = 0;
+    pt.bytes[8] = 0;
+    pt.bytes[9] = 0;
+    pt.bytes[10] = 0;
+    pt.bytes[11] = 0;
+    pt.bytes[12] = 0;
+    pt.bytes[13] = 0;
+    pt.bytes[14] = 0;
+    pt.bytes[15] = 0;
+    key.bytes[0] = 170;
+    key.bytes[1] = 174;
+    key.bytes[2] = 26;
+    key.bytes[3] = 81;
+    key.bytes[4] = 69;
+    key.bytes[5] = 172;
+    key.bytes[6] = 170;
+    key.bytes[7] = 125;
+    des_encrypt_block(pt, key, ct);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (ct.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 6: des_ecb(key_6, pt_6)
+    pt.bytes[0] = 0;
+    pt.bytes[1] = 0;
+    pt.bytes[2] = 0;
+    pt.bytes[3] = 0;
+    pt.bytes[4] = 0;
+    pt.bytes[5] = 0;
+    pt.bytes[6] = 0;
+    pt.bytes[7] = 0;
+    pt.bytes[8] = 0;
+    pt.bytes[9] = 0;
+    pt.bytes[10] = 0;
+    pt.bytes[11] = 0;
+    pt.bytes[12] = 0;
+    pt.bytes[13] = 0;
+    pt.bytes[14] = 0;
+    pt.bytes[15] = 0;
+    key.bytes[0] = 83;
+    key.bytes[1] = 0;
+    key.bytes[2] = 223;
+    key.bytes[3] = 44;
+    key.bytes[4] = 193;
+    key.bytes[5] = 35;
+    key.bytes[6] = 3;
+    key.bytes[7] = 161;
+    des_encrypt_block(pt, key, ct);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (ct.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 7: des_ecb(key_7, pt_7)
+    pt.bytes[0] = 0;
+    pt.bytes[1] = 0;
+    pt.bytes[2] = 0;
+    pt.bytes[3] = 0;
+    pt.bytes[4] = 0;
+    pt.bytes[5] = 0;
+    pt.bytes[6] = 0;
+    pt.bytes[7] = 0;
+    pt.bytes[8] = 0;
+    pt.bytes[9] = 0;
+    pt.bytes[10] = 0;
+    pt.bytes[11] = 0;
+    pt.bytes[12] = 0;
+    pt.bytes[13] = 0;
+    pt.bytes[14] = 0;
+    pt.bytes[15] = 0;
+    key.bytes[0] = 229;
+    key.bytes[1] = 52;
+    key.bytes[2] = 22;
+    key.bytes[3] = 47;
+    key.bytes[4] = 72;
+    key.bytes[5] = 64;
+    key.bytes[6] = 10;
+    key.bytes[7] = 149;
+    des_encrypt_block(pt, key, ct);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (ct.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 8: des_ecb(key_8, pt_8)
+    pt.bytes[0] = 255;
+    pt.bytes[1] = 255;
+    pt.bytes[2] = 255;
+    pt.bytes[3] = 255;
+    pt.bytes[4] = 255;
+    pt.bytes[5] = 255;
+    pt.bytes[6] = 255;
+    pt.bytes[7] = 255;
+    pt.bytes[8] = 255;
+    pt.bytes[9] = 255;
+    pt.bytes[10] = 255;
+    pt.bytes[11] = 255;
+    pt.bytes[12] = 255;
+    pt.bytes[13] = 255;
+    pt.bytes[14] = 255;
+    pt.bytes[15] = 255;
+    key.bytes[0] = 220;
+    key.bytes[1] = 244;
+    key.bytes[2] = 135;
+    key.bytes[3] = 240;
+    key.bytes[4] = 18;
+    key.bytes[5] = 156;
+    key.bytes[6] = 175;
+    key.bytes[7] = 247;
+    des_encrypt_block(pt, key, ct);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (ct.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 9: des_ecb(key_9, pt_9)
+    pt.bytes[0] = 255;
+    pt.bytes[1] = 255;
+    pt.bytes[2] = 255;
+    pt.bytes[3] = 255;
+    pt.bytes[4] = 255;
+    pt.bytes[5] = 255;
+    pt.bytes[6] = 255;
+    pt.bytes[7] = 255;
+    pt.bytes[8] = 255;
+    pt.bytes[9] = 255;
+    pt.bytes[10] = 255;
+    pt.bytes[11] = 255;
+    pt.bytes[12] = 255;
+    pt.bytes[13] = 255;
+    pt.bytes[14] = 255;
+    pt.bytes[15] = 255;
+    key.bytes[0] = 105;
+    key.bytes[1] = 161;
+    key.bytes[2] = 6;
+    key.bytes[3] = 203;
+    key.bytes[4] = 222;
+    key.bytes[5] = 248;
+    key.bytes[6] = 214;
+    key.bytes[7] = 191;
+    des_encrypt_block(pt, key, ct);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (ct.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 10: des_ecb(key_10, pt_10)
+    pt.bytes[0] = 0;
+    pt.bytes[1] = 1;
+    pt.bytes[2] = 2;
+    pt.bytes[3] = 3;
+    pt.bytes[4] = 4;
+    pt.bytes[5] = 5;
+    pt.bytes[6] = 6;
+    pt.bytes[7] = 7;
+    pt.bytes[8] = 8;
+    pt.bytes[9] = 9;
+    pt.bytes[10] = 10;
+    pt.bytes[11] = 11;
+    pt.bytes[12] = 12;
+    pt.bytes[13] = 13;
+    pt.bytes[14] = 14;
+    pt.bytes[15] = 15;
+    key.bytes[0] = 16;
+    key.bytes[1] = 92;
+    key.bytes[2] = 42;
+    key.bytes[3] = 249;
+    key.bytes[4] = 134;
+    key.bytes[5] = 87;
+    key.bytes[6] = 171;
+    key.bytes[7] = 172;
+    des_encrypt_block(pt, key, ct);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (ct.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 11: des_ecb(key_11, pt_11)
+    pt.bytes[0] = 0;
+    pt.bytes[1] = 1;
+    pt.bytes[2] = 2;
+    pt.bytes[3] = 3;
+    pt.bytes[4] = 4;
+    pt.bytes[5] = 5;
+    pt.bytes[6] = 6;
+    pt.bytes[7] = 7;
+    pt.bytes[8] = 8;
+    pt.bytes[9] = 9;
+    pt.bytes[10] = 10;
+    pt.bytes[11] = 11;
+    pt.bytes[12] = 12;
+    pt.bytes[13] = 13;
+    pt.bytes[14] = 14;
+    pt.bytes[15] = 15;
+    key.bytes[0] = 200;
+    key.bytes[1] = 37;
+    key.bytes[2] = 233;
+    key.bytes[3] = 198;
+    key.bytes[4] = 172;
+    key.bytes[5] = 8;
+    key.bytes[6] = 96;
+    key.bytes[7] = 45;
+    des_encrypt_block(pt, key, ct);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (ct.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 12: des_ecb(key_12, pt_12)
+    pt.bytes[0] = 0;
+    pt.bytes[1] = 1;
+    pt.bytes[2] = 2;
+    pt.bytes[3] = 3;
+    pt.bytes[4] = 4;
+    pt.bytes[5] = 5;
+    pt.bytes[6] = 6;
+    pt.bytes[7] = 7;
+    pt.bytes[8] = 8;
+    pt.bytes[9] = 9;
+    pt.bytes[10] = 10;
+    pt.bytes[11] = 11;
+    pt.bytes[12] = 12;
+    pt.bytes[13] = 13;
+    pt.bytes[14] = 14;
+    pt.bytes[15] = 15;
+    key.bytes[0] = 186;
+    key.bytes[1] = 6;
+    key.bytes[2] = 180;
+    key.bytes[3] = 117;
+    key.bytes[4] = 207;
+    key.bytes[5] = 30;
+    key.bytes[6] = 147;
+    key.bytes[7] = 253;
+    des_encrypt_block(pt, key, ct);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (ct.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 13: des_ecb(key_13, pt_13)
+    pt.bytes[0] = 57;
+    pt.bytes[1] = 0;
+    pt.bytes[2] = 0;
+    pt.bytes[3] = 0;
+    key.bytes[0] = 119;
+    key.bytes[1] = 247;
+    key.bytes[2] = 90;
+    key.bytes[3] = 78;
+    key.bytes[4] = 227;
+    key.bytes[5] = 193;
+    key.bytes[6] = 236;
+    key.bytes[7] = 22;
+    des_encrypt_block(pt, key, ct);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (ct.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 14: des_ecb(key_14, pt_14)
+    pt.bytes[0] = 12;
+    pt.bytes[1] = 140;
+    pt.bytes[2] = 125;
+    pt.bytes[3] = 114;
+    pt.bytes[4] = 71;
+    pt.bytes[5] = 52;
+    pt.bytes[6] = 44;
+    key.bytes[0] = 5;
+    key.bytes[1] = 68;
+    key.bytes[2] = 233;
+    key.bytes[3] = 98;
+    key.bytes[4] = 10;
+    key.bytes[5] = 131;
+    key.bytes[6] = 180;
+    key.bytes[7] = 139;
+    des_encrypt_block(pt, key, ct);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (ct.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 15: des_ecb(key_15, pt_15)
+    pt.bytes[0] = 216;
+    pt.bytes[1] = 16;
+    pt.bytes[2] = 15;
+    pt.bytes[3] = 47;
+    pt.bytes[4] = 111;
+    pt.bytes[5] = 119;
+    pt.bytes[6] = 13;
+    pt.bytes[7] = 101;
+    pt.bytes[8] = 214;
+    pt.bytes[9] = 112;
+    pt.bytes[10] = 229;
+    pt.bytes[11] = 142;
+    pt.bytes[12] = 3;
+    pt.bytes[13] = 81;
+    pt.bytes[14] = 216;
+    key.bytes[0] = 222;
+    key.bytes[1] = 215;
+    key.bytes[2] = 0;
+    key.bytes[3] = 55;
+    key.bytes[4] = 32;
+    key.bytes[5] = 181;
+    key.bytes[6] = 45;
+    key.bytes[7] = 42;
+    des_encrypt_block(pt, key, ct);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (ct.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 16: des_ecb(key_16, pt_16)
+    pt.bytes[0] = 174;
+    pt.bytes[1] = 142;
+    pt.bytes[2] = 79;
+    pt.bytes[3] = 110;
+    pt.bytes[4] = 172;
+    pt.bytes[5] = 52;
+    pt.bytes[6] = 47;
+    pt.bytes[7] = 194;
+    pt.bytes[8] = 49;
+    pt.bytes[9] = 183;
+    pt.bytes[10] = 176;
+    pt.bytes[11] = 135;
+    pt.bytes[12] = 22;
+    pt.bytes[13] = 235;
+    pt.bytes[14] = 63;
+    pt.bytes[15] = 193;
+    key.bytes[0] = 221;
+    key.bytes[1] = 4;
+    key.bytes[2] = 193;
+    key.bytes[3] = 37;
+    key.bytes[4] = 206;
+    key.bytes[5] = 14;
+    key.bytes[6] = 165;
+    key.bytes[7] = 134;
+    des_encrypt_block(pt, key, ct);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (ct.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 17: des_ecb(key_17, pt_17)
+    pt.bytes[0] = 83;
+    pt.bytes[1] = 189;
+    pt.bytes[2] = 181;
+    pt.bytes[3] = 107;
+    pt.bytes[4] = 136;
+    pt.bytes[5] = 36;
+    pt.bytes[6] = 87;
+    pt.bytes[7] = 125;
+    pt.bytes[8] = 83;
+    pt.bytes[9] = 236;
+    pt.bytes[10] = 194;
+    pt.bytes[11] = 138;
+    pt.bytes[12] = 112;
+    pt.bytes[13] = 166;
+    pt.bytes[14] = 28;
+    pt.bytes[15] = 117;
+    key.bytes[0] = 241;
+    key.bytes[1] = 16;
+    key.bytes[2] = 171;
+    key.bytes[3] = 212;
+    key.bytes[4] = 178;
+    key.bytes[5] = 12;
+    key.bytes[6] = 83;
+    key.bytes[7] = 214;
+    des_encrypt_block(pt, key, ct);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (ct.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 18: des_ecb(key_18, pt_18)
+    pt.bytes[0] = 222;
+    pt.bytes[1] = 80;
+    pt.bytes[2] = 232;
+    pt.bytes[3] = 1;
+    pt.bytes[4] = 134;
+    pt.bytes[5] = 91;
+    pt.bytes[6] = 54;
+    pt.bytes[7] = 152;
+    pt.bytes[8] = 101;
+    pt.bytes[9] = 78;
+    pt.bytes[10] = 191;
+    pt.bytes[11] = 82;
+    pt.bytes[12] = 0;
+    pt.bytes[13] = 165;
+    pt.bytes[14] = 250;
+    pt.bytes[15] = 9;
+    key.bytes[0] = 32;
+    key.bytes[1] = 73;
+    key.bytes[2] = 190;
+    key.bytes[3] = 120;
+    key.bytes[4] = 40;
+    key.bytes[5] = 29;
+    key.bytes[6] = 198;
+    key.bytes[7] = 156;
+    des_encrypt_block(pt, key, ct);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (ct.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 19: des_ecb(key_19, pt_19)
+    pt.bytes[0] = 208;
+    pt.bytes[1] = 97;
+    pt.bytes[2] = 48;
+    pt.bytes[3] = 49;
+    pt.bytes[4] = 220;
+    pt.bytes[5] = 181;
+    pt.bytes[6] = 216;
+    pt.bytes[7] = 210;
+    pt.bytes[8] = 239;
+    pt.bytes[9] = 27;
+    pt.bytes[10] = 50;
+    pt.bytes[11] = 31;
+    pt.bytes[12] = 206;
+    pt.bytes[13] = 173;
+    pt.bytes[14] = 55;
+    pt.bytes[15] = 127;
+    key.bytes[0] = 74;
+    key.bytes[1] = 149;
+    key.bytes[2] = 199;
+    key.bytes[3] = 188;
+    key.bytes[4] = 64;
+    key.bytes[5] = 172;
+    key.bytes[6] = 61;
+    key.bytes[7] = 85;
+    des_encrypt_block(pt, key, ct);
+    oi = 0;
+    while oi < 8 {
+        print_int(1000 + (ct.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

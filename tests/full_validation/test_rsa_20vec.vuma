@@ -1,0 +1,732 @@
+// Auto-generated VUMA harness for rsa
+// Tests 20 vectors against C reference (OpenSSL)
+// Reuses state variables to avoid arena overflow
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/rsa.vuma"::{Rsa256, RsaKey, rsa_bn_add};
+
+transform main() -> i32 {
+    // Shared state (reused for all vectors)
+    let a = state_new(Rsa256);
+    let r = state_new(Rsa256);
+    let oi: u32 = 0;
+
+    // Vector 0: sha256(input_0)
+    rsa_bn_add(r, a, a);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (r.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 1: sha256(input_1)
+    a.bytes[0] = 0;
+    rsa_bn_add(r, a, a);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (r.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 2: sha256(input_2)
+    a.bytes[0] = 255;
+    rsa_bn_add(r, a, a);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (r.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 3: sha256(input_3)
+    a.bytes[0] = 97;
+    a.bytes[1] = 98;
+    a.bytes[2] = 99;
+    rsa_bn_add(r, a, a);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (r.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 4: sha256(input_4)
+    a.bytes[0] = 97;
+    a.bytes[1] = 98;
+    a.bytes[2] = 99;
+    a.bytes[3] = 100;
+    a.bytes[4] = 101;
+    a.bytes[5] = 102;
+    a.bytes[6] = 103;
+    a.bytes[7] = 104;
+    a.bytes[8] = 105;
+    a.bytes[9] = 106;
+    a.bytes[10] = 107;
+    a.bytes[11] = 108;
+    a.bytes[12] = 109;
+    a.bytes[13] = 110;
+    a.bytes[14] = 111;
+    a.bytes[15] = 112;
+    a.bytes[16] = 113;
+    a.bytes[17] = 114;
+    a.bytes[18] = 115;
+    a.bytes[19] = 116;
+    a.bytes[20] = 117;
+    a.bytes[21] = 118;
+    a.bytes[22] = 119;
+    a.bytes[23] = 120;
+    a.bytes[24] = 121;
+    a.bytes[25] = 122;
+    rsa_bn_add(r, a, a);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (r.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 5: sha256(input_5)
+    a.bytes[0] = 0;
+    a.bytes[1] = 0;
+    a.bytes[2] = 0;
+    a.bytes[3] = 0;
+    a.bytes[4] = 0;
+    a.bytes[5] = 0;
+    a.bytes[6] = 0;
+    a.bytes[7] = 0;
+    a.bytes[8] = 0;
+    a.bytes[9] = 0;
+    a.bytes[10] = 0;
+    a.bytes[11] = 0;
+    a.bytes[12] = 0;
+    a.bytes[13] = 0;
+    a.bytes[14] = 0;
+    a.bytes[15] = 0;
+    rsa_bn_add(r, a, a);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (r.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 6: sha256(input_6)
+    a.bytes[0] = 0;
+    a.bytes[1] = 0;
+    a.bytes[2] = 0;
+    a.bytes[3] = 0;
+    a.bytes[4] = 0;
+    a.bytes[5] = 0;
+    a.bytes[6] = 0;
+    a.bytes[7] = 0;
+    a.bytes[8] = 0;
+    a.bytes[9] = 0;
+    a.bytes[10] = 0;
+    a.bytes[11] = 0;
+    a.bytes[12] = 0;
+    a.bytes[13] = 0;
+    a.bytes[14] = 0;
+    a.bytes[15] = 0;
+    a.bytes[16] = 0;
+    a.bytes[17] = 0;
+    a.bytes[18] = 0;
+    a.bytes[19] = 0;
+    a.bytes[20] = 0;
+    a.bytes[21] = 0;
+    a.bytes[22] = 0;
+    a.bytes[23] = 0;
+    a.bytes[24] = 0;
+    a.bytes[25] = 0;
+    a.bytes[26] = 0;
+    a.bytes[27] = 0;
+    a.bytes[28] = 0;
+    a.bytes[29] = 0;
+    a.bytes[30] = 0;
+    a.bytes[31] = 0;
+    rsa_bn_add(r, a, a);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (r.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 7: sha256(input_7)
+    a.bytes[0] = 0;
+    a.bytes[1] = 0;
+    a.bytes[2] = 0;
+    a.bytes[3] = 0;
+    a.bytes[4] = 0;
+    a.bytes[5] = 0;
+    a.bytes[6] = 0;
+    a.bytes[7] = 0;
+    a.bytes[8] = 0;
+    a.bytes[9] = 0;
+    a.bytes[10] = 0;
+    a.bytes[11] = 0;
+    a.bytes[12] = 0;
+    a.bytes[13] = 0;
+    a.bytes[14] = 0;
+    a.bytes[15] = 0;
+    a.bytes[16] = 0;
+    a.bytes[17] = 0;
+    a.bytes[18] = 0;
+    a.bytes[19] = 0;
+    a.bytes[20] = 0;
+    a.bytes[21] = 0;
+    a.bytes[22] = 0;
+    a.bytes[23] = 0;
+    a.bytes[24] = 0;
+    a.bytes[25] = 0;
+    a.bytes[26] = 0;
+    a.bytes[27] = 0;
+    a.bytes[28] = 0;
+    a.bytes[29] = 0;
+    a.bytes[30] = 0;
+    a.bytes[31] = 0;
+    a.bytes[32] = 0;
+    a.bytes[33] = 0;
+    a.bytes[34] = 0;
+    a.bytes[35] = 0;
+    a.bytes[36] = 0;
+    a.bytes[37] = 0;
+    a.bytes[38] = 0;
+    a.bytes[39] = 0;
+    a.bytes[40] = 0;
+    a.bytes[41] = 0;
+    a.bytes[42] = 0;
+    a.bytes[43] = 0;
+    a.bytes[44] = 0;
+    a.bytes[45] = 0;
+    a.bytes[46] = 0;
+    a.bytes[47] = 0;
+    a.bytes[48] = 0;
+    a.bytes[49] = 0;
+    a.bytes[50] = 0;
+    a.bytes[51] = 0;
+    a.bytes[52] = 0;
+    a.bytes[53] = 0;
+    a.bytes[54] = 0;
+    a.bytes[55] = 0;
+    a.bytes[56] = 0;
+    a.bytes[57] = 0;
+    a.bytes[58] = 0;
+    a.bytes[59] = 0;
+    a.bytes[60] = 0;
+    a.bytes[61] = 0;
+    a.bytes[62] = 0;
+    a.bytes[63] = 0;
+    rsa_bn_add(r, a, a);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (r.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 8: sha256(input_8)
+    a.bytes[0] = 255;
+    a.bytes[1] = 255;
+    a.bytes[2] = 255;
+    a.bytes[3] = 255;
+    a.bytes[4] = 255;
+    a.bytes[5] = 255;
+    a.bytes[6] = 255;
+    a.bytes[7] = 255;
+    a.bytes[8] = 255;
+    a.bytes[9] = 255;
+    a.bytes[10] = 255;
+    a.bytes[11] = 255;
+    a.bytes[12] = 255;
+    a.bytes[13] = 255;
+    a.bytes[14] = 255;
+    a.bytes[15] = 255;
+    rsa_bn_add(r, a, a);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (r.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 9: sha256(input_9)
+    a.bytes[0] = 255;
+    a.bytes[1] = 255;
+    a.bytes[2] = 255;
+    a.bytes[3] = 255;
+    a.bytes[4] = 255;
+    a.bytes[5] = 255;
+    a.bytes[6] = 255;
+    a.bytes[7] = 255;
+    a.bytes[8] = 255;
+    a.bytes[9] = 255;
+    a.bytes[10] = 255;
+    a.bytes[11] = 255;
+    a.bytes[12] = 255;
+    a.bytes[13] = 255;
+    a.bytes[14] = 255;
+    a.bytes[15] = 255;
+    a.bytes[16] = 255;
+    a.bytes[17] = 255;
+    a.bytes[18] = 255;
+    a.bytes[19] = 255;
+    a.bytes[20] = 255;
+    a.bytes[21] = 255;
+    a.bytes[22] = 255;
+    a.bytes[23] = 255;
+    a.bytes[24] = 255;
+    a.bytes[25] = 255;
+    a.bytes[26] = 255;
+    a.bytes[27] = 255;
+    a.bytes[28] = 255;
+    a.bytes[29] = 255;
+    a.bytes[30] = 255;
+    a.bytes[31] = 255;
+    rsa_bn_add(r, a, a);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (r.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 10: sha256(input_10)
+    a.bytes[0] = 0;
+    a.bytes[1] = 1;
+    a.bytes[2] = 2;
+    a.bytes[3] = 3;
+    a.bytes[4] = 4;
+    a.bytes[5] = 5;
+    a.bytes[6] = 6;
+    a.bytes[7] = 7;
+    a.bytes[8] = 8;
+    a.bytes[9] = 9;
+    a.bytes[10] = 10;
+    a.bytes[11] = 11;
+    a.bytes[12] = 12;
+    a.bytes[13] = 13;
+    a.bytes[14] = 14;
+    a.bytes[15] = 15;
+    rsa_bn_add(r, a, a);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (r.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 11: sha256(input_11)
+    a.bytes[0] = 0;
+    a.bytes[1] = 1;
+    a.bytes[2] = 2;
+    a.bytes[3] = 3;
+    a.bytes[4] = 4;
+    a.bytes[5] = 5;
+    a.bytes[6] = 6;
+    a.bytes[7] = 7;
+    a.bytes[8] = 8;
+    a.bytes[9] = 9;
+    a.bytes[10] = 10;
+    a.bytes[11] = 11;
+    a.bytes[12] = 12;
+    a.bytes[13] = 13;
+    a.bytes[14] = 14;
+    a.bytes[15] = 15;
+    a.bytes[16] = 16;
+    a.bytes[17] = 17;
+    a.bytes[18] = 18;
+    a.bytes[19] = 19;
+    a.bytes[20] = 20;
+    a.bytes[21] = 21;
+    a.bytes[22] = 22;
+    a.bytes[23] = 23;
+    a.bytes[24] = 24;
+    a.bytes[25] = 25;
+    a.bytes[26] = 26;
+    a.bytes[27] = 27;
+    a.bytes[28] = 28;
+    a.bytes[29] = 29;
+    a.bytes[30] = 30;
+    a.bytes[31] = 31;
+    rsa_bn_add(r, a, a);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (r.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 12: sha256(input_12)
+    a.bytes[0] = 0;
+    a.bytes[1] = 1;
+    a.bytes[2] = 2;
+    a.bytes[3] = 3;
+    a.bytes[4] = 4;
+    a.bytes[5] = 5;
+    a.bytes[6] = 6;
+    a.bytes[7] = 7;
+    a.bytes[8] = 8;
+    a.bytes[9] = 9;
+    a.bytes[10] = 10;
+    a.bytes[11] = 11;
+    a.bytes[12] = 12;
+    a.bytes[13] = 13;
+    a.bytes[14] = 14;
+    a.bytes[15] = 15;
+    a.bytes[16] = 16;
+    a.bytes[17] = 17;
+    a.bytes[18] = 18;
+    a.bytes[19] = 19;
+    a.bytes[20] = 20;
+    a.bytes[21] = 21;
+    a.bytes[22] = 22;
+    a.bytes[23] = 23;
+    a.bytes[24] = 24;
+    a.bytes[25] = 25;
+    a.bytes[26] = 26;
+    a.bytes[27] = 27;
+    a.bytes[28] = 28;
+    a.bytes[29] = 29;
+    a.bytes[30] = 30;
+    a.bytes[31] = 31;
+    a.bytes[32] = 32;
+    a.bytes[33] = 33;
+    a.bytes[34] = 34;
+    a.bytes[35] = 35;
+    a.bytes[36] = 36;
+    a.bytes[37] = 37;
+    a.bytes[38] = 38;
+    a.bytes[39] = 39;
+    a.bytes[40] = 40;
+    a.bytes[41] = 41;
+    a.bytes[42] = 42;
+    a.bytes[43] = 43;
+    a.bytes[44] = 44;
+    a.bytes[45] = 45;
+    a.bytes[46] = 46;
+    a.bytes[47] = 47;
+    a.bytes[48] = 48;
+    a.bytes[49] = 49;
+    a.bytes[50] = 50;
+    a.bytes[51] = 51;
+    a.bytes[52] = 52;
+    a.bytes[53] = 53;
+    a.bytes[54] = 54;
+    a.bytes[55] = 55;
+    a.bytes[56] = 56;
+    a.bytes[57] = 57;
+    a.bytes[58] = 58;
+    a.bytes[59] = 59;
+    a.bytes[60] = 60;
+    a.bytes[61] = 61;
+    a.bytes[62] = 62;
+    a.bytes[63] = 63;
+    rsa_bn_add(r, a, a);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (r.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 13: sha256(input_13)
+    a.bytes[0] = 57;
+    rsa_bn_add(r, a, a);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (r.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 14: sha256(input_14)
+    a.bytes[0] = 12;
+    a.bytes[1] = 140;
+    a.bytes[2] = 125;
+    a.bytes[3] = 114;
+    a.bytes[4] = 71;
+    a.bytes[5] = 52;
+    a.bytes[6] = 44;
+    rsa_bn_add(r, a, a);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (r.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 15: sha256(input_15)
+    a.bytes[0] = 216;
+    a.bytes[1] = 16;
+    a.bytes[2] = 15;
+    a.bytes[3] = 47;
+    a.bytes[4] = 111;
+    a.bytes[5] = 119;
+    a.bytes[6] = 13;
+    a.bytes[7] = 101;
+    a.bytes[8] = 214;
+    a.bytes[9] = 112;
+    a.bytes[10] = 229;
+    a.bytes[11] = 142;
+    a.bytes[12] = 3;
+    a.bytes[13] = 81;
+    a.bytes[14] = 216;
+    rsa_bn_add(r, a, a);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (r.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 16: sha256(input_16)
+    a.bytes[0] = 174;
+    a.bytes[1] = 142;
+    a.bytes[2] = 79;
+    a.bytes[3] = 110;
+    a.bytes[4] = 172;
+    a.bytes[5] = 52;
+    a.bytes[6] = 47;
+    a.bytes[7] = 194;
+    a.bytes[8] = 49;
+    a.bytes[9] = 183;
+    a.bytes[10] = 176;
+    a.bytes[11] = 135;
+    a.bytes[12] = 22;
+    a.bytes[13] = 235;
+    a.bytes[14] = 63;
+    a.bytes[15] = 193;
+    a.bytes[16] = 40;
+    a.bytes[17] = 150;
+    a.bytes[18] = 185;
+    a.bytes[19] = 98;
+    a.bytes[20] = 35;
+    a.bytes[21] = 23;
+    a.bytes[22] = 116;
+    a.bytes[23] = 148;
+    a.bytes[24] = 40;
+    a.bytes[25] = 119;
+    a.bytes[26] = 51;
+    a.bytes[27] = 194;
+    a.bytes[28] = 142;
+    a.bytes[29] = 232;
+    a.bytes[30] = 186;
+    rsa_bn_add(r, a, a);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (r.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 17: sha256(input_17)
+    a.bytes[0] = 83;
+    a.bytes[1] = 189;
+    a.bytes[2] = 181;
+    a.bytes[3] = 107;
+    a.bytes[4] = 136;
+    a.bytes[5] = 36;
+    a.bytes[6] = 87;
+    a.bytes[7] = 125;
+    a.bytes[8] = 83;
+    a.bytes[9] = 236;
+    a.bytes[10] = 194;
+    a.bytes[11] = 138;
+    a.bytes[12] = 112;
+    a.bytes[13] = 166;
+    a.bytes[14] = 28;
+    a.bytes[15] = 117;
+    a.bytes[16] = 16;
+    a.bytes[17] = 161;
+    a.bytes[18] = 205;
+    a.bytes[19] = 137;
+    a.bytes[20] = 33;
+    a.bytes[21] = 108;
+    a.bytes[22] = 161;
+    a.bytes[23] = 108;
+    a.bytes[24] = 255;
+    a.bytes[25] = 202;
+    a.bytes[26] = 234;
+    a.bytes[27] = 73;
+    a.bytes[28] = 135;
+    a.bytes[29] = 71;
+    a.bytes[30] = 126;
+    a.bytes[31] = 134;
+    a.bytes[32] = 219;
+    a.bytes[33] = 204;
+    a.bytes[34] = 185;
+    a.bytes[35] = 112;
+    a.bytes[36] = 70;
+    a.bytes[37] = 252;
+    a.bytes[38] = 46;
+    a.bytes[39] = 24;
+    a.bytes[40] = 56;
+    a.bytes[41] = 78;
+    a.bytes[42] = 81;
+    a.bytes[43] = 216;
+    a.bytes[44] = 32;
+    a.bytes[45] = 197;
+    a.bytes[46] = 195;
+    a.bytes[47] = 239;
+    a.bytes[48] = 128;
+    a.bytes[49] = 5;
+    a.bytes[50] = 58;
+    a.bytes[51] = 136;
+    a.bytes[52] = 174;
+    a.bytes[53] = 57;
+    a.bytes[54] = 150;
+    rsa_bn_add(r, a, a);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (r.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 18: sha256(input_18)
+    a.bytes[0] = 222;
+    a.bytes[1] = 80;
+    a.bytes[2] = 232;
+    a.bytes[3] = 1;
+    a.bytes[4] = 134;
+    a.bytes[5] = 91;
+    a.bytes[6] = 54;
+    a.bytes[7] = 152;
+    a.bytes[8] = 101;
+    a.bytes[9] = 78;
+    a.bytes[10] = 191;
+    a.bytes[11] = 82;
+    a.bytes[12] = 0;
+    a.bytes[13] = 165;
+    a.bytes[14] = 250;
+    a.bytes[15] = 9;
+    a.bytes[16] = 57;
+    a.bytes[17] = 185;
+    a.bytes[18] = 157;
+    a.bytes[19] = 122;
+    a.bytes[20] = 29;
+    a.bytes[21] = 123;
+    a.bytes[22] = 40;
+    a.bytes[23] = 43;
+    a.bytes[24] = 248;
+    a.bytes[25] = 35;
+    a.bytes[26] = 64;
+    a.bytes[27] = 65;
+    a.bytes[28] = 243;
+    a.bytes[29] = 84;
+    a.bytes[30] = 135;
+    a.bytes[31] = 216;
+    a.bytes[32] = 108;
+    a.bytes[33] = 102;
+    a.bytes[34] = 159;
+    a.bytes[35] = 204;
+    a.bytes[36] = 191;
+    a.bytes[37] = 224;
+    a.bytes[38] = 231;
+    a.bytes[39] = 61;
+    a.bytes[40] = 126;
+    a.bytes[41] = 115;
+    a.bytes[42] = 32;
+    a.bytes[43] = 173;
+    a.bytes[44] = 10;
+    a.bytes[45] = 117;
+    a.bytes[46] = 112;
+    a.bytes[47] = 3;
+    a.bytes[48] = 36;
+    a.bytes[49] = 30;
+    a.bytes[50] = 117;
+    a.bytes[51] = 34;
+    a.bytes[52] = 16;
+    a.bytes[53] = 169;
+    a.bytes[54] = 36;
+    a.bytes[55] = 121;
+    a.bytes[56] = 142;
+    a.bytes[57] = 248;
+    a.bytes[58] = 109;
+    a.bytes[59] = 67;
+    a.bytes[60] = 242;
+    a.bytes[61] = 124;
+    a.bytes[62] = 242;
+    rsa_bn_add(r, a, a);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (r.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 19: sha256(input_19)
+    a.bytes[0] = 208;
+    a.bytes[1] = 97;
+    a.bytes[2] = 48;
+    a.bytes[3] = 49;
+    a.bytes[4] = 220;
+    a.bytes[5] = 181;
+    a.bytes[6] = 216;
+    a.bytes[7] = 210;
+    a.bytes[8] = 239;
+    a.bytes[9] = 27;
+    a.bytes[10] = 50;
+    a.bytes[11] = 31;
+    a.bytes[12] = 206;
+    a.bytes[13] = 173;
+    a.bytes[14] = 55;
+    a.bytes[15] = 127;
+    a.bytes[16] = 98;
+    a.bytes[17] = 97;
+    a.bytes[18] = 229;
+    a.bytes[19] = 71;
+    a.bytes[20] = 216;
+    a.bytes[21] = 93;
+    a.bytes[22] = 142;
+    a.bytes[23] = 236;
+    a.bytes[24] = 127;
+    a.bytes[25] = 38;
+    a.bytes[26] = 226;
+    a.bytes[27] = 50;
+    a.bytes[28] = 25;
+    a.bytes[29] = 7;
+    a.bytes[30] = 47;
+    a.bytes[31] = 121;
+    a.bytes[32] = 85;
+    a.bytes[33] = 208;
+    a.bytes[34] = 248;
+    a.bytes[35] = 246;
+    a.bytes[36] = 109;
+    a.bytes[37] = 205;
+    a.bytes[38] = 30;
+    a.bytes[39] = 84;
+    a.bytes[40] = 194;
+    a.bytes[41] = 1;
+    a.bytes[42] = 199;
+    a.bytes[43] = 135;
+    a.bytes[44] = 232;
+    a.bytes[45] = 146;
+    a.bytes[46] = 216;
+    a.bytes[47] = 249;
+    a.bytes[48] = 79;
+    a.bytes[49] = 97;
+    a.bytes[50] = 151;
+    a.bytes[51] = 111;
+    a.bytes[52] = 29;
+    a.bytes[53] = 31;
+    a.bytes[54] = 160;
+    a.bytes[55] = 29;
+    a.bytes[56] = 25;
+    a.bytes[57] = 244;
+    a.bytes[58] = 80;
+    a.bytes[59] = 29;
+    a.bytes[60] = 41;
+    a.bytes[61] = 95;
+    a.bytes[62] = 35;
+    a.bytes[63] = 34;
+    rsa_bn_add(r, a, a);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (r.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

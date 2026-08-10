@@ -1,0 +1,733 @@
+// Auto-generated VUMA harness for ml_kem
+// Tests 20 vectors against C reference (OpenSSL)
+// Reuses state variables to avoid arena overflow
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/post_quantum/ml_kem.vuma"::{MlKemBuf, MlKemEntropy, ml_kem_keygen_512};
+
+transform main() -> i32 {
+    // Shared state (reused for all vectors)
+    let pool = state_new(MlKemEntropy);
+    let pk = state_new(MlKemBuf);
+    let sk = state_new(MlKemBuf);
+    let oi: u32 = 0;
+
+    // Vector 0: sha256(input_0)
+    ml_kem_keygen_512(pool, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 1: sha256(input_1)
+    pool.bytes[0] = 0;
+    ml_kem_keygen_512(pool, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 2: sha256(input_2)
+    pool.bytes[0] = 255;
+    ml_kem_keygen_512(pool, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 3: sha256(input_3)
+    pool.bytes[0] = 97;
+    pool.bytes[1] = 98;
+    pool.bytes[2] = 99;
+    ml_kem_keygen_512(pool, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 4: sha256(input_4)
+    pool.bytes[0] = 97;
+    pool.bytes[1] = 98;
+    pool.bytes[2] = 99;
+    pool.bytes[3] = 100;
+    pool.bytes[4] = 101;
+    pool.bytes[5] = 102;
+    pool.bytes[6] = 103;
+    pool.bytes[7] = 104;
+    pool.bytes[8] = 105;
+    pool.bytes[9] = 106;
+    pool.bytes[10] = 107;
+    pool.bytes[11] = 108;
+    pool.bytes[12] = 109;
+    pool.bytes[13] = 110;
+    pool.bytes[14] = 111;
+    pool.bytes[15] = 112;
+    pool.bytes[16] = 113;
+    pool.bytes[17] = 114;
+    pool.bytes[18] = 115;
+    pool.bytes[19] = 116;
+    pool.bytes[20] = 117;
+    pool.bytes[21] = 118;
+    pool.bytes[22] = 119;
+    pool.bytes[23] = 120;
+    pool.bytes[24] = 121;
+    pool.bytes[25] = 122;
+    ml_kem_keygen_512(pool, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 5: sha256(input_5)
+    pool.bytes[0] = 0;
+    pool.bytes[1] = 0;
+    pool.bytes[2] = 0;
+    pool.bytes[3] = 0;
+    pool.bytes[4] = 0;
+    pool.bytes[5] = 0;
+    pool.bytes[6] = 0;
+    pool.bytes[7] = 0;
+    pool.bytes[8] = 0;
+    pool.bytes[9] = 0;
+    pool.bytes[10] = 0;
+    pool.bytes[11] = 0;
+    pool.bytes[12] = 0;
+    pool.bytes[13] = 0;
+    pool.bytes[14] = 0;
+    pool.bytes[15] = 0;
+    ml_kem_keygen_512(pool, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 6: sha256(input_6)
+    pool.bytes[0] = 0;
+    pool.bytes[1] = 0;
+    pool.bytes[2] = 0;
+    pool.bytes[3] = 0;
+    pool.bytes[4] = 0;
+    pool.bytes[5] = 0;
+    pool.bytes[6] = 0;
+    pool.bytes[7] = 0;
+    pool.bytes[8] = 0;
+    pool.bytes[9] = 0;
+    pool.bytes[10] = 0;
+    pool.bytes[11] = 0;
+    pool.bytes[12] = 0;
+    pool.bytes[13] = 0;
+    pool.bytes[14] = 0;
+    pool.bytes[15] = 0;
+    pool.bytes[16] = 0;
+    pool.bytes[17] = 0;
+    pool.bytes[18] = 0;
+    pool.bytes[19] = 0;
+    pool.bytes[20] = 0;
+    pool.bytes[21] = 0;
+    pool.bytes[22] = 0;
+    pool.bytes[23] = 0;
+    pool.bytes[24] = 0;
+    pool.bytes[25] = 0;
+    pool.bytes[26] = 0;
+    pool.bytes[27] = 0;
+    pool.bytes[28] = 0;
+    pool.bytes[29] = 0;
+    pool.bytes[30] = 0;
+    pool.bytes[31] = 0;
+    ml_kem_keygen_512(pool, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 7: sha256(input_7)
+    pool.bytes[0] = 0;
+    pool.bytes[1] = 0;
+    pool.bytes[2] = 0;
+    pool.bytes[3] = 0;
+    pool.bytes[4] = 0;
+    pool.bytes[5] = 0;
+    pool.bytes[6] = 0;
+    pool.bytes[7] = 0;
+    pool.bytes[8] = 0;
+    pool.bytes[9] = 0;
+    pool.bytes[10] = 0;
+    pool.bytes[11] = 0;
+    pool.bytes[12] = 0;
+    pool.bytes[13] = 0;
+    pool.bytes[14] = 0;
+    pool.bytes[15] = 0;
+    pool.bytes[16] = 0;
+    pool.bytes[17] = 0;
+    pool.bytes[18] = 0;
+    pool.bytes[19] = 0;
+    pool.bytes[20] = 0;
+    pool.bytes[21] = 0;
+    pool.bytes[22] = 0;
+    pool.bytes[23] = 0;
+    pool.bytes[24] = 0;
+    pool.bytes[25] = 0;
+    pool.bytes[26] = 0;
+    pool.bytes[27] = 0;
+    pool.bytes[28] = 0;
+    pool.bytes[29] = 0;
+    pool.bytes[30] = 0;
+    pool.bytes[31] = 0;
+    pool.bytes[32] = 0;
+    pool.bytes[33] = 0;
+    pool.bytes[34] = 0;
+    pool.bytes[35] = 0;
+    pool.bytes[36] = 0;
+    pool.bytes[37] = 0;
+    pool.bytes[38] = 0;
+    pool.bytes[39] = 0;
+    pool.bytes[40] = 0;
+    pool.bytes[41] = 0;
+    pool.bytes[42] = 0;
+    pool.bytes[43] = 0;
+    pool.bytes[44] = 0;
+    pool.bytes[45] = 0;
+    pool.bytes[46] = 0;
+    pool.bytes[47] = 0;
+    pool.bytes[48] = 0;
+    pool.bytes[49] = 0;
+    pool.bytes[50] = 0;
+    pool.bytes[51] = 0;
+    pool.bytes[52] = 0;
+    pool.bytes[53] = 0;
+    pool.bytes[54] = 0;
+    pool.bytes[55] = 0;
+    pool.bytes[56] = 0;
+    pool.bytes[57] = 0;
+    pool.bytes[58] = 0;
+    pool.bytes[59] = 0;
+    pool.bytes[60] = 0;
+    pool.bytes[61] = 0;
+    pool.bytes[62] = 0;
+    pool.bytes[63] = 0;
+    ml_kem_keygen_512(pool, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 8: sha256(input_8)
+    pool.bytes[0] = 255;
+    pool.bytes[1] = 255;
+    pool.bytes[2] = 255;
+    pool.bytes[3] = 255;
+    pool.bytes[4] = 255;
+    pool.bytes[5] = 255;
+    pool.bytes[6] = 255;
+    pool.bytes[7] = 255;
+    pool.bytes[8] = 255;
+    pool.bytes[9] = 255;
+    pool.bytes[10] = 255;
+    pool.bytes[11] = 255;
+    pool.bytes[12] = 255;
+    pool.bytes[13] = 255;
+    pool.bytes[14] = 255;
+    pool.bytes[15] = 255;
+    ml_kem_keygen_512(pool, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 9: sha256(input_9)
+    pool.bytes[0] = 255;
+    pool.bytes[1] = 255;
+    pool.bytes[2] = 255;
+    pool.bytes[3] = 255;
+    pool.bytes[4] = 255;
+    pool.bytes[5] = 255;
+    pool.bytes[6] = 255;
+    pool.bytes[7] = 255;
+    pool.bytes[8] = 255;
+    pool.bytes[9] = 255;
+    pool.bytes[10] = 255;
+    pool.bytes[11] = 255;
+    pool.bytes[12] = 255;
+    pool.bytes[13] = 255;
+    pool.bytes[14] = 255;
+    pool.bytes[15] = 255;
+    pool.bytes[16] = 255;
+    pool.bytes[17] = 255;
+    pool.bytes[18] = 255;
+    pool.bytes[19] = 255;
+    pool.bytes[20] = 255;
+    pool.bytes[21] = 255;
+    pool.bytes[22] = 255;
+    pool.bytes[23] = 255;
+    pool.bytes[24] = 255;
+    pool.bytes[25] = 255;
+    pool.bytes[26] = 255;
+    pool.bytes[27] = 255;
+    pool.bytes[28] = 255;
+    pool.bytes[29] = 255;
+    pool.bytes[30] = 255;
+    pool.bytes[31] = 255;
+    ml_kem_keygen_512(pool, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 10: sha256(input_10)
+    pool.bytes[0] = 0;
+    pool.bytes[1] = 1;
+    pool.bytes[2] = 2;
+    pool.bytes[3] = 3;
+    pool.bytes[4] = 4;
+    pool.bytes[5] = 5;
+    pool.bytes[6] = 6;
+    pool.bytes[7] = 7;
+    pool.bytes[8] = 8;
+    pool.bytes[9] = 9;
+    pool.bytes[10] = 10;
+    pool.bytes[11] = 11;
+    pool.bytes[12] = 12;
+    pool.bytes[13] = 13;
+    pool.bytes[14] = 14;
+    pool.bytes[15] = 15;
+    ml_kem_keygen_512(pool, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 11: sha256(input_11)
+    pool.bytes[0] = 0;
+    pool.bytes[1] = 1;
+    pool.bytes[2] = 2;
+    pool.bytes[3] = 3;
+    pool.bytes[4] = 4;
+    pool.bytes[5] = 5;
+    pool.bytes[6] = 6;
+    pool.bytes[7] = 7;
+    pool.bytes[8] = 8;
+    pool.bytes[9] = 9;
+    pool.bytes[10] = 10;
+    pool.bytes[11] = 11;
+    pool.bytes[12] = 12;
+    pool.bytes[13] = 13;
+    pool.bytes[14] = 14;
+    pool.bytes[15] = 15;
+    pool.bytes[16] = 16;
+    pool.bytes[17] = 17;
+    pool.bytes[18] = 18;
+    pool.bytes[19] = 19;
+    pool.bytes[20] = 20;
+    pool.bytes[21] = 21;
+    pool.bytes[22] = 22;
+    pool.bytes[23] = 23;
+    pool.bytes[24] = 24;
+    pool.bytes[25] = 25;
+    pool.bytes[26] = 26;
+    pool.bytes[27] = 27;
+    pool.bytes[28] = 28;
+    pool.bytes[29] = 29;
+    pool.bytes[30] = 30;
+    pool.bytes[31] = 31;
+    ml_kem_keygen_512(pool, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 12: sha256(input_12)
+    pool.bytes[0] = 0;
+    pool.bytes[1] = 1;
+    pool.bytes[2] = 2;
+    pool.bytes[3] = 3;
+    pool.bytes[4] = 4;
+    pool.bytes[5] = 5;
+    pool.bytes[6] = 6;
+    pool.bytes[7] = 7;
+    pool.bytes[8] = 8;
+    pool.bytes[9] = 9;
+    pool.bytes[10] = 10;
+    pool.bytes[11] = 11;
+    pool.bytes[12] = 12;
+    pool.bytes[13] = 13;
+    pool.bytes[14] = 14;
+    pool.bytes[15] = 15;
+    pool.bytes[16] = 16;
+    pool.bytes[17] = 17;
+    pool.bytes[18] = 18;
+    pool.bytes[19] = 19;
+    pool.bytes[20] = 20;
+    pool.bytes[21] = 21;
+    pool.bytes[22] = 22;
+    pool.bytes[23] = 23;
+    pool.bytes[24] = 24;
+    pool.bytes[25] = 25;
+    pool.bytes[26] = 26;
+    pool.bytes[27] = 27;
+    pool.bytes[28] = 28;
+    pool.bytes[29] = 29;
+    pool.bytes[30] = 30;
+    pool.bytes[31] = 31;
+    pool.bytes[32] = 32;
+    pool.bytes[33] = 33;
+    pool.bytes[34] = 34;
+    pool.bytes[35] = 35;
+    pool.bytes[36] = 36;
+    pool.bytes[37] = 37;
+    pool.bytes[38] = 38;
+    pool.bytes[39] = 39;
+    pool.bytes[40] = 40;
+    pool.bytes[41] = 41;
+    pool.bytes[42] = 42;
+    pool.bytes[43] = 43;
+    pool.bytes[44] = 44;
+    pool.bytes[45] = 45;
+    pool.bytes[46] = 46;
+    pool.bytes[47] = 47;
+    pool.bytes[48] = 48;
+    pool.bytes[49] = 49;
+    pool.bytes[50] = 50;
+    pool.bytes[51] = 51;
+    pool.bytes[52] = 52;
+    pool.bytes[53] = 53;
+    pool.bytes[54] = 54;
+    pool.bytes[55] = 55;
+    pool.bytes[56] = 56;
+    pool.bytes[57] = 57;
+    pool.bytes[58] = 58;
+    pool.bytes[59] = 59;
+    pool.bytes[60] = 60;
+    pool.bytes[61] = 61;
+    pool.bytes[62] = 62;
+    pool.bytes[63] = 63;
+    ml_kem_keygen_512(pool, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 13: sha256(input_13)
+    pool.bytes[0] = 57;
+    ml_kem_keygen_512(pool, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 14: sha256(input_14)
+    pool.bytes[0] = 12;
+    pool.bytes[1] = 140;
+    pool.bytes[2] = 125;
+    pool.bytes[3] = 114;
+    pool.bytes[4] = 71;
+    pool.bytes[5] = 52;
+    pool.bytes[6] = 44;
+    ml_kem_keygen_512(pool, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 15: sha256(input_15)
+    pool.bytes[0] = 216;
+    pool.bytes[1] = 16;
+    pool.bytes[2] = 15;
+    pool.bytes[3] = 47;
+    pool.bytes[4] = 111;
+    pool.bytes[5] = 119;
+    pool.bytes[6] = 13;
+    pool.bytes[7] = 101;
+    pool.bytes[8] = 214;
+    pool.bytes[9] = 112;
+    pool.bytes[10] = 229;
+    pool.bytes[11] = 142;
+    pool.bytes[12] = 3;
+    pool.bytes[13] = 81;
+    pool.bytes[14] = 216;
+    ml_kem_keygen_512(pool, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 16: sha256(input_16)
+    pool.bytes[0] = 174;
+    pool.bytes[1] = 142;
+    pool.bytes[2] = 79;
+    pool.bytes[3] = 110;
+    pool.bytes[4] = 172;
+    pool.bytes[5] = 52;
+    pool.bytes[6] = 47;
+    pool.bytes[7] = 194;
+    pool.bytes[8] = 49;
+    pool.bytes[9] = 183;
+    pool.bytes[10] = 176;
+    pool.bytes[11] = 135;
+    pool.bytes[12] = 22;
+    pool.bytes[13] = 235;
+    pool.bytes[14] = 63;
+    pool.bytes[15] = 193;
+    pool.bytes[16] = 40;
+    pool.bytes[17] = 150;
+    pool.bytes[18] = 185;
+    pool.bytes[19] = 98;
+    pool.bytes[20] = 35;
+    pool.bytes[21] = 23;
+    pool.bytes[22] = 116;
+    pool.bytes[23] = 148;
+    pool.bytes[24] = 40;
+    pool.bytes[25] = 119;
+    pool.bytes[26] = 51;
+    pool.bytes[27] = 194;
+    pool.bytes[28] = 142;
+    pool.bytes[29] = 232;
+    pool.bytes[30] = 186;
+    ml_kem_keygen_512(pool, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 17: sha256(input_17)
+    pool.bytes[0] = 83;
+    pool.bytes[1] = 189;
+    pool.bytes[2] = 181;
+    pool.bytes[3] = 107;
+    pool.bytes[4] = 136;
+    pool.bytes[5] = 36;
+    pool.bytes[6] = 87;
+    pool.bytes[7] = 125;
+    pool.bytes[8] = 83;
+    pool.bytes[9] = 236;
+    pool.bytes[10] = 194;
+    pool.bytes[11] = 138;
+    pool.bytes[12] = 112;
+    pool.bytes[13] = 166;
+    pool.bytes[14] = 28;
+    pool.bytes[15] = 117;
+    pool.bytes[16] = 16;
+    pool.bytes[17] = 161;
+    pool.bytes[18] = 205;
+    pool.bytes[19] = 137;
+    pool.bytes[20] = 33;
+    pool.bytes[21] = 108;
+    pool.bytes[22] = 161;
+    pool.bytes[23] = 108;
+    pool.bytes[24] = 255;
+    pool.bytes[25] = 202;
+    pool.bytes[26] = 234;
+    pool.bytes[27] = 73;
+    pool.bytes[28] = 135;
+    pool.bytes[29] = 71;
+    pool.bytes[30] = 126;
+    pool.bytes[31] = 134;
+    pool.bytes[32] = 219;
+    pool.bytes[33] = 204;
+    pool.bytes[34] = 185;
+    pool.bytes[35] = 112;
+    pool.bytes[36] = 70;
+    pool.bytes[37] = 252;
+    pool.bytes[38] = 46;
+    pool.bytes[39] = 24;
+    pool.bytes[40] = 56;
+    pool.bytes[41] = 78;
+    pool.bytes[42] = 81;
+    pool.bytes[43] = 216;
+    pool.bytes[44] = 32;
+    pool.bytes[45] = 197;
+    pool.bytes[46] = 195;
+    pool.bytes[47] = 239;
+    pool.bytes[48] = 128;
+    pool.bytes[49] = 5;
+    pool.bytes[50] = 58;
+    pool.bytes[51] = 136;
+    pool.bytes[52] = 174;
+    pool.bytes[53] = 57;
+    pool.bytes[54] = 150;
+    ml_kem_keygen_512(pool, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 18: sha256(input_18)
+    pool.bytes[0] = 222;
+    pool.bytes[1] = 80;
+    pool.bytes[2] = 232;
+    pool.bytes[3] = 1;
+    pool.bytes[4] = 134;
+    pool.bytes[5] = 91;
+    pool.bytes[6] = 54;
+    pool.bytes[7] = 152;
+    pool.bytes[8] = 101;
+    pool.bytes[9] = 78;
+    pool.bytes[10] = 191;
+    pool.bytes[11] = 82;
+    pool.bytes[12] = 0;
+    pool.bytes[13] = 165;
+    pool.bytes[14] = 250;
+    pool.bytes[15] = 9;
+    pool.bytes[16] = 57;
+    pool.bytes[17] = 185;
+    pool.bytes[18] = 157;
+    pool.bytes[19] = 122;
+    pool.bytes[20] = 29;
+    pool.bytes[21] = 123;
+    pool.bytes[22] = 40;
+    pool.bytes[23] = 43;
+    pool.bytes[24] = 248;
+    pool.bytes[25] = 35;
+    pool.bytes[26] = 64;
+    pool.bytes[27] = 65;
+    pool.bytes[28] = 243;
+    pool.bytes[29] = 84;
+    pool.bytes[30] = 135;
+    pool.bytes[31] = 216;
+    pool.bytes[32] = 108;
+    pool.bytes[33] = 102;
+    pool.bytes[34] = 159;
+    pool.bytes[35] = 204;
+    pool.bytes[36] = 191;
+    pool.bytes[37] = 224;
+    pool.bytes[38] = 231;
+    pool.bytes[39] = 61;
+    pool.bytes[40] = 126;
+    pool.bytes[41] = 115;
+    pool.bytes[42] = 32;
+    pool.bytes[43] = 173;
+    pool.bytes[44] = 10;
+    pool.bytes[45] = 117;
+    pool.bytes[46] = 112;
+    pool.bytes[47] = 3;
+    pool.bytes[48] = 36;
+    pool.bytes[49] = 30;
+    pool.bytes[50] = 117;
+    pool.bytes[51] = 34;
+    pool.bytes[52] = 16;
+    pool.bytes[53] = 169;
+    pool.bytes[54] = 36;
+    pool.bytes[55] = 121;
+    pool.bytes[56] = 142;
+    pool.bytes[57] = 248;
+    pool.bytes[58] = 109;
+    pool.bytes[59] = 67;
+    pool.bytes[60] = 242;
+    pool.bytes[61] = 124;
+    pool.bytes[62] = 242;
+    ml_kem_keygen_512(pool, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 19: sha256(input_19)
+    pool.bytes[0] = 208;
+    pool.bytes[1] = 97;
+    pool.bytes[2] = 48;
+    pool.bytes[3] = 49;
+    pool.bytes[4] = 220;
+    pool.bytes[5] = 181;
+    pool.bytes[6] = 216;
+    pool.bytes[7] = 210;
+    pool.bytes[8] = 239;
+    pool.bytes[9] = 27;
+    pool.bytes[10] = 50;
+    pool.bytes[11] = 31;
+    pool.bytes[12] = 206;
+    pool.bytes[13] = 173;
+    pool.bytes[14] = 55;
+    pool.bytes[15] = 127;
+    pool.bytes[16] = 98;
+    pool.bytes[17] = 97;
+    pool.bytes[18] = 229;
+    pool.bytes[19] = 71;
+    pool.bytes[20] = 216;
+    pool.bytes[21] = 93;
+    pool.bytes[22] = 142;
+    pool.bytes[23] = 236;
+    pool.bytes[24] = 127;
+    pool.bytes[25] = 38;
+    pool.bytes[26] = 226;
+    pool.bytes[27] = 50;
+    pool.bytes[28] = 25;
+    pool.bytes[29] = 7;
+    pool.bytes[30] = 47;
+    pool.bytes[31] = 121;
+    pool.bytes[32] = 85;
+    pool.bytes[33] = 208;
+    pool.bytes[34] = 248;
+    pool.bytes[35] = 246;
+    pool.bytes[36] = 109;
+    pool.bytes[37] = 205;
+    pool.bytes[38] = 30;
+    pool.bytes[39] = 84;
+    pool.bytes[40] = 194;
+    pool.bytes[41] = 1;
+    pool.bytes[42] = 199;
+    pool.bytes[43] = 135;
+    pool.bytes[44] = 232;
+    pool.bytes[45] = 146;
+    pool.bytes[46] = 216;
+    pool.bytes[47] = 249;
+    pool.bytes[48] = 79;
+    pool.bytes[49] = 97;
+    pool.bytes[50] = 151;
+    pool.bytes[51] = 111;
+    pool.bytes[52] = 29;
+    pool.bytes[53] = 31;
+    pool.bytes[54] = 160;
+    pool.bytes[55] = 29;
+    pool.bytes[56] = 25;
+    pool.bytes[57] = 244;
+    pool.bytes[58] = 80;
+    pool.bytes[59] = 29;
+    pool.bytes[60] = 41;
+    pool.bytes[61] = 95;
+    pool.bytes[62] = 35;
+    pool.bytes[63] = 34;
+    ml_kem_keygen_512(pool, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

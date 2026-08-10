@@ -1,0 +1,732 @@
+// Auto-generated VUMA harness for bignum
+// Tests 20 vectors against C reference (OpenSSL)
+// Reuses state variables to avoid arena overflow
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_add};
+
+transform main() -> i32 {
+    // Shared state (reused for all vectors)
+    let a = state_new(Bn256Ctx);
+    let r = state_new(Bn256Ctx);
+    let oi: u32 = 0;
+
+    // Vector 0: sha256(input_0)
+    bn256_add(r, a, a);
+    oi = 0;
+    while oi < 4 {
+        print_int(1000 + (r.limbs[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 1: sha256(input_1)
+    a.limbs[0] = 0;
+    bn256_add(r, a, a);
+    oi = 0;
+    while oi < 4 {
+        print_int(1000 + (r.limbs[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 2: sha256(input_2)
+    a.limbs[0] = 255;
+    bn256_add(r, a, a);
+    oi = 0;
+    while oi < 4 {
+        print_int(1000 + (r.limbs[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 3: sha256(input_3)
+    a.limbs[0] = 97;
+    a.limbs[1] = 98;
+    a.limbs[2] = 99;
+    bn256_add(r, a, a);
+    oi = 0;
+    while oi < 4 {
+        print_int(1000 + (r.limbs[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 4: sha256(input_4)
+    a.limbs[0] = 97;
+    a.limbs[1] = 98;
+    a.limbs[2] = 99;
+    a.limbs[3] = 100;
+    a.limbs[4] = 101;
+    a.limbs[5] = 102;
+    a.limbs[6] = 103;
+    a.limbs[7] = 104;
+    a.limbs[8] = 105;
+    a.limbs[9] = 106;
+    a.limbs[10] = 107;
+    a.limbs[11] = 108;
+    a.limbs[12] = 109;
+    a.limbs[13] = 110;
+    a.limbs[14] = 111;
+    a.limbs[15] = 112;
+    a.limbs[16] = 113;
+    a.limbs[17] = 114;
+    a.limbs[18] = 115;
+    a.limbs[19] = 116;
+    a.limbs[20] = 117;
+    a.limbs[21] = 118;
+    a.limbs[22] = 119;
+    a.limbs[23] = 120;
+    a.limbs[24] = 121;
+    a.limbs[25] = 122;
+    bn256_add(r, a, a);
+    oi = 0;
+    while oi < 4 {
+        print_int(1000 + (r.limbs[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 5: sha256(input_5)
+    a.limbs[0] = 0;
+    a.limbs[1] = 0;
+    a.limbs[2] = 0;
+    a.limbs[3] = 0;
+    a.limbs[4] = 0;
+    a.limbs[5] = 0;
+    a.limbs[6] = 0;
+    a.limbs[7] = 0;
+    a.limbs[8] = 0;
+    a.limbs[9] = 0;
+    a.limbs[10] = 0;
+    a.limbs[11] = 0;
+    a.limbs[12] = 0;
+    a.limbs[13] = 0;
+    a.limbs[14] = 0;
+    a.limbs[15] = 0;
+    bn256_add(r, a, a);
+    oi = 0;
+    while oi < 4 {
+        print_int(1000 + (r.limbs[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 6: sha256(input_6)
+    a.limbs[0] = 0;
+    a.limbs[1] = 0;
+    a.limbs[2] = 0;
+    a.limbs[3] = 0;
+    a.limbs[4] = 0;
+    a.limbs[5] = 0;
+    a.limbs[6] = 0;
+    a.limbs[7] = 0;
+    a.limbs[8] = 0;
+    a.limbs[9] = 0;
+    a.limbs[10] = 0;
+    a.limbs[11] = 0;
+    a.limbs[12] = 0;
+    a.limbs[13] = 0;
+    a.limbs[14] = 0;
+    a.limbs[15] = 0;
+    a.limbs[16] = 0;
+    a.limbs[17] = 0;
+    a.limbs[18] = 0;
+    a.limbs[19] = 0;
+    a.limbs[20] = 0;
+    a.limbs[21] = 0;
+    a.limbs[22] = 0;
+    a.limbs[23] = 0;
+    a.limbs[24] = 0;
+    a.limbs[25] = 0;
+    a.limbs[26] = 0;
+    a.limbs[27] = 0;
+    a.limbs[28] = 0;
+    a.limbs[29] = 0;
+    a.limbs[30] = 0;
+    a.limbs[31] = 0;
+    bn256_add(r, a, a);
+    oi = 0;
+    while oi < 4 {
+        print_int(1000 + (r.limbs[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 7: sha256(input_7)
+    a.limbs[0] = 0;
+    a.limbs[1] = 0;
+    a.limbs[2] = 0;
+    a.limbs[3] = 0;
+    a.limbs[4] = 0;
+    a.limbs[5] = 0;
+    a.limbs[6] = 0;
+    a.limbs[7] = 0;
+    a.limbs[8] = 0;
+    a.limbs[9] = 0;
+    a.limbs[10] = 0;
+    a.limbs[11] = 0;
+    a.limbs[12] = 0;
+    a.limbs[13] = 0;
+    a.limbs[14] = 0;
+    a.limbs[15] = 0;
+    a.limbs[16] = 0;
+    a.limbs[17] = 0;
+    a.limbs[18] = 0;
+    a.limbs[19] = 0;
+    a.limbs[20] = 0;
+    a.limbs[21] = 0;
+    a.limbs[22] = 0;
+    a.limbs[23] = 0;
+    a.limbs[24] = 0;
+    a.limbs[25] = 0;
+    a.limbs[26] = 0;
+    a.limbs[27] = 0;
+    a.limbs[28] = 0;
+    a.limbs[29] = 0;
+    a.limbs[30] = 0;
+    a.limbs[31] = 0;
+    a.limbs[32] = 0;
+    a.limbs[33] = 0;
+    a.limbs[34] = 0;
+    a.limbs[35] = 0;
+    a.limbs[36] = 0;
+    a.limbs[37] = 0;
+    a.limbs[38] = 0;
+    a.limbs[39] = 0;
+    a.limbs[40] = 0;
+    a.limbs[41] = 0;
+    a.limbs[42] = 0;
+    a.limbs[43] = 0;
+    a.limbs[44] = 0;
+    a.limbs[45] = 0;
+    a.limbs[46] = 0;
+    a.limbs[47] = 0;
+    a.limbs[48] = 0;
+    a.limbs[49] = 0;
+    a.limbs[50] = 0;
+    a.limbs[51] = 0;
+    a.limbs[52] = 0;
+    a.limbs[53] = 0;
+    a.limbs[54] = 0;
+    a.limbs[55] = 0;
+    a.limbs[56] = 0;
+    a.limbs[57] = 0;
+    a.limbs[58] = 0;
+    a.limbs[59] = 0;
+    a.limbs[60] = 0;
+    a.limbs[61] = 0;
+    a.limbs[62] = 0;
+    a.limbs[63] = 0;
+    bn256_add(r, a, a);
+    oi = 0;
+    while oi < 4 {
+        print_int(1000 + (r.limbs[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 8: sha256(input_8)
+    a.limbs[0] = 255;
+    a.limbs[1] = 255;
+    a.limbs[2] = 255;
+    a.limbs[3] = 255;
+    a.limbs[4] = 255;
+    a.limbs[5] = 255;
+    a.limbs[6] = 255;
+    a.limbs[7] = 255;
+    a.limbs[8] = 255;
+    a.limbs[9] = 255;
+    a.limbs[10] = 255;
+    a.limbs[11] = 255;
+    a.limbs[12] = 255;
+    a.limbs[13] = 255;
+    a.limbs[14] = 255;
+    a.limbs[15] = 255;
+    bn256_add(r, a, a);
+    oi = 0;
+    while oi < 4 {
+        print_int(1000 + (r.limbs[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 9: sha256(input_9)
+    a.limbs[0] = 255;
+    a.limbs[1] = 255;
+    a.limbs[2] = 255;
+    a.limbs[3] = 255;
+    a.limbs[4] = 255;
+    a.limbs[5] = 255;
+    a.limbs[6] = 255;
+    a.limbs[7] = 255;
+    a.limbs[8] = 255;
+    a.limbs[9] = 255;
+    a.limbs[10] = 255;
+    a.limbs[11] = 255;
+    a.limbs[12] = 255;
+    a.limbs[13] = 255;
+    a.limbs[14] = 255;
+    a.limbs[15] = 255;
+    a.limbs[16] = 255;
+    a.limbs[17] = 255;
+    a.limbs[18] = 255;
+    a.limbs[19] = 255;
+    a.limbs[20] = 255;
+    a.limbs[21] = 255;
+    a.limbs[22] = 255;
+    a.limbs[23] = 255;
+    a.limbs[24] = 255;
+    a.limbs[25] = 255;
+    a.limbs[26] = 255;
+    a.limbs[27] = 255;
+    a.limbs[28] = 255;
+    a.limbs[29] = 255;
+    a.limbs[30] = 255;
+    a.limbs[31] = 255;
+    bn256_add(r, a, a);
+    oi = 0;
+    while oi < 4 {
+        print_int(1000 + (r.limbs[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 10: sha256(input_10)
+    a.limbs[0] = 0;
+    a.limbs[1] = 1;
+    a.limbs[2] = 2;
+    a.limbs[3] = 3;
+    a.limbs[4] = 4;
+    a.limbs[5] = 5;
+    a.limbs[6] = 6;
+    a.limbs[7] = 7;
+    a.limbs[8] = 8;
+    a.limbs[9] = 9;
+    a.limbs[10] = 10;
+    a.limbs[11] = 11;
+    a.limbs[12] = 12;
+    a.limbs[13] = 13;
+    a.limbs[14] = 14;
+    a.limbs[15] = 15;
+    bn256_add(r, a, a);
+    oi = 0;
+    while oi < 4 {
+        print_int(1000 + (r.limbs[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 11: sha256(input_11)
+    a.limbs[0] = 0;
+    a.limbs[1] = 1;
+    a.limbs[2] = 2;
+    a.limbs[3] = 3;
+    a.limbs[4] = 4;
+    a.limbs[5] = 5;
+    a.limbs[6] = 6;
+    a.limbs[7] = 7;
+    a.limbs[8] = 8;
+    a.limbs[9] = 9;
+    a.limbs[10] = 10;
+    a.limbs[11] = 11;
+    a.limbs[12] = 12;
+    a.limbs[13] = 13;
+    a.limbs[14] = 14;
+    a.limbs[15] = 15;
+    a.limbs[16] = 16;
+    a.limbs[17] = 17;
+    a.limbs[18] = 18;
+    a.limbs[19] = 19;
+    a.limbs[20] = 20;
+    a.limbs[21] = 21;
+    a.limbs[22] = 22;
+    a.limbs[23] = 23;
+    a.limbs[24] = 24;
+    a.limbs[25] = 25;
+    a.limbs[26] = 26;
+    a.limbs[27] = 27;
+    a.limbs[28] = 28;
+    a.limbs[29] = 29;
+    a.limbs[30] = 30;
+    a.limbs[31] = 31;
+    bn256_add(r, a, a);
+    oi = 0;
+    while oi < 4 {
+        print_int(1000 + (r.limbs[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 12: sha256(input_12)
+    a.limbs[0] = 0;
+    a.limbs[1] = 1;
+    a.limbs[2] = 2;
+    a.limbs[3] = 3;
+    a.limbs[4] = 4;
+    a.limbs[5] = 5;
+    a.limbs[6] = 6;
+    a.limbs[7] = 7;
+    a.limbs[8] = 8;
+    a.limbs[9] = 9;
+    a.limbs[10] = 10;
+    a.limbs[11] = 11;
+    a.limbs[12] = 12;
+    a.limbs[13] = 13;
+    a.limbs[14] = 14;
+    a.limbs[15] = 15;
+    a.limbs[16] = 16;
+    a.limbs[17] = 17;
+    a.limbs[18] = 18;
+    a.limbs[19] = 19;
+    a.limbs[20] = 20;
+    a.limbs[21] = 21;
+    a.limbs[22] = 22;
+    a.limbs[23] = 23;
+    a.limbs[24] = 24;
+    a.limbs[25] = 25;
+    a.limbs[26] = 26;
+    a.limbs[27] = 27;
+    a.limbs[28] = 28;
+    a.limbs[29] = 29;
+    a.limbs[30] = 30;
+    a.limbs[31] = 31;
+    a.limbs[32] = 32;
+    a.limbs[33] = 33;
+    a.limbs[34] = 34;
+    a.limbs[35] = 35;
+    a.limbs[36] = 36;
+    a.limbs[37] = 37;
+    a.limbs[38] = 38;
+    a.limbs[39] = 39;
+    a.limbs[40] = 40;
+    a.limbs[41] = 41;
+    a.limbs[42] = 42;
+    a.limbs[43] = 43;
+    a.limbs[44] = 44;
+    a.limbs[45] = 45;
+    a.limbs[46] = 46;
+    a.limbs[47] = 47;
+    a.limbs[48] = 48;
+    a.limbs[49] = 49;
+    a.limbs[50] = 50;
+    a.limbs[51] = 51;
+    a.limbs[52] = 52;
+    a.limbs[53] = 53;
+    a.limbs[54] = 54;
+    a.limbs[55] = 55;
+    a.limbs[56] = 56;
+    a.limbs[57] = 57;
+    a.limbs[58] = 58;
+    a.limbs[59] = 59;
+    a.limbs[60] = 60;
+    a.limbs[61] = 61;
+    a.limbs[62] = 62;
+    a.limbs[63] = 63;
+    bn256_add(r, a, a);
+    oi = 0;
+    while oi < 4 {
+        print_int(1000 + (r.limbs[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 13: sha256(input_13)
+    a.limbs[0] = 57;
+    bn256_add(r, a, a);
+    oi = 0;
+    while oi < 4 {
+        print_int(1000 + (r.limbs[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 14: sha256(input_14)
+    a.limbs[0] = 12;
+    a.limbs[1] = 140;
+    a.limbs[2] = 125;
+    a.limbs[3] = 114;
+    a.limbs[4] = 71;
+    a.limbs[5] = 52;
+    a.limbs[6] = 44;
+    bn256_add(r, a, a);
+    oi = 0;
+    while oi < 4 {
+        print_int(1000 + (r.limbs[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 15: sha256(input_15)
+    a.limbs[0] = 216;
+    a.limbs[1] = 16;
+    a.limbs[2] = 15;
+    a.limbs[3] = 47;
+    a.limbs[4] = 111;
+    a.limbs[5] = 119;
+    a.limbs[6] = 13;
+    a.limbs[7] = 101;
+    a.limbs[8] = 214;
+    a.limbs[9] = 112;
+    a.limbs[10] = 229;
+    a.limbs[11] = 142;
+    a.limbs[12] = 3;
+    a.limbs[13] = 81;
+    a.limbs[14] = 216;
+    bn256_add(r, a, a);
+    oi = 0;
+    while oi < 4 {
+        print_int(1000 + (r.limbs[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 16: sha256(input_16)
+    a.limbs[0] = 174;
+    a.limbs[1] = 142;
+    a.limbs[2] = 79;
+    a.limbs[3] = 110;
+    a.limbs[4] = 172;
+    a.limbs[5] = 52;
+    a.limbs[6] = 47;
+    a.limbs[7] = 194;
+    a.limbs[8] = 49;
+    a.limbs[9] = 183;
+    a.limbs[10] = 176;
+    a.limbs[11] = 135;
+    a.limbs[12] = 22;
+    a.limbs[13] = 235;
+    a.limbs[14] = 63;
+    a.limbs[15] = 193;
+    a.limbs[16] = 40;
+    a.limbs[17] = 150;
+    a.limbs[18] = 185;
+    a.limbs[19] = 98;
+    a.limbs[20] = 35;
+    a.limbs[21] = 23;
+    a.limbs[22] = 116;
+    a.limbs[23] = 148;
+    a.limbs[24] = 40;
+    a.limbs[25] = 119;
+    a.limbs[26] = 51;
+    a.limbs[27] = 194;
+    a.limbs[28] = 142;
+    a.limbs[29] = 232;
+    a.limbs[30] = 186;
+    bn256_add(r, a, a);
+    oi = 0;
+    while oi < 4 {
+        print_int(1000 + (r.limbs[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 17: sha256(input_17)
+    a.limbs[0] = 83;
+    a.limbs[1] = 189;
+    a.limbs[2] = 181;
+    a.limbs[3] = 107;
+    a.limbs[4] = 136;
+    a.limbs[5] = 36;
+    a.limbs[6] = 87;
+    a.limbs[7] = 125;
+    a.limbs[8] = 83;
+    a.limbs[9] = 236;
+    a.limbs[10] = 194;
+    a.limbs[11] = 138;
+    a.limbs[12] = 112;
+    a.limbs[13] = 166;
+    a.limbs[14] = 28;
+    a.limbs[15] = 117;
+    a.limbs[16] = 16;
+    a.limbs[17] = 161;
+    a.limbs[18] = 205;
+    a.limbs[19] = 137;
+    a.limbs[20] = 33;
+    a.limbs[21] = 108;
+    a.limbs[22] = 161;
+    a.limbs[23] = 108;
+    a.limbs[24] = 255;
+    a.limbs[25] = 202;
+    a.limbs[26] = 234;
+    a.limbs[27] = 73;
+    a.limbs[28] = 135;
+    a.limbs[29] = 71;
+    a.limbs[30] = 126;
+    a.limbs[31] = 134;
+    a.limbs[32] = 219;
+    a.limbs[33] = 204;
+    a.limbs[34] = 185;
+    a.limbs[35] = 112;
+    a.limbs[36] = 70;
+    a.limbs[37] = 252;
+    a.limbs[38] = 46;
+    a.limbs[39] = 24;
+    a.limbs[40] = 56;
+    a.limbs[41] = 78;
+    a.limbs[42] = 81;
+    a.limbs[43] = 216;
+    a.limbs[44] = 32;
+    a.limbs[45] = 197;
+    a.limbs[46] = 195;
+    a.limbs[47] = 239;
+    a.limbs[48] = 128;
+    a.limbs[49] = 5;
+    a.limbs[50] = 58;
+    a.limbs[51] = 136;
+    a.limbs[52] = 174;
+    a.limbs[53] = 57;
+    a.limbs[54] = 150;
+    bn256_add(r, a, a);
+    oi = 0;
+    while oi < 4 {
+        print_int(1000 + (r.limbs[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 18: sha256(input_18)
+    a.limbs[0] = 222;
+    a.limbs[1] = 80;
+    a.limbs[2] = 232;
+    a.limbs[3] = 1;
+    a.limbs[4] = 134;
+    a.limbs[5] = 91;
+    a.limbs[6] = 54;
+    a.limbs[7] = 152;
+    a.limbs[8] = 101;
+    a.limbs[9] = 78;
+    a.limbs[10] = 191;
+    a.limbs[11] = 82;
+    a.limbs[12] = 0;
+    a.limbs[13] = 165;
+    a.limbs[14] = 250;
+    a.limbs[15] = 9;
+    a.limbs[16] = 57;
+    a.limbs[17] = 185;
+    a.limbs[18] = 157;
+    a.limbs[19] = 122;
+    a.limbs[20] = 29;
+    a.limbs[21] = 123;
+    a.limbs[22] = 40;
+    a.limbs[23] = 43;
+    a.limbs[24] = 248;
+    a.limbs[25] = 35;
+    a.limbs[26] = 64;
+    a.limbs[27] = 65;
+    a.limbs[28] = 243;
+    a.limbs[29] = 84;
+    a.limbs[30] = 135;
+    a.limbs[31] = 216;
+    a.limbs[32] = 108;
+    a.limbs[33] = 102;
+    a.limbs[34] = 159;
+    a.limbs[35] = 204;
+    a.limbs[36] = 191;
+    a.limbs[37] = 224;
+    a.limbs[38] = 231;
+    a.limbs[39] = 61;
+    a.limbs[40] = 126;
+    a.limbs[41] = 115;
+    a.limbs[42] = 32;
+    a.limbs[43] = 173;
+    a.limbs[44] = 10;
+    a.limbs[45] = 117;
+    a.limbs[46] = 112;
+    a.limbs[47] = 3;
+    a.limbs[48] = 36;
+    a.limbs[49] = 30;
+    a.limbs[50] = 117;
+    a.limbs[51] = 34;
+    a.limbs[52] = 16;
+    a.limbs[53] = 169;
+    a.limbs[54] = 36;
+    a.limbs[55] = 121;
+    a.limbs[56] = 142;
+    a.limbs[57] = 248;
+    a.limbs[58] = 109;
+    a.limbs[59] = 67;
+    a.limbs[60] = 242;
+    a.limbs[61] = 124;
+    a.limbs[62] = 242;
+    bn256_add(r, a, a);
+    oi = 0;
+    while oi < 4 {
+        print_int(1000 + (r.limbs[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 19: sha256(input_19)
+    a.limbs[0] = 208;
+    a.limbs[1] = 97;
+    a.limbs[2] = 48;
+    a.limbs[3] = 49;
+    a.limbs[4] = 220;
+    a.limbs[5] = 181;
+    a.limbs[6] = 216;
+    a.limbs[7] = 210;
+    a.limbs[8] = 239;
+    a.limbs[9] = 27;
+    a.limbs[10] = 50;
+    a.limbs[11] = 31;
+    a.limbs[12] = 206;
+    a.limbs[13] = 173;
+    a.limbs[14] = 55;
+    a.limbs[15] = 127;
+    a.limbs[16] = 98;
+    a.limbs[17] = 97;
+    a.limbs[18] = 229;
+    a.limbs[19] = 71;
+    a.limbs[20] = 216;
+    a.limbs[21] = 93;
+    a.limbs[22] = 142;
+    a.limbs[23] = 236;
+    a.limbs[24] = 127;
+    a.limbs[25] = 38;
+    a.limbs[26] = 226;
+    a.limbs[27] = 50;
+    a.limbs[28] = 25;
+    a.limbs[29] = 7;
+    a.limbs[30] = 47;
+    a.limbs[31] = 121;
+    a.limbs[32] = 85;
+    a.limbs[33] = 208;
+    a.limbs[34] = 248;
+    a.limbs[35] = 246;
+    a.limbs[36] = 109;
+    a.limbs[37] = 205;
+    a.limbs[38] = 30;
+    a.limbs[39] = 84;
+    a.limbs[40] = 194;
+    a.limbs[41] = 1;
+    a.limbs[42] = 199;
+    a.limbs[43] = 135;
+    a.limbs[44] = 232;
+    a.limbs[45] = 146;
+    a.limbs[46] = 216;
+    a.limbs[47] = 249;
+    a.limbs[48] = 79;
+    a.limbs[49] = 97;
+    a.limbs[50] = 151;
+    a.limbs[51] = 111;
+    a.limbs[52] = 29;
+    a.limbs[53] = 31;
+    a.limbs[54] = 160;
+    a.limbs[55] = 29;
+    a.limbs[56] = 25;
+    a.limbs[57] = 244;
+    a.limbs[58] = 80;
+    a.limbs[59] = 29;
+    a.limbs[60] = 41;
+    a.limbs[61] = 95;
+    a.limbs[62] = 35;
+    a.limbs[63] = 34;
+    bn256_add(r, a, a);
+    oi = 0;
+    while oi < 4 {
+        print_int(1000 + (r.limbs[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

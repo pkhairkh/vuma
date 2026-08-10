@@ -1,0 +1,732 @@
+// Auto-generated VUMA harness for x25519
+// Tests 20 vectors against C reference (OpenSSL)
+// Reuses state variables to avoid arena overflow
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/x25519.vuma"::{X25519Bytes, x25519_base};
+
+transform main() -> i32 {
+    // Shared state (reused for all vectors)
+    let scalar = state_new(X25519Bytes);
+    let out = state_new(X25519Bytes);
+    let oi: u32 = 0;
+
+    // Vector 0: sha256(input_0)
+    x25519_base(out, scalar);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 1: sha256(input_1)
+    scalar.data[0] = 0;
+    x25519_base(out, scalar);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 2: sha256(input_2)
+    scalar.data[0] = 255;
+    x25519_base(out, scalar);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 3: sha256(input_3)
+    scalar.data[0] = 97;
+    scalar.data[1] = 98;
+    scalar.data[2] = 99;
+    x25519_base(out, scalar);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 4: sha256(input_4)
+    scalar.data[0] = 97;
+    scalar.data[1] = 98;
+    scalar.data[2] = 99;
+    scalar.data[3] = 100;
+    scalar.data[4] = 101;
+    scalar.data[5] = 102;
+    scalar.data[6] = 103;
+    scalar.data[7] = 104;
+    scalar.data[8] = 105;
+    scalar.data[9] = 106;
+    scalar.data[10] = 107;
+    scalar.data[11] = 108;
+    scalar.data[12] = 109;
+    scalar.data[13] = 110;
+    scalar.data[14] = 111;
+    scalar.data[15] = 112;
+    scalar.data[16] = 113;
+    scalar.data[17] = 114;
+    scalar.data[18] = 115;
+    scalar.data[19] = 116;
+    scalar.data[20] = 117;
+    scalar.data[21] = 118;
+    scalar.data[22] = 119;
+    scalar.data[23] = 120;
+    scalar.data[24] = 121;
+    scalar.data[25] = 122;
+    x25519_base(out, scalar);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 5: sha256(input_5)
+    scalar.data[0] = 0;
+    scalar.data[1] = 0;
+    scalar.data[2] = 0;
+    scalar.data[3] = 0;
+    scalar.data[4] = 0;
+    scalar.data[5] = 0;
+    scalar.data[6] = 0;
+    scalar.data[7] = 0;
+    scalar.data[8] = 0;
+    scalar.data[9] = 0;
+    scalar.data[10] = 0;
+    scalar.data[11] = 0;
+    scalar.data[12] = 0;
+    scalar.data[13] = 0;
+    scalar.data[14] = 0;
+    scalar.data[15] = 0;
+    x25519_base(out, scalar);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 6: sha256(input_6)
+    scalar.data[0] = 0;
+    scalar.data[1] = 0;
+    scalar.data[2] = 0;
+    scalar.data[3] = 0;
+    scalar.data[4] = 0;
+    scalar.data[5] = 0;
+    scalar.data[6] = 0;
+    scalar.data[7] = 0;
+    scalar.data[8] = 0;
+    scalar.data[9] = 0;
+    scalar.data[10] = 0;
+    scalar.data[11] = 0;
+    scalar.data[12] = 0;
+    scalar.data[13] = 0;
+    scalar.data[14] = 0;
+    scalar.data[15] = 0;
+    scalar.data[16] = 0;
+    scalar.data[17] = 0;
+    scalar.data[18] = 0;
+    scalar.data[19] = 0;
+    scalar.data[20] = 0;
+    scalar.data[21] = 0;
+    scalar.data[22] = 0;
+    scalar.data[23] = 0;
+    scalar.data[24] = 0;
+    scalar.data[25] = 0;
+    scalar.data[26] = 0;
+    scalar.data[27] = 0;
+    scalar.data[28] = 0;
+    scalar.data[29] = 0;
+    scalar.data[30] = 0;
+    scalar.data[31] = 0;
+    x25519_base(out, scalar);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 7: sha256(input_7)
+    scalar.data[0] = 0;
+    scalar.data[1] = 0;
+    scalar.data[2] = 0;
+    scalar.data[3] = 0;
+    scalar.data[4] = 0;
+    scalar.data[5] = 0;
+    scalar.data[6] = 0;
+    scalar.data[7] = 0;
+    scalar.data[8] = 0;
+    scalar.data[9] = 0;
+    scalar.data[10] = 0;
+    scalar.data[11] = 0;
+    scalar.data[12] = 0;
+    scalar.data[13] = 0;
+    scalar.data[14] = 0;
+    scalar.data[15] = 0;
+    scalar.data[16] = 0;
+    scalar.data[17] = 0;
+    scalar.data[18] = 0;
+    scalar.data[19] = 0;
+    scalar.data[20] = 0;
+    scalar.data[21] = 0;
+    scalar.data[22] = 0;
+    scalar.data[23] = 0;
+    scalar.data[24] = 0;
+    scalar.data[25] = 0;
+    scalar.data[26] = 0;
+    scalar.data[27] = 0;
+    scalar.data[28] = 0;
+    scalar.data[29] = 0;
+    scalar.data[30] = 0;
+    scalar.data[31] = 0;
+    scalar.data[32] = 0;
+    scalar.data[33] = 0;
+    scalar.data[34] = 0;
+    scalar.data[35] = 0;
+    scalar.data[36] = 0;
+    scalar.data[37] = 0;
+    scalar.data[38] = 0;
+    scalar.data[39] = 0;
+    scalar.data[40] = 0;
+    scalar.data[41] = 0;
+    scalar.data[42] = 0;
+    scalar.data[43] = 0;
+    scalar.data[44] = 0;
+    scalar.data[45] = 0;
+    scalar.data[46] = 0;
+    scalar.data[47] = 0;
+    scalar.data[48] = 0;
+    scalar.data[49] = 0;
+    scalar.data[50] = 0;
+    scalar.data[51] = 0;
+    scalar.data[52] = 0;
+    scalar.data[53] = 0;
+    scalar.data[54] = 0;
+    scalar.data[55] = 0;
+    scalar.data[56] = 0;
+    scalar.data[57] = 0;
+    scalar.data[58] = 0;
+    scalar.data[59] = 0;
+    scalar.data[60] = 0;
+    scalar.data[61] = 0;
+    scalar.data[62] = 0;
+    scalar.data[63] = 0;
+    x25519_base(out, scalar);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 8: sha256(input_8)
+    scalar.data[0] = 255;
+    scalar.data[1] = 255;
+    scalar.data[2] = 255;
+    scalar.data[3] = 255;
+    scalar.data[4] = 255;
+    scalar.data[5] = 255;
+    scalar.data[6] = 255;
+    scalar.data[7] = 255;
+    scalar.data[8] = 255;
+    scalar.data[9] = 255;
+    scalar.data[10] = 255;
+    scalar.data[11] = 255;
+    scalar.data[12] = 255;
+    scalar.data[13] = 255;
+    scalar.data[14] = 255;
+    scalar.data[15] = 255;
+    x25519_base(out, scalar);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 9: sha256(input_9)
+    scalar.data[0] = 255;
+    scalar.data[1] = 255;
+    scalar.data[2] = 255;
+    scalar.data[3] = 255;
+    scalar.data[4] = 255;
+    scalar.data[5] = 255;
+    scalar.data[6] = 255;
+    scalar.data[7] = 255;
+    scalar.data[8] = 255;
+    scalar.data[9] = 255;
+    scalar.data[10] = 255;
+    scalar.data[11] = 255;
+    scalar.data[12] = 255;
+    scalar.data[13] = 255;
+    scalar.data[14] = 255;
+    scalar.data[15] = 255;
+    scalar.data[16] = 255;
+    scalar.data[17] = 255;
+    scalar.data[18] = 255;
+    scalar.data[19] = 255;
+    scalar.data[20] = 255;
+    scalar.data[21] = 255;
+    scalar.data[22] = 255;
+    scalar.data[23] = 255;
+    scalar.data[24] = 255;
+    scalar.data[25] = 255;
+    scalar.data[26] = 255;
+    scalar.data[27] = 255;
+    scalar.data[28] = 255;
+    scalar.data[29] = 255;
+    scalar.data[30] = 255;
+    scalar.data[31] = 255;
+    x25519_base(out, scalar);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 10: sha256(input_10)
+    scalar.data[0] = 0;
+    scalar.data[1] = 1;
+    scalar.data[2] = 2;
+    scalar.data[3] = 3;
+    scalar.data[4] = 4;
+    scalar.data[5] = 5;
+    scalar.data[6] = 6;
+    scalar.data[7] = 7;
+    scalar.data[8] = 8;
+    scalar.data[9] = 9;
+    scalar.data[10] = 10;
+    scalar.data[11] = 11;
+    scalar.data[12] = 12;
+    scalar.data[13] = 13;
+    scalar.data[14] = 14;
+    scalar.data[15] = 15;
+    x25519_base(out, scalar);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 11: sha256(input_11)
+    scalar.data[0] = 0;
+    scalar.data[1] = 1;
+    scalar.data[2] = 2;
+    scalar.data[3] = 3;
+    scalar.data[4] = 4;
+    scalar.data[5] = 5;
+    scalar.data[6] = 6;
+    scalar.data[7] = 7;
+    scalar.data[8] = 8;
+    scalar.data[9] = 9;
+    scalar.data[10] = 10;
+    scalar.data[11] = 11;
+    scalar.data[12] = 12;
+    scalar.data[13] = 13;
+    scalar.data[14] = 14;
+    scalar.data[15] = 15;
+    scalar.data[16] = 16;
+    scalar.data[17] = 17;
+    scalar.data[18] = 18;
+    scalar.data[19] = 19;
+    scalar.data[20] = 20;
+    scalar.data[21] = 21;
+    scalar.data[22] = 22;
+    scalar.data[23] = 23;
+    scalar.data[24] = 24;
+    scalar.data[25] = 25;
+    scalar.data[26] = 26;
+    scalar.data[27] = 27;
+    scalar.data[28] = 28;
+    scalar.data[29] = 29;
+    scalar.data[30] = 30;
+    scalar.data[31] = 31;
+    x25519_base(out, scalar);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 12: sha256(input_12)
+    scalar.data[0] = 0;
+    scalar.data[1] = 1;
+    scalar.data[2] = 2;
+    scalar.data[3] = 3;
+    scalar.data[4] = 4;
+    scalar.data[5] = 5;
+    scalar.data[6] = 6;
+    scalar.data[7] = 7;
+    scalar.data[8] = 8;
+    scalar.data[9] = 9;
+    scalar.data[10] = 10;
+    scalar.data[11] = 11;
+    scalar.data[12] = 12;
+    scalar.data[13] = 13;
+    scalar.data[14] = 14;
+    scalar.data[15] = 15;
+    scalar.data[16] = 16;
+    scalar.data[17] = 17;
+    scalar.data[18] = 18;
+    scalar.data[19] = 19;
+    scalar.data[20] = 20;
+    scalar.data[21] = 21;
+    scalar.data[22] = 22;
+    scalar.data[23] = 23;
+    scalar.data[24] = 24;
+    scalar.data[25] = 25;
+    scalar.data[26] = 26;
+    scalar.data[27] = 27;
+    scalar.data[28] = 28;
+    scalar.data[29] = 29;
+    scalar.data[30] = 30;
+    scalar.data[31] = 31;
+    scalar.data[32] = 32;
+    scalar.data[33] = 33;
+    scalar.data[34] = 34;
+    scalar.data[35] = 35;
+    scalar.data[36] = 36;
+    scalar.data[37] = 37;
+    scalar.data[38] = 38;
+    scalar.data[39] = 39;
+    scalar.data[40] = 40;
+    scalar.data[41] = 41;
+    scalar.data[42] = 42;
+    scalar.data[43] = 43;
+    scalar.data[44] = 44;
+    scalar.data[45] = 45;
+    scalar.data[46] = 46;
+    scalar.data[47] = 47;
+    scalar.data[48] = 48;
+    scalar.data[49] = 49;
+    scalar.data[50] = 50;
+    scalar.data[51] = 51;
+    scalar.data[52] = 52;
+    scalar.data[53] = 53;
+    scalar.data[54] = 54;
+    scalar.data[55] = 55;
+    scalar.data[56] = 56;
+    scalar.data[57] = 57;
+    scalar.data[58] = 58;
+    scalar.data[59] = 59;
+    scalar.data[60] = 60;
+    scalar.data[61] = 61;
+    scalar.data[62] = 62;
+    scalar.data[63] = 63;
+    x25519_base(out, scalar);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 13: sha256(input_13)
+    scalar.data[0] = 57;
+    x25519_base(out, scalar);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 14: sha256(input_14)
+    scalar.data[0] = 12;
+    scalar.data[1] = 140;
+    scalar.data[2] = 125;
+    scalar.data[3] = 114;
+    scalar.data[4] = 71;
+    scalar.data[5] = 52;
+    scalar.data[6] = 44;
+    x25519_base(out, scalar);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 15: sha256(input_15)
+    scalar.data[0] = 216;
+    scalar.data[1] = 16;
+    scalar.data[2] = 15;
+    scalar.data[3] = 47;
+    scalar.data[4] = 111;
+    scalar.data[5] = 119;
+    scalar.data[6] = 13;
+    scalar.data[7] = 101;
+    scalar.data[8] = 214;
+    scalar.data[9] = 112;
+    scalar.data[10] = 229;
+    scalar.data[11] = 142;
+    scalar.data[12] = 3;
+    scalar.data[13] = 81;
+    scalar.data[14] = 216;
+    x25519_base(out, scalar);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 16: sha256(input_16)
+    scalar.data[0] = 174;
+    scalar.data[1] = 142;
+    scalar.data[2] = 79;
+    scalar.data[3] = 110;
+    scalar.data[4] = 172;
+    scalar.data[5] = 52;
+    scalar.data[6] = 47;
+    scalar.data[7] = 194;
+    scalar.data[8] = 49;
+    scalar.data[9] = 183;
+    scalar.data[10] = 176;
+    scalar.data[11] = 135;
+    scalar.data[12] = 22;
+    scalar.data[13] = 235;
+    scalar.data[14] = 63;
+    scalar.data[15] = 193;
+    scalar.data[16] = 40;
+    scalar.data[17] = 150;
+    scalar.data[18] = 185;
+    scalar.data[19] = 98;
+    scalar.data[20] = 35;
+    scalar.data[21] = 23;
+    scalar.data[22] = 116;
+    scalar.data[23] = 148;
+    scalar.data[24] = 40;
+    scalar.data[25] = 119;
+    scalar.data[26] = 51;
+    scalar.data[27] = 194;
+    scalar.data[28] = 142;
+    scalar.data[29] = 232;
+    scalar.data[30] = 186;
+    x25519_base(out, scalar);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 17: sha256(input_17)
+    scalar.data[0] = 83;
+    scalar.data[1] = 189;
+    scalar.data[2] = 181;
+    scalar.data[3] = 107;
+    scalar.data[4] = 136;
+    scalar.data[5] = 36;
+    scalar.data[6] = 87;
+    scalar.data[7] = 125;
+    scalar.data[8] = 83;
+    scalar.data[9] = 236;
+    scalar.data[10] = 194;
+    scalar.data[11] = 138;
+    scalar.data[12] = 112;
+    scalar.data[13] = 166;
+    scalar.data[14] = 28;
+    scalar.data[15] = 117;
+    scalar.data[16] = 16;
+    scalar.data[17] = 161;
+    scalar.data[18] = 205;
+    scalar.data[19] = 137;
+    scalar.data[20] = 33;
+    scalar.data[21] = 108;
+    scalar.data[22] = 161;
+    scalar.data[23] = 108;
+    scalar.data[24] = 255;
+    scalar.data[25] = 202;
+    scalar.data[26] = 234;
+    scalar.data[27] = 73;
+    scalar.data[28] = 135;
+    scalar.data[29] = 71;
+    scalar.data[30] = 126;
+    scalar.data[31] = 134;
+    scalar.data[32] = 219;
+    scalar.data[33] = 204;
+    scalar.data[34] = 185;
+    scalar.data[35] = 112;
+    scalar.data[36] = 70;
+    scalar.data[37] = 252;
+    scalar.data[38] = 46;
+    scalar.data[39] = 24;
+    scalar.data[40] = 56;
+    scalar.data[41] = 78;
+    scalar.data[42] = 81;
+    scalar.data[43] = 216;
+    scalar.data[44] = 32;
+    scalar.data[45] = 197;
+    scalar.data[46] = 195;
+    scalar.data[47] = 239;
+    scalar.data[48] = 128;
+    scalar.data[49] = 5;
+    scalar.data[50] = 58;
+    scalar.data[51] = 136;
+    scalar.data[52] = 174;
+    scalar.data[53] = 57;
+    scalar.data[54] = 150;
+    x25519_base(out, scalar);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 18: sha256(input_18)
+    scalar.data[0] = 222;
+    scalar.data[1] = 80;
+    scalar.data[2] = 232;
+    scalar.data[3] = 1;
+    scalar.data[4] = 134;
+    scalar.data[5] = 91;
+    scalar.data[6] = 54;
+    scalar.data[7] = 152;
+    scalar.data[8] = 101;
+    scalar.data[9] = 78;
+    scalar.data[10] = 191;
+    scalar.data[11] = 82;
+    scalar.data[12] = 0;
+    scalar.data[13] = 165;
+    scalar.data[14] = 250;
+    scalar.data[15] = 9;
+    scalar.data[16] = 57;
+    scalar.data[17] = 185;
+    scalar.data[18] = 157;
+    scalar.data[19] = 122;
+    scalar.data[20] = 29;
+    scalar.data[21] = 123;
+    scalar.data[22] = 40;
+    scalar.data[23] = 43;
+    scalar.data[24] = 248;
+    scalar.data[25] = 35;
+    scalar.data[26] = 64;
+    scalar.data[27] = 65;
+    scalar.data[28] = 243;
+    scalar.data[29] = 84;
+    scalar.data[30] = 135;
+    scalar.data[31] = 216;
+    scalar.data[32] = 108;
+    scalar.data[33] = 102;
+    scalar.data[34] = 159;
+    scalar.data[35] = 204;
+    scalar.data[36] = 191;
+    scalar.data[37] = 224;
+    scalar.data[38] = 231;
+    scalar.data[39] = 61;
+    scalar.data[40] = 126;
+    scalar.data[41] = 115;
+    scalar.data[42] = 32;
+    scalar.data[43] = 173;
+    scalar.data[44] = 10;
+    scalar.data[45] = 117;
+    scalar.data[46] = 112;
+    scalar.data[47] = 3;
+    scalar.data[48] = 36;
+    scalar.data[49] = 30;
+    scalar.data[50] = 117;
+    scalar.data[51] = 34;
+    scalar.data[52] = 16;
+    scalar.data[53] = 169;
+    scalar.data[54] = 36;
+    scalar.data[55] = 121;
+    scalar.data[56] = 142;
+    scalar.data[57] = 248;
+    scalar.data[58] = 109;
+    scalar.data[59] = 67;
+    scalar.data[60] = 242;
+    scalar.data[61] = 124;
+    scalar.data[62] = 242;
+    x25519_base(out, scalar);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 19: sha256(input_19)
+    scalar.data[0] = 208;
+    scalar.data[1] = 97;
+    scalar.data[2] = 48;
+    scalar.data[3] = 49;
+    scalar.data[4] = 220;
+    scalar.data[5] = 181;
+    scalar.data[6] = 216;
+    scalar.data[7] = 210;
+    scalar.data[8] = 239;
+    scalar.data[9] = 27;
+    scalar.data[10] = 50;
+    scalar.data[11] = 31;
+    scalar.data[12] = 206;
+    scalar.data[13] = 173;
+    scalar.data[14] = 55;
+    scalar.data[15] = 127;
+    scalar.data[16] = 98;
+    scalar.data[17] = 97;
+    scalar.data[18] = 229;
+    scalar.data[19] = 71;
+    scalar.data[20] = 216;
+    scalar.data[21] = 93;
+    scalar.data[22] = 142;
+    scalar.data[23] = 236;
+    scalar.data[24] = 127;
+    scalar.data[25] = 38;
+    scalar.data[26] = 226;
+    scalar.data[27] = 50;
+    scalar.data[28] = 25;
+    scalar.data[29] = 7;
+    scalar.data[30] = 47;
+    scalar.data[31] = 121;
+    scalar.data[32] = 85;
+    scalar.data[33] = 208;
+    scalar.data[34] = 248;
+    scalar.data[35] = 246;
+    scalar.data[36] = 109;
+    scalar.data[37] = 205;
+    scalar.data[38] = 30;
+    scalar.data[39] = 84;
+    scalar.data[40] = 194;
+    scalar.data[41] = 1;
+    scalar.data[42] = 199;
+    scalar.data[43] = 135;
+    scalar.data[44] = 232;
+    scalar.data[45] = 146;
+    scalar.data[46] = 216;
+    scalar.data[47] = 249;
+    scalar.data[48] = 79;
+    scalar.data[49] = 97;
+    scalar.data[50] = 151;
+    scalar.data[51] = 111;
+    scalar.data[52] = 29;
+    scalar.data[53] = 31;
+    scalar.data[54] = 160;
+    scalar.data[55] = 29;
+    scalar.data[56] = 25;
+    scalar.data[57] = 244;
+    scalar.data[58] = 80;
+    scalar.data[59] = 29;
+    scalar.data[60] = 41;
+    scalar.data[61] = 95;
+    scalar.data[62] = 35;
+    scalar.data[63] = 34;
+    x25519_base(out, scalar);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

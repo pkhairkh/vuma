@@ -1,0 +1,754 @@
+// Auto-generated VUMA harness for drbg_extra
+// Tests 20 vectors against C reference (OpenSSL)
+// Reuses state variables to avoid arena overflow
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/drbg/drbg_extra.vuma"::{DrbgExtraCtx, DrbgXBuf, hash_drbg_init, hash_drbg_generate};
+
+transform main() -> i32 {
+    // Shared state (reused for all vectors)
+    let state = state_new(DrbgExtraCtx);
+    let entropy = state_new(DrbgXBuf);
+    let nonce = state_new(DrbgXBuf);
+    let out = state_new(DrbgXBuf);
+    let oi: u32 = 0;
+
+    // Vector 0: sha256(input_0)
+    hash_drbg_init(state, entropy, 0, nonce, 0);
+    hash_drbg_generate(state, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 1: sha256(input_1)
+    entropy.bytes[0] = 0;
+    hash_drbg_init(state, entropy, 1, nonce, 0);
+    hash_drbg_generate(state, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 2: sha256(input_2)
+    entropy.bytes[0] = 255;
+    hash_drbg_init(state, entropy, 1, nonce, 0);
+    hash_drbg_generate(state, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 3: sha256(input_3)
+    entropy.bytes[0] = 97;
+    entropy.bytes[1] = 98;
+    entropy.bytes[2] = 99;
+    hash_drbg_init(state, entropy, 3, nonce, 0);
+    hash_drbg_generate(state, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 4: sha256(input_4)
+    entropy.bytes[0] = 97;
+    entropy.bytes[1] = 98;
+    entropy.bytes[2] = 99;
+    entropy.bytes[3] = 100;
+    entropy.bytes[4] = 101;
+    entropy.bytes[5] = 102;
+    entropy.bytes[6] = 103;
+    entropy.bytes[7] = 104;
+    entropy.bytes[8] = 105;
+    entropy.bytes[9] = 106;
+    entropy.bytes[10] = 107;
+    entropy.bytes[11] = 108;
+    entropy.bytes[12] = 109;
+    entropy.bytes[13] = 110;
+    entropy.bytes[14] = 111;
+    entropy.bytes[15] = 112;
+    entropy.bytes[16] = 113;
+    entropy.bytes[17] = 114;
+    entropy.bytes[18] = 115;
+    entropy.bytes[19] = 116;
+    entropy.bytes[20] = 117;
+    entropy.bytes[21] = 118;
+    entropy.bytes[22] = 119;
+    entropy.bytes[23] = 120;
+    entropy.bytes[24] = 121;
+    entropy.bytes[25] = 122;
+    hash_drbg_init(state, entropy, 26, nonce, 0);
+    hash_drbg_generate(state, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 5: sha256(input_5)
+    entropy.bytes[0] = 0;
+    entropy.bytes[1] = 0;
+    entropy.bytes[2] = 0;
+    entropy.bytes[3] = 0;
+    entropy.bytes[4] = 0;
+    entropy.bytes[5] = 0;
+    entropy.bytes[6] = 0;
+    entropy.bytes[7] = 0;
+    entropy.bytes[8] = 0;
+    entropy.bytes[9] = 0;
+    entropy.bytes[10] = 0;
+    entropy.bytes[11] = 0;
+    entropy.bytes[12] = 0;
+    entropy.bytes[13] = 0;
+    entropy.bytes[14] = 0;
+    entropy.bytes[15] = 0;
+    hash_drbg_init(state, entropy, 16, nonce, 0);
+    hash_drbg_generate(state, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 6: sha256(input_6)
+    entropy.bytes[0] = 0;
+    entropy.bytes[1] = 0;
+    entropy.bytes[2] = 0;
+    entropy.bytes[3] = 0;
+    entropy.bytes[4] = 0;
+    entropy.bytes[5] = 0;
+    entropy.bytes[6] = 0;
+    entropy.bytes[7] = 0;
+    entropy.bytes[8] = 0;
+    entropy.bytes[9] = 0;
+    entropy.bytes[10] = 0;
+    entropy.bytes[11] = 0;
+    entropy.bytes[12] = 0;
+    entropy.bytes[13] = 0;
+    entropy.bytes[14] = 0;
+    entropy.bytes[15] = 0;
+    entropy.bytes[16] = 0;
+    entropy.bytes[17] = 0;
+    entropy.bytes[18] = 0;
+    entropy.bytes[19] = 0;
+    entropy.bytes[20] = 0;
+    entropy.bytes[21] = 0;
+    entropy.bytes[22] = 0;
+    entropy.bytes[23] = 0;
+    entropy.bytes[24] = 0;
+    entropy.bytes[25] = 0;
+    entropy.bytes[26] = 0;
+    entropy.bytes[27] = 0;
+    entropy.bytes[28] = 0;
+    entropy.bytes[29] = 0;
+    entropy.bytes[30] = 0;
+    entropy.bytes[31] = 0;
+    hash_drbg_init(state, entropy, 32, nonce, 0);
+    hash_drbg_generate(state, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 7: sha256(input_7)
+    entropy.bytes[0] = 0;
+    entropy.bytes[1] = 0;
+    entropy.bytes[2] = 0;
+    entropy.bytes[3] = 0;
+    entropy.bytes[4] = 0;
+    entropy.bytes[5] = 0;
+    entropy.bytes[6] = 0;
+    entropy.bytes[7] = 0;
+    entropy.bytes[8] = 0;
+    entropy.bytes[9] = 0;
+    entropy.bytes[10] = 0;
+    entropy.bytes[11] = 0;
+    entropy.bytes[12] = 0;
+    entropy.bytes[13] = 0;
+    entropy.bytes[14] = 0;
+    entropy.bytes[15] = 0;
+    entropy.bytes[16] = 0;
+    entropy.bytes[17] = 0;
+    entropy.bytes[18] = 0;
+    entropy.bytes[19] = 0;
+    entropy.bytes[20] = 0;
+    entropy.bytes[21] = 0;
+    entropy.bytes[22] = 0;
+    entropy.bytes[23] = 0;
+    entropy.bytes[24] = 0;
+    entropy.bytes[25] = 0;
+    entropy.bytes[26] = 0;
+    entropy.bytes[27] = 0;
+    entropy.bytes[28] = 0;
+    entropy.bytes[29] = 0;
+    entropy.bytes[30] = 0;
+    entropy.bytes[31] = 0;
+    entropy.bytes[32] = 0;
+    entropy.bytes[33] = 0;
+    entropy.bytes[34] = 0;
+    entropy.bytes[35] = 0;
+    entropy.bytes[36] = 0;
+    entropy.bytes[37] = 0;
+    entropy.bytes[38] = 0;
+    entropy.bytes[39] = 0;
+    entropy.bytes[40] = 0;
+    entropy.bytes[41] = 0;
+    entropy.bytes[42] = 0;
+    entropy.bytes[43] = 0;
+    entropy.bytes[44] = 0;
+    entropy.bytes[45] = 0;
+    entropy.bytes[46] = 0;
+    entropy.bytes[47] = 0;
+    entropy.bytes[48] = 0;
+    entropy.bytes[49] = 0;
+    entropy.bytes[50] = 0;
+    entropy.bytes[51] = 0;
+    entropy.bytes[52] = 0;
+    entropy.bytes[53] = 0;
+    entropy.bytes[54] = 0;
+    entropy.bytes[55] = 0;
+    entropy.bytes[56] = 0;
+    entropy.bytes[57] = 0;
+    entropy.bytes[58] = 0;
+    entropy.bytes[59] = 0;
+    entropy.bytes[60] = 0;
+    entropy.bytes[61] = 0;
+    entropy.bytes[62] = 0;
+    entropy.bytes[63] = 0;
+    hash_drbg_init(state, entropy, 64, nonce, 0);
+    hash_drbg_generate(state, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 8: sha256(input_8)
+    entropy.bytes[0] = 255;
+    entropy.bytes[1] = 255;
+    entropy.bytes[2] = 255;
+    entropy.bytes[3] = 255;
+    entropy.bytes[4] = 255;
+    entropy.bytes[5] = 255;
+    entropy.bytes[6] = 255;
+    entropy.bytes[7] = 255;
+    entropy.bytes[8] = 255;
+    entropy.bytes[9] = 255;
+    entropy.bytes[10] = 255;
+    entropy.bytes[11] = 255;
+    entropy.bytes[12] = 255;
+    entropy.bytes[13] = 255;
+    entropy.bytes[14] = 255;
+    entropy.bytes[15] = 255;
+    hash_drbg_init(state, entropy, 16, nonce, 0);
+    hash_drbg_generate(state, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 9: sha256(input_9)
+    entropy.bytes[0] = 255;
+    entropy.bytes[1] = 255;
+    entropy.bytes[2] = 255;
+    entropy.bytes[3] = 255;
+    entropy.bytes[4] = 255;
+    entropy.bytes[5] = 255;
+    entropy.bytes[6] = 255;
+    entropy.bytes[7] = 255;
+    entropy.bytes[8] = 255;
+    entropy.bytes[9] = 255;
+    entropy.bytes[10] = 255;
+    entropy.bytes[11] = 255;
+    entropy.bytes[12] = 255;
+    entropy.bytes[13] = 255;
+    entropy.bytes[14] = 255;
+    entropy.bytes[15] = 255;
+    entropy.bytes[16] = 255;
+    entropy.bytes[17] = 255;
+    entropy.bytes[18] = 255;
+    entropy.bytes[19] = 255;
+    entropy.bytes[20] = 255;
+    entropy.bytes[21] = 255;
+    entropy.bytes[22] = 255;
+    entropy.bytes[23] = 255;
+    entropy.bytes[24] = 255;
+    entropy.bytes[25] = 255;
+    entropy.bytes[26] = 255;
+    entropy.bytes[27] = 255;
+    entropy.bytes[28] = 255;
+    entropy.bytes[29] = 255;
+    entropy.bytes[30] = 255;
+    entropy.bytes[31] = 255;
+    hash_drbg_init(state, entropy, 32, nonce, 0);
+    hash_drbg_generate(state, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 10: sha256(input_10)
+    entropy.bytes[0] = 0;
+    entropy.bytes[1] = 1;
+    entropy.bytes[2] = 2;
+    entropy.bytes[3] = 3;
+    entropy.bytes[4] = 4;
+    entropy.bytes[5] = 5;
+    entropy.bytes[6] = 6;
+    entropy.bytes[7] = 7;
+    entropy.bytes[8] = 8;
+    entropy.bytes[9] = 9;
+    entropy.bytes[10] = 10;
+    entropy.bytes[11] = 11;
+    entropy.bytes[12] = 12;
+    entropy.bytes[13] = 13;
+    entropy.bytes[14] = 14;
+    entropy.bytes[15] = 15;
+    hash_drbg_init(state, entropy, 16, nonce, 0);
+    hash_drbg_generate(state, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 11: sha256(input_11)
+    entropy.bytes[0] = 0;
+    entropy.bytes[1] = 1;
+    entropy.bytes[2] = 2;
+    entropy.bytes[3] = 3;
+    entropy.bytes[4] = 4;
+    entropy.bytes[5] = 5;
+    entropy.bytes[6] = 6;
+    entropy.bytes[7] = 7;
+    entropy.bytes[8] = 8;
+    entropy.bytes[9] = 9;
+    entropy.bytes[10] = 10;
+    entropy.bytes[11] = 11;
+    entropy.bytes[12] = 12;
+    entropy.bytes[13] = 13;
+    entropy.bytes[14] = 14;
+    entropy.bytes[15] = 15;
+    entropy.bytes[16] = 16;
+    entropy.bytes[17] = 17;
+    entropy.bytes[18] = 18;
+    entropy.bytes[19] = 19;
+    entropy.bytes[20] = 20;
+    entropy.bytes[21] = 21;
+    entropy.bytes[22] = 22;
+    entropy.bytes[23] = 23;
+    entropy.bytes[24] = 24;
+    entropy.bytes[25] = 25;
+    entropy.bytes[26] = 26;
+    entropy.bytes[27] = 27;
+    entropy.bytes[28] = 28;
+    entropy.bytes[29] = 29;
+    entropy.bytes[30] = 30;
+    entropy.bytes[31] = 31;
+    hash_drbg_init(state, entropy, 32, nonce, 0);
+    hash_drbg_generate(state, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 12: sha256(input_12)
+    entropy.bytes[0] = 0;
+    entropy.bytes[1] = 1;
+    entropy.bytes[2] = 2;
+    entropy.bytes[3] = 3;
+    entropy.bytes[4] = 4;
+    entropy.bytes[5] = 5;
+    entropy.bytes[6] = 6;
+    entropy.bytes[7] = 7;
+    entropy.bytes[8] = 8;
+    entropy.bytes[9] = 9;
+    entropy.bytes[10] = 10;
+    entropy.bytes[11] = 11;
+    entropy.bytes[12] = 12;
+    entropy.bytes[13] = 13;
+    entropy.bytes[14] = 14;
+    entropy.bytes[15] = 15;
+    entropy.bytes[16] = 16;
+    entropy.bytes[17] = 17;
+    entropy.bytes[18] = 18;
+    entropy.bytes[19] = 19;
+    entropy.bytes[20] = 20;
+    entropy.bytes[21] = 21;
+    entropy.bytes[22] = 22;
+    entropy.bytes[23] = 23;
+    entropy.bytes[24] = 24;
+    entropy.bytes[25] = 25;
+    entropy.bytes[26] = 26;
+    entropy.bytes[27] = 27;
+    entropy.bytes[28] = 28;
+    entropy.bytes[29] = 29;
+    entropy.bytes[30] = 30;
+    entropy.bytes[31] = 31;
+    entropy.bytes[32] = 32;
+    entropy.bytes[33] = 33;
+    entropy.bytes[34] = 34;
+    entropy.bytes[35] = 35;
+    entropy.bytes[36] = 36;
+    entropy.bytes[37] = 37;
+    entropy.bytes[38] = 38;
+    entropy.bytes[39] = 39;
+    entropy.bytes[40] = 40;
+    entropy.bytes[41] = 41;
+    entropy.bytes[42] = 42;
+    entropy.bytes[43] = 43;
+    entropy.bytes[44] = 44;
+    entropy.bytes[45] = 45;
+    entropy.bytes[46] = 46;
+    entropy.bytes[47] = 47;
+    entropy.bytes[48] = 48;
+    entropy.bytes[49] = 49;
+    entropy.bytes[50] = 50;
+    entropy.bytes[51] = 51;
+    entropy.bytes[52] = 52;
+    entropy.bytes[53] = 53;
+    entropy.bytes[54] = 54;
+    entropy.bytes[55] = 55;
+    entropy.bytes[56] = 56;
+    entropy.bytes[57] = 57;
+    entropy.bytes[58] = 58;
+    entropy.bytes[59] = 59;
+    entropy.bytes[60] = 60;
+    entropy.bytes[61] = 61;
+    entropy.bytes[62] = 62;
+    entropy.bytes[63] = 63;
+    hash_drbg_init(state, entropy, 64, nonce, 0);
+    hash_drbg_generate(state, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 13: sha256(input_13)
+    entropy.bytes[0] = 57;
+    hash_drbg_init(state, entropy, 1, nonce, 0);
+    hash_drbg_generate(state, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 14: sha256(input_14)
+    entropy.bytes[0] = 12;
+    entropy.bytes[1] = 140;
+    entropy.bytes[2] = 125;
+    entropy.bytes[3] = 114;
+    entropy.bytes[4] = 71;
+    entropy.bytes[5] = 52;
+    entropy.bytes[6] = 44;
+    hash_drbg_init(state, entropy, 7, nonce, 0);
+    hash_drbg_generate(state, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 15: sha256(input_15)
+    entropy.bytes[0] = 216;
+    entropy.bytes[1] = 16;
+    entropy.bytes[2] = 15;
+    entropy.bytes[3] = 47;
+    entropy.bytes[4] = 111;
+    entropy.bytes[5] = 119;
+    entropy.bytes[6] = 13;
+    entropy.bytes[7] = 101;
+    entropy.bytes[8] = 214;
+    entropy.bytes[9] = 112;
+    entropy.bytes[10] = 229;
+    entropy.bytes[11] = 142;
+    entropy.bytes[12] = 3;
+    entropy.bytes[13] = 81;
+    entropy.bytes[14] = 216;
+    hash_drbg_init(state, entropy, 15, nonce, 0);
+    hash_drbg_generate(state, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 16: sha256(input_16)
+    entropy.bytes[0] = 174;
+    entropy.bytes[1] = 142;
+    entropy.bytes[2] = 79;
+    entropy.bytes[3] = 110;
+    entropy.bytes[4] = 172;
+    entropy.bytes[5] = 52;
+    entropy.bytes[6] = 47;
+    entropy.bytes[7] = 194;
+    entropy.bytes[8] = 49;
+    entropy.bytes[9] = 183;
+    entropy.bytes[10] = 176;
+    entropy.bytes[11] = 135;
+    entropy.bytes[12] = 22;
+    entropy.bytes[13] = 235;
+    entropy.bytes[14] = 63;
+    entropy.bytes[15] = 193;
+    entropy.bytes[16] = 40;
+    entropy.bytes[17] = 150;
+    entropy.bytes[18] = 185;
+    entropy.bytes[19] = 98;
+    entropy.bytes[20] = 35;
+    entropy.bytes[21] = 23;
+    entropy.bytes[22] = 116;
+    entropy.bytes[23] = 148;
+    entropy.bytes[24] = 40;
+    entropy.bytes[25] = 119;
+    entropy.bytes[26] = 51;
+    entropy.bytes[27] = 194;
+    entropy.bytes[28] = 142;
+    entropy.bytes[29] = 232;
+    entropy.bytes[30] = 186;
+    hash_drbg_init(state, entropy, 31, nonce, 0);
+    hash_drbg_generate(state, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 17: sha256(input_17)
+    entropy.bytes[0] = 83;
+    entropy.bytes[1] = 189;
+    entropy.bytes[2] = 181;
+    entropy.bytes[3] = 107;
+    entropy.bytes[4] = 136;
+    entropy.bytes[5] = 36;
+    entropy.bytes[6] = 87;
+    entropy.bytes[7] = 125;
+    entropy.bytes[8] = 83;
+    entropy.bytes[9] = 236;
+    entropy.bytes[10] = 194;
+    entropy.bytes[11] = 138;
+    entropy.bytes[12] = 112;
+    entropy.bytes[13] = 166;
+    entropy.bytes[14] = 28;
+    entropy.bytes[15] = 117;
+    entropy.bytes[16] = 16;
+    entropy.bytes[17] = 161;
+    entropy.bytes[18] = 205;
+    entropy.bytes[19] = 137;
+    entropy.bytes[20] = 33;
+    entropy.bytes[21] = 108;
+    entropy.bytes[22] = 161;
+    entropy.bytes[23] = 108;
+    entropy.bytes[24] = 255;
+    entropy.bytes[25] = 202;
+    entropy.bytes[26] = 234;
+    entropy.bytes[27] = 73;
+    entropy.bytes[28] = 135;
+    entropy.bytes[29] = 71;
+    entropy.bytes[30] = 126;
+    entropy.bytes[31] = 134;
+    entropy.bytes[32] = 219;
+    entropy.bytes[33] = 204;
+    entropy.bytes[34] = 185;
+    entropy.bytes[35] = 112;
+    entropy.bytes[36] = 70;
+    entropy.bytes[37] = 252;
+    entropy.bytes[38] = 46;
+    entropy.bytes[39] = 24;
+    entropy.bytes[40] = 56;
+    entropy.bytes[41] = 78;
+    entropy.bytes[42] = 81;
+    entropy.bytes[43] = 216;
+    entropy.bytes[44] = 32;
+    entropy.bytes[45] = 197;
+    entropy.bytes[46] = 195;
+    entropy.bytes[47] = 239;
+    entropy.bytes[48] = 128;
+    entropy.bytes[49] = 5;
+    entropy.bytes[50] = 58;
+    entropy.bytes[51] = 136;
+    entropy.bytes[52] = 174;
+    entropy.bytes[53] = 57;
+    entropy.bytes[54] = 150;
+    hash_drbg_init(state, entropy, 55, nonce, 0);
+    hash_drbg_generate(state, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 18: sha256(input_18)
+    entropy.bytes[0] = 222;
+    entropy.bytes[1] = 80;
+    entropy.bytes[2] = 232;
+    entropy.bytes[3] = 1;
+    entropy.bytes[4] = 134;
+    entropy.bytes[5] = 91;
+    entropy.bytes[6] = 54;
+    entropy.bytes[7] = 152;
+    entropy.bytes[8] = 101;
+    entropy.bytes[9] = 78;
+    entropy.bytes[10] = 191;
+    entropy.bytes[11] = 82;
+    entropy.bytes[12] = 0;
+    entropy.bytes[13] = 165;
+    entropy.bytes[14] = 250;
+    entropy.bytes[15] = 9;
+    entropy.bytes[16] = 57;
+    entropy.bytes[17] = 185;
+    entropy.bytes[18] = 157;
+    entropy.bytes[19] = 122;
+    entropy.bytes[20] = 29;
+    entropy.bytes[21] = 123;
+    entropy.bytes[22] = 40;
+    entropy.bytes[23] = 43;
+    entropy.bytes[24] = 248;
+    entropy.bytes[25] = 35;
+    entropy.bytes[26] = 64;
+    entropy.bytes[27] = 65;
+    entropy.bytes[28] = 243;
+    entropy.bytes[29] = 84;
+    entropy.bytes[30] = 135;
+    entropy.bytes[31] = 216;
+    entropy.bytes[32] = 108;
+    entropy.bytes[33] = 102;
+    entropy.bytes[34] = 159;
+    entropy.bytes[35] = 204;
+    entropy.bytes[36] = 191;
+    entropy.bytes[37] = 224;
+    entropy.bytes[38] = 231;
+    entropy.bytes[39] = 61;
+    entropy.bytes[40] = 126;
+    entropy.bytes[41] = 115;
+    entropy.bytes[42] = 32;
+    entropy.bytes[43] = 173;
+    entropy.bytes[44] = 10;
+    entropy.bytes[45] = 117;
+    entropy.bytes[46] = 112;
+    entropy.bytes[47] = 3;
+    entropy.bytes[48] = 36;
+    entropy.bytes[49] = 30;
+    entropy.bytes[50] = 117;
+    entropy.bytes[51] = 34;
+    entropy.bytes[52] = 16;
+    entropy.bytes[53] = 169;
+    entropy.bytes[54] = 36;
+    entropy.bytes[55] = 121;
+    entropy.bytes[56] = 142;
+    entropy.bytes[57] = 248;
+    entropy.bytes[58] = 109;
+    entropy.bytes[59] = 67;
+    entropy.bytes[60] = 242;
+    entropy.bytes[61] = 124;
+    entropy.bytes[62] = 242;
+    hash_drbg_init(state, entropy, 63, nonce, 0);
+    hash_drbg_generate(state, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 19: sha256(input_19)
+    entropy.bytes[0] = 208;
+    entropy.bytes[1] = 97;
+    entropy.bytes[2] = 48;
+    entropy.bytes[3] = 49;
+    entropy.bytes[4] = 220;
+    entropy.bytes[5] = 181;
+    entropy.bytes[6] = 216;
+    entropy.bytes[7] = 210;
+    entropy.bytes[8] = 239;
+    entropy.bytes[9] = 27;
+    entropy.bytes[10] = 50;
+    entropy.bytes[11] = 31;
+    entropy.bytes[12] = 206;
+    entropy.bytes[13] = 173;
+    entropy.bytes[14] = 55;
+    entropy.bytes[15] = 127;
+    entropy.bytes[16] = 98;
+    entropy.bytes[17] = 97;
+    entropy.bytes[18] = 229;
+    entropy.bytes[19] = 71;
+    entropy.bytes[20] = 216;
+    entropy.bytes[21] = 93;
+    entropy.bytes[22] = 142;
+    entropy.bytes[23] = 236;
+    entropy.bytes[24] = 127;
+    entropy.bytes[25] = 38;
+    entropy.bytes[26] = 226;
+    entropy.bytes[27] = 50;
+    entropy.bytes[28] = 25;
+    entropy.bytes[29] = 7;
+    entropy.bytes[30] = 47;
+    entropy.bytes[31] = 121;
+    entropy.bytes[32] = 85;
+    entropy.bytes[33] = 208;
+    entropy.bytes[34] = 248;
+    entropy.bytes[35] = 246;
+    entropy.bytes[36] = 109;
+    entropy.bytes[37] = 205;
+    entropy.bytes[38] = 30;
+    entropy.bytes[39] = 84;
+    entropy.bytes[40] = 194;
+    entropy.bytes[41] = 1;
+    entropy.bytes[42] = 199;
+    entropy.bytes[43] = 135;
+    entropy.bytes[44] = 232;
+    entropy.bytes[45] = 146;
+    entropy.bytes[46] = 216;
+    entropy.bytes[47] = 249;
+    entropy.bytes[48] = 79;
+    entropy.bytes[49] = 97;
+    entropy.bytes[50] = 151;
+    entropy.bytes[51] = 111;
+    entropy.bytes[52] = 29;
+    entropy.bytes[53] = 31;
+    entropy.bytes[54] = 160;
+    entropy.bytes[55] = 29;
+    entropy.bytes[56] = 25;
+    entropy.bytes[57] = 244;
+    entropy.bytes[58] = 80;
+    entropy.bytes[59] = 29;
+    entropy.bytes[60] = 41;
+    entropy.bytes[61] = 95;
+    entropy.bytes[62] = 35;
+    entropy.bytes[63] = 34;
+    hash_drbg_init(state, entropy, 64, nonce, 0);
+    hash_drbg_generate(state, out, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

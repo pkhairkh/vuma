@@ -1,0 +1,733 @@
+// Auto-generated VUMA harness for slh_dsa
+// Tests 20 vectors against C reference (OpenSSL)
+// Reuses state variables to avoid arena overflow
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/post_quantum/slh_dsa.vuma"::{SlhBuf, slh_dsa_keygen};
+
+transform main() -> i32 {
+    // Shared state (reused for all vectors)
+    let seed = state_new(SlhBuf);
+    let pk = state_new(SlhBuf);
+    let sk = state_new(SlhBuf);
+    let oi: u32 = 0;
+
+    // Vector 0: sha512(input_0)
+    slh_dsa_keygen(seed, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 1: sha512(input_1)
+    seed.bytes[0] = 0;
+    slh_dsa_keygen(seed, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 2: sha512(input_2)
+    seed.bytes[0] = 255;
+    slh_dsa_keygen(seed, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 3: sha512(input_3)
+    seed.bytes[0] = 97;
+    seed.bytes[1] = 98;
+    seed.bytes[2] = 99;
+    slh_dsa_keygen(seed, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 4: sha512(input_4)
+    seed.bytes[0] = 97;
+    seed.bytes[1] = 98;
+    seed.bytes[2] = 99;
+    seed.bytes[3] = 100;
+    seed.bytes[4] = 101;
+    seed.bytes[5] = 102;
+    seed.bytes[6] = 103;
+    seed.bytes[7] = 104;
+    seed.bytes[8] = 105;
+    seed.bytes[9] = 106;
+    seed.bytes[10] = 107;
+    seed.bytes[11] = 108;
+    seed.bytes[12] = 109;
+    seed.bytes[13] = 110;
+    seed.bytes[14] = 111;
+    seed.bytes[15] = 112;
+    seed.bytes[16] = 113;
+    seed.bytes[17] = 114;
+    seed.bytes[18] = 115;
+    seed.bytes[19] = 116;
+    seed.bytes[20] = 117;
+    seed.bytes[21] = 118;
+    seed.bytes[22] = 119;
+    seed.bytes[23] = 120;
+    seed.bytes[24] = 121;
+    seed.bytes[25] = 122;
+    slh_dsa_keygen(seed, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 5: sha512(input_5)
+    seed.bytes[0] = 0;
+    seed.bytes[1] = 0;
+    seed.bytes[2] = 0;
+    seed.bytes[3] = 0;
+    seed.bytes[4] = 0;
+    seed.bytes[5] = 0;
+    seed.bytes[6] = 0;
+    seed.bytes[7] = 0;
+    seed.bytes[8] = 0;
+    seed.bytes[9] = 0;
+    seed.bytes[10] = 0;
+    seed.bytes[11] = 0;
+    seed.bytes[12] = 0;
+    seed.bytes[13] = 0;
+    seed.bytes[14] = 0;
+    seed.bytes[15] = 0;
+    slh_dsa_keygen(seed, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 6: sha512(input_6)
+    seed.bytes[0] = 0;
+    seed.bytes[1] = 0;
+    seed.bytes[2] = 0;
+    seed.bytes[3] = 0;
+    seed.bytes[4] = 0;
+    seed.bytes[5] = 0;
+    seed.bytes[6] = 0;
+    seed.bytes[7] = 0;
+    seed.bytes[8] = 0;
+    seed.bytes[9] = 0;
+    seed.bytes[10] = 0;
+    seed.bytes[11] = 0;
+    seed.bytes[12] = 0;
+    seed.bytes[13] = 0;
+    seed.bytes[14] = 0;
+    seed.bytes[15] = 0;
+    seed.bytes[16] = 0;
+    seed.bytes[17] = 0;
+    seed.bytes[18] = 0;
+    seed.bytes[19] = 0;
+    seed.bytes[20] = 0;
+    seed.bytes[21] = 0;
+    seed.bytes[22] = 0;
+    seed.bytes[23] = 0;
+    seed.bytes[24] = 0;
+    seed.bytes[25] = 0;
+    seed.bytes[26] = 0;
+    seed.bytes[27] = 0;
+    seed.bytes[28] = 0;
+    seed.bytes[29] = 0;
+    seed.bytes[30] = 0;
+    seed.bytes[31] = 0;
+    slh_dsa_keygen(seed, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 7: sha512(input_7)
+    seed.bytes[0] = 0;
+    seed.bytes[1] = 0;
+    seed.bytes[2] = 0;
+    seed.bytes[3] = 0;
+    seed.bytes[4] = 0;
+    seed.bytes[5] = 0;
+    seed.bytes[6] = 0;
+    seed.bytes[7] = 0;
+    seed.bytes[8] = 0;
+    seed.bytes[9] = 0;
+    seed.bytes[10] = 0;
+    seed.bytes[11] = 0;
+    seed.bytes[12] = 0;
+    seed.bytes[13] = 0;
+    seed.bytes[14] = 0;
+    seed.bytes[15] = 0;
+    seed.bytes[16] = 0;
+    seed.bytes[17] = 0;
+    seed.bytes[18] = 0;
+    seed.bytes[19] = 0;
+    seed.bytes[20] = 0;
+    seed.bytes[21] = 0;
+    seed.bytes[22] = 0;
+    seed.bytes[23] = 0;
+    seed.bytes[24] = 0;
+    seed.bytes[25] = 0;
+    seed.bytes[26] = 0;
+    seed.bytes[27] = 0;
+    seed.bytes[28] = 0;
+    seed.bytes[29] = 0;
+    seed.bytes[30] = 0;
+    seed.bytes[31] = 0;
+    seed.bytes[32] = 0;
+    seed.bytes[33] = 0;
+    seed.bytes[34] = 0;
+    seed.bytes[35] = 0;
+    seed.bytes[36] = 0;
+    seed.bytes[37] = 0;
+    seed.bytes[38] = 0;
+    seed.bytes[39] = 0;
+    seed.bytes[40] = 0;
+    seed.bytes[41] = 0;
+    seed.bytes[42] = 0;
+    seed.bytes[43] = 0;
+    seed.bytes[44] = 0;
+    seed.bytes[45] = 0;
+    seed.bytes[46] = 0;
+    seed.bytes[47] = 0;
+    seed.bytes[48] = 0;
+    seed.bytes[49] = 0;
+    seed.bytes[50] = 0;
+    seed.bytes[51] = 0;
+    seed.bytes[52] = 0;
+    seed.bytes[53] = 0;
+    seed.bytes[54] = 0;
+    seed.bytes[55] = 0;
+    seed.bytes[56] = 0;
+    seed.bytes[57] = 0;
+    seed.bytes[58] = 0;
+    seed.bytes[59] = 0;
+    seed.bytes[60] = 0;
+    seed.bytes[61] = 0;
+    seed.bytes[62] = 0;
+    seed.bytes[63] = 0;
+    slh_dsa_keygen(seed, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 8: sha512(input_8)
+    seed.bytes[0] = 255;
+    seed.bytes[1] = 255;
+    seed.bytes[2] = 255;
+    seed.bytes[3] = 255;
+    seed.bytes[4] = 255;
+    seed.bytes[5] = 255;
+    seed.bytes[6] = 255;
+    seed.bytes[7] = 255;
+    seed.bytes[8] = 255;
+    seed.bytes[9] = 255;
+    seed.bytes[10] = 255;
+    seed.bytes[11] = 255;
+    seed.bytes[12] = 255;
+    seed.bytes[13] = 255;
+    seed.bytes[14] = 255;
+    seed.bytes[15] = 255;
+    slh_dsa_keygen(seed, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 9: sha512(input_9)
+    seed.bytes[0] = 255;
+    seed.bytes[1] = 255;
+    seed.bytes[2] = 255;
+    seed.bytes[3] = 255;
+    seed.bytes[4] = 255;
+    seed.bytes[5] = 255;
+    seed.bytes[6] = 255;
+    seed.bytes[7] = 255;
+    seed.bytes[8] = 255;
+    seed.bytes[9] = 255;
+    seed.bytes[10] = 255;
+    seed.bytes[11] = 255;
+    seed.bytes[12] = 255;
+    seed.bytes[13] = 255;
+    seed.bytes[14] = 255;
+    seed.bytes[15] = 255;
+    seed.bytes[16] = 255;
+    seed.bytes[17] = 255;
+    seed.bytes[18] = 255;
+    seed.bytes[19] = 255;
+    seed.bytes[20] = 255;
+    seed.bytes[21] = 255;
+    seed.bytes[22] = 255;
+    seed.bytes[23] = 255;
+    seed.bytes[24] = 255;
+    seed.bytes[25] = 255;
+    seed.bytes[26] = 255;
+    seed.bytes[27] = 255;
+    seed.bytes[28] = 255;
+    seed.bytes[29] = 255;
+    seed.bytes[30] = 255;
+    seed.bytes[31] = 255;
+    slh_dsa_keygen(seed, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 10: sha512(input_10)
+    seed.bytes[0] = 0;
+    seed.bytes[1] = 1;
+    seed.bytes[2] = 2;
+    seed.bytes[3] = 3;
+    seed.bytes[4] = 4;
+    seed.bytes[5] = 5;
+    seed.bytes[6] = 6;
+    seed.bytes[7] = 7;
+    seed.bytes[8] = 8;
+    seed.bytes[9] = 9;
+    seed.bytes[10] = 10;
+    seed.bytes[11] = 11;
+    seed.bytes[12] = 12;
+    seed.bytes[13] = 13;
+    seed.bytes[14] = 14;
+    seed.bytes[15] = 15;
+    slh_dsa_keygen(seed, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 11: sha512(input_11)
+    seed.bytes[0] = 0;
+    seed.bytes[1] = 1;
+    seed.bytes[2] = 2;
+    seed.bytes[3] = 3;
+    seed.bytes[4] = 4;
+    seed.bytes[5] = 5;
+    seed.bytes[6] = 6;
+    seed.bytes[7] = 7;
+    seed.bytes[8] = 8;
+    seed.bytes[9] = 9;
+    seed.bytes[10] = 10;
+    seed.bytes[11] = 11;
+    seed.bytes[12] = 12;
+    seed.bytes[13] = 13;
+    seed.bytes[14] = 14;
+    seed.bytes[15] = 15;
+    seed.bytes[16] = 16;
+    seed.bytes[17] = 17;
+    seed.bytes[18] = 18;
+    seed.bytes[19] = 19;
+    seed.bytes[20] = 20;
+    seed.bytes[21] = 21;
+    seed.bytes[22] = 22;
+    seed.bytes[23] = 23;
+    seed.bytes[24] = 24;
+    seed.bytes[25] = 25;
+    seed.bytes[26] = 26;
+    seed.bytes[27] = 27;
+    seed.bytes[28] = 28;
+    seed.bytes[29] = 29;
+    seed.bytes[30] = 30;
+    seed.bytes[31] = 31;
+    slh_dsa_keygen(seed, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 12: sha512(input_12)
+    seed.bytes[0] = 0;
+    seed.bytes[1] = 1;
+    seed.bytes[2] = 2;
+    seed.bytes[3] = 3;
+    seed.bytes[4] = 4;
+    seed.bytes[5] = 5;
+    seed.bytes[6] = 6;
+    seed.bytes[7] = 7;
+    seed.bytes[8] = 8;
+    seed.bytes[9] = 9;
+    seed.bytes[10] = 10;
+    seed.bytes[11] = 11;
+    seed.bytes[12] = 12;
+    seed.bytes[13] = 13;
+    seed.bytes[14] = 14;
+    seed.bytes[15] = 15;
+    seed.bytes[16] = 16;
+    seed.bytes[17] = 17;
+    seed.bytes[18] = 18;
+    seed.bytes[19] = 19;
+    seed.bytes[20] = 20;
+    seed.bytes[21] = 21;
+    seed.bytes[22] = 22;
+    seed.bytes[23] = 23;
+    seed.bytes[24] = 24;
+    seed.bytes[25] = 25;
+    seed.bytes[26] = 26;
+    seed.bytes[27] = 27;
+    seed.bytes[28] = 28;
+    seed.bytes[29] = 29;
+    seed.bytes[30] = 30;
+    seed.bytes[31] = 31;
+    seed.bytes[32] = 32;
+    seed.bytes[33] = 33;
+    seed.bytes[34] = 34;
+    seed.bytes[35] = 35;
+    seed.bytes[36] = 36;
+    seed.bytes[37] = 37;
+    seed.bytes[38] = 38;
+    seed.bytes[39] = 39;
+    seed.bytes[40] = 40;
+    seed.bytes[41] = 41;
+    seed.bytes[42] = 42;
+    seed.bytes[43] = 43;
+    seed.bytes[44] = 44;
+    seed.bytes[45] = 45;
+    seed.bytes[46] = 46;
+    seed.bytes[47] = 47;
+    seed.bytes[48] = 48;
+    seed.bytes[49] = 49;
+    seed.bytes[50] = 50;
+    seed.bytes[51] = 51;
+    seed.bytes[52] = 52;
+    seed.bytes[53] = 53;
+    seed.bytes[54] = 54;
+    seed.bytes[55] = 55;
+    seed.bytes[56] = 56;
+    seed.bytes[57] = 57;
+    seed.bytes[58] = 58;
+    seed.bytes[59] = 59;
+    seed.bytes[60] = 60;
+    seed.bytes[61] = 61;
+    seed.bytes[62] = 62;
+    seed.bytes[63] = 63;
+    slh_dsa_keygen(seed, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 13: sha512(input_13)
+    seed.bytes[0] = 57;
+    slh_dsa_keygen(seed, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 14: sha512(input_14)
+    seed.bytes[0] = 12;
+    seed.bytes[1] = 140;
+    seed.bytes[2] = 125;
+    seed.bytes[3] = 114;
+    seed.bytes[4] = 71;
+    seed.bytes[5] = 52;
+    seed.bytes[6] = 44;
+    slh_dsa_keygen(seed, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 15: sha512(input_15)
+    seed.bytes[0] = 216;
+    seed.bytes[1] = 16;
+    seed.bytes[2] = 15;
+    seed.bytes[3] = 47;
+    seed.bytes[4] = 111;
+    seed.bytes[5] = 119;
+    seed.bytes[6] = 13;
+    seed.bytes[7] = 101;
+    seed.bytes[8] = 214;
+    seed.bytes[9] = 112;
+    seed.bytes[10] = 229;
+    seed.bytes[11] = 142;
+    seed.bytes[12] = 3;
+    seed.bytes[13] = 81;
+    seed.bytes[14] = 216;
+    slh_dsa_keygen(seed, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 16: sha512(input_16)
+    seed.bytes[0] = 174;
+    seed.bytes[1] = 142;
+    seed.bytes[2] = 79;
+    seed.bytes[3] = 110;
+    seed.bytes[4] = 172;
+    seed.bytes[5] = 52;
+    seed.bytes[6] = 47;
+    seed.bytes[7] = 194;
+    seed.bytes[8] = 49;
+    seed.bytes[9] = 183;
+    seed.bytes[10] = 176;
+    seed.bytes[11] = 135;
+    seed.bytes[12] = 22;
+    seed.bytes[13] = 235;
+    seed.bytes[14] = 63;
+    seed.bytes[15] = 193;
+    seed.bytes[16] = 40;
+    seed.bytes[17] = 150;
+    seed.bytes[18] = 185;
+    seed.bytes[19] = 98;
+    seed.bytes[20] = 35;
+    seed.bytes[21] = 23;
+    seed.bytes[22] = 116;
+    seed.bytes[23] = 148;
+    seed.bytes[24] = 40;
+    seed.bytes[25] = 119;
+    seed.bytes[26] = 51;
+    seed.bytes[27] = 194;
+    seed.bytes[28] = 142;
+    seed.bytes[29] = 232;
+    seed.bytes[30] = 186;
+    slh_dsa_keygen(seed, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 17: sha512(input_17)
+    seed.bytes[0] = 83;
+    seed.bytes[1] = 189;
+    seed.bytes[2] = 181;
+    seed.bytes[3] = 107;
+    seed.bytes[4] = 136;
+    seed.bytes[5] = 36;
+    seed.bytes[6] = 87;
+    seed.bytes[7] = 125;
+    seed.bytes[8] = 83;
+    seed.bytes[9] = 236;
+    seed.bytes[10] = 194;
+    seed.bytes[11] = 138;
+    seed.bytes[12] = 112;
+    seed.bytes[13] = 166;
+    seed.bytes[14] = 28;
+    seed.bytes[15] = 117;
+    seed.bytes[16] = 16;
+    seed.bytes[17] = 161;
+    seed.bytes[18] = 205;
+    seed.bytes[19] = 137;
+    seed.bytes[20] = 33;
+    seed.bytes[21] = 108;
+    seed.bytes[22] = 161;
+    seed.bytes[23] = 108;
+    seed.bytes[24] = 255;
+    seed.bytes[25] = 202;
+    seed.bytes[26] = 234;
+    seed.bytes[27] = 73;
+    seed.bytes[28] = 135;
+    seed.bytes[29] = 71;
+    seed.bytes[30] = 126;
+    seed.bytes[31] = 134;
+    seed.bytes[32] = 219;
+    seed.bytes[33] = 204;
+    seed.bytes[34] = 185;
+    seed.bytes[35] = 112;
+    seed.bytes[36] = 70;
+    seed.bytes[37] = 252;
+    seed.bytes[38] = 46;
+    seed.bytes[39] = 24;
+    seed.bytes[40] = 56;
+    seed.bytes[41] = 78;
+    seed.bytes[42] = 81;
+    seed.bytes[43] = 216;
+    seed.bytes[44] = 32;
+    seed.bytes[45] = 197;
+    seed.bytes[46] = 195;
+    seed.bytes[47] = 239;
+    seed.bytes[48] = 128;
+    seed.bytes[49] = 5;
+    seed.bytes[50] = 58;
+    seed.bytes[51] = 136;
+    seed.bytes[52] = 174;
+    seed.bytes[53] = 57;
+    seed.bytes[54] = 150;
+    slh_dsa_keygen(seed, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 18: sha512(input_18)
+    seed.bytes[0] = 222;
+    seed.bytes[1] = 80;
+    seed.bytes[2] = 232;
+    seed.bytes[3] = 1;
+    seed.bytes[4] = 134;
+    seed.bytes[5] = 91;
+    seed.bytes[6] = 54;
+    seed.bytes[7] = 152;
+    seed.bytes[8] = 101;
+    seed.bytes[9] = 78;
+    seed.bytes[10] = 191;
+    seed.bytes[11] = 82;
+    seed.bytes[12] = 0;
+    seed.bytes[13] = 165;
+    seed.bytes[14] = 250;
+    seed.bytes[15] = 9;
+    seed.bytes[16] = 57;
+    seed.bytes[17] = 185;
+    seed.bytes[18] = 157;
+    seed.bytes[19] = 122;
+    seed.bytes[20] = 29;
+    seed.bytes[21] = 123;
+    seed.bytes[22] = 40;
+    seed.bytes[23] = 43;
+    seed.bytes[24] = 248;
+    seed.bytes[25] = 35;
+    seed.bytes[26] = 64;
+    seed.bytes[27] = 65;
+    seed.bytes[28] = 243;
+    seed.bytes[29] = 84;
+    seed.bytes[30] = 135;
+    seed.bytes[31] = 216;
+    seed.bytes[32] = 108;
+    seed.bytes[33] = 102;
+    seed.bytes[34] = 159;
+    seed.bytes[35] = 204;
+    seed.bytes[36] = 191;
+    seed.bytes[37] = 224;
+    seed.bytes[38] = 231;
+    seed.bytes[39] = 61;
+    seed.bytes[40] = 126;
+    seed.bytes[41] = 115;
+    seed.bytes[42] = 32;
+    seed.bytes[43] = 173;
+    seed.bytes[44] = 10;
+    seed.bytes[45] = 117;
+    seed.bytes[46] = 112;
+    seed.bytes[47] = 3;
+    seed.bytes[48] = 36;
+    seed.bytes[49] = 30;
+    seed.bytes[50] = 117;
+    seed.bytes[51] = 34;
+    seed.bytes[52] = 16;
+    seed.bytes[53] = 169;
+    seed.bytes[54] = 36;
+    seed.bytes[55] = 121;
+    seed.bytes[56] = 142;
+    seed.bytes[57] = 248;
+    seed.bytes[58] = 109;
+    seed.bytes[59] = 67;
+    seed.bytes[60] = 242;
+    seed.bytes[61] = 124;
+    seed.bytes[62] = 242;
+    slh_dsa_keygen(seed, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 19: sha512(input_19)
+    seed.bytes[0] = 208;
+    seed.bytes[1] = 97;
+    seed.bytes[2] = 48;
+    seed.bytes[3] = 49;
+    seed.bytes[4] = 220;
+    seed.bytes[5] = 181;
+    seed.bytes[6] = 216;
+    seed.bytes[7] = 210;
+    seed.bytes[8] = 239;
+    seed.bytes[9] = 27;
+    seed.bytes[10] = 50;
+    seed.bytes[11] = 31;
+    seed.bytes[12] = 206;
+    seed.bytes[13] = 173;
+    seed.bytes[14] = 55;
+    seed.bytes[15] = 127;
+    seed.bytes[16] = 98;
+    seed.bytes[17] = 97;
+    seed.bytes[18] = 229;
+    seed.bytes[19] = 71;
+    seed.bytes[20] = 216;
+    seed.bytes[21] = 93;
+    seed.bytes[22] = 142;
+    seed.bytes[23] = 236;
+    seed.bytes[24] = 127;
+    seed.bytes[25] = 38;
+    seed.bytes[26] = 226;
+    seed.bytes[27] = 50;
+    seed.bytes[28] = 25;
+    seed.bytes[29] = 7;
+    seed.bytes[30] = 47;
+    seed.bytes[31] = 121;
+    seed.bytes[32] = 85;
+    seed.bytes[33] = 208;
+    seed.bytes[34] = 248;
+    seed.bytes[35] = 246;
+    seed.bytes[36] = 109;
+    seed.bytes[37] = 205;
+    seed.bytes[38] = 30;
+    seed.bytes[39] = 84;
+    seed.bytes[40] = 194;
+    seed.bytes[41] = 1;
+    seed.bytes[42] = 199;
+    seed.bytes[43] = 135;
+    seed.bytes[44] = 232;
+    seed.bytes[45] = 146;
+    seed.bytes[46] = 216;
+    seed.bytes[47] = 249;
+    seed.bytes[48] = 79;
+    seed.bytes[49] = 97;
+    seed.bytes[50] = 151;
+    seed.bytes[51] = 111;
+    seed.bytes[52] = 29;
+    seed.bytes[53] = 31;
+    seed.bytes[54] = 160;
+    seed.bytes[55] = 29;
+    seed.bytes[56] = 25;
+    seed.bytes[57] = 244;
+    seed.bytes[58] = 80;
+    seed.bytes[59] = 29;
+    seed.bytes[60] = 41;
+    seed.bytes[61] = 95;
+    seed.bytes[62] = 35;
+    seed.bytes[63] = 34;
+    slh_dsa_keygen(seed, pk, sk);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (pk.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

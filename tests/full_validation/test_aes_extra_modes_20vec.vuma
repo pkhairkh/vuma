@@ -1,0 +1,786 @@
+// Auto-generated VUMA harness for aes_extra_modes
+// Tests 20 vectors against C reference (OpenSSL)
+// Reuses state variables to avoid arena overflow
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/aes128.vuma"::{AesKey};
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/aes_extra_modes.vuma"::{AesXBuf, aes_cmac};
+
+transform main() -> i32 {
+    // Shared state (reused for all vectors)
+    let key = state_new(AesKey);
+    let msg = state_new(AesXBuf);
+    let out = state_new(AesXBuf);
+    let oi: u32 = 0;
+
+    // Vector 0: aes128_ecb(key_0, pt_0)
+    msg.bytes[0] = 0;
+    msg.bytes[1] = 0;
+    msg.bytes[2] = 0;
+    msg.bytes[3] = 0;
+    msg.bytes[4] = 0;
+    msg.bytes[5] = 0;
+    msg.bytes[6] = 0;
+    msg.bytes[7] = 0;
+    key.data[0] = 0;
+    key.data[1] = 1;
+    key.data[2] = 2;
+    key.data[3] = 3;
+    key.data[4] = 4;
+    key.data[5] = 5;
+    key.data[6] = 6;
+    key.data[7] = 7;
+    key.data[8] = 8;
+    key.data[9] = 9;
+    key.data[10] = 10;
+    key.data[11] = 11;
+    key.data[12] = 12;
+    key.data[13] = 13;
+    key.data[14] = 14;
+    key.data[15] = 15;
+    aes_cmac(key, msg, 8, out);
+    oi = 0;
+    while oi < 16 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 1: aes128_ecb(key_1, pt_1)
+    msg.bytes[0] = 0;
+    msg.bytes[1] = 0;
+    msg.bytes[2] = 0;
+    msg.bytes[3] = 0;
+    msg.bytes[4] = 0;
+    msg.bytes[5] = 0;
+    msg.bytes[6] = 0;
+    msg.bytes[7] = 0;
+    key.data[0] = 0;
+    key.data[1] = 0;
+    key.data[2] = 0;
+    key.data[3] = 0;
+    key.data[4] = 0;
+    key.data[5] = 0;
+    key.data[6] = 0;
+    key.data[7] = 0;
+    key.data[8] = 0;
+    key.data[9] = 0;
+    key.data[10] = 0;
+    key.data[11] = 0;
+    key.data[12] = 0;
+    key.data[13] = 0;
+    key.data[14] = 0;
+    key.data[15] = 0;
+    aes_cmac(key, msg, 8, out);
+    oi = 0;
+    while oi < 16 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 2: aes128_ecb(key_2, pt_2)
+    msg.bytes[0] = 255;
+    msg.bytes[1] = 0;
+    msg.bytes[2] = 0;
+    msg.bytes[3] = 0;
+    msg.bytes[4] = 0;
+    msg.bytes[5] = 0;
+    msg.bytes[6] = 0;
+    msg.bytes[7] = 0;
+    key.data[0] = 255;
+    key.data[1] = 255;
+    key.data[2] = 255;
+    key.data[3] = 255;
+    key.data[4] = 255;
+    key.data[5] = 255;
+    key.data[6] = 255;
+    key.data[7] = 255;
+    key.data[8] = 255;
+    key.data[9] = 255;
+    key.data[10] = 255;
+    key.data[11] = 255;
+    key.data[12] = 255;
+    key.data[13] = 255;
+    key.data[14] = 255;
+    key.data[15] = 255;
+    aes_cmac(key, msg, 8, out);
+    oi = 0;
+    while oi < 16 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 3: aes128_ecb(key_3, pt_3)
+    msg.bytes[0] = 97;
+    msg.bytes[1] = 98;
+    msg.bytes[2] = 99;
+    msg.bytes[3] = 0;
+    msg.bytes[4] = 0;
+    msg.bytes[5] = 0;
+    msg.bytes[6] = 0;
+    msg.bytes[7] = 0;
+    key.data[0] = 0;
+    key.data[1] = 1;
+    key.data[2] = 2;
+    key.data[3] = 3;
+    key.data[4] = 4;
+    key.data[5] = 5;
+    key.data[6] = 6;
+    key.data[7] = 7;
+    key.data[8] = 8;
+    key.data[9] = 9;
+    key.data[10] = 10;
+    key.data[11] = 11;
+    key.data[12] = 12;
+    key.data[13] = 13;
+    key.data[14] = 14;
+    key.data[15] = 15;
+    aes_cmac(key, msg, 8, out);
+    oi = 0;
+    while oi < 16 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 4: aes128_ecb(key_4, pt_4)
+    msg.bytes[0] = 97;
+    msg.bytes[1] = 98;
+    msg.bytes[2] = 99;
+    msg.bytes[3] = 100;
+    msg.bytes[4] = 101;
+    msg.bytes[5] = 102;
+    msg.bytes[6] = 103;
+    msg.bytes[7] = 104;
+    msg.bytes[8] = 105;
+    msg.bytes[9] = 106;
+    msg.bytes[10] = 107;
+    msg.bytes[11] = 108;
+    msg.bytes[12] = 109;
+    msg.bytes[13] = 110;
+    msg.bytes[14] = 111;
+    msg.bytes[15] = 112;
+    key.data[0] = 26;
+    key.data[1] = 137;
+    key.data[2] = 44;
+    key.data[3] = 208;
+    key.data[4] = 136;
+    key.data[5] = 55;
+    key.data[6] = 19;
+    key.data[7] = 194;
+    key.data[8] = 170;
+    key.data[9] = 174;
+    key.data[10] = 26;
+    key.data[11] = 81;
+    key.data[12] = 69;
+    key.data[13] = 172;
+    key.data[14] = 170;
+    key.data[15] = 125;
+    aes_cmac(key, msg, 16, out);
+    oi = 0;
+    while oi < 16 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 5: aes128_ecb(key_5, pt_5)
+    msg.bytes[0] = 0;
+    msg.bytes[1] = 0;
+    msg.bytes[2] = 0;
+    msg.bytes[3] = 0;
+    msg.bytes[4] = 0;
+    msg.bytes[5] = 0;
+    msg.bytes[6] = 0;
+    msg.bytes[7] = 0;
+    msg.bytes[8] = 0;
+    msg.bytes[9] = 0;
+    msg.bytes[10] = 0;
+    msg.bytes[11] = 0;
+    msg.bytes[12] = 0;
+    msg.bytes[13] = 0;
+    msg.bytes[14] = 0;
+    msg.bytes[15] = 0;
+    key.data[0] = 83;
+    key.data[1] = 0;
+    key.data[2] = 223;
+    key.data[3] = 44;
+    key.data[4] = 193;
+    key.data[5] = 35;
+    key.data[6] = 3;
+    key.data[7] = 161;
+    key.data[8] = 229;
+    key.data[9] = 52;
+    key.data[10] = 22;
+    key.data[11] = 47;
+    key.data[12] = 72;
+    key.data[13] = 64;
+    key.data[14] = 10;
+    key.data[15] = 149;
+    aes_cmac(key, msg, 16, out);
+    oi = 0;
+    while oi < 16 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 6: aes128_ecb(key_6, pt_6)
+    msg.bytes[0] = 0;
+    msg.bytes[1] = 0;
+    msg.bytes[2] = 0;
+    msg.bytes[3] = 0;
+    msg.bytes[4] = 0;
+    msg.bytes[5] = 0;
+    msg.bytes[6] = 0;
+    msg.bytes[7] = 0;
+    msg.bytes[8] = 0;
+    msg.bytes[9] = 0;
+    msg.bytes[10] = 0;
+    msg.bytes[11] = 0;
+    msg.bytes[12] = 0;
+    msg.bytes[13] = 0;
+    msg.bytes[14] = 0;
+    msg.bytes[15] = 0;
+    key.data[0] = 220;
+    key.data[1] = 244;
+    key.data[2] = 135;
+    key.data[3] = 240;
+    key.data[4] = 18;
+    key.data[5] = 156;
+    key.data[6] = 175;
+    key.data[7] = 247;
+    key.data[8] = 105;
+    key.data[9] = 161;
+    key.data[10] = 6;
+    key.data[11] = 203;
+    key.data[12] = 222;
+    key.data[13] = 248;
+    key.data[14] = 214;
+    key.data[15] = 191;
+    aes_cmac(key, msg, 16, out);
+    oi = 0;
+    while oi < 16 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 7: aes128_ecb(key_7, pt_7)
+    msg.bytes[0] = 0;
+    msg.bytes[1] = 0;
+    msg.bytes[2] = 0;
+    msg.bytes[3] = 0;
+    msg.bytes[4] = 0;
+    msg.bytes[5] = 0;
+    msg.bytes[6] = 0;
+    msg.bytes[7] = 0;
+    msg.bytes[8] = 0;
+    msg.bytes[9] = 0;
+    msg.bytes[10] = 0;
+    msg.bytes[11] = 0;
+    msg.bytes[12] = 0;
+    msg.bytes[13] = 0;
+    msg.bytes[14] = 0;
+    msg.bytes[15] = 0;
+    key.data[0] = 16;
+    key.data[1] = 92;
+    key.data[2] = 42;
+    key.data[3] = 249;
+    key.data[4] = 134;
+    key.data[5] = 87;
+    key.data[6] = 171;
+    key.data[7] = 172;
+    key.data[8] = 200;
+    key.data[9] = 37;
+    key.data[10] = 233;
+    key.data[11] = 198;
+    key.data[12] = 172;
+    key.data[13] = 8;
+    key.data[14] = 96;
+    key.data[15] = 45;
+    aes_cmac(key, msg, 16, out);
+    oi = 0;
+    while oi < 16 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 8: aes128_ecb(key_8, pt_8)
+    msg.bytes[0] = 255;
+    msg.bytes[1] = 255;
+    msg.bytes[2] = 255;
+    msg.bytes[3] = 255;
+    msg.bytes[4] = 255;
+    msg.bytes[5] = 255;
+    msg.bytes[6] = 255;
+    msg.bytes[7] = 255;
+    msg.bytes[8] = 255;
+    msg.bytes[9] = 255;
+    msg.bytes[10] = 255;
+    msg.bytes[11] = 255;
+    msg.bytes[12] = 255;
+    msg.bytes[13] = 255;
+    msg.bytes[14] = 255;
+    msg.bytes[15] = 255;
+    key.data[0] = 186;
+    key.data[1] = 6;
+    key.data[2] = 180;
+    key.data[3] = 117;
+    key.data[4] = 207;
+    key.data[5] = 30;
+    key.data[6] = 147;
+    key.data[7] = 253;
+    key.data[8] = 119;
+    key.data[9] = 247;
+    key.data[10] = 90;
+    key.data[11] = 78;
+    key.data[12] = 227;
+    key.data[13] = 193;
+    key.data[14] = 236;
+    key.data[15] = 22;
+    aes_cmac(key, msg, 16, out);
+    oi = 0;
+    while oi < 16 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 9: aes128_ecb(key_9, pt_9)
+    msg.bytes[0] = 255;
+    msg.bytes[1] = 255;
+    msg.bytes[2] = 255;
+    msg.bytes[3] = 255;
+    msg.bytes[4] = 255;
+    msg.bytes[5] = 255;
+    msg.bytes[6] = 255;
+    msg.bytes[7] = 255;
+    msg.bytes[8] = 255;
+    msg.bytes[9] = 255;
+    msg.bytes[10] = 255;
+    msg.bytes[11] = 255;
+    msg.bytes[12] = 255;
+    msg.bytes[13] = 255;
+    msg.bytes[14] = 255;
+    msg.bytes[15] = 255;
+    key.data[0] = 5;
+    key.data[1] = 68;
+    key.data[2] = 233;
+    key.data[3] = 98;
+    key.data[4] = 10;
+    key.data[5] = 131;
+    key.data[6] = 180;
+    key.data[7] = 139;
+    key.data[8] = 222;
+    key.data[9] = 215;
+    key.data[10] = 0;
+    key.data[11] = 55;
+    key.data[12] = 32;
+    key.data[13] = 181;
+    key.data[14] = 45;
+    key.data[15] = 42;
+    aes_cmac(key, msg, 16, out);
+    oi = 0;
+    while oi < 16 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 10: aes128_ecb(key_10, pt_10)
+    msg.bytes[0] = 0;
+    msg.bytes[1] = 1;
+    msg.bytes[2] = 2;
+    msg.bytes[3] = 3;
+    msg.bytes[4] = 4;
+    msg.bytes[5] = 5;
+    msg.bytes[6] = 6;
+    msg.bytes[7] = 7;
+    msg.bytes[8] = 8;
+    msg.bytes[9] = 9;
+    msg.bytes[10] = 10;
+    msg.bytes[11] = 11;
+    msg.bytes[12] = 12;
+    msg.bytes[13] = 13;
+    msg.bytes[14] = 14;
+    msg.bytes[15] = 15;
+    key.data[0] = 221;
+    key.data[1] = 4;
+    key.data[2] = 193;
+    key.data[3] = 37;
+    key.data[4] = 206;
+    key.data[5] = 14;
+    key.data[6] = 165;
+    key.data[7] = 134;
+    key.data[8] = 241;
+    key.data[9] = 16;
+    key.data[10] = 171;
+    key.data[11] = 212;
+    key.data[12] = 178;
+    key.data[13] = 12;
+    key.data[14] = 83;
+    key.data[15] = 214;
+    aes_cmac(key, msg, 16, out);
+    oi = 0;
+    while oi < 16 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 11: aes128_ecb(key_11, pt_11)
+    msg.bytes[0] = 0;
+    msg.bytes[1] = 1;
+    msg.bytes[2] = 2;
+    msg.bytes[3] = 3;
+    msg.bytes[4] = 4;
+    msg.bytes[5] = 5;
+    msg.bytes[6] = 6;
+    msg.bytes[7] = 7;
+    msg.bytes[8] = 8;
+    msg.bytes[9] = 9;
+    msg.bytes[10] = 10;
+    msg.bytes[11] = 11;
+    msg.bytes[12] = 12;
+    msg.bytes[13] = 13;
+    msg.bytes[14] = 14;
+    msg.bytes[15] = 15;
+    key.data[0] = 32;
+    key.data[1] = 73;
+    key.data[2] = 190;
+    key.data[3] = 120;
+    key.data[4] = 40;
+    key.data[5] = 29;
+    key.data[6] = 198;
+    key.data[7] = 156;
+    key.data[8] = 74;
+    key.data[9] = 149;
+    key.data[10] = 199;
+    key.data[11] = 188;
+    key.data[12] = 64;
+    key.data[13] = 172;
+    key.data[14] = 61;
+    key.data[15] = 85;
+    aes_cmac(key, msg, 16, out);
+    oi = 0;
+    while oi < 16 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 12: aes128_ecb(key_12, pt_12)
+    msg.bytes[0] = 0;
+    msg.bytes[1] = 1;
+    msg.bytes[2] = 2;
+    msg.bytes[3] = 3;
+    msg.bytes[4] = 4;
+    msg.bytes[5] = 5;
+    msg.bytes[6] = 6;
+    msg.bytes[7] = 7;
+    msg.bytes[8] = 8;
+    msg.bytes[9] = 9;
+    msg.bytes[10] = 10;
+    msg.bytes[11] = 11;
+    msg.bytes[12] = 12;
+    msg.bytes[13] = 13;
+    msg.bytes[14] = 14;
+    msg.bytes[15] = 15;
+    key.data[0] = 197;
+    key.data[1] = 221;
+    key.data[2] = 31;
+    key.data[3] = 69;
+    key.data[4] = 232;
+    key.data[5] = 10;
+    key.data[6] = 178;
+    key.data[7] = 230;
+    key.data[8] = 230;
+    key.data[9] = 155;
+    key.data[10] = 219;
+    key.data[11] = 14;
+    key.data[12] = 81;
+    key.data[13] = 166;
+    key.data[14] = 70;
+    key.data[15] = 175;
+    aes_cmac(key, msg, 16, out);
+    oi = 0;
+    while oi < 16 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 13: aes128_ecb(key_13, pt_13)
+    msg.bytes[0] = 57;
+    msg.bytes[1] = 0;
+    msg.bytes[2] = 0;
+    msg.bytes[3] = 0;
+    msg.bytes[4] = 0;
+    msg.bytes[5] = 0;
+    msg.bytes[6] = 0;
+    msg.bytes[7] = 0;
+    key.data[0] = 53;
+    key.data[1] = 188;
+    key.data[2] = 115;
+    key.data[3] = 174;
+    key.data[4] = 47;
+    key.data[5] = 139;
+    key.data[6] = 124;
+    key.data[7] = 104;
+    key.data[8] = 164;
+    key.data[9] = 135;
+    key.data[10] = 203;
+    key.data[11] = 22;
+    key.data[12] = 41;
+    key.data[13] = 100;
+    key.data[14] = 102;
+    key.data[15] = 8;
+    aes_cmac(key, msg, 8, out);
+    oi = 0;
+    while oi < 16 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 14: aes128_ecb(key_14, pt_14)
+    msg.bytes[0] = 12;
+    msg.bytes[1] = 140;
+    msg.bytes[2] = 125;
+    msg.bytes[3] = 114;
+    msg.bytes[4] = 71;
+    msg.bytes[5] = 52;
+    msg.bytes[6] = 44;
+    msg.bytes[7] = 0;
+    key.data[0] = 99;
+    key.data[1] = 137;
+    key.data[2] = 118;
+    key.data[3] = 43;
+    key.data[4] = 162;
+    key.data[5] = 42;
+    key.data[6] = 174;
+    key.data[7] = 68;
+    key.data[8] = 69;
+    key.data[9] = 247;
+    key.data[10] = 252;
+    key.data[11] = 203;
+    key.data[12] = 14;
+    key.data[13] = 131;
+    key.data[14] = 248;
+    key.data[15] = 174;
+    aes_cmac(key, msg, 8, out);
+    oi = 0;
+    while oi < 16 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 15: aes128_ecb(key_15, pt_15)
+    msg.bytes[0] = 216;
+    msg.bytes[1] = 16;
+    msg.bytes[2] = 15;
+    msg.bytes[3] = 47;
+    msg.bytes[4] = 111;
+    msg.bytes[5] = 119;
+    msg.bytes[6] = 13;
+    msg.bytes[7] = 101;
+    msg.bytes[8] = 214;
+    msg.bytes[9] = 112;
+    msg.bytes[10] = 229;
+    msg.bytes[11] = 142;
+    msg.bytes[12] = 3;
+    msg.bytes[13] = 81;
+    msg.bytes[14] = 216;
+    key.data[0] = 202;
+    key.data[1] = 114;
+    key.data[2] = 64;
+    key.data[3] = 3;
+    key.data[4] = 253;
+    key.data[5] = 175;
+    key.data[6] = 62;
+    key.data[7] = 26;
+    key.data[8] = 184;
+    key.data[9] = 235;
+    key.data[10] = 185;
+    key.data[11] = 215;
+    key.data[12] = 161;
+    key.data[13] = 183;
+    key.data[14] = 110;
+    key.data[15] = 229;
+    aes_cmac(key, msg, 15, out);
+    oi = 0;
+    while oi < 16 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 16: aes128_ecb(key_16, pt_16)
+    msg.bytes[0] = 174;
+    msg.bytes[1] = 142;
+    msg.bytes[2] = 79;
+    msg.bytes[3] = 110;
+    msg.bytes[4] = 172;
+    msg.bytes[5] = 52;
+    msg.bytes[6] = 47;
+    msg.bytes[7] = 194;
+    msg.bytes[8] = 49;
+    msg.bytes[9] = 183;
+    msg.bytes[10] = 176;
+    msg.bytes[11] = 135;
+    msg.bytes[12] = 22;
+    msg.bytes[13] = 235;
+    msg.bytes[14] = 63;
+    msg.bytes[15] = 193;
+    key.data[0] = 175;
+    key.data[1] = 98;
+    key.data[2] = 92;
+    key.data[3] = 195;
+    key.data[4] = 31;
+    key.data[5] = 212;
+    key.data[6] = 192;
+    key.data[7] = 135;
+    key.data[8] = 89;
+    key.data[9] = 192;
+    key.data[10] = 188;
+    key.data[11] = 35;
+    key.data[12] = 151;
+    key.data[13] = 62;
+    key.data[14] = 135;
+    key.data[15] = 164;
+    aes_cmac(key, msg, 16, out);
+    oi = 0;
+    while oi < 16 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 17: aes128_ecb(key_17, pt_17)
+    msg.bytes[0] = 83;
+    msg.bytes[1] = 189;
+    msg.bytes[2] = 181;
+    msg.bytes[3] = 107;
+    msg.bytes[4] = 136;
+    msg.bytes[5] = 36;
+    msg.bytes[6] = 87;
+    msg.bytes[7] = 125;
+    msg.bytes[8] = 83;
+    msg.bytes[9] = 236;
+    msg.bytes[10] = 194;
+    msg.bytes[11] = 138;
+    msg.bytes[12] = 112;
+    msg.bytes[13] = 166;
+    msg.bytes[14] = 28;
+    msg.bytes[15] = 117;
+    key.data[0] = 28;
+    key.data[1] = 194;
+    key.data[2] = 26;
+    key.data[3] = 198;
+    key.data[4] = 152;
+    key.data[5] = 55;
+    key.data[6] = 238;
+    key.data[7] = 166;
+    key.data[8] = 124;
+    key.data[9] = 228;
+    key.data[10] = 136;
+    key.data[11] = 224;
+    key.data[12] = 176;
+    key.data[13] = 127;
+    key.data[14] = 233;
+    key.data[15] = 140;
+    aes_cmac(key, msg, 16, out);
+    oi = 0;
+    while oi < 16 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 18: aes128_ecb(key_18, pt_18)
+    msg.bytes[0] = 222;
+    msg.bytes[1] = 80;
+    msg.bytes[2] = 232;
+    msg.bytes[3] = 1;
+    msg.bytes[4] = 134;
+    msg.bytes[5] = 91;
+    msg.bytes[6] = 54;
+    msg.bytes[7] = 152;
+    msg.bytes[8] = 101;
+    msg.bytes[9] = 78;
+    msg.bytes[10] = 191;
+    msg.bytes[11] = 82;
+    msg.bytes[12] = 0;
+    msg.bytes[13] = 165;
+    msg.bytes[14] = 250;
+    msg.bytes[15] = 9;
+    key.data[0] = 172;
+    key.data[1] = 24;
+    key.data[2] = 93;
+    key.data[3] = 63;
+    key.data[4] = 10;
+    key.data[5] = 219;
+    key.data[6] = 254;
+    key.data[7] = 67;
+    key.data[8] = 244;
+    key.data[9] = 21;
+    key.data[10] = 240;
+    key.data[11] = 72;
+    key.data[12] = 166;
+    key.data[13] = 189;
+    key.data[14] = 113;
+    key.data[15] = 16;
+    aes_cmac(key, msg, 16, out);
+    oi = 0;
+    while oi < 16 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 19: aes128_ecb(key_19, pt_19)
+    msg.bytes[0] = 208;
+    msg.bytes[1] = 97;
+    msg.bytes[2] = 48;
+    msg.bytes[3] = 49;
+    msg.bytes[4] = 220;
+    msg.bytes[5] = 181;
+    msg.bytes[6] = 216;
+    msg.bytes[7] = 210;
+    msg.bytes[8] = 239;
+    msg.bytes[9] = 27;
+    msg.bytes[10] = 50;
+    msg.bytes[11] = 31;
+    msg.bytes[12] = 206;
+    msg.bytes[13] = 173;
+    msg.bytes[14] = 55;
+    msg.bytes[15] = 127;
+    key.data[0] = 237;
+    key.data[1] = 147;
+    key.data[2] = 7;
+    key.data[3] = 164;
+    key.data[4] = 197;
+    key.data[5] = 116;
+    key.data[6] = 32;
+    key.data[7] = 129;
+    key.data[8] = 145;
+    key.data[9] = 86;
+    key.data[10] = 213;
+    key.data[11] = 183;
+    key.data[12] = 217;
+    key.data[13] = 22;
+    key.data[14] = 6;
+    key.data[15] = 254;
+    aes_cmac(key, msg, 16, out);
+    oi = 0;
+    while oi < 16 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}
