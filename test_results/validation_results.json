@@ -261,6 +261,22 @@
     "pass": 20,
     "total": 20
   },
+  "salsa20|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "salsa20|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "salsa20|riscv64": {
+    "status": "EXC",
+    "pass": 0,
+    "total": 20,
+    "err": "Command '['/home/z/my-project/vuma/target/release/compile_dump', '/home/z/my-project/vuma/tests/full"
+  },
   "rc4|x86_32": {
     "status": "PASS",
     "pass": 20,
