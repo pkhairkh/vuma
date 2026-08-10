@@ -1,0 +1,733 @@
+// Auto-generated VUMA harness for hkdf
+// Tests 20 vectors against C reference (OpenSSL)
+// Reuses state variables to avoid arena overflow
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hkdf.vuma"::{HmacKey, HmacMsg, HmacOut, hkdf_sha256};
+
+transform main() -> i32 {
+    // Shared state (reused for all vectors)
+    let salt = state_new(HmacKey);
+    let ikm = state_new(HmacMsg);
+    let okm = state_new(HmacMsg);
+    let oi: u32 = 0;
+
+    // Vector 0: hkdf_sha256(key_0, msg_0)
+    hkdf_sha256(salt, 0, ikm, 0, ikm, 0, okm, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (okm.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 1: hkdf_sha256(key_1, msg_1)
+    ikm.data[0] = 0;
+    hkdf_sha256(salt, 0, ikm, 1, ikm, 0, okm, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (okm.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 2: hkdf_sha256(key_2, msg_2)
+    ikm.data[0] = 255;
+    hkdf_sha256(salt, 0, ikm, 1, ikm, 0, okm, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (okm.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 3: hkdf_sha256(key_3, msg_3)
+    ikm.data[0] = 97;
+    ikm.data[1] = 98;
+    ikm.data[2] = 99;
+    hkdf_sha256(salt, 0, ikm, 3, ikm, 0, okm, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (okm.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 4: hkdf_sha256(key_4, msg_4)
+    ikm.data[0] = 97;
+    ikm.data[1] = 98;
+    ikm.data[2] = 99;
+    ikm.data[3] = 100;
+    ikm.data[4] = 101;
+    ikm.data[5] = 102;
+    ikm.data[6] = 103;
+    ikm.data[7] = 104;
+    ikm.data[8] = 105;
+    ikm.data[9] = 106;
+    ikm.data[10] = 107;
+    ikm.data[11] = 108;
+    ikm.data[12] = 109;
+    ikm.data[13] = 110;
+    ikm.data[14] = 111;
+    ikm.data[15] = 112;
+    ikm.data[16] = 113;
+    ikm.data[17] = 114;
+    ikm.data[18] = 115;
+    ikm.data[19] = 116;
+    ikm.data[20] = 117;
+    ikm.data[21] = 118;
+    ikm.data[22] = 119;
+    ikm.data[23] = 120;
+    ikm.data[24] = 121;
+    ikm.data[25] = 122;
+    hkdf_sha256(salt, 0, ikm, 26, ikm, 0, okm, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (okm.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 5: hkdf_sha256(key_5, msg_5)
+    ikm.data[0] = 0;
+    ikm.data[1] = 0;
+    ikm.data[2] = 0;
+    ikm.data[3] = 0;
+    ikm.data[4] = 0;
+    ikm.data[5] = 0;
+    ikm.data[6] = 0;
+    ikm.data[7] = 0;
+    ikm.data[8] = 0;
+    ikm.data[9] = 0;
+    ikm.data[10] = 0;
+    ikm.data[11] = 0;
+    ikm.data[12] = 0;
+    ikm.data[13] = 0;
+    ikm.data[14] = 0;
+    ikm.data[15] = 0;
+    hkdf_sha256(salt, 0, ikm, 16, ikm, 0, okm, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (okm.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 6: hkdf_sha256(key_6, msg_6)
+    ikm.data[0] = 0;
+    ikm.data[1] = 0;
+    ikm.data[2] = 0;
+    ikm.data[3] = 0;
+    ikm.data[4] = 0;
+    ikm.data[5] = 0;
+    ikm.data[6] = 0;
+    ikm.data[7] = 0;
+    ikm.data[8] = 0;
+    ikm.data[9] = 0;
+    ikm.data[10] = 0;
+    ikm.data[11] = 0;
+    ikm.data[12] = 0;
+    ikm.data[13] = 0;
+    ikm.data[14] = 0;
+    ikm.data[15] = 0;
+    ikm.data[16] = 0;
+    ikm.data[17] = 0;
+    ikm.data[18] = 0;
+    ikm.data[19] = 0;
+    ikm.data[20] = 0;
+    ikm.data[21] = 0;
+    ikm.data[22] = 0;
+    ikm.data[23] = 0;
+    ikm.data[24] = 0;
+    ikm.data[25] = 0;
+    ikm.data[26] = 0;
+    ikm.data[27] = 0;
+    ikm.data[28] = 0;
+    ikm.data[29] = 0;
+    ikm.data[30] = 0;
+    ikm.data[31] = 0;
+    hkdf_sha256(salt, 0, ikm, 32, ikm, 0, okm, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (okm.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 7: hkdf_sha256(key_7, msg_7)
+    ikm.data[0] = 0;
+    ikm.data[1] = 0;
+    ikm.data[2] = 0;
+    ikm.data[3] = 0;
+    ikm.data[4] = 0;
+    ikm.data[5] = 0;
+    ikm.data[6] = 0;
+    ikm.data[7] = 0;
+    ikm.data[8] = 0;
+    ikm.data[9] = 0;
+    ikm.data[10] = 0;
+    ikm.data[11] = 0;
+    ikm.data[12] = 0;
+    ikm.data[13] = 0;
+    ikm.data[14] = 0;
+    ikm.data[15] = 0;
+    ikm.data[16] = 0;
+    ikm.data[17] = 0;
+    ikm.data[18] = 0;
+    ikm.data[19] = 0;
+    ikm.data[20] = 0;
+    ikm.data[21] = 0;
+    ikm.data[22] = 0;
+    ikm.data[23] = 0;
+    ikm.data[24] = 0;
+    ikm.data[25] = 0;
+    ikm.data[26] = 0;
+    ikm.data[27] = 0;
+    ikm.data[28] = 0;
+    ikm.data[29] = 0;
+    ikm.data[30] = 0;
+    ikm.data[31] = 0;
+    ikm.data[32] = 0;
+    ikm.data[33] = 0;
+    ikm.data[34] = 0;
+    ikm.data[35] = 0;
+    ikm.data[36] = 0;
+    ikm.data[37] = 0;
+    ikm.data[38] = 0;
+    ikm.data[39] = 0;
+    ikm.data[40] = 0;
+    ikm.data[41] = 0;
+    ikm.data[42] = 0;
+    ikm.data[43] = 0;
+    ikm.data[44] = 0;
+    ikm.data[45] = 0;
+    ikm.data[46] = 0;
+    ikm.data[47] = 0;
+    ikm.data[48] = 0;
+    ikm.data[49] = 0;
+    ikm.data[50] = 0;
+    ikm.data[51] = 0;
+    ikm.data[52] = 0;
+    ikm.data[53] = 0;
+    ikm.data[54] = 0;
+    ikm.data[55] = 0;
+    ikm.data[56] = 0;
+    ikm.data[57] = 0;
+    ikm.data[58] = 0;
+    ikm.data[59] = 0;
+    ikm.data[60] = 0;
+    ikm.data[61] = 0;
+    ikm.data[62] = 0;
+    ikm.data[63] = 0;
+    hkdf_sha256(salt, 0, ikm, 64, ikm, 0, okm, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (okm.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 8: hkdf_sha256(key_8, msg_8)
+    ikm.data[0] = 255;
+    ikm.data[1] = 255;
+    ikm.data[2] = 255;
+    ikm.data[3] = 255;
+    ikm.data[4] = 255;
+    ikm.data[5] = 255;
+    ikm.data[6] = 255;
+    ikm.data[7] = 255;
+    ikm.data[8] = 255;
+    ikm.data[9] = 255;
+    ikm.data[10] = 255;
+    ikm.data[11] = 255;
+    ikm.data[12] = 255;
+    ikm.data[13] = 255;
+    ikm.data[14] = 255;
+    ikm.data[15] = 255;
+    hkdf_sha256(salt, 0, ikm, 16, ikm, 0, okm, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (okm.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 9: hkdf_sha256(key_9, msg_9)
+    ikm.data[0] = 255;
+    ikm.data[1] = 255;
+    ikm.data[2] = 255;
+    ikm.data[3] = 255;
+    ikm.data[4] = 255;
+    ikm.data[5] = 255;
+    ikm.data[6] = 255;
+    ikm.data[7] = 255;
+    ikm.data[8] = 255;
+    ikm.data[9] = 255;
+    ikm.data[10] = 255;
+    ikm.data[11] = 255;
+    ikm.data[12] = 255;
+    ikm.data[13] = 255;
+    ikm.data[14] = 255;
+    ikm.data[15] = 255;
+    ikm.data[16] = 255;
+    ikm.data[17] = 255;
+    ikm.data[18] = 255;
+    ikm.data[19] = 255;
+    ikm.data[20] = 255;
+    ikm.data[21] = 255;
+    ikm.data[22] = 255;
+    ikm.data[23] = 255;
+    ikm.data[24] = 255;
+    ikm.data[25] = 255;
+    ikm.data[26] = 255;
+    ikm.data[27] = 255;
+    ikm.data[28] = 255;
+    ikm.data[29] = 255;
+    ikm.data[30] = 255;
+    ikm.data[31] = 255;
+    hkdf_sha256(salt, 0, ikm, 32, ikm, 0, okm, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (okm.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 10: hkdf_sha256(key_10, msg_10)
+    ikm.data[0] = 0;
+    ikm.data[1] = 1;
+    ikm.data[2] = 2;
+    ikm.data[3] = 3;
+    ikm.data[4] = 4;
+    ikm.data[5] = 5;
+    ikm.data[6] = 6;
+    ikm.data[7] = 7;
+    ikm.data[8] = 8;
+    ikm.data[9] = 9;
+    ikm.data[10] = 10;
+    ikm.data[11] = 11;
+    ikm.data[12] = 12;
+    ikm.data[13] = 13;
+    ikm.data[14] = 14;
+    ikm.data[15] = 15;
+    hkdf_sha256(salt, 0, ikm, 16, ikm, 0, okm, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (okm.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 11: hkdf_sha256(key_11, msg_11)
+    ikm.data[0] = 0;
+    ikm.data[1] = 1;
+    ikm.data[2] = 2;
+    ikm.data[3] = 3;
+    ikm.data[4] = 4;
+    ikm.data[5] = 5;
+    ikm.data[6] = 6;
+    ikm.data[7] = 7;
+    ikm.data[8] = 8;
+    ikm.data[9] = 9;
+    ikm.data[10] = 10;
+    ikm.data[11] = 11;
+    ikm.data[12] = 12;
+    ikm.data[13] = 13;
+    ikm.data[14] = 14;
+    ikm.data[15] = 15;
+    ikm.data[16] = 16;
+    ikm.data[17] = 17;
+    ikm.data[18] = 18;
+    ikm.data[19] = 19;
+    ikm.data[20] = 20;
+    ikm.data[21] = 21;
+    ikm.data[22] = 22;
+    ikm.data[23] = 23;
+    ikm.data[24] = 24;
+    ikm.data[25] = 25;
+    ikm.data[26] = 26;
+    ikm.data[27] = 27;
+    ikm.data[28] = 28;
+    ikm.data[29] = 29;
+    ikm.data[30] = 30;
+    ikm.data[31] = 31;
+    hkdf_sha256(salt, 0, ikm, 32, ikm, 0, okm, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (okm.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 12: hkdf_sha256(key_12, msg_12)
+    ikm.data[0] = 0;
+    ikm.data[1] = 1;
+    ikm.data[2] = 2;
+    ikm.data[3] = 3;
+    ikm.data[4] = 4;
+    ikm.data[5] = 5;
+    ikm.data[6] = 6;
+    ikm.data[7] = 7;
+    ikm.data[8] = 8;
+    ikm.data[9] = 9;
+    ikm.data[10] = 10;
+    ikm.data[11] = 11;
+    ikm.data[12] = 12;
+    ikm.data[13] = 13;
+    ikm.data[14] = 14;
+    ikm.data[15] = 15;
+    ikm.data[16] = 16;
+    ikm.data[17] = 17;
+    ikm.data[18] = 18;
+    ikm.data[19] = 19;
+    ikm.data[20] = 20;
+    ikm.data[21] = 21;
+    ikm.data[22] = 22;
+    ikm.data[23] = 23;
+    ikm.data[24] = 24;
+    ikm.data[25] = 25;
+    ikm.data[26] = 26;
+    ikm.data[27] = 27;
+    ikm.data[28] = 28;
+    ikm.data[29] = 29;
+    ikm.data[30] = 30;
+    ikm.data[31] = 31;
+    ikm.data[32] = 32;
+    ikm.data[33] = 33;
+    ikm.data[34] = 34;
+    ikm.data[35] = 35;
+    ikm.data[36] = 36;
+    ikm.data[37] = 37;
+    ikm.data[38] = 38;
+    ikm.data[39] = 39;
+    ikm.data[40] = 40;
+    ikm.data[41] = 41;
+    ikm.data[42] = 42;
+    ikm.data[43] = 43;
+    ikm.data[44] = 44;
+    ikm.data[45] = 45;
+    ikm.data[46] = 46;
+    ikm.data[47] = 47;
+    ikm.data[48] = 48;
+    ikm.data[49] = 49;
+    ikm.data[50] = 50;
+    ikm.data[51] = 51;
+    ikm.data[52] = 52;
+    ikm.data[53] = 53;
+    ikm.data[54] = 54;
+    ikm.data[55] = 55;
+    ikm.data[56] = 56;
+    ikm.data[57] = 57;
+    ikm.data[58] = 58;
+    ikm.data[59] = 59;
+    ikm.data[60] = 60;
+    ikm.data[61] = 61;
+    ikm.data[62] = 62;
+    ikm.data[63] = 63;
+    hkdf_sha256(salt, 0, ikm, 64, ikm, 0, okm, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (okm.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 13: hkdf_sha256(key_13, msg_13)
+    ikm.data[0] = 57;
+    hkdf_sha256(salt, 0, ikm, 1, ikm, 0, okm, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (okm.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 14: hkdf_sha256(key_14, msg_14)
+    ikm.data[0] = 12;
+    ikm.data[1] = 140;
+    ikm.data[2] = 125;
+    ikm.data[3] = 114;
+    ikm.data[4] = 71;
+    ikm.data[5] = 52;
+    ikm.data[6] = 44;
+    hkdf_sha256(salt, 0, ikm, 7, ikm, 0, okm, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (okm.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 15: hkdf_sha256(key_15, msg_15)
+    ikm.data[0] = 216;
+    ikm.data[1] = 16;
+    ikm.data[2] = 15;
+    ikm.data[3] = 47;
+    ikm.data[4] = 111;
+    ikm.data[5] = 119;
+    ikm.data[6] = 13;
+    ikm.data[7] = 101;
+    ikm.data[8] = 214;
+    ikm.data[9] = 112;
+    ikm.data[10] = 229;
+    ikm.data[11] = 142;
+    ikm.data[12] = 3;
+    ikm.data[13] = 81;
+    ikm.data[14] = 216;
+    hkdf_sha256(salt, 0, ikm, 15, ikm, 0, okm, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (okm.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 16: hkdf_sha256(key_16, msg_16)
+    ikm.data[0] = 174;
+    ikm.data[1] = 142;
+    ikm.data[2] = 79;
+    ikm.data[3] = 110;
+    ikm.data[4] = 172;
+    ikm.data[5] = 52;
+    ikm.data[6] = 47;
+    ikm.data[7] = 194;
+    ikm.data[8] = 49;
+    ikm.data[9] = 183;
+    ikm.data[10] = 176;
+    ikm.data[11] = 135;
+    ikm.data[12] = 22;
+    ikm.data[13] = 235;
+    ikm.data[14] = 63;
+    ikm.data[15] = 193;
+    ikm.data[16] = 40;
+    ikm.data[17] = 150;
+    ikm.data[18] = 185;
+    ikm.data[19] = 98;
+    ikm.data[20] = 35;
+    ikm.data[21] = 23;
+    ikm.data[22] = 116;
+    ikm.data[23] = 148;
+    ikm.data[24] = 40;
+    ikm.data[25] = 119;
+    ikm.data[26] = 51;
+    ikm.data[27] = 194;
+    ikm.data[28] = 142;
+    ikm.data[29] = 232;
+    ikm.data[30] = 186;
+    hkdf_sha256(salt, 0, ikm, 31, ikm, 0, okm, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (okm.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 17: hkdf_sha256(key_17, msg_17)
+    ikm.data[0] = 83;
+    ikm.data[1] = 189;
+    ikm.data[2] = 181;
+    ikm.data[3] = 107;
+    ikm.data[4] = 136;
+    ikm.data[5] = 36;
+    ikm.data[6] = 87;
+    ikm.data[7] = 125;
+    ikm.data[8] = 83;
+    ikm.data[9] = 236;
+    ikm.data[10] = 194;
+    ikm.data[11] = 138;
+    ikm.data[12] = 112;
+    ikm.data[13] = 166;
+    ikm.data[14] = 28;
+    ikm.data[15] = 117;
+    ikm.data[16] = 16;
+    ikm.data[17] = 161;
+    ikm.data[18] = 205;
+    ikm.data[19] = 137;
+    ikm.data[20] = 33;
+    ikm.data[21] = 108;
+    ikm.data[22] = 161;
+    ikm.data[23] = 108;
+    ikm.data[24] = 255;
+    ikm.data[25] = 202;
+    ikm.data[26] = 234;
+    ikm.data[27] = 73;
+    ikm.data[28] = 135;
+    ikm.data[29] = 71;
+    ikm.data[30] = 126;
+    ikm.data[31] = 134;
+    ikm.data[32] = 219;
+    ikm.data[33] = 204;
+    ikm.data[34] = 185;
+    ikm.data[35] = 112;
+    ikm.data[36] = 70;
+    ikm.data[37] = 252;
+    ikm.data[38] = 46;
+    ikm.data[39] = 24;
+    ikm.data[40] = 56;
+    ikm.data[41] = 78;
+    ikm.data[42] = 81;
+    ikm.data[43] = 216;
+    ikm.data[44] = 32;
+    ikm.data[45] = 197;
+    ikm.data[46] = 195;
+    ikm.data[47] = 239;
+    ikm.data[48] = 128;
+    ikm.data[49] = 5;
+    ikm.data[50] = 58;
+    ikm.data[51] = 136;
+    ikm.data[52] = 174;
+    ikm.data[53] = 57;
+    ikm.data[54] = 150;
+    hkdf_sha256(salt, 0, ikm, 55, ikm, 0, okm, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (okm.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 18: hkdf_sha256(key_18, msg_18)
+    ikm.data[0] = 222;
+    ikm.data[1] = 80;
+    ikm.data[2] = 232;
+    ikm.data[3] = 1;
+    ikm.data[4] = 134;
+    ikm.data[5] = 91;
+    ikm.data[6] = 54;
+    ikm.data[7] = 152;
+    ikm.data[8] = 101;
+    ikm.data[9] = 78;
+    ikm.data[10] = 191;
+    ikm.data[11] = 82;
+    ikm.data[12] = 0;
+    ikm.data[13] = 165;
+    ikm.data[14] = 250;
+    ikm.data[15] = 9;
+    ikm.data[16] = 57;
+    ikm.data[17] = 185;
+    ikm.data[18] = 157;
+    ikm.data[19] = 122;
+    ikm.data[20] = 29;
+    ikm.data[21] = 123;
+    ikm.data[22] = 40;
+    ikm.data[23] = 43;
+    ikm.data[24] = 248;
+    ikm.data[25] = 35;
+    ikm.data[26] = 64;
+    ikm.data[27] = 65;
+    ikm.data[28] = 243;
+    ikm.data[29] = 84;
+    ikm.data[30] = 135;
+    ikm.data[31] = 216;
+    ikm.data[32] = 108;
+    ikm.data[33] = 102;
+    ikm.data[34] = 159;
+    ikm.data[35] = 204;
+    ikm.data[36] = 191;
+    ikm.data[37] = 224;
+    ikm.data[38] = 231;
+    ikm.data[39] = 61;
+    ikm.data[40] = 126;
+    ikm.data[41] = 115;
+    ikm.data[42] = 32;
+    ikm.data[43] = 173;
+    ikm.data[44] = 10;
+    ikm.data[45] = 117;
+    ikm.data[46] = 112;
+    ikm.data[47] = 3;
+    ikm.data[48] = 36;
+    ikm.data[49] = 30;
+    ikm.data[50] = 117;
+    ikm.data[51] = 34;
+    ikm.data[52] = 16;
+    ikm.data[53] = 169;
+    ikm.data[54] = 36;
+    ikm.data[55] = 121;
+    ikm.data[56] = 142;
+    ikm.data[57] = 248;
+    ikm.data[58] = 109;
+    ikm.data[59] = 67;
+    ikm.data[60] = 242;
+    ikm.data[61] = 124;
+    ikm.data[62] = 242;
+    hkdf_sha256(salt, 0, ikm, 63, ikm, 0, okm, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (okm.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Vector 19: hkdf_sha256(key_19, msg_19)
+    ikm.data[0] = 208;
+    ikm.data[1] = 97;
+    ikm.data[2] = 48;
+    ikm.data[3] = 49;
+    ikm.data[4] = 220;
+    ikm.data[5] = 181;
+    ikm.data[6] = 216;
+    ikm.data[7] = 210;
+    ikm.data[8] = 239;
+    ikm.data[9] = 27;
+    ikm.data[10] = 50;
+    ikm.data[11] = 31;
+    ikm.data[12] = 206;
+    ikm.data[13] = 173;
+    ikm.data[14] = 55;
+    ikm.data[15] = 127;
+    ikm.data[16] = 98;
+    ikm.data[17] = 97;
+    ikm.data[18] = 229;
+    ikm.data[19] = 71;
+    ikm.data[20] = 216;
+    ikm.data[21] = 93;
+    ikm.data[22] = 142;
+    ikm.data[23] = 236;
+    ikm.data[24] = 127;
+    ikm.data[25] = 38;
+    ikm.data[26] = 226;
+    ikm.data[27] = 50;
+    ikm.data[28] = 25;
+    ikm.data[29] = 7;
+    ikm.data[30] = 47;
+    ikm.data[31] = 121;
+    ikm.data[32] = 85;
+    ikm.data[33] = 208;
+    ikm.data[34] = 248;
+    ikm.data[35] = 246;
+    ikm.data[36] = 109;
+    ikm.data[37] = 205;
+    ikm.data[38] = 30;
+    ikm.data[39] = 84;
+    ikm.data[40] = 194;
+    ikm.data[41] = 1;
+    ikm.data[42] = 199;
+    ikm.data[43] = 135;
+    ikm.data[44] = 232;
+    ikm.data[45] = 146;
+    ikm.data[46] = 216;
+    ikm.data[47] = 249;
+    ikm.data[48] = 79;
+    ikm.data[49] = 97;
+    ikm.data[50] = 151;
+    ikm.data[51] = 111;
+    ikm.data[52] = 29;
+    ikm.data[53] = 31;
+    ikm.data[54] = 160;
+    ikm.data[55] = 29;
+    ikm.data[56] = 25;
+    ikm.data[57] = 244;
+    ikm.data[58] = 80;
+    ikm.data[59] = 29;
+    ikm.data[60] = 41;
+    ikm.data[61] = 95;
+    ikm.data[62] = 35;
+    ikm.data[63] = 34;
+    hkdf_sha256(salt, 0, ikm, 64, ikm, 0, okm, 32);
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (okm.data[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}
