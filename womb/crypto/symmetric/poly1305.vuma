@@ -60,9 +60,9 @@ transform poly1305_init(ctx: State<Poly1305Ctx>, key: State<Poly1305Key>) {
     // r[3] = ((t2 >> 14) | (t3 << 18)) & 0x3F03FFF   (clamp: clear bits 18-19)
     // r[4] = (t3 >> 8) & 0x0FFFFF                     (clamp: clear bits 24+)
     ctx.r[0] = t0 & 67108863;
-    ctx.r[1] = ((t0 >> 26) | (t1 << 6)) & 67108611;
-    ctx.r[2] = ((t1 >> 20) | (t2 << 12)) & 67092735;
-    ctx.r[3] = ((t2 >> 14) | (t3 << 18)) & 66191359;
+    ctx.r[1] = ((t0 >> 26) | (t1 << 6)) & 67108803;
+    ctx.r[2] = ((t1 >> 20) | (t2 << 12)) & 67105023;
+    ctx.r[3] = ((t2 >> 14) | (t3 << 18)) & 66076671;
     ctx.r[4] = (t3 >> 8) & 1048575;
 
     // Load s from key.bytes[16..31] as 4 LE u32 limbs (no clamp)
@@ -303,29 +303,30 @@ transform poly1305_final(ctx: State<Poly1305Ctx>, tag: State<Poly1305Tag>) {
     let out3: u32;
     let out4: u32;
     if need_sub == 1 {
-        // Subtract p = (67108859, 67108863, 67108863, 67108863, 3)
+        // Subtract p from acc (not from g)
+        // p = (67108859, 67108863, 67108863, 67108863, 3) in 26-bit limbs
         let bb0: u32 = 0;
-        if g0 < 67108859 { bb0 = 1; }
-        out0 = g0 - 67108859;
+        if ctx.acc[0] < 67108859 { bb0 = 1; }
+        out0 = ctx.acc[0] - 67108859;
         let bb1: u32 = bb0;
-        if g1 < 67108863 { bb1 = bb1 + 1; }
-        if g1 < bb0 { bb1 = bb1 + 1; }
-        out1 = g1 - 67108863 - bb0;
+        if ctx.acc[1] < 67108863 { bb1 = bb1 + 1; }
+        if ctx.acc[1] < bb0 { bb1 = bb1 + 1; }
+        out1 = ctx.acc[1] - 67108863 - bb0;
         let bb2: u32 = bb1;
-        if g2 < 67108863 { bb2 = bb2 + 1; }
-        if g2 < bb1 { bb2 = bb2 + 1; }
-        out2 = g2 - 67108863 - bb1;
+        if ctx.acc[2] < 67108863 { bb2 = bb2 + 1; }
+        if ctx.acc[2] < bb1 { bb2 = bb2 + 1; }
+        out2 = ctx.acc[2] - 67108863 - bb1;
         let bb3: u32 = bb2;
-        if g3 < 67108863 { bb3 = bb3 + 1; }
-        if g3 < bb2 { bb3 = bb3 + 1; }
-        out3 = g3 - 67108863 - bb2;
-        out4 = g4 - 3 - bb3;
+        if ctx.acc[3] < 67108863 { bb3 = bb3 + 1; }
+        if ctx.acc[3] < bb2 { bb3 = bb3 + 1; }
+        out3 = ctx.acc[3] - 67108863 - bb2;
+        out4 = ctx.acc[4] - 3 - bb3;
     } else {
-        out0 = g0;
-        out1 = g1;
-        out2 = g2;
-        out3 = g3;
-        out4 = g4;
+        out0 = ctx.acc[0];
+        out1 = ctx.acc[1];
+        out2 = ctx.acc[2];
+        out3 = ctx.acc[3];
+        out4 = ctx.acc[4];
     }
 
     // Add s to the reduced accumulator (s is 128 bits = 4 × 32-bit limbs)
