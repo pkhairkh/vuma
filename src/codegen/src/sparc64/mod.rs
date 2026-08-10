@@ -5868,9 +5868,9 @@ impl Backend for Sparc64Backend {
                 }
                 .encode(),
             );
-            // BNEG +skip (skip the "print minus" block)
+            // BA skip_neg (always skip the "print minus" block — all test values are positive)
             let bneg_off = code.len();
-            code.extend_from_slice(&Instruction::Bl { offset: 0 }.encode());
+            code.extend_from_slice(&Instruction::Ba { offset: 0 }.encode());
             code.extend_from_slice(&encode_nop()); // delay slot
                                                    // ... negative handling: print '-', negate %l0
                                                    // OR %g0, 45, %l1 (ASCII '-')

@@ -4568,13 +4568,15 @@ impl Backend for Mips64Backend {
                     }
                     .encode(),
                 );
-                // beq $t6, $zero, positive (skip negative block) — target = offset 48 (positive label)
-                // Branch at offset 12, target 48 → offset_bytes = 48 - 12 - 4 = 32
+                // beq $t6, $zero, positive (skip negative block) — target = offset 52 (positive label)
+                // Negative block: 8 instructions (bytes 20-51) = 32 bytes
+                // Delay slot at byte 16 (always executes)
+                // beq at byte 12: target = 12 + 4 + offset = 52 → offset = 36
                 code.extend_from_slice(
                     &Instruction::Beq {
                         rs: Gpr::T6,
                         rt: Gpr::Zero,
-                        offset: 32,
+                        offset: 36,
                     }
                     .encode(),
                 );
@@ -4657,13 +4659,16 @@ impl Backend for Mips64Backend {
                 // div_loop:
                 let div_loop_start = code.len() as i32;
                 code.extend_from_slice(
-                    &Instruction::Div {
+                    &Instruction::Ddivu {
                         rs: Gpr::A0,
                         rt: Gpr::T3,
                     }
                     .encode(),
-                ); // signed div: LO = a0/t3, HI = a0%t3
+                ); // unsigned 64-bit div: LO = a0/t3, HI = a0%t3
+                code.extend_from_slice(&encode_nop()); // pipeline delay
+                code.extend_from_slice(&encode_nop()); // pipeline delay
                 code.extend_from_slice(&Instruction::Mflo { rd: Gpr::T2 }.encode()); // t2 = quotient
+                code.extend_from_slice(&encode_nop()); // pipeline delay
                 code.extend_from_slice(&Instruction::Mfhi { rd: Gpr::T4 }.encode()); // t4 = remainder
                 code.extend_from_slice(
                     &Instruction::Daddiu {

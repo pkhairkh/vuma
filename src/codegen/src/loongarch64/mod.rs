@@ -3620,13 +3620,13 @@ impl Backend for LoongArch64Backend {
                 // if a0 >= 0, skip negative handling.
                 // Negative block (instructions 3-10): print '-', syscall, negate a0.
                 // Positive label is instruction 11 (t1 = 32).
-                // Bge target = current_index + 1 + offset = 2 + 1 + offset.
-                // To land on instruction 11: offset = 11 - 2 - 1 = 8.
+                // Bge target = PC + offset*4. Bge at byte 8.
+                // Target = byte 44 (instruction 11) → offset = (44-8)/4 = 9.
                 code.extend_from_slice(
                     &Instruction::Bge {
                         rj: Gpr::A0,
                         rd: Gpr::R0,
-                        offs16: 8,
+                        offs16: 9,
                     }
                     .encode(),
                 );
