@@ -87,8 +87,8 @@
       "source": "hashlib"
     },
     {
-      "input_hex": "c3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bf",
-      "expected_hex": "3b6d9693048673a97fb322d92fb1e51cc846e70bc64ce479cfa33d63722620357e9af5cfb8999e7970e62e3665e4dcebd747ba4d3c2c11c70bf86ce34da1df9c",
+      "input_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "expected_hex": "6b6c0636f1fb940abfab60ab0f6c9656b1ab133fdf8fef4316e82fea774a2f2d077c6f748d8bf8bcba70b09144842d9fe25b20f7b18a325db6291ff1e1d482a3",
       "desc": "blake2b(64 0xff bytes)",
       "source": "hashlib"
     },

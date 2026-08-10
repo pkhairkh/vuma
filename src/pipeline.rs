@@ -8377,8 +8377,8 @@ pub fn flatten_expr(
             } else {
                 None
             };
-            if let Some(bv) = base_var {
-                if let Some(layout_name) = ctx.state_var_layouts.get(&bv).cloned() {
+            if let Some(ref bv) = base_var {
+                if let Some(layout_name) = ctx.state_var_layouts.get(bv).cloned() {
                     chain.reverse(); // outermost-to-innermost order
                     // (Task 2-A) Push a StateRead meta entry (mirrors the
                     // extractor's StateRead push). Use the outermost field

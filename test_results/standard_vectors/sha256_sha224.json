@@ -81,8 +81,8 @@
       "source": "NIST FIPS + hashlib"
     },
     {
-      "input_hex": "c3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bf",
-      "expected_hex": "26473e885183ca4b6371c87042b0464655824cf066c60956092ef57be38d27d4",
+      "input_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "expected_hex": "8667e718294e9e0df1d30600ba3eeb201f764aad2dad72748643e4a285e1d1f7",
       "desc": "sha256(64 0xff bytes)",
       "source": "NIST FIPS + hashlib"
     },

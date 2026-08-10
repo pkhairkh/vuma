@@ -87,8 +87,8 @@
       "source": "hashlib"
     },
     {
-      "input_hex": "c3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bfc3bf",
-      "expected_hex": "3139cc5a1af7cf13b045b91d0a21c46080d32819f487fc86a414b18d52d32dd2",
+      "input_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "expected_hex": "7fd8db918bee5379b22f583ce6479f784d232816beaa5642243a734a8165a15a",
       "desc": "sha3_256(64 0xff bytes)",
       "source": "hashlib"
     },

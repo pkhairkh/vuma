@@ -64,7 +64,7 @@ def gen_hash_vectors(algo, hashlib_name, count=20, max_len=64):
     vectors = []
     for i, (inp, desc) in enumerate(inputs[:count]):
         # Convert string to bytes, truncating to max_len
-        inp_bytes = inp.encode('utf-8', errors='replace')[:max_len]
+        inp_bytes = inp.encode('latin-1', errors='replace')[:max_len]
         h = hashlib.new(hashlib_name)
         h.update(inp_bytes)
         vectors.append({
@@ -338,7 +338,7 @@ def gen_hkdf_vectors(hash_algo, count=20):
 def gen_blake2b_vectors(count=20):
     vectors = []
     for i, (inp, desc) in enumerate(HASH_INPUTS_128[:count]):
-        inp_bytes = inp.encode('utf-8', errors='replace')[:128]
+        inp_bytes = inp.encode('latin-1', errors='replace')[:128]
         h = hashlib.blake2b(inp_bytes)
         vectors.append({"input_hex": inp_bytes.hex(), "expected_hex": h.hexdigest(),
                         "desc": f"blake2b({desc})", "source": "hashlib"})
@@ -347,7 +347,7 @@ def gen_blake2b_vectors(count=20):
 def gen_blake2s_vectors(count=20):
     vectors = []
     for i, (inp, desc) in enumerate(HASH_INPUTS_64[:count]):
-        inp_bytes = inp.encode('utf-8', errors='replace')[:64]
+        inp_bytes = inp.encode('latin-1', errors='replace')[:64]
         h = hashlib.blake2s(inp_bytes)
         vectors.append({"input_hex": inp_bytes.hex(), "expected_hex": h.hexdigest(),
                         "desc": f"blake2s({desc})", "source": "hashlib"})
@@ -357,7 +357,7 @@ def gen_blake3_vectors(count=20):
     import blake3
     vectors = []
     for i, (inp, desc) in enumerate(HASH_INPUTS_128[:count]):
-        inp_bytes = inp.encode('utf-8', errors='replace')[:128]
+        inp_bytes = inp.encode('latin-1', errors='replace')[:128]
         h = blake3.blake3(inp_bytes)
         vectors.append({"input_hex": inp_bytes.hex(), "expected_hex": h.hexdigest(),
                         "desc": f"blake3({desc})", "source": "blake3 crate"})
@@ -366,7 +366,7 @@ def gen_blake3_vectors(count=20):
 def gen_sha3_vectors(variant, hashlib_name, count=20):
     vectors = []
     for i, (inp, desc) in enumerate(HASH_INPUTS_128[:count]):
-        inp_bytes = inp.encode('utf-8', errors='replace')[:200]
+        inp_bytes = inp.encode('latin-1', errors='replace')[:200]
         h = hashlib.new(hashlib_name)
         h.update(inp_bytes)
         vectors.append({"input_hex": inp_bytes.hex(), "expected_hex": h.hexdigest(),
