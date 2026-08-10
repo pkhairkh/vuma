@@ -543,5 +543,30 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "md5|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "md5|s390x": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "md5|sparc64": {
+    "status": "PARTIAL",
+    "pass": 1,
+    "total": 20
+  },
+  "md5|alpha": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "md5|hppa": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
