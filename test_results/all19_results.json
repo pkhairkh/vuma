@@ -738,5 +738,35 @@
     "status": "TOUT",
     "pass": 0,
     "total": 20
+  },
+  "sha3|armeb": {
+    "status": "TOUT",
+    "pass": 0,
+    "total": 20
+  },
+  "sha3|riscv64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha3|riscv32": {
+    "status": "PARTIAL",
+    "pass": 5,
+    "total": 20
+  },
+  "sha3|mips64": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "sha3|mips64be": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "sha3|ppc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
