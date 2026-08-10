@@ -708,5 +708,35 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "sha384|hppa": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "sha3|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha3|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha3|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha3|aarch64_be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha3|arm32": {
+    "status": "TOUT",
+    "pass": 0,
+    "total": 20
   }
 }
