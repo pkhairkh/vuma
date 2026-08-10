@@ -103,25 +103,27 @@ transform c20p1305_poly_update_lengths(ctx: State<Poly1305Ctx>, aad_len: u32, ct
     let i: u32 = 0;
     while i < 16 { msg.bytes[i] = 0; i = i + 1; }
 
-    let aad_bits: u64 = aad_len as u64 * 8;
-    let ct_bits: u64 = ct_len as u64 * 8;
+    // RFC 8439 §2.8: the lengths block is LE64(aad_len) || LE64(ct_len)
+    // where aad_len and ct_len are the number of BYTES (not bits).
+    let aad_u64: u64 = aad_len as u64;
+    let ct_u64: u64 = ct_len as u64;
 
-    msg.bytes[0] = (aad_bits & 255) as u8;
-    msg.bytes[1] = ((aad_bits >> 8) & 255) as u8;
-    msg.bytes[2] = ((aad_bits >> 16) & 255) as u8;
-    msg.bytes[3] = ((aad_bits >> 24) & 255) as u8;
-    msg.bytes[4] = ((aad_bits >> 32) & 255) as u8;
-    msg.bytes[5] = ((aad_bits >> 40) & 255) as u8;
-    msg.bytes[6] = ((aad_bits >> 48) & 255) as u8;
-    msg.bytes[7] = ((aad_bits >> 56) & 255) as u8;
-    msg.bytes[8]  = (ct_bits & 255) as u8;
-    msg.bytes[9]  = ((ct_bits >> 8) & 255) as u8;
-    msg.bytes[10] = ((ct_bits >> 16) & 255) as u8;
-    msg.bytes[11] = ((ct_bits >> 24) & 255) as u8;
-    msg.bytes[12] = ((ct_bits >> 32) & 255) as u8;
-    msg.bytes[13] = ((ct_bits >> 40) & 255) as u8;
-    msg.bytes[14] = ((ct_bits >> 48) & 255) as u8;
-    msg.bytes[15] = ((ct_bits >> 56) & 255) as u8;
+    msg.bytes[0] = (aad_u64 & 255) as u8;
+    msg.bytes[1] = ((aad_u64 >> 8) & 255) as u8;
+    msg.bytes[2] = ((aad_u64 >> 16) & 255) as u8;
+    msg.bytes[3] = ((aad_u64 >> 24) & 255) as u8;
+    msg.bytes[4] = ((aad_u64 >> 32) & 255) as u8;
+    msg.bytes[5] = ((aad_u64 >> 40) & 255) as u8;
+    msg.bytes[6] = ((aad_u64 >> 48) & 255) as u8;
+    msg.bytes[7] = ((aad_u64 >> 56) & 255) as u8;
+    msg.bytes[8]  = (ct_u64 & 255) as u8;
+    msg.bytes[9]  = ((ct_u64 >> 8) & 255) as u8;
+    msg.bytes[10] = ((ct_u64 >> 16) & 255) as u8;
+    msg.bytes[11] = ((ct_u64 >> 24) & 255) as u8;
+    msg.bytes[12] = ((ct_u64 >> 32) & 255) as u8;
+    msg.bytes[13] = ((ct_u64 >> 40) & 255) as u8;
+    msg.bytes[14] = ((ct_u64 >> 48) & 255) as u8;
+    msg.bytes[15] = ((ct_u64 >> 56) & 255) as u8;
 
     poly1305_update(ctx, msg, 16);
 }

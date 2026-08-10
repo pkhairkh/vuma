@@ -4,7 +4,9 @@ import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/des_rc4_aria_camel
 transform main() -> i32 {
     let buf = state_new(DesWord);
     let out = state_new(DesWord);
-    let key = state_new(DesWord);
+    let k1 = state_new(DesWord);
+    let k2 = state_new(DesWord);
+    let k3 = state_new(DesWord);
     k1.bytes[0] = 124;
     k1.bytes[1] = 185;
     k1.bytes[2] = 246;

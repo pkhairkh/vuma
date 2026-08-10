@@ -105,13 +105,13 @@
     "total": 12
   },
   "chacha20_poly1305|x86_64": {
-    "status": "PARTIAL",
-    "pass": 0,
+    "status": "PASS",
+    "pass": 5,
     "total": 5
   },
   "des_rc4_aria_camellia|x86_64": {
     "status": "PARTIAL",
-    "pass": 10,
+    "pass": 14,
     "total": 15
   },
   "aes_extra_modes|x86_64": {
@@ -327,6 +327,11 @@
   "sha384|riscv64": {
     "status": "PASS",
     "pass": 20,
+    "total": 20
+  },
+  "scrypt|x86_64": {
+    "status": "FAIL",
+    "pass": 0,
     "total": 20
   }
 }
