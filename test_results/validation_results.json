@@ -188,5 +188,57 @@
     "status": "PARTIAL",
     "pass": 0,
     "total": 20
+  },
+  "aes192|x86_64": {
+    "status": "EXC",
+    "pass": 0,
+    "total": 20,
+    "err": "Command '['/home/z/my-project/vuma/target/release/compile_dump', '/home/z/my-project/vuma/tests/full"
+  },
+  "aes256|x86_64": {
+    "status": "EXC",
+    "pass": 0,
+    "total": 20,
+    "err": "Command '['/home/z/my-project/vuma/target/release/compile_dump', '/home/z/my-project/vuma/tests/full"
+  },
+  "des|x86_64": {
+    "status": "PARTIAL",
+    "pass": 16,
+    "total": 20
+  },
+  "rc4|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "salsa20|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "poly1305|x86_64": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "sha3|x86_64": {
+    "status": "PARTIAL",
+    "pass": 1,
+    "total": 20
+  },
+  "blake2|x86_64": {
+    "status": "PARTIAL",
+    "pass": 1,
+    "total": 20
+  },
+  "blake3|x86_64": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
   }
 }
