@@ -518,5 +518,20 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "chacha20|ppc64le": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|hppa": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|m68k": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
