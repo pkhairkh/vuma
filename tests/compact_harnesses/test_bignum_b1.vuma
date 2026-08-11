@@ -1,30 +1,34 @@
-// bignum batch 1 (vector 1)
+// bignum batch 1 (vector 1) — op=add
+// bn256_add 1
 import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_add};
 
 transform main() -> i32 {
     let a = state_new(Bn256Ctx);
     let b = state_new(Bn256Ctx);
     let r = state_new(Bn256Ctx);
+
     a.limbs[0] = ((136505587 as u64) << 32) | (1812140441 as u64);
     a.limbs[1] = ((402418010 as u64) << 32) | (127978094 as u64);
     a.limbs[2] = ((999270936 as u64) << 32) | (939042955 as u64);
     a.limbs[3] = ((2585650756 as u64) << 32) | (2170484433 as u64);
+
     b.limbs[0] = ((2410529190 as u64) << 32) | (113971123 as u64);
     b.limbs[1] = ((3075280817 as u64) << 32) | (854001193 as u64);
     b.limbs[2] = ((3012167820 as u64) << 32) | (2791232393 as u64);
     b.limbs[3] = ((1801823908 as u64) << 32) | (2340505846 as u64);
+
     bn256_add(r, a, b);
     let oi: u32 = 0;
     while oi < 4 {
-        let v = r.limbs[oi];
-        print_int(1000 + ((v & 255) as u32));
-        print_int(1000 + (((v >> 8) & 255) as u32));
-        print_int(1000 + (((v >> 16) & 255) as u32));
-        print_int(1000 + (((v >> 24) & 255) as u32));
-        print_int(1000 + (((v >> 32) & 255) as u32));
-        print_int(1000 + (((v >> 40) & 255) as u32));
-        print_int(1000 + (((v >> 48) & 255) as u32));
+        let v = r.limbs[3 - oi];
         print_int(1000 + (((v >> 56) & 255) as u32));
+        print_int(1000 + (((v >> 48) & 255) as u32));
+        print_int(1000 + (((v >> 40) & 255) as u32));
+        print_int(1000 + (((v >> 32) & 255) as u32));
+        print_int(1000 + (((v >> 24) & 255) as u32));
+        print_int(1000 + (((v >> 16) & 255) as u32));
+        print_int(1000 + (((v >> 8) & 255) as u32));
+        print_int(1000 + ((v & 255) as u32));
         oi = oi + 1;
     }
     print_int(999);

@@ -7885,6 +7885,38 @@ pub fn flatten_expr(
                         BinOpKind::ShrL
                     }
                 }
+                // Type-aware comparison: signed types → S{Lt,Le,Gt,Ge},
+                // unsigned types → U{Lt,Le,Gt,Ge}. Defaults to unsigned
+                // (safer for crypto code which uses u32/u64 everywhere).
+                vuma_parser::ast::BinOp::Lt
+                | vuma_parser::ast::BinOp::Le
+                | vuma_parser::ast::BinOp::Gt
+                | vuma_parser::ast::BinOp::Ge => {
+                    let is_signed = match lhs.as_ref() {
+                        Expr::Var { name, .. } => ctx
+                            .var_types
+                            .get(name)
+                            .map(|ty| {
+                                matches!(
+                                    ty,
+                                    ScgType::I8 | ScgType::I16 | ScgType::I32 | ScgType::I64
+                                )
+                            })
+                            .unwrap_or(false),
+                        _ => false,
+                    };
+                    if is_signed {
+                        map_ast_binop(op)
+                    } else {
+                        match op {
+                            vuma_parser::ast::BinOp::Lt => BinOpKind::ULt,
+                            vuma_parser::ast::BinOp::Le => BinOpKind::ULe,
+                            vuma_parser::ast::BinOp::Gt => BinOpKind::UGt,
+                            vuma_parser::ast::BinOp::Ge => BinOpKind::UGe,
+                            _ => unreachable!(),
+                        }
+                    }
+                }
                 _ => map_ast_binop(op),
             };
             stmts.push(ScgStatement::Computation(ComputationNode {

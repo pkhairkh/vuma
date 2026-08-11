@@ -335,8 +335,8 @@
     "total": 20
   },
   "bignum|x86_64": {
-    "status": "PARTIAL",
-    "pass": 0,
+    "status": "PASS",
+    "pass": 20,
     "total": 20
   },
   "sha384|riscv32": {
