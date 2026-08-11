@@ -1,0 +1,83 @@
+// ed25519 batch 11 (vector 11) — sign
+// seed=69281c8e4452ab37... msg_len=32 -> sig (64 bytes)
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha512.vuma"::{Sha512Ctx, Sha512Data, Sha512Digest, sha512_init, sha512_update, sha512_final};
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_bitlen, bn256_cmp, bn256_get_bit, bn256_mod_add, bn256_mod_exp, bn256_mod_inv, bn256_mod_mul, bn256_mod_sub, bn256_set_u32, bn256_copy, bn256_zero, bn256_add, bn256_rshift1, bn256_sub};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ed25519.vuma"::{B32, B64, B256, ed25519_sign};
+
+transform main() -> i32 {
+    let priv = state_new(B32);
+    let msg = state_new(B256);
+    let sig = state_new(B64);
+    priv.bytes[0] = 105;
+    priv.bytes[1] = 40;
+    priv.bytes[2] = 28;
+    priv.bytes[3] = 142;
+    priv.bytes[4] = 68;
+    priv.bytes[5] = 82;
+    priv.bytes[6] = 171;
+    priv.bytes[7] = 55;
+    priv.bytes[8] = 97;
+    priv.bytes[9] = 110;
+    priv.bytes[10] = 219;
+    priv.bytes[11] = 73;
+    priv.bytes[12] = 110;
+    priv.bytes[13] = 70;
+    priv.bytes[14] = 85;
+    priv.bytes[15] = 213;
+    priv.bytes[16] = 202;
+    priv.bytes[17] = 167;
+    priv.bytes[18] = 54;
+    priv.bytes[19] = 103;
+    priv.bytes[20] = 161;
+    priv.bytes[21] = 86;
+    priv.bytes[22] = 218;
+    priv.bytes[23] = 85;
+    priv.bytes[24] = 76;
+    priv.bytes[25] = 23;
+    priv.bytes[26] = 197;
+    priv.bytes[27] = 182;
+    priv.bytes[28] = 229;
+    priv.bytes[29] = 20;
+    priv.bytes[30] = 115;
+    priv.bytes[31] = 185;
+    msg.bytes[0] = 170;
+    msg.bytes[1] = 67;
+    msg.bytes[2] = 73;
+    msg.bytes[3] = 115;
+    msg.bytes[4] = 116;
+    msg.bytes[5] = 238;
+    msg.bytes[6] = 162;
+    msg.bytes[7] = 15;
+    msg.bytes[8] = 146;
+    msg.bytes[9] = 64;
+    msg.bytes[10] = 231;
+    msg.bytes[11] = 29;
+    msg.bytes[12] = 233;
+    msg.bytes[13] = 249;
+    msg.bytes[14] = 171;
+    msg.bytes[15] = 204;
+    msg.bytes[16] = 254;
+    msg.bytes[17] = 118;
+    msg.bytes[18] = 103;
+    msg.bytes[19] = 71;
+    msg.bytes[20] = 19;
+    msg.bytes[21] = 134;
+    msg.bytes[22] = 69;
+    msg.bytes[23] = 31;
+    msg.bytes[24] = 225;
+    msg.bytes[25] = 79;
+    msg.bytes[26] = 217;
+    msg.bytes[27] = 129;
+    msg.bytes[28] = 89;
+    msg.bytes[29] = 82;
+    msg.bytes[30] = 195;
+    msg.bytes[31] = 11;
+    ed25519_sign(priv, msg, 32, sig);
+    let oi: u32 = 0;
+    while oi < 64 {
+        print_int(1000 + (sig.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

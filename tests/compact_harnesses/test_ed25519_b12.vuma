@@ -1,0 +1,52 @@
+// ed25519 batch 12 (vector 12) — sign
+// seed=66f6caa8d999cdff... msg_len=1 -> sig (64 bytes)
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha512.vuma"::{Sha512Ctx, Sha512Data, Sha512Digest, sha512_init, sha512_update, sha512_final};
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_bitlen, bn256_cmp, bn256_get_bit, bn256_mod_add, bn256_mod_exp, bn256_mod_inv, bn256_mod_mul, bn256_mod_sub, bn256_set_u32, bn256_copy, bn256_zero, bn256_add, bn256_rshift1, bn256_sub};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ed25519.vuma"::{B32, B64, B256, ed25519_sign};
+
+transform main() -> i32 {
+    let priv = state_new(B32);
+    let msg = state_new(B256);
+    let sig = state_new(B64);
+    priv.bytes[0] = 102;
+    priv.bytes[1] = 246;
+    priv.bytes[2] = 202;
+    priv.bytes[3] = 168;
+    priv.bytes[4] = 217;
+    priv.bytes[5] = 153;
+    priv.bytes[6] = 205;
+    priv.bytes[7] = 255;
+    priv.bytes[8] = 19;
+    priv.bytes[9] = 82;
+    priv.bytes[10] = 169;
+    priv.bytes[11] = 241;
+    priv.bytes[12] = 89;
+    priv.bytes[13] = 245;
+    priv.bytes[14] = 139;
+    priv.bytes[15] = 95;
+    priv.bytes[16] = 138;
+    priv.bytes[17] = 130;
+    priv.bytes[18] = 1;
+    priv.bytes[19] = 120;
+    priv.bytes[20] = 123;
+    priv.bytes[21] = 233;
+    priv.bytes[22] = 246;
+    priv.bytes[23] = 28;
+    priv.bytes[24] = 22;
+    priv.bytes[25] = 167;
+    priv.bytes[26] = 155;
+    priv.bytes[27] = 243;
+    priv.bytes[28] = 12;
+    priv.bytes[29] = 148;
+    priv.bytes[30] = 47;
+    priv.bytes[31] = 144;
+    msg.bytes[0] = 193;
+    ed25519_sign(priv, msg, 1, sig);
+    let oi: u32 = 0;
+    while oi < 64 {
+        print_int(1000 + (sig.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

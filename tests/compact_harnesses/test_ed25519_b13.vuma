@@ -1,0 +1,67 @@
+// ed25519 batch 13 (vector 13) — sign
+// seed=4d484e961d2ca213... msg_len=16 -> sig (64 bytes)
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha512.vuma"::{Sha512Ctx, Sha512Data, Sha512Digest, sha512_init, sha512_update, sha512_final};
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_bitlen, bn256_cmp, bn256_get_bit, bn256_mod_add, bn256_mod_exp, bn256_mod_inv, bn256_mod_mul, bn256_mod_sub, bn256_set_u32, bn256_copy, bn256_zero, bn256_add, bn256_rshift1, bn256_sub};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ed25519.vuma"::{B32, B64, B256, ed25519_sign};
+
+transform main() -> i32 {
+    let priv = state_new(B32);
+    let msg = state_new(B256);
+    let sig = state_new(B64);
+    priv.bytes[0] = 77;
+    priv.bytes[1] = 72;
+    priv.bytes[2] = 78;
+    priv.bytes[3] = 150;
+    priv.bytes[4] = 29;
+    priv.bytes[5] = 44;
+    priv.bytes[6] = 162;
+    priv.bytes[7] = 19;
+    priv.bytes[8] = 152;
+    priv.bytes[9] = 237;
+    priv.bytes[10] = 237;
+    priv.bytes[11] = 143;
+    priv.bytes[12] = 4;
+    priv.bytes[13] = 227;
+    priv.bytes[14] = 218;
+    priv.bytes[15] = 27;
+    priv.bytes[16] = 211;
+    priv.bytes[17] = 91;
+    priv.bytes[18] = 1;
+    priv.bytes[19] = 156;
+    priv.bytes[20] = 131;
+    priv.bytes[21] = 20;
+    priv.bytes[22] = 211;
+    priv.bytes[23] = 37;
+    priv.bytes[24] = 52;
+    priv.bytes[25] = 190;
+    priv.bytes[26] = 37;
+    priv.bytes[27] = 53;
+    priv.bytes[28] = 24;
+    priv.bytes[29] = 82;
+    priv.bytes[30] = 178;
+    priv.bytes[31] = 38;
+    msg.bytes[0] = 14;
+    msg.bytes[1] = 198;
+    msg.bytes[2] = 153;
+    msg.bytes[3] = 142;
+    msg.bytes[4] = 136;
+    msg.bytes[5] = 230;
+    msg.bytes[6] = 236;
+    msg.bytes[7] = 124;
+    msg.bytes[8] = 6;
+    msg.bytes[9] = 9;
+    msg.bytes[10] = 165;
+    msg.bytes[11] = 226;
+    msg.bytes[12] = 191;
+    msg.bytes[13] = 204;
+    msg.bytes[14] = 61;
+    msg.bytes[15] = 104;
+    ed25519_sign(priv, msg, 16, sig);
+    let oi: u32 = 0;
+    while oi < 64 {
+        print_int(1000 + (sig.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

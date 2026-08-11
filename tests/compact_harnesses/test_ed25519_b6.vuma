@@ -1,0 +1,50 @@
+// ed25519 batch 6 (vector 6) — keygen
+// seed=d3d1c0f9f30ea61b... -> pubkey (32 bytes)
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha512.vuma"::{Sha512Ctx, Sha512Data, Sha512Digest, sha512_init, sha512_update, sha512_final};
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_bitlen, bn256_cmp, bn256_get_bit, bn256_mod_add, bn256_mod_exp, bn256_mod_inv, bn256_mod_mul, bn256_mod_sub, bn256_set_u32, bn256_copy, bn256_zero, bn256_add, bn256_rshift1, bn256_sub};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ed25519.vuma"::{B32, ed25519_keygen};
+
+transform main() -> i32 {
+    let priv = state_new(B32);
+    let pub_out = state_new(B32);
+    priv.bytes[0] = 211;
+    priv.bytes[1] = 209;
+    priv.bytes[2] = 192;
+    priv.bytes[3] = 249;
+    priv.bytes[4] = 243;
+    priv.bytes[5] = 14;
+    priv.bytes[6] = 166;
+    priv.bytes[7] = 27;
+    priv.bytes[8] = 90;
+    priv.bytes[9] = 20;
+    priv.bytes[10] = 8;
+    priv.bytes[11] = 69;
+    priv.bytes[12] = 190;
+    priv.bytes[13] = 84;
+    priv.bytes[14] = 23;
+    priv.bytes[15] = 47;
+    priv.bytes[16] = 214;
+    priv.bytes[17] = 162;
+    priv.bytes[18] = 122;
+    priv.bytes[19] = 10;
+    priv.bytes[20] = 227;
+    priv.bytes[21] = 25;
+    priv.bytes[22] = 246;
+    priv.bytes[23] = 239;
+    priv.bytes[24] = 91;
+    priv.bytes[25] = 176;
+    priv.bytes[26] = 157;
+    priv.bytes[27] = 211;
+    priv.bytes[28] = 76;
+    priv.bytes[29] = 221;
+    priv.bytes[30] = 54;
+    priv.bytes[31] = 71;
+    ed25519_keygen(priv, pub_out);
+    let oi: u32 = 0;
+    while oi < 32 {
+        print_int(1000 + (pub_out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}
