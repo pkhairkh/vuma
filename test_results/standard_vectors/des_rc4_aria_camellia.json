@@ -104,6 +104,56 @@
       "input_hex": "e0bde74ae9f2c1d9",
       "algo": "tdes_encrypt",
       "expected_hex": "b1761375585ad5ea"
+    },
+    {
+      "desc": "3DES EDE3 encrypt 5 (additional)",
+      "op": "tdes_ede3_encrypt",
+      "key1_hex": "000306090c0f1215",
+      "key2_hex": "0d12171c21262b30",
+      "key3_hex": "1d242b323940474e",
+      "pt_hex": "2f3a45505b66717c",
+      "ct_hex": "2424427ceb13f7fa",
+      "expected_hex": "2424427ceb13f7fa"
+    },
+    {
+      "desc": "3DES EDE3 encrypt 6 (additional)",
+      "op": "tdes_ede3_encrypt",
+      "key1_hex": "070a0d101316191c",
+      "key2_hex": "181d22272c31363b",
+      "key3_hex": "2a31383f464d545b",
+      "pt_hex": "404b56616c77828d",
+      "ct_hex": "e75f4eaef36a2fc5",
+      "expected_hex": "e75f4eaef36a2fc5"
+    },
+    {
+      "desc": "3DES EDE3 encrypt 7 (additional)",
+      "op": "tdes_ede3_encrypt",
+      "key1_hex": "0e1114171a1d2023",
+      "key2_hex": "23282d32373c4146",
+      "key3_hex": "373e454c535a6168",
+      "pt_hex": "515c67727d88939e",
+      "ct_hex": "4dcb1ea8e2b2da71",
+      "expected_hex": "4dcb1ea8e2b2da71"
+    },
+    {
+      "desc": "3DES EDE3 encrypt 8 (additional)",
+      "op": "tdes_ede3_encrypt",
+      "key1_hex": "15181b1e2124272a",
+      "key2_hex": "2e33383d42474c51",
+      "key3_hex": "444b525960676e75",
+      "pt_hex": "626d78838e99a4af",
+      "ct_hex": "82e94511c2ef7929",
+      "expected_hex": "82e94511c2ef7929"
+    },
+    {
+      "desc": "3DES EDE3 encrypt 9 (additional)",
+      "op": "tdes_ede3_encrypt",
+      "key1_hex": "1c1f2225282b2e31",
+      "key2_hex": "393e43484d52575c",
+      "key3_hex": "51585f666d747b82",
+      "pt_hex": "737e89949faab5c0",
+      "ct_hex": "b034faba4f2b0d2e",
+      "expected_hex": "b034faba4f2b0d2e"
     }
   ]
 }

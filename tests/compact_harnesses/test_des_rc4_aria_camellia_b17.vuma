@@ -1,0 +1,49 @@
+import "/home/z/my-project/workdir/vuma/womb/crypto/symmetric/des_rc4_aria_camellia.vuma"::{DesWord, tdes_ede3_encrypt_block};
+
+transform main() -> i32 {
+    let buf = state_new(DesWord);
+    let out = state_new(DesWord);
+    let k1 = state_new(DesWord);
+    let k2 = state_new(DesWord);
+    let k3 = state_new(DesWord);
+    k1.bytes[0] = 14;
+    k1.bytes[1] = 17;
+    k1.bytes[2] = 20;
+    k1.bytes[3] = 23;
+    k1.bytes[4] = 26;
+    k1.bytes[5] = 29;
+    k1.bytes[6] = 32;
+    k1.bytes[7] = 35;
+    k2.bytes[0] = 35;
+    k2.bytes[1] = 40;
+    k2.bytes[2] = 45;
+    k2.bytes[3] = 50;
+    k2.bytes[4] = 55;
+    k2.bytes[5] = 60;
+    k2.bytes[6] = 65;
+    k2.bytes[7] = 70;
+    k3.bytes[0] = 55;
+    k3.bytes[1] = 62;
+    k3.bytes[2] = 69;
+    k3.bytes[3] = 76;
+    k3.bytes[4] = 83;
+    k3.bytes[5] = 90;
+    k3.bytes[6] = 97;
+    k3.bytes[7] = 104;
+    buf.bytes[0] = 81;
+    buf.bytes[1] = 92;
+    buf.bytes[2] = 103;
+    buf.bytes[3] = 114;
+    buf.bytes[4] = 125;
+    buf.bytes[5] = 136;
+    buf.bytes[6] = 147;
+    buf.bytes[7] = 158;
+    tdes_ede3_encrypt_block(buf, k1, k2, k3, out);
+    let oi: u32 = 0;
+    while oi < 8 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}
