@@ -590,8 +590,8 @@
     "total": 20
   },
   "ed25519|x86_64": {
-    "status": "PARTIAL",
-    "pass": 0,
+    "status": "PASS",
+    "pass": 20,
     "total": 20
   },
   "drbg_extra|x86_64": {

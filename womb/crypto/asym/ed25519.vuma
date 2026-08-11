@@ -37,10 +37,10 @@ transform ed25519_p(out: State<B32>) {
 
 transform ed25519_l(out: State<B32>) {
     // L = 2^252 + 27742317777372353535851937790883648493 (LE bytes)
-    out.bytes[ 0] = 237; out.bytes[ 1] =  61; out.bytes[ 2] =  93; out.bytes[ 3] = 197;
-    out.bytes[ 4] = 166; out.bytes[ 5] =  35; out.bytes[ 6] =  97; out.bytes[ 7] = 129;
-    out.bytes[ 8] = 165; out.bytes[ 9] = 137; out.bytes[10] = 122; out.bytes[11] = 247;
-    out.bytes[12] =  47; out.bytes[13] = 234; out.bytes[14] = 158; out.bytes[15] =  20;
+    out.bytes[ 0] = 237; out.bytes[ 1] = 211; out.bytes[ 2] = 245; out.bytes[ 3] =  92;
+    out.bytes[ 4] =  26; out.bytes[ 5] =  99; out.bytes[ 6] =  18; out.bytes[ 7] =  88;
+    out.bytes[ 8] = 214; out.bytes[ 9] = 156; out.bytes[10] = 247; out.bytes[11] = 162;
+    out.bytes[12] = 222; out.bytes[13] = 249; out.bytes[14] = 222; out.bytes[15] =  20;
     out.bytes[16] =   0; out.bytes[17] =   0; out.bytes[18] =   0; out.bytes[19] =   0;
     out.bytes[20] =   0; out.bytes[21] =   0; out.bytes[22] =   0; out.bytes[23] =   0;
     out.bytes[24] =   0; out.bytes[25] =   0; out.bytes[26] =   0; out.bytes[27] =   0;
@@ -115,14 +115,18 @@ transform b32_is_zero(a: State<B32>) -> u32 {
     return 1;
 }
 
-// 32-byte LE compare. Returns 1 if a>b, -1 if a<b, 0 if equal.
-transform b32_cmp(a: State<B32>, b: State<B32>) -> i32 {
+// 32-byte LE compare. Returns 1 if a>b, 2 if a<b, 0 if equal.
+// Uses u32 return type (not i32) to avoid VUMA codegen signed-comparison
+// bug where `i32 >= 0` on a function-call result defaults to unsigned
+// comparison (treating -1 as 0xFFFFFFFF, which is >= 0 unsigned). With
+// u32 returns, callers test `b32_cmp(a,b) != 2` for "a >= b".
+transform b32_cmp(a: State<B32>, b: State<B32>) -> u32 {
     let i: u32 = 31;
     while 1 == 1 {
         let av: u32 = a.bytes[i] as u32;
         let bv: u32 = b.bytes[i] as u32;
         if av > bv { return 1; }
-        if av < bv { return -1; }
+        if av < bv { return 2; }
         if i == 0 { break; }
         i = i - 1;
     }
@@ -245,94 +249,40 @@ transform ed25519_sha512_hash(buf: State<B256>, total_len: u32, out: State<B64>)
 
 // ===========================================================================
 // 64-byte little-endian buffer -> 32-byte little-endian reduction mod L.
-// Implements long division: walk 512 bits from MSB to LSB, shift the
-// remainder left by 1, set the LSB to the current input bit, and subtract L
-// whenever the remainder is >= L. rem lives in a 64-byte buffer; the high
-// 32 bytes are only nonzero if rem ever overflows 32 bytes (which we handle
-// by treating it as an indicator that rem >= L).
+// Processes the hash byte-by-byte from MSB (byte 63) to LSB (byte 0):
+//   rem = 0
+//   for i in 63..0: rem = (rem * 256 + hash[i]) mod L
+// rem * 256 is computed via 8 modular doublings (rem + rem).
+// Uses only bn256_mod_add (proven correct), avoiding the buggy bn256_mod_mul.
 // ===========================================================================
 
 transform ed25519_mod_l(r: State<B32>, hash_64: State<B64>) {
     let L_le = state_new(B32);
     ed25519_l(L_le);
+    let L_bn = state_new(Bn256Ctx);
+    b32_to_bn256(L_bn, L_le);
 
-    let rem = state_new(B64);
-    let i: u32 = 0;
-    while i < 64 { rem.bytes[i] = 0; i = i + 1; }
+    let rem = state_new(Bn256Ctx);
+    bn256_zero(rem);
 
-    let pos: i32 = 511;
-    while pos >= 0 {
-        let byte_idx: u32 = (pos as u32) / 8;
-        let bit_idx: u32 = (pos as u32) % 8;
-        let bit: u32 = ((hash_64.bytes[byte_idx] as u32) >> bit_idx) & 1;
+    let i: u32 = 64;
+    while i > 0 {
+        i = i - 1;
 
-        // rem = rem << 1 (64 bytes wide)
-        let carry: u32 = 0;
-        let j: u32 = 0;
-        while j < 64 {
-            let cur: u32 = rem.bytes[j] as u32;
-            let newv: u32 = ((cur << 1) | carry) & 255;
-            rem.bytes[j] = newv as u8;
-            carry = cur >> 7;
-            j = j + 1;
+        // rem = rem * 256 mod L (8 modular doublings)
+        let d: u32 = 0;
+        while d < 8 {
+            bn256_mod_add(rem, rem, rem, L_bn);
+            d = d + 1;
         }
 
-        // rem.bit0 = bit
-        rem.bytes[0] = (rem.bytes[0] & 254) | (bit as u8);
-
-        // Determine whether rem >= L. If any of bytes 32..63 are nonzero,
-        // rem is definitely >= L (since L fits in 32 bytes). Otherwise
-        // compare the low 32 bytes against L_le.
-        let ge_l: u32 = 0;
-        let high_nz: u32 = 0;
-        let k: u32 = 32;
-        while k < 64 {
-            if rem.bytes[k] != 0 { high_nz = 1; }
-            k = k + 1;
-        }
-        if high_nz == 1 {
-            ge_l = 1;
-        } else {
-            // Compare rem.bytes[0..31] vs L_le.bytes[0..31]
-            let low = state_new(B32);
-            let m: u32 = 0;
-            while m < 32 { low.bytes[m] = rem.bytes[m]; m = m + 1; }
-            if b32_cmp(low, L_le) >= 0 { ge_l = 1; }
-        }
-
-        if ge_l == 1 {
-            // rem = rem - L (low 32 bytes; borrow propagates into high 32)
-            let low2 = state_new(B32);
-            let low1 = state_new(B32);
-            let m2: u32 = 0;
-            while m2 < 32 {
-                low1.bytes[m2] = rem.bytes[m2];
-                m2 = m2 + 1;
-            }
-            let borrow: u32 = b32_sub(low2, low1, L_le);
-            let m3: u32 = 0;
-            while m3 < 32 { rem.bytes[m3] = low2.bytes[m3]; m3 = m3 + 1; }
-            if borrow == 1 {
-                // Propagate borrow into high 32 bytes
-                let n: u32 = 32;
-                while n < 64 {
-                    let cur: u32 = rem.bytes[n] as u32;
-                    if cur > 0 {
-                        rem.bytes[n] = (cur - 1) as u8;
-                        n = 64;
-                    } else {
-                        rem.bytes[n] = 255;
-                    }
-                    n = n + 1;
-                }
-            }
-        }
-
-        pos = pos - 1;
+        // rem = (rem + hash_64.bytes[i]) mod L
+        let byte_bn = state_new(Bn256Ctx);
+        bn256_set_u32(byte_bn, hash_64.bytes[i] as u32);
+        bn256_mod_add(rem, rem, byte_bn, L_bn);
     }
 
-    let p: u32 = 0;
-    while p < 32 { r.bytes[p] = rem.bytes[p]; p = p + 1; }
+    bn256_to_b32(r, rem);
 }
 
 // ===========================================================================
@@ -580,7 +530,7 @@ transform ed25519_point_decompress(
     while i < 31 { y_le.bytes[i] = enc.bytes[i]; i = i + 1; }
     y_le.bytes[31] = enc.bytes[31] & 127;
     // Reduce y mod p (y < 2^255 < 2p)
-    if b32_cmp(y_le, p_le) >= 0 {
+    if b32_cmp(y_le, p_le) != 2 {
         b32_sub(y_le, y_le, p_le);
     }
     return ed25519_recover_x(x_le, y_le, sign, p_le, d_le);
