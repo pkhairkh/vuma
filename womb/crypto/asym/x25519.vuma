@@ -64,6 +64,51 @@ transform fe_from_bytes(fe: State<Fe>, bytes: State<X25519Bytes>) {
 // Montgomery ladder works correctly with non-canonical intermediates.
 // The final output just needs bit 255 cleared.
 transform fe_to_bytes(fe: State<Fe>, bytes: State<X25519Bytes>) {
+    // First, fully reduce fe mod p (fe may be in [0, 2p) from fe_mul/fe_sub).
+    // p = 2^255 - 19. In LE u32: [0xFFFFFFED, 0xFFFFFFFF×6, 0x7FFFFFFF]
+    // Strategy: subtract p; if borrow (fe was < p), add p back.
+
+    // Subtract p from fe (limb by limb)
+    // limb[0]: subtract 0xFFFFFFED
+    let d0: u64 = (fe.limbs[0] as u64) + 4294967296 - 4294967277;
+    fe.limbs[0] = (d0 & 4294967295) as u32;
+    let b0: u64 = 0;
+    if d0 < 4294967296 { b0 = 1; }
+
+    // limbs[1..6]: subtract 0xFFFFFFFF
+    let i1: u32 = 1;
+    let b1: u64 = b0;
+    while i1 < 7 {
+        let d: u64 = (fe.limbs[i1] as u64) + 4294967296 - 4294967295 - b1;
+        fe.limbs[i1] = (d & 4294967295) as u32;
+        let nb: u64 = 0;
+        if d < 4294967296 { nb = 1; }
+        b1 = nb;
+        i1 = i1 + 1;
+    }
+    // limb[7]: subtract 0x7FFFFFFF
+    let d7: u64 = (fe.limbs[7] as u64) + 4294967296 - 2147483647 - b1;
+    fe.limbs[7] = (d7 & 4294967295) as u32;
+    let final_borrow: u32 = 0;
+    if d7 < 4294967296 { final_borrow = 1; }
+
+    // If borrow (fe was < p), add p back
+    if final_borrow == 1 {
+        let s0: u64 = (fe.limbs[0] as u64) + 4294967277;
+        fe.limbs[0] = (s0 & 4294967295) as u32;
+        let c2: u64 = s0 >> 32;
+        let i2: u32 = 1;
+        while i2 < 7 {
+            let s: u64 = (fe.limbs[i2] as u64) + 4294967295 + c2;
+            fe.limbs[i2] = (s & 4294967295) as u32;
+            c2 = s >> 32;
+            i2 = i2 + 1;
+        }
+        let s7: u64 = (fe.limbs[7] as u64) + 2147483647 + c2;
+        fe.limbs[7] = (s7 & 4294967295) as u32;
+    }
+
+    // Now fe is in [0, p). Output bytes (bit 255 is already 0).
     let i: u32 = 0;
     while i < 8 {
         let off = i * 4;
@@ -74,8 +119,6 @@ transform fe_to_bytes(fe: State<Fe>, bytes: State<X25519Bytes>) {
         bytes.data[off + 3] = ((v >> 24) & 255) as u8;
         i = i + 1;
     }
-    // Clear the high bit (bit 255) per RFC 7748
-    bytes.data[31] = bytes.data[31] & 127;
 }
 
 // ===========================================================================
@@ -142,20 +185,18 @@ transform fe_add(r: State<Fe>, a: State<Fe>, b: State<Fe>) {
 // fe_sub: r = (a - b) mod p
 // Add p + a - b to avoid negative numbers, then reduce.
 transform fe_sub(r: State<Fe>, a: State<Fe>, b: State<Fe>) {
-    // r = a - b + 2*p (to ensure positive result)
-    // 2*p = 2^256 - 38
-    // We compute: r = a + (2*p - b) = a + 2^256 - 38 - b
-    // Since we work mod 2^256 (u32 limbs overflow naturally), this is:
-    // r = a - b - 38, then add back 2^256 if underflow
-    // Actually, let's use: r = a + (p - b) + p, where p = 2^255 - 19
-    // Simpler: compute a - b with borrow, then add p if borrow occurred
+    // r = (a - b) mod p
+    // Per-limb subtraction with +2^32 to prevent underflow. If borrow occurs
+    // at the top, the result is a - b + 2^256. Since 2^256 ≡ 38 (mod p),
+    // r mod p = (a - b + 38) mod p. To get (a - b) mod p, SUBTRACT 38,
+    // giving r' = a - b + 2p (lazy-reduced, in [0, 2p)).
 
     let borrow: u64 = 0;
     let i: u32 = 0;
     while i < 8 {
         let av: u64 = a.limbs[i] as u64;
         let bv: u64 = b.limbs[i] as u64;
-        let diff: u64 = (av + 4294967296 - bv - borrow) & X25519_MASK64;  // add 2^32 for underflow
+        let diff: u64 = (av + 4294967296 - bv - borrow) & X25519_MASK64;
         r.limbs[i] = (diff & 4294967295) as u32;
         if diff < 4294967296 {
             borrow = 1;
@@ -164,15 +205,19 @@ transform fe_sub(r: State<Fe>, a: State<Fe>, b: State<Fe>) {
         }
         i = i + 1;
     }
-    // If borrow, the unsigned wrap added 2^256, which ≡ 38 (mod p).
-    // So add 38 to compensate (NOT 19 + bit 255 — that adds p+38, too much).
+    // If borrow: r = a - b + 2^256. Subtract 38 → r = a - b + 2p (in [0, 2p)).
     if borrow == 1 {
-        let carry2: u64 = 38;
+        let carry_sub: u64 = 38;
         let i2: u32 = 0;
         while i2 < 8 {
-            let sum: u64 = (r.limbs[i2] as u64) + carry2;
-            r.limbs[i2] = (sum & 4294967295) as u32;
-            carry2 = sum >> 32;
+            let rv: u64 = r.limbs[i2] as u64;
+            let sub_val: u64 = (rv + 4294967296 - carry_sub) & X25519_MASK64;
+            r.limbs[i2] = (sub_val & 4294967295) as u32;
+            if sub_val < 4294967296 {
+                carry_sub = 1;
+            } else {
+                carry_sub = 0;
+            }
             i2 = i2 + 1;
         }
     }

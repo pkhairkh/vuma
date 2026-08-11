@@ -578,5 +578,10 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "x25519|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
