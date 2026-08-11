@@ -613,5 +613,15 @@
     "status": "PARTIAL",
     "pass": 19,
     "total": 20
+  },
+  "hmac|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hmac|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
