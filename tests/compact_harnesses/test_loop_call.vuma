@@ -1,0 +1,55 @@
+// Test: calling bn256_is_zero from within a while loop
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_zero, bn256_set_u32, bn256_copy, bn256_is_zero, bn256_bitlen, bn256_get_bit};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ecdsa_p256.vuma"::{B32, p256_gx, p256_gy, p256_p, be32_to_bn256};
+
+transform main() -> i32 {
+    let k_be = state_new(B32);
+    let i = 0;
+    while i < 31 { k_be.bytes[i] = 0; i = i + 1; }
+    k_be.bytes[31] = 7;
+
+    let k_bn = state_new(Bn256Ctx);
+    be32_to_bn256(k_bn, k_be);
+
+    let p_be = state_new(B32);
+    p256_p(p_be);
+    let p_bn = state_new(Bn256Ctx);
+    be32_to_bn256(p_bn, p_be);
+
+    let gx_be = state_new(B32);
+    let gy_be = state_new(B32);
+    p256_gx(gx_be);
+    p256_gy(gy_be);
+    let px = state_new(Bn256Ctx);
+    let py = state_new(Bn256Ctx);
+    be32_to_bn256(px, gx_be);
+    be32_to_bn256(py, gy_be);
+
+    let a_val = state_new(Bn256Ctx);
+    let rx_j = state_new(Bn256Ctx);
+    let ry_j = state_new(Bn256Ctx);
+
+    bn256_copy(a_val, p_bn);
+    let lo = a_val.limbs[0];
+    a_val.limbs[0] = lo - 3;
+    bn256_zero(rx_j);
+    bn256_zero(ry_j);
+
+    // Loop that calls bn256_is_zero (function call in loop)
+    let count: u32 = 0;
+    let bits: u32 = bn256_bitlen(k_bn);
+    let ii: u32 = bits;
+    while ii > 0 {
+        let jj = ii - 1;
+        if bn256_get_bit(k_bn, jj) == 1 {
+            if bn256_is_zero(rx_j) == 1 {
+                count = count + 1;
+            }
+        }
+        ii = jj;
+    }
+
+    print_int(2000 + count);
+    print_int(999);
+    return 0;
+}

@@ -699,7 +699,7 @@ transform p256_scalar_step_add(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, qx: Sta
     bn256_copy(ry, t2);
 }
 // Specialized scalar_mul: k * G (base point loaded internally).
-// 3 params + 6 state_new = 9 State vars (safe).
+// 3 params + 7 state_new = 10 State vars.
 transform p256_scalar_mul_base(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, k: State<Bn256Ctx>) {
     if bn256_is_zero(k) == 1 {
         bn256_zero(rx);
@@ -713,15 +713,15 @@ transform p256_scalar_mul_base(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, k: Stat
     p256_p(p_be);
     be32_to_bn256(p_bn, p_be);
 
-    // Load base point G
-    let px = state_new(Bn256Ctx);
-    let py = state_new(Bn256Ctx);
+    // Load base point G into rx_j, ry_j (start with R = G)
     let gx_be = state_new(B32);
     let gy_be = state_new(B32);
     p256_gx(gx_be);
     p256_gy(gy_be);
-    be32_to_bn256(px, gx_be);
-    be32_to_bn256(py, gy_be);
+    let rx_j = state_new(Bn256Ctx);
+    let ry_j = state_new(Bn256Ctx);
+    be32_to_bn256(rx_j, gx_be);
+    be32_to_bn256(ry_j, gy_be);
 
     // a = -3 mod p
     let a_val = state_new(Bn256Ctx);
@@ -729,26 +729,20 @@ transform p256_scalar_mul_base(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, k: Stat
     let lo_a = a_val.limbs[0];
     a_val.limbs[0] = lo_a - 3;
 
-    // R = identity
-    let rx_j = state_new(Bn256Ctx);
-    let ry_j = state_new(Bn256Ctx);
-    bn256_zero(rx_j);
-    bn256_zero(ry_j);
+    // Also need px, py for additions. Reuse gx_be, gy_be → reload into px, py.
+    // But we already have rx_j = G, so for "add G" we can use a separate copy.
+    let px = state_new(Bn256Ctx);
+    let py = state_new(Bn256Ctx);
+    be32_to_bn256(px, gx_be);
+    be32_to_bn256(py, gy_be);
 
     let bits: u32 = bn256_bitlen(k);
-    let i: u32 = bits;
+    let i: u32 = bits - 1;
     while i > 0 {
         let ii = i - 1;
-        if bn256_is_zero(rx_j) == 0 {
-            p256_scalar_step_double(rx_j, ry_j, a_val, p_bn);
-        }
+        p256_scalar_step_double(rx_j, ry_j, a_val, p_bn);
         if bn256_get_bit(k, ii) == 1 {
-            if bn256_is_zero(rx_j) == 1 {
-                bn256_copy(rx_j, px);
-                bn256_copy(ry_j, py);
-            } else {
-                p256_scalar_step_add(rx_j, ry_j, px, py, p_bn, a_val, a_val);
-            }
+            p256_scalar_step_add(rx_j, ry_j, px, py, p_bn, a_val, a_val);
         }
         i = ii;
     }
