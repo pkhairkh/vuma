@@ -1,0 +1,55 @@
+// Test bn256_mont_mul directly: mont_mul(2, 3, P256, mprime=1)
+// Expected: 6 * R^(-1) mod P256 = 0xfffffff900000012ffffffee0000000c00000006fffffff40000001200000005
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, Bn512Ctx, bn256_mont_mul, bn256_mont_mu, bn256_zero};
+
+transform main() -> i32 {
+    let a = state_new(Bn256Ctx);
+    let b = state_new(Bn256Ctx);
+    let m = state_new(Bn256Ctx);
+    let r = state_new(Bn256Ctx);
+
+    // m = P-256 prime = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF
+    // LE limbs: limb[0]=0xFFFFFFFFFFFFFFFF, limb[1]=0x00000000FFFFFFFF,
+    //          limb[2]=0x0000000000000000, limb[3]=0xFFFFFFFF00000001
+    // Use split literals for values > 2^63 (VUMA literal parser truncates them)
+    m.limbs[0] = ((4294967295 as u64) << 32) | (4294967295 as u64);  // 0xFFFFFFFFFFFFFFFF
+    m.limbs[1] = 4294967295 as u64;  // 0x00000000FFFFFFFF
+    m.limbs[2] = 0;
+    m.limbs[3] = ((4294967295 as u64) << 32) | (1 as u64);  // 0xFFFFFFFF00000001
+
+    // a = 2
+    bn256_zero(a);
+    a.limbs[0] = 2;
+
+    // b = 3
+    bn256_zero(b);
+    b.limbs[0] = 3;
+
+    // mprime = bn256_mont_mu(m.limbs[0]) — for P-256, m[0] = 0xFFFF...FF, mprime = 1
+    let mprime: u64 = bn256_mont_mu(m.limbs[0]);
+
+    // r = mont_mul(a, b, m, mprime) = 2*3*R^(-1) mod P256
+    bn256_mont_mul(r, a, b, m, mprime);
+
+    // First output mprime for debugging
+    print_int(2000 + ((mprime >> 32) as u32));
+    print_int(2000 + ((mprime & 4294967295) as u32));
+    print_int(1999);
+
+    // Output r as 32 bytes big-endian
+    let oi: u32 = 0;
+    while oi < 4 {
+        let v = r.limbs[3 - oi];
+        print_int(1000 + (((v >> 56) & 255) as u32));
+        print_int(1000 + (((v >> 48) & 255) as u32));
+        print_int(1000 + (((v >> 40) & 255) as u32));
+        print_int(1000 + (((v >> 32) & 255) as u32));
+        print_int(1000 + (((v >> 24) & 255) as u32));
+        print_int(1000 + (((v >> 16) & 255) as u32));
+        print_int(1000 + (((v >> 8) & 255) as u32));
+        print_int(1000 + ((v & 255) as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

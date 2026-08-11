@@ -1,0 +1,33 @@
+// Test: function with 4 State variables (2 params + 2 locals)
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx};
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha256_sha224.vuma"::{Sha256Ctx};
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ecdsa_p256.vuma"::{B32, p256_gx, p256_gy};
+
+transform do_test(rx: State<B32>, ry: State<B32>) {
+    let px = state_new(B32);
+    let py = state_new(B32);
+
+    p256_gx(px);
+    p256_gy(py);
+
+    // Copy px to rx, py to ry
+    let i = 0;
+    while i < 32 { rx.bytes[i] = px.bytes[i]; ry.bytes[i] = py.bytes[i]; i = i + 1; }
+
+    print_int(7001);
+}
+
+transform main() -> i32 {
+    let rx = state_new(B32);
+    let ry = state_new(B32);
+
+    print_int(6001);
+
+    do_test(rx, ry);
+
+    print_int(6002);
+
+    print_int(999);
+    return 0;
+}

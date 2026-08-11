@@ -1,0 +1,41 @@
+// Debug test 4: test with 5 state_new calls
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, Bn512Ctx, Bn64Ctx, bn256_mont_mul, bn256_mont_mu, bn256_mont_r2, bn256_mod_inv, bn256_mod_add, bn256_mod_sub, bn256_mod_mul, bn256_zero, bn256_set_u32, bn256_copy, bn256_cmp, bn256_sub, bn256_add, bn256_is_zero, bn256_bitlen, bn256_get_bit, bn256_lshift1, bn256_mul_512, bn256_divmod_512, bn256_rshift1, bn256_mod, bn256_mod_exp, bn_mul_u64};
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha256_sha224.vuma"::{Sha256Ctx, Sha256Data, Sha256Digest, Sha256W, Sha256K, sha256_init, sha256_update, sha256_final};
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, HmacBuf, hmac_sha256};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ecdsa_p256.vuma"::{B32, p256_gx, p256_gy};
+
+transform main() -> i32 {
+    print_int(1001);
+
+    let k = state_new(B32);
+    let px = state_new(B32);
+    let py = state_new(B32);
+    let rx = state_new(B32);
+    let ry = state_new(B32);
+
+    print_int(1002);  // all 5 allocated
+
+    // Test: write to each state
+    k.bytes[0] = 1;
+    px.bytes[0] = 2;
+    py.bytes[0] = 3;
+    rx.bytes[0] = 4;
+    ry.bytes[0] = 5;
+
+    print_int(1003);  // writes done
+
+    // Test: while loop
+    let i = 0;
+    while i < 31 { k.bytes[i] = 0; i = i + 1; }
+    k.bytes[31] = 1;
+
+    print_int(1004);  // while loop done
+
+    p256_gx(px);
+    p256_gy(py);
+
+    print_int(1005);  // gx/gy done
+
+    print_int(999);
+    return 0;
+}

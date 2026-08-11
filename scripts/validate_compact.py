@@ -73,9 +73,12 @@ def run_module(module, backends):
     with open(vec_path) as f: vec_data = json.load(f)
     all_vectors = vec_data["vectors"]
     
-    # Find all batch harnesses
-    import glob
-    harnesses = sorted(glob.glob(f"{HARNESS_DIR}/test_{module}_b*.vuma"))
+    # Find all batch harnesses — sort numerically by batch index, not lexicographically
+    import glob, re
+    def batch_sort_key(path):
+        m = re.search(r'_b(\d+)\.vuma$', path)
+        return int(m.group(1)) if m else 0
+    harnesses = sorted(glob.glob(f"{HARNESS_DIR}/test_{module}_b*.vuma"), key=batch_sort_key)
     if not harnesses: print(f"  {module}: NO HARNESS"); return
     
     # Detect vectors per batch from the first harness by counting print_int(999)

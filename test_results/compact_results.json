@@ -334,11 +334,6 @@
     "pass": 20,
     "total": 20
   },
-  "bignum|x86_64": {
-    "status": "PASS",
-    "pass": 20,
-    "total": 20
-  },
   "sha384|riscv32": {
     "status": "PARTIAL",
     "pass": 0,
@@ -579,11 +574,6 @@
     "pass": 20,
     "total": 20
   },
-  "x25519|x86_64": {
-    "status": "PASS",
-    "pass": 20,
-    "total": 20
-  },
   "cmac_bcrypt_kdf|x86_64": {
     "status": "PASS",
     "pass": 20,
@@ -605,6 +595,16 @@
     "total": 20
   },
   "drbg_extra|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "bignum|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "x25519|x86_64": {
     "status": "PASS",
     "pass": 20,
     "total": 20

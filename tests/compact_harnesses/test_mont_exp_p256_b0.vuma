@@ -1,0 +1,43 @@
+// Test bn256_mod_exp with P-256 prime, a=2, exp=100
+// 2^100 mod P-256 = 0x10000000000000000000000000 (since 2^100 < P-256)
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_mod_exp, bn256_zero};
+
+transform main() -> i32 {
+    let a = state_new(Bn256Ctx);
+    let exp = state_new(Bn256Ctx);
+    let m = state_new(Bn256Ctx);
+    let r = state_new(Bn256Ctx);
+
+    // m = P-256 prime (use split literals for values > 2^63)
+    m.limbs[0] = ((4294967295 as u64) << 32) | (4294967295 as u64);  // 0xFFFFFFFFFFFFFFFF
+    m.limbs[1] = 4294967295 as u64;  // 0x00000000FFFFFFFF
+    m.limbs[2] = 0;
+    m.limbs[3] = ((4294967295 as u64) << 32) | (1 as u64);  // 0xFFFFFFFF00000001
+
+    // a = 2
+    bn256_zero(a);
+    a.limbs[0] = 2;
+
+    // exp = 100
+    bn256_zero(exp);
+    exp.limbs[0] = 100;
+
+    bn256_mod_exp(r, a, exp, m);
+
+    // Output r as 32 bytes big-endian
+    let oi: u32 = 0;
+    while oi < 4 {
+        let v = r.limbs[3 - oi];
+        print_int(1000 + (((v >> 56) & 255) as u32));
+        print_int(1000 + (((v >> 48) & 255) as u32));
+        print_int(1000 + (((v >> 40) & 255) as u32));
+        print_int(1000 + (((v >> 32) & 255) as u32));
+        print_int(1000 + (((v >> 24) & 255) as u32));
+        print_int(1000 + (((v >> 16) & 255) as u32));
+        print_int(1000 + (((v >> 8) & 255) as u32));
+        print_int(1000 + ((v & 255) as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

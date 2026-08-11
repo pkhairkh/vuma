@@ -390,27 +390,256 @@ transform bn256_mod(r: State<Bn256Ctx>, a: State<Bn256Ctx>, m: State<Bn256Ctx>) 
 }
 
 // r = a^exp mod m via square-and-multiply (left-to-right, LSB-first scan).
+// Uses Montgomery multiplication internally for ~100x speedup.
+// Falls back to plain mod_mul if m is even (Montgomery requires odd modulus).
 transform bn256_mod_exp(r: State<Bn256Ctx>, a: State<Bn256Ctx>, exp: State<Bn256Ctx>, m: State<Bn256Ctx>) {
-    bn256_zero(r);
-    r.limbs[0] = 1;  // r = 1
+    // Check if m is odd (required for Montgomery)
+    if (m.limbs[0] & 1) == 0 {
+        // Even modulus: fall back to slow path
+        bn256_zero(r);
+        r.limbs[0] = 1;
+        let base = state_new(Bn256Ctx);
+        bn256_mod(base, a, m);
+        let bits: u32 = bn256_bitlen(exp);
+        if bits == 0 { return; }
+        let i = 0;
+        while i < bits {
+            if bn256_get_bit(exp, i) == 1 {
+                let tmp = state_new(Bn256Ctx);
+                bn256_mod_mul(tmp, r, base, m);
+                bn256_copy(r, tmp);
+            }
+            let sq = state_new(Bn256Ctx);
+            bn256_mod_mul(sq, base, base, m);
+            bn256_copy(base, sq);
+            i = i + 1;
+        }
+        return;
+    }
 
-    let base = state_new(Bn256Ctx);
-    bn256_mod(base, a, m);
+    // Montgomery path: m is odd.
+    // Precompute Montgomery context (one-time cost per mod_exp call).
+    let m0_val: u64 = m.limbs[0];
+    let mprime: u64 = bn256_mont_mu(m0_val);
+    let r2 = state_new(Bn256Ctx);
+    bn256_mont_r2(r2, m);
+
+    // Convert base to Montgomery form: a_mont = a * R mod m = mont_mul(a, r2, m, mprime)
+    let base_mont = state_new(Bn256Ctx);
+    bn256_mod(base_mont, a, m);
+    let base_m = state_new(Bn256Ctx);
+    bn256_mont_mul(base_m, base_mont, r2, m, mprime);
+
+    // result in Montgomery form starts as R mod m (= "1" in Montgomery form).
+    // R mod m = mont_mul(1, r2, m, mprime).
+    let one = state_new(Bn256Ctx);
+    bn256_set_u32(one, 1);
+    let res_m = state_new(Bn256Ctx);
+    bn256_mont_mul(res_m, one, r2, m, mprime);
 
     let bits: u32 = bn256_bitlen(exp);
-    if bits == 0 { return; }
+    if bits == 0 {
+        // exp = 0, result = 1
+        bn256_set_u32(r, 1);
+        return;
+    }
+
     let i = 0;
     while i < bits {
         if bn256_get_bit(exp, i) == 1 {
             let tmp = state_new(Bn256Ctx);
-            bn256_mod_mul(tmp, r, base, m);
-            bn256_copy(r, tmp);
+            bn256_mont_mul(tmp, res_m, base_m, m, mprime);
+            bn256_copy(res_m, tmp);
         }
         let sq = state_new(Bn256Ctx);
-        bn256_mod_mul(sq, base, base, m);
-        bn256_copy(base, sq);
+        bn256_mont_mul(sq, base_m, base_m, m, mprime);
+        bn256_copy(base_m, sq);
         i = i + 1;
     }
+
+    // Convert result back from Montgomery form: r = res_m * R^(-1) mod m
+    // = mont_mul(res_m, 1, m, mprime).
+    bn256_mont_mul(r, res_m, one, m, mprime);
+}
+
+// ===========================================================================
+// Montgomery multiplication (R = 2^256 for 4-limb 64-bit bignums).
+// Requires m odd. ~100x faster than divmod-based mod_mul for repeated use.
+// ===========================================================================
+
+// Compute m' = -m^(-1) mod 2^64 via Newton's method.
+// Input: m0 = low limb of modulus (must be odd).
+// Returns: m' such that m0 * m' ≡ -1 (mod 2^64).
+transform bn256_mont_mu(m0: u64) -> u64 {
+    let y: u64 = 1;  // m0 is odd => m0*1 ≡ 1 (mod 2), correct starting guess
+    let zero_u64: u64 = 0;
+    let two_u64: u64 = 2;
+    let i = 0;
+    while i < 6 {
+        // y = y * (2 - m0 * y) mod 2^64
+        // m0 * y wraps to low 64 bits (which is all we need)
+        let my: u64 = m0 * y;
+        // 2 - my mod 2^64 = (0 - my) + 2 (handles wraparound)
+        let neg_my: u64 = zero_u64 - my;
+        let t: u64 = neg_my + two_u64;
+        y = y * t;
+        i = i + 1;
+    }
+    // m' = -y mod 2^64
+    return zero_u64 - y;
+}
+
+// Compute R^2 mod m where R = 2^256.
+// R^2 = 2^512. We compute 2^512 mod m via bn256_divmod_512.
+// This is a one-time cost per modulus.
+transform bn256_mont_r2(r: State<Bn256Ctx>, m: State<Bn256Ctx>) {
+    // 2^512 = Bn512Ctx with limb[7] = 1, rest 0... wait, 2^512 is bit 512,
+    // which is beyond 8 limbs (8*64 = 512 bits, indices 0..511).
+    // 2^512 doesn't fit in Bn512Ctx! We need 2^512 mod m.
+    // Trick: 2^256 mod m first (via 2^256 = Bn512Ctx with limb[4]=1), then
+    // square it mod m. But squaring needs mod_mul which is what we're optimizing.
+    // Alternative: compute 2^512 mod m by doubling 256 times from 1.
+    // That's 256 iterations of mod_add — cheap.
+    bn256_zero(r);
+    r.limbs[0] = 1;  // r = 1
+    let i = 0;
+    while i < 512 {
+        // r = (r * 2) mod m = r + r mod m
+        let carry: u32 = bn256_lshift1(r, r);
+        if carry == 1 {
+            // r wrapped (>= 2^256), which means r >= m (since m < 2^256), subtract m
+            bn256_sub(r, r, m);
+        } else {
+            if bn256_cmp(r, m) != 2 {
+                bn256_sub(r, r, m);
+            }
+        }
+        i = i + 1;
+    }
+}
+
+// Montgomery reduction: r = t * R^(-1) mod m, where t is 512-bit (Bn512Ctx),
+// m is 256-bit (4 limbs, odd), mprime = -m^(-1) mod 2^64.
+// t is destroyed (modified in place). Result r < m.
+transform bn256_mont_reduce(r: State<Bn256Ctx>, t: State<Bn512Ctx>, m: State<Bn256Ctx>, mprime: u64) {
+    let lo = state_new(Bn64Ctx);
+    let hi = state_new(Bn64Ctx);
+    let overflow: u64 = 0;
+
+    let i = 0;
+    while i < 4 {
+        // q = mprime * t[i] mod 2^64 (wraps, giving low 64 bits)
+        let ti: u64 = t.limbs[i];
+        let q: u64 = mprime * ti;
+
+        // t[i..i+4] += q * m[0..3]
+        let C_lo: u64 = 0;
+        let C_hi: u64 = 0;  // extra bit: C can be up to 2^64+2, split into (C_lo, C_hi)
+        let j = 0;
+        while j < 4 {
+            let mj: u64 = m.limbs[j];
+            bn_mul_u64(q, mj, lo, hi);
+            let prod_lo: u64 = lo.limbs[0];
+            let prod_hi: u64 = hi.limbs[0];
+
+            let idx = i + j;
+            let cur: u64 = t.limbs[idx];
+
+            // sum = cur + prod_lo + C_lo + C_hi (4-way add with carry)
+            let s1: u64 = cur + prod_lo;
+            let c1: u64 = 0;
+            if s1 < cur { c1 = 1; }
+            let s2: u64 = s1 + C_lo;
+            let c2: u64 = 0;
+            if s2 < s1 { c2 = 1; }
+            let s3: u64 = s2 + C_hi;
+            let c3: u64 = 0;
+            if s3 < s2 { c3 = 1; }
+
+            t.limbs[idx] = s3;
+
+            // carry from 3-way addition = c1 + c2 + c3 (max 3)
+            let carry_add: u64 = c1 + c2 + c3;
+
+            // New C = prod_hi + carry_add (max 2^64-1 + 3 = 2^64+2)
+            let new_C_lo: u64 = prod_hi + carry_add;
+            let new_C_hi: u64 = 0;
+            if new_C_lo < prod_hi { new_C_hi = 1; }
+            // Also handle case where prod_hi + carry_add overflows twice:
+            // carry_add <= 3, so prod_hi + carry_add < 2^64 + 3, at most 1 overflow.
+
+            C_lo = new_C_lo;
+            C_hi = new_C_hi;
+
+            j = j + 1;
+        }
+
+        // Propagate C into t[i+4] and upward
+        let idx4 = i + 4;
+        let cur4: u64 = t.limbs[idx4];
+        let s1: u64 = cur4 + C_lo;
+        let c1: u64 = 0;
+        if s1 < cur4 { c1 = 1; }
+        let s2: u64 = s1 + C_hi;
+        let c2: u64 = 0;
+        if s2 < s1 { c2 = 1; }
+        t.limbs[idx4] = s2;
+        let carry: u64 = c1 + c2;
+
+        // Propagate carry upward through t[i+5], t[i+6], ...
+        let k = 1;
+        while carry != 0 {
+            let idxk = idx4 + k;
+            if idxk >= 8 {
+                // Overflow beyond t[7]: add to overflow flag.
+                // REDC invariant guarantees total overflow <= 1 for input t < m*R.
+                overflow = overflow + carry;
+                break;
+            }
+            let curk: u64 = t.limbs[idxk];
+            let sumk: u64 = curk + carry;
+            t.limbs[idxk] = sumk;
+            if sumk < curk { carry = 1; } else { carry = 0; }
+            k = k + 1;
+        }
+
+        i = i + 1;
+    }
+
+    // Result is in t[4..7] (+ overflow * 2^256).
+    // REDC guarantees: overflow * 2^256 + t[4..7] < 2m, so at most 1 conditional subtract.
+    r.limbs[0] = t.limbs[4];
+    r.limbs[1] = t.limbs[5];
+    r.limbs[2] = t.limbs[6];
+    r.limbs[3] = t.limbs[7];
+
+    // Precompute -m mod 2^256 = 2^256 - m (two's complement) for overflow case.
+    // Used when overflow != 0: (r + 2^256) - m = r + (2^256 - m).
+    if overflow != 0 {
+        let neg_m = state_new(Bn256Ctx);
+        let zero = state_new(Bn256Ctx);
+        bn256_zero(zero);
+        bn256_sub(neg_m, zero, m);  // neg_m = 0 - m = 2^256 - m (borrow ignored)
+        // Subtract m for each unit of overflow (each adds 2^256 to the result).
+        // After subtraction, result < m if overflow was the only excess.
+        let oi = 0;
+        while oi < overflow {
+            bn256_add(r, r, neg_m);  // r = r + (2^256 - m) = (r + 2^256) - m, wraps correctly
+            oi = oi + 1;
+        }
+    }
+    // Final conditional subtract (covers overflow == 0 case, and safety for overflow > 1).
+    if bn256_cmp(r, m) != 2 {
+        bn256_sub(r, r, m);
+    }
+}
+
+// Montgomery multiplication: r = a * b * R^(-1) mod m.
+// a, b should be < m. m must be odd. mprime = bn256_mont_mu(m.limbs[0]).
+transform bn256_mont_mul(r: State<Bn256Ctx>, a: State<Bn256Ctx>, b: State<Bn256Ctx>, m: State<Bn256Ctx>, mprime: u64) {
+    let prod = state_new(Bn512Ctx);
+    bn256_mul_512(prod, a, b);
+    bn256_mont_reduce(r, prod, m, mprime);
 }
 
 // ===========================================================================

@@ -1,0 +1,34 @@
+// Test ecdsa_p256_keygen — exercises p256_scalar_mul_bn with Montgomery
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_mont_mul, bn256_mont_mu, bn256_mont_r2, bn256_mod_inv, bn256_mod_add, bn256_mod_sub, bn256_mod_mul, bn256_zero, bn256_set_u32, bn256_copy, bn256_cmp, bn256_sub, bn256_add, bn256_is_zero, bn256_bitlen, bn256_get_bit, bn256_lshift1, bn256_mul_512, bn256_divmod_512, bn256_rshift1, bn256_mod, bn256_mod_exp, Bn512Ctx, Bn64Ctx, bn_mul_u64, bn_load_u64, bn_store_u64, bn256_or, bn256_xor, bn256_and, bn256_gcd};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ecdsa_p256.vuma"::{B32, ecdsa_p256_keygen};
+
+transform main() -> i32 {
+    let privkey = state_new(B32);
+    let pubx = state_new(B32);
+    let puby = state_new(B32);
+
+    // priv_hex = b7e6ad05e4300226a083e2760604268777ddfceb2b4e558373862d26d0630a05
+    privkey.bytes[ 0] = 183; privkey.bytes[ 1] = 230; privkey.bytes[ 2] = 173; privkey.bytes[ 3] =   5;
+    privkey.bytes[ 4] = 228; privkey.bytes[ 5] =  48; privkey.bytes[ 6] =   2; privkey.bytes[ 7] =  38;
+    privkey.bytes[ 8] = 160; privkey.bytes[ 9] = 131; privkey.bytes[10] = 226; privkey.bytes[11] = 118;
+    privkey.bytes[12] =   6; privkey.bytes[13] =   4; privkey.bytes[14] =  38; privkey.bytes[15] = 135;
+    privkey.bytes[16] = 119; privkey.bytes[17] = 221; privkey.bytes[18] = 252; privkey.bytes[19] = 235;
+    privkey.bytes[20] =  43; privkey.bytes[21] =  78; privkey.bytes[22] =  85; privkey.bytes[23] = 131;
+    privkey.bytes[24] = 115; privkey.bytes[25] = 134; privkey.bytes[26] =  45; privkey.bytes[27] =  38;
+    privkey.bytes[28] = 208; privkey.bytes[29] =  99; privkey.bytes[30] =  10; privkey.bytes[31] =   5;
+
+    ecdsa_p256_keygen(privkey, pubx, puby);
+
+    let oi: u32 = 0;
+    while oi < 32 {
+        print_int(1000 + (pubx.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (puby.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

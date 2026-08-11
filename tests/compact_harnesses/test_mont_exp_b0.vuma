@@ -1,0 +1,41 @@
+// Test bn256_mod_exp with m=7, a=2, exp=3 → expected 1 (2^3=8, 8 mod 7 = 1)
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_mod_exp, bn256_zero};
+
+transform main() -> i32 {
+    let a = state_new(Bn256Ctx);
+    let exp = state_new(Bn256Ctx);
+    let m = state_new(Bn256Ctx);
+    let r = state_new(Bn256Ctx);
+
+    // m = 7
+    bn256_zero(m);
+    m.limbs[0] = 7;
+
+    // a = 2
+    bn256_zero(a);
+    a.limbs[0] = 2;
+
+    // exp = 3
+    bn256_zero(exp);
+    exp.limbs[0] = 3;
+
+    // r = a^exp mod m = 2^3 mod 7 = 1
+    bn256_mod_exp(r, a, exp, m);
+
+    // Output r as 32 bytes (big-endian for consistency with other tests)
+    let oi: u32 = 0;
+    while oi < 4 {
+        let v = r.limbs[3 - oi];
+        print_int(1000 + (((v >> 56) & 255) as u32));
+        print_int(1000 + (((v >> 48) & 255) as u32));
+        print_int(1000 + (((v >> 40) & 255) as u32));
+        print_int(1000 + (((v >> 32) & 255) as u32));
+        print_int(1000 + (((v >> 24) & 255) as u32));
+        print_int(1000 + (((v >> 16) & 255) as u32));
+        print_int(1000 + (((v >> 8) & 255) as u32));
+        print_int(1000 + ((v & 255) as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}
