@@ -1,0 +1,27 @@
+// Verify Gx conversion: output Gx limbs after be32_to_bn256
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_zero};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ecdsa_p256.vuma"::{B32, p256_gx, be32_to_bn256};
+
+transform main() -> i32 {
+    let gx_be = state_new(B32);
+    let gx_bn = state_new(Bn256Ctx);
+    p256_gx(gx_be);
+    be32_to_bn256(gx_bn, gx_be);
+
+    // Output limb[0] (8 bytes big-endian for readability)
+    let oi: u32 = 0;
+    while oi < 4 {
+        let v = gx_bn.limbs[oi];
+        print_int(1000 + (((v >> 56) & 255) as u32));
+        print_int(1000 + (((v >> 48) & 255) as u32));
+        print_int(1000 + (((v >> 40) & 255) as u32));
+        print_int(1000 + (((v >> 32) & 255) as u32));
+        print_int(1000 + (((v >> 24) & 255) as u32));
+        print_int(1000 + (((v >> 16) & 255) as u32));
+        print_int(1000 + (((v >> 8) & 255) as u32));
+        print_int(1000 + ((v & 255) as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

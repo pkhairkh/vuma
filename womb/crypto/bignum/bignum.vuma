@@ -377,16 +377,8 @@ transform bn256_mod_mul(r: State<Bn256Ctx>, a: State<Bn256Ctx>, b: State<Bn256Ct
 
 // Fast modular multiplication using Montgomery form.
 // Computes mprime internally (small overhead per call, ~100x faster than divmod).
-// Only works for odd m (required for Montgomery). Falls back to divmod for even m.
+// Only works for odd m (required for Montgomery).
 transform bn256_mod_mul_mont(r: State<Bn256Ctx>, a: State<Bn256Ctx>, b: State<Bn256Ctx>, m: State<Bn256Ctx>) {
-    if (m.limbs[0] & 1) == 0 {
-        // Even modulus: fall back to slow path
-        let prod = state_new(Bn512Ctx);
-        let quot = state_new(Bn512Ctx);
-        bn256_mul_512(prod, a, b);
-        bn256_divmod_512(prod, m, quot, r);
-        return;
-    }
     let m0: u64 = m.limbs[0];
     let mprime: u64 = bn256_mont_mu(m0);
     bn256_mont_mul(r, a, b, m, mprime);

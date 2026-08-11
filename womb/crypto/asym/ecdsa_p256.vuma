@@ -564,7 +564,7 @@ transform p256_affine_double(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>,
     let slope_sq = state_new(Bn256Ctx);
 
     // t1 = px^2
-    bn256_mod_mul_mont(t1, px, px, p_bn);
+    bn256_mod_mul(t1, px, px, p_bn);
     // t2 = 3*px^2
     bn256_mod_add(t2, t1, t1, p_bn);
     bn256_mod_add(t2, t2, t1, p_bn);
@@ -575,16 +575,16 @@ transform p256_affine_double(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>,
     // t3_inv = (2*py)^(-1) via Fermat
     bn256_mod_inv_fermat(t1, t3, p_bn);
     // slope = t2 * t1 = (3*px^2 + a) / (2*py)
-    bn256_mod_mul_mont(slope, t2, t1, p_bn);
+    bn256_mod_mul(slope, t2, t1, p_bn);
 
     // rx = slope^2 - 2*px
-    bn256_mod_mul_mont(slope_sq, slope, slope, p_bn);
+    bn256_mod_mul(slope_sq, slope, slope, p_bn);
     bn256_mod_add(t3, px, px, p_bn);  // 2*px
     bn256_mod_sub(rx, slope_sq, t3, p_bn);
 
     // ry = slope*(px - rx) - py
     bn256_mod_sub(t1, px, rx, p_bn);
-    bn256_mod_mul_mont(t2, slope, t1, p_bn);
+    bn256_mod_mul(t2, slope, t1, p_bn);
     bn256_mod_sub(ry, t2, py, p_bn);
 }
 
@@ -622,16 +622,16 @@ transform p256_affine_add(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>,
     let t2_inv = state_new(Bn256Ctx);
     bn256_mod_inv_fermat(t2_inv, t2, p_bn);
     // slope = (qy - py) / (qx - px)
-    bn256_mod_mul_mont(slope, t1, t2_inv, p_bn);
+    bn256_mod_mul(slope, t1, t2_inv, p_bn);
 
     // rx = slope^2 - px - qx
-    bn256_mod_mul_mont(slope_sq, slope, slope, p_bn);
+    bn256_mod_mul(slope_sq, slope, slope, p_bn);
     bn256_mod_sub(rx, slope_sq, px, p_bn);
     bn256_mod_sub(rx, rx, qx, p_bn);
 
     // ry = slope*(px - rx) - py
     bn256_mod_sub(t1, px, rx, p_bn);
-    bn256_mod_mul_mont(t2, slope, t1, p_bn);
+    bn256_mod_mul(t2, slope, t1, p_bn);
     bn256_mod_sub(ry, t2, py, p_bn);
 }
 

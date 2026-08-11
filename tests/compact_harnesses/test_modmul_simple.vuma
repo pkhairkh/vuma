@@ -1,0 +1,30 @@
+// Test bn256_mod_mul with simple cases
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_mod_mul, bn256_set_u32, bn256_zero};
+
+transform main() -> i32 {
+    // Test 1: 3 * 5 mod 7 = 1
+    let a = state_new(Bn256Ctx);
+    let b = state_new(Bn256Ctx);
+    let m = state_new(Bn256Ctx);
+    let r = state_new(Bn256Ctx);
+
+    bn256_set_u32(a, 3);
+    bn256_set_u32(b, 5);
+    bn256_set_u32(m, 7);
+    bn256_mod_mul(r, a, b, m);
+    print_int(2000 + (r.limbs[0] as u32));  // should be 1
+
+    // Test 2: 3 * 5 mod 1000003 = 15
+    bn256_set_u32(m, 1000003);
+    bn256_mod_mul(r, a, b, m);
+    print_int(3000 + (r.limbs[0] as u32));  // should be 15
+
+    // Test 3: 100 * 100 mod 1000003 = 10000
+    bn256_set_u32(a, 100);
+    bn256_set_u32(b, 100);
+    bn256_mod_mul(r, a, b, m);
+    print_int(4000 + (r.limbs[0] as u32));  // should be 10000
+
+    print_int(999);
+    return 0;
+}

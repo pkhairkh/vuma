@@ -1,0 +1,19 @@
+// Test bn256_mod_inv_fermat: 3^(-1) mod 7 = 5 (since 3*5=15=1 mod 7)
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_mod_inv_fermat, bn256_mod_mul, bn256_set_u32, bn256_zero};
+
+transform main() -> i32 {
+    let a = state_new(Bn256Ctx);
+    let m = state_new(Bn256Ctx);
+    let r = state_new(Bn256Ctx);
+
+    bn256_set_u32(a, 3);
+    bn256_set_u32(m, 7);
+
+    bn256_mod_inv_fermat(r, a, m);
+
+    // r should be 5
+    let v = r.limbs[0];
+    print_int(1000 + ((v & 255) as u32));
+    print_int(999);
+    return 0;
+}

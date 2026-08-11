@@ -1,0 +1,34 @@
+// Test bn256_mod_mul(Gx, Gx, p) — should give Gx^2 mod p
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_mod_mul, bn256_zero};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ecdsa_p256.vuma"::{B32, p256_gx, p256_p, be32_to_bn256};
+
+transform main() -> i32 {
+    let gx_be = state_new(B32);
+    let p_be = state_new(B32);
+    let gx_bn = state_new(Bn256Ctx);
+    let p_bn = state_new(Bn256Ctx);
+    let r = state_new(Bn256Ctx);
+    p256_gx(gx_be);
+    p256_p(p_be);
+    be32_to_bn256(gx_bn, gx_be);
+    be32_to_bn256(p_bn, p_be);
+
+    bn256_mod_mul(r, gx_bn, gx_bn, p_bn);
+
+    // Output r limbs
+    let oi: u32 = 0;
+    while oi < 4 {
+        let v = r.limbs[oi];
+        print_int(1000 + (((v >> 56) & 255) as u32));
+        print_int(1000 + (((v >> 48) & 255) as u32));
+        print_int(1000 + (((v >> 40) & 255) as u32));
+        print_int(1000 + (((v >> 32) & 255) as u32));
+        print_int(1000 + (((v >> 24) & 255) as u32));
+        print_int(1000 + (((v >> 16) & 255) as u32));
+        print_int(1000 + (((v >> 8) & 255) as u32));
+        print_int(1000 + ((v & 255) as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

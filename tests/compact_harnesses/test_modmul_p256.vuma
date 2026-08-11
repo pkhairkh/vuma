@@ -1,0 +1,41 @@
+// Test bn256_mod_mul with P-256 prime: 3 * 5 mod P-256 = 15
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_mod_mul, bn256_set_u32, bn256_zero};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ecdsa_p256.vuma"::{B32, p256_p, be32_to_bn256};
+
+transform main() -> i32 {
+    let p_be = state_new(B32);
+    let p_bn = state_new(Bn256Ctx);
+    p256_p(p_be);
+    be32_to_bn256(p_bn, p_be);
+
+    // Verify p_bn limbs
+    print_int(5000 + ((p_bn.limbs[0] >> 56) as u32));
+    print_int(5000 + ((p_bn.limbs[0] >> 48) as u32 & 255));
+    print_int(5000 + ((p_bn.limbs[0] >> 40) as u32 & 255));
+    print_int(5000 + ((p_bn.limbs[0] >> 32) as u32 & 255));
+    print_int(5000 + ((p_bn.limbs[0] >> 24) as u32 & 255));
+    print_int(5000 + ((p_bn.limbs[0] >> 16) as u32 & 255));
+    print_int(5000 + ((p_bn.limbs[0] >> 8) as u32 & 255));
+    print_int(5000 + (p_bn.limbs[0] as u32 & 255));
+    print_int(4999);  // limb[0] = 0xFFFFFFFFFFFFFFFF
+
+    let a = state_new(Bn256Ctx);
+    let b = state_new(Bn256Ctx);
+    let r = state_new(Bn256Ctx);
+    bn256_set_u32(a, 3);
+    bn256_set_u32(b, 5);
+
+    bn256_mod_mul(r, a, b, p_bn);
+
+    // r should be 15 (since 15 < P-256)
+    print_int(1000 + ((r.limbs[0] >> 56) as u32));
+    print_int(1000 + ((r.limbs[0] >> 48) as u32 & 255));
+    print_int(1000 + ((r.limbs[0] >> 40) as u32 & 255));
+    print_int(1000 + ((r.limbs[0] >> 32) as u32 & 255));
+    print_int(1000 + ((r.limbs[0] >> 24) as u32 & 255));
+    print_int(1000 + ((r.limbs[0] >> 16) as u32 & 255));
+    print_int(1000 + ((r.limbs[0] >> 8) as u32 & 255));
+    print_int(1000 + (r.limbs[0] as u32 & 255));
+    print_int(999);
+    return 0;
+}

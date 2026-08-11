@@ -1,0 +1,31 @@
+// Test bn256_mod_mul_mont: 3 * 5 mod P-256 should be 15
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_mod_mul_mont, bn256_zero, bn256_set_u32};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ecdsa_p256.vuma"::{B32, p256_p, be32_to_bn256};
+
+transform main() -> i32 {
+    let p_be = state_new(B32);
+    let p_bn = state_new(Bn256Ctx);
+    p256_p(p_be);
+    be32_to_bn256(p_bn, p_be);
+
+    let a = state_new(Bn256Ctx);
+    let b = state_new(Bn256Ctx);
+    let r = state_new(Bn256Ctx);
+    bn256_set_u32(a, 3);
+    bn256_set_u32(b, 5);
+
+    bn256_mod_mul_mont(r, a, b, p_bn);
+
+    // Output r.limbs[0] (should be 15)
+    let v = r.limbs[0];
+    print_int(1000 + ((v >> 56) & 255) as u32);
+    print_int(1000 + ((v >> 48) & 255) as u32);
+    print_int(1000 + ((v >> 40) & 255) as u32);
+    print_int(1000 + ((v >> 32) & 255) as u32);
+    print_int(1000 + ((v >> 24) & 255) as u32);
+    print_int(1000 + ((v >> 16) & 255) as u32);
+    print_int(1000 + ((v >> 8) & 255) as u32);
+    print_int(1000 + (v & 255) as u32);
+    print_int(999);
+    return 0;
+}
