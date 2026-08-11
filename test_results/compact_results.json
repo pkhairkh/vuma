@@ -330,8 +330,8 @@
     "total": 20
   },
   "scrypt|x86_64": {
-    "status": "FAIL",
-    "pass": 0,
+    "status": "PASS",
+    "pass": 20,
     "total": 20
   },
   "bignum|x86_64": {

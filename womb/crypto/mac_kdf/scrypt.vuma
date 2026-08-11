@@ -14,7 +14,7 @@
 const SCRYPT_MASK32: u32 = 4294967295;
 
 layout ScryptBlock = { bytes: [u8; 64] }
-layout ScryptBuf   = { bytes: [u8; 8192] }
+layout ScryptBuf   = { bytes: [u8; 16384] }
 
 // ===========================================================================
 // 32-bit rotate left.
@@ -114,7 +114,8 @@ transform scrypt_salsa20_8_core(block: State<ScryptBlock>) {
 // ===========================================================================
 
 transform scrypt_blockmix(input: State<ScryptBuf>, output: State<ScryptBuf>, r: u32) {
-    let block_size: u32 = 64 * r;
+    // Input is 2r blocks of 64 bytes each = 128*r bytes total.
+    let block_size: u32 = 128 * r;
     let x = state_new(ScryptBlock);
     // X = B[2r-1] (last block)
     let i: u32 = 0;

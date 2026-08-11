@@ -1,5 +1,7 @@
 // scrypt batch 2 (vector 2)
+// scrypt(pw='password', salt='NaCl', N=16, r=1, p=1, dklen=16)
 import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg};
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/pbkdf2.vuma"::{pbkdf2_hmac_sha256};
 import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/scrypt.vuma"::{scrypt};
 
 transform main() -> i32 {
@@ -18,9 +20,9 @@ transform main() -> i32 {
     salt.bytes[1] = 97;
     salt.bytes[2] = 67;
     salt.bytes[3] = 108;
-    scrypt(pass, 8, salt, 4, 16, 1, 1, out, 32);
+    scrypt(pass, 8, salt, 4, 16, 1, 1, out, 16);
     let oi: u32 = 0;
-    while oi < 32 {
+    while oi < 16 {
         print_int(1000 + (out.bytes[oi] as u32));
         oi = oi + 1;
     }

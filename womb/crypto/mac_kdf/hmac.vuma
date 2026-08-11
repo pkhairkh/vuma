@@ -26,7 +26,7 @@ const HMAC_BUF_SIZE: u32 = 384;
 layout HmacKey = { bytes: [u8; 256] }
 
 // HMAC message buffer.
-layout HmacMsg = { bytes: [u8; 256] }
+layout HmacMsg = { bytes: [u8; 512] }
 
 // HMAC output buffer (max 64 bytes for SHA-512 digest).
 layout HmacOut = { bytes: [u8; 64] }

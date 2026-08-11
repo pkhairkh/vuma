@@ -1,5 +1,106 @@
 {
+  "module": "scrypt",
   "vectors": [
+    {
+      "desc": "scrypt(pw=b'', salt=b'', N=16, r=1, p=1, dklen=64) \u2014 RFC 7914 \u00a75 v1",
+      "pass_hex": "",
+      "salt_hex": "",
+      "n": 16,
+      "r": 1,
+      "p": 1,
+      "dklen": 64,
+      "expected_hex": "77d6576238657b203b19ca42c18a0497f16b4844e3074ae8dfdffa3fede21442fcd0069ded0948f8326a753a0fc81f17e8d3e0fb2e0d3628cf35e20c38d18906"
+    },
+    {
+      "desc": "scrypt(pw='password', salt='NaCl', N=16, r=1, p=1, dklen=64)",
+      "pass_hex": "70617373776f7264",
+      "salt_hex": "4e61436c",
+      "n": 16,
+      "r": 1,
+      "p": 1,
+      "dklen": 64,
+      "expected_hex": "aec6b7483ed26e08802b41f4032086a0e886be7ac48fcfd92ff0cef8109752f4ac74b077263256a65a99701b7a304d46611c8aa391e799ce10a27753e7e9c09a"
+    },
+    {
+      "desc": "scrypt(pw='password', salt='NaCl', N=16, r=1, p=1, dklen=16)",
+      "pass_hex": "70617373776f7264",
+      "salt_hex": "4e61436c",
+      "n": 16,
+      "r": 1,
+      "p": 1,
+      "dklen": 16,
+      "expected_hex": "aec6b7483ed26e08802b41f4032086a0"
+    },
+    {
+      "desc": "scrypt(pw='password', salt='NaCl', N=16, r=1, p=1, dklen=32)",
+      "pass_hex": "70617373776f7264",
+      "salt_hex": "4e61436c",
+      "n": 16,
+      "r": 1,
+      "p": 1,
+      "dklen": 32,
+      "expected_hex": "aec6b7483ed26e08802b41f4032086a0e886be7ac48fcfd92ff0cef8109752f4"
+    },
+    {
+      "desc": "scrypt(pw='password', salt='NaCl', N=16, r=1, p=1, dklen=128)",
+      "pass_hex": "70617373776f7264",
+      "salt_hex": "4e61436c",
+      "n": 16,
+      "r": 1,
+      "p": 1,
+      "dklen": 128,
+      "expected_hex": "aec6b7483ed26e08802b41f4032086a0e886be7ac48fcfd92ff0cef8109752f4ac74b077263256a65a99701b7a304d46611c8aa391e799ce10a27753e7e9c09a0628efcfb8fc2d1e5b3402527c323b7673544d0edd59b83c27cf3ab459ba98bb821d8e9fdb67fff59ce9b358d43daf62b7b2ab18ed6ea853b25a26600504de49"
+    },
+    {
+      "desc": "scrypt(pw='password', salt='NaCl', N=32, r=1, p=1, dklen=64)",
+      "pass_hex": "70617373776f7264",
+      "salt_hex": "4e61436c",
+      "n": 32,
+      "r": 1,
+      "p": 1,
+      "dklen": 64,
+      "expected_hex": "1f1c4f4ec1d9b4fe44b41c8b8733058d022966dc5f6a6a66e3785e0e5b926a06abcd0c9b1aecfac2c6c1e46e1a38fc7d6942f8ec3c186947634c410bdd127676"
+    },
+    {
+      "desc": "scrypt(pw='password', salt='NaCl', N=64, r=1, p=1, dklen=64)",
+      "pass_hex": "70617373776f7264",
+      "salt_hex": "4e61436c",
+      "n": 64,
+      "r": 1,
+      "p": 1,
+      "dklen": 64,
+      "expected_hex": "6d11ccf1d3564d29a7a30e0881a413894566bb4f4406f921e60505fe8d7f1553684193999b13d6f82fd7be0c598e8f2ca223a8f9a0582f20e3153242c26eeb62"
+    },
+    {
+      "desc": "scrypt(pw='password', salt='NaCl', N=16, r=2, p=1, dklen=64)",
+      "pass_hex": "70617373776f7264",
+      "salt_hex": "4e61436c",
+      "n": 16,
+      "r": 2,
+      "p": 1,
+      "dklen": 64,
+      "expected_hex": "696fd52c8cec830c2de2e0f016b0dfcbe9ab55e072c754d56fb9230a752c5faf4fd914a4edad8c508d0d35040aad8e8b7795698998d9c21505eaea188dafde7a"
+    },
+    {
+      "desc": "scrypt(pw='password', salt='NaCl', N=16, r=2, p=1, dklen=32)",
+      "pass_hex": "70617373776f7264",
+      "salt_hex": "4e61436c",
+      "n": 16,
+      "r": 2,
+      "p": 1,
+      "dklen": 32,
+      "expected_hex": "696fd52c8cec830c2de2e0f016b0dfcbe9ab55e072c754d56fb9230a752c5faf"
+    },
+    {
+      "desc": "scrypt(pw='password', salt='NaCl', N=16, r=1, p=2, dklen=64)",
+      "pass_hex": "70617373776f7264",
+      "salt_hex": "4e61436c",
+      "n": 16,
+      "r": 1,
+      "p": 2,
+      "dklen": 64,
+      "expected_hex": "c247eabb7c5d3894e045edf2a4e992737d953a3b181f2e482c2b7c3a7060a11ca0d5e45a98745bfba7fa549c0db559591b81747c9b37e842ebac53ebdcfdee6d"
+    },
     {
       "desc": "scrypt(pw=b'', salt=b'', N=16, r=1, p=1, dklen=64)",
       "pass_hex": "",
@@ -8,217 +109,97 @@
       "r": 1,
       "p": 1,
       "dklen": 64,
-      "input_hex": "",
       "expected_hex": "77d6576238657b203b19ca42c18a0497f16b4844e3074ae8dfdffa3fede21442fcd0069ded0948f8326a753a0fc81f17e8d3e0fb2e0d3628cf35e20c38d18906"
     },
     {
-      "desc": "scrypt(pw=b'password', salt=b'NaCl', N=1024, r=8, p=16, dklen=64)",
-      "pass_hex": "70617373776f7264",
-      "salt_hex": "4e61436c",
-      "n": 1024,
-      "r": 8,
-      "p": 16,
+      "desc": "scrypt(pw=b'short', salt=b's', N=16, r=1, p=1, dklen=64)",
+      "pass_hex": "73686f7274",
+      "salt_hex": "73",
+      "n": 16,
+      "r": 1,
+      "p": 1,
       "dklen": 64,
-      "input_hex": "4e61436c",
-      "expected_hex": "fdbabe1c9d3472007856e7190d01e9fe7c6ad7cbc8237830e77376634b3731622eaf30d92e22a3886ff109279d9830dac727afb94a83ee6d8360cbdfa2cc0640"
+      "expected_hex": "c76b261a4f204286b60f89e847e0bd146d907dea9305c4da39b7e2820486388795a92a3f5e52f88c04184b3ea391a52209e4607c0b8f0b409fc60463363f76ba"
     },
     {
-      "desc": "scrypt(pw=b'password', salt=b'NaCl', N=16, r=1, p=1, dklen=32)",
-      "pass_hex": "70617373776f7264",
-      "salt_hex": "4e61436c",
+      "desc": "scrypt(pw=b'longerpasswordvalue', salt=b'saltsalt', N=16, r=1, p=1, dklen=64)",
+      "pass_hex": "6c6f6e67657270617373776f726476616c7565",
+      "salt_hex": "73616c7473616c74",
       "n": 16,
       "r": 1,
       "p": 1,
-      "dklen": 32,
-      "input_hex": "4e61436c",
-      "expected_hex": "aec6b7483ed26e08802b41f4032086a0e886be7ac48fcfd92ff0cef8109752f4"
+      "dklen": 64,
+      "expected_hex": "0d6ae7636a6c933e4b5db50ee9f18244704cb2cfcc63afdc0e98a4bd516ac230ea7aef00ad6174ba5e1f0cc50503a2efc510aa8f471fa7032de2f3514d74cfda"
     },
     {
-      "desc": "scrypt(pw=b'password', salt=b'NaCl', N=16, r=1, p=1, dklen=16)",
-      "pass_hex": "70617373776f7264",
-      "salt_hex": "4e61436c",
+      "desc": "scrypt(pw=b'\\x00\\x01\\x02\\x03\\x04', salt=b'\\xff\\xfe\\xfd\\xfc', N=16, r=1, p=1, dklen=64)",
+      "pass_hex": "0001020304",
+      "salt_hex": "fffefdfc",
       "n": 16,
       "r": 1,
       "p": 1,
-      "dklen": 16,
-      "input_hex": "4e61436c",
-      "expected_hex": "aec6b7483ed26e08802b41f4032086a0"
+      "dklen": 64,
+      "expected_hex": "52109b2238105b43ce8f399d295da6dad2d1abc9cfb7490792c2125e1b8577088d5900dfb51f4b3d68ac83d3860423c194170376c34aca095d280ddb459e7c62"
     },
     {
-      "desc": "scrypt(pw=b'password', salt=b'NaCl', N=32, r=2, p=1, dklen=64)",
-      "pass_hex": "70617373776f7264",
-      "salt_hex": "4e61436c",
+      "desc": "scrypt(pw=b'P@ssw0rd!', salt=b'$4lty$4lt', N=16, r=1, p=1, dklen=64)",
+      "pass_hex": "504073737730726421",
+      "salt_hex": "24346c747924346c74",
+      "n": 16,
+      "r": 1,
+      "p": 1,
+      "dklen": 64,
+      "expected_hex": "ddeddddcec00eb84279f2130c1ecaf77ebe0d2e3d8a2b1a433062360f551b4300bf928ccc6d9b3ba58f796adead878e5cc80fc7373759066f47ad0693037f7bc"
+    },
+    {
+      "desc": "scrypt(pw=b'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', salt=b'bbbbbbbbbbbbbbbb', N=16, r=1, p=1, dklen=64)",
+      "pass_hex": "6161616161616161616161616161616161616161616161616161616161616161",
+      "salt_hex": "62626262626262626262626262626262",
+      "n": 16,
+      "r": 1,
+      "p": 1,
+      "dklen": 64,
+      "expected_hex": "bc5e8146384f7d3fce204866689c61b0f2b661eeec063e115c9eae2beff7437d3934599de39acd1e81979a79f160afea223911f2d81d09c0b27615e8df52ede0"
+    },
+    {
+      "desc": "scrypt(pw=b'testpw', salt=b'testsalt', N=8, r=1, p=1, dklen=64)",
+      "pass_hex": "746573747077",
+      "salt_hex": "7465737473616c74",
+      "n": 8,
+      "r": 1,
+      "p": 1,
+      "dklen": 64,
+      "expected_hex": "fbfd84521c02f747622efefcb8aa0c638a2de1bb593b1452de4d1ebe27a5523a8f4ddbe7da729eb0429452ebdf49f75b44b63de267dc3a953b4ddbed5a0f2640"
+    },
+    {
+      "desc": "scrypt(pw=b'testpw', salt=b'testsalt', N=32, r=1, p=1, dklen=64)",
+      "pass_hex": "746573747077",
+      "salt_hex": "7465737473616c74",
       "n": 32,
-      "r": 2,
+      "r": 1,
       "p": 1,
       "dklen": 64,
-      "input_hex": "4e61436c",
-      "expected_hex": "f5727ce9dfd085857962cf8dbf5e2f486f95f18b1ec23035bfe0c23a604361a2952eee331213396ed5c45a00c6fbaca0c556f2e702f5002c12a54ddb0fca0762"
+      "expected_hex": "b116de1aa04016b19074b516c49c21206e4dc64056de0b25066a3feef51c135cb4b584b6c0ee4acfe5a5f49f9203988767eca9954d2e7bf8f8b5bc998ccb4f54"
     },
     {
-      "desc": "scrypt(pw=b'password', salt=b'NaCl', N=64, r=1, p=1, dklen=64)",
-      "pass_hex": "70617373776f7264",
-      "salt_hex": "4e61436c",
+      "desc": "scrypt(pw=b'testpw', salt=b'testsalt', N=16, r=1, p=1, dklen=64)",
+      "pass_hex": "746573747077",
+      "salt_hex": "7465737473616c74",
+      "n": 16,
+      "r": 1,
+      "p": 1,
+      "dklen": 64,
+      "expected_hex": "0f3d00920d2de827bca4a6b3d70adbbe22342fe1c25323c107405b4a6ea7f5fd51c1f5b5a4dea1dcea43dc08c61417c2b9615f937d809051463512c5154404f6"
+    },
+    {
+      "desc": "scrypt(pw=b'testpw', salt=b'testsalt', N=64, r=1, p=1, dklen=64)",
+      "pass_hex": "746573747077",
+      "salt_hex": "7465737473616c74",
       "n": 64,
       "r": 1,
       "p": 1,
       "dklen": 64,
-      "input_hex": "4e61436c",
-      "expected_hex": "6d11ccf1d3564d29a7a30e0881a413894566bb4f4406f921e60505fe8d7f1553684193999b13d6f82fd7be0c598e8f2ca223a8f9a0582f20e3153242c26eeb62"
-    },
-    {
-      "desc": "scrypt(pw=b'password', salt=b'NaCl', N=128, r=1, p=1, dklen=64)",
-      "pass_hex": "70617373776f7264",
-      "salt_hex": "4e61436c",
-      "n": 128,
-      "r": 1,
-      "p": 1,
-      "dklen": 64,
-      "input_hex": "4e61436c",
-      "expected_hex": "58e48b54f8e42adddcf97b606e0f1bea9be19b70c9251e7c7900e5ad594581030d4b8bc6c7067111001ba3d105e3710134f4c3de1824dff3522e463f777d9a90"
-    },
-    {
-      "desc": "scrypt(pw=b'password', salt=b'NaCl', N=256, r=1, p=1, dklen=64)",
-      "pass_hex": "70617373776f7264",
-      "salt_hex": "4e61436c",
-      "n": 256,
-      "r": 1,
-      "p": 1,
-      "dklen": 64,
-      "input_hex": "4e61436c",
-      "expected_hex": "5e5d89b8eceb18e5873d76270d4dcb8ea6312344be7a8e88c8b930bad8447f6d668dfc83bdc39c8c9bc4983c4925f87f1fa2fee49007152e1590b1612ef08ce2"
-    },
-    {
-      "desc": "scrypt(pw=b'password', salt=b'NaCl', N=512, r=1, p=1, dklen=64)",
-      "pass_hex": "70617373776f7264",
-      "salt_hex": "4e61436c",
-      "n": 512,
-      "r": 1,
-      "p": 1,
-      "dklen": 64,
-      "input_hex": "4e61436c",
-      "expected_hex": "850372d0686fb7eb1bc1c430b59eead498ffe8eea6b3265b6d7ac3d2b192d20797b7a829b34a2e7f5c3ae62b819be615547cc0f815ed6a6280f9a6c4b8cb4fd5"
-    },
-    {
-      "desc": "scrypt(pw=b'test', salt=b'salt', N=16, r=1, p=1, dklen=32)",
-      "pass_hex": "74657374",
-      "salt_hex": "73616c74",
-      "n": 16,
-      "r": 1,
-      "p": 1,
-      "dklen": 32,
-      "input_hex": "73616c74",
-      "expected_hex": "8acc02aa68d2272ef849afc353fc1990775fa4f5b21922ded06a5509c1233232"
-    },
-    {
-      "desc": "scrypt(pw=b'test', salt=b'salt', N=32, r=1, p=1, dklen=32)",
-      "pass_hex": "74657374",
-      "salt_hex": "73616c74",
-      "n": 32,
-      "r": 1,
-      "p": 1,
-      "dklen": 32,
-      "input_hex": "73616c74",
-      "expected_hex": "4c23365871a235a2659f7b078ab4768ae1848594c4896a05d8d1d5b11fd70d6e"
-    },
-    {
-      "desc": "scrypt(pw=b'test', salt=b'salt', N=64, r=1, p=1, dklen=32)",
-      "pass_hex": "74657374",
-      "salt_hex": "73616c74",
-      "n": 64,
-      "r": 1,
-      "p": 1,
-      "dklen": 32,
-      "input_hex": "73616c74",
-      "expected_hex": "1fc6e0627cec14b1afca0fc7de3f430138c7441bccde652ba99dadba31edd8ed"
-    },
-    {
-      "desc": "scrypt(pw=b'hello', salt=b'world', N=16, r=1, p=1, dklen=32)",
-      "pass_hex": "68656c6c6f",
-      "salt_hex": "776f726c64",
-      "n": 16,
-      "r": 1,
-      "p": 1,
-      "dklen": 32,
-      "input_hex": "776f726c64",
-      "expected_hex": "79277ba364150a536a16cd558fa5bedd3474ebe73496561963ca6d7e2474e981"
-    },
-    {
-      "desc": "scrypt(pw=b'hello', salt=b'world', N=32, r=1, p=1, dklen=32)",
-      "pass_hex": "68656c6c6f",
-      "salt_hex": "776f726c64",
-      "n": 32,
-      "r": 1,
-      "p": 1,
-      "dklen": 32,
-      "input_hex": "776f726c64",
-      "expected_hex": "d670cd46987743cb3c56c0b237ab45e072e0cf89494d63b6c2efa51999c58f68"
-    },
-    {
-      "desc": "scrypt(pw=b'abc', salt=b'def', N=16, r=1, p=1, dklen=16)",
-      "pass_hex": "616263",
-      "salt_hex": "646566",
-      "n": 16,
-      "r": 1,
-      "p": 1,
-      "dklen": 16,
-      "input_hex": "646566",
-      "expected_hex": "88743d24b81c8aabac1848a552923508"
-    },
-    {
-      "desc": "scrypt(pw=b'abc', salt=b'def', N=16, r=1, p=1, dklen=32)",
-      "pass_hex": "616263",
-      "salt_hex": "646566",
-      "n": 16,
-      "r": 1,
-      "p": 1,
-      "dklen": 32,
-      "input_hex": "646566",
-      "expected_hex": "88743d24b81c8aabac1848a55292350848437b31dc404e671fe5ce199800ae6d"
-    },
-    {
-      "desc": "scrypt(pw=b'abc', salt=b'def', N=16, r=1, p=1, dklen=64)",
-      "pass_hex": "616263",
-      "salt_hex": "646566",
-      "n": 16,
-      "r": 1,
-      "p": 1,
-      "dklen": 64,
-      "input_hex": "646566",
-      "expected_hex": "88743d24b81c8aabac1848a55292350848437b31dc404e671fe5ce199800ae6d32eff132c50dc130f482064cd92404db757860ea45624c309a1e11f3857aa551"
-    },
-    {
-      "desc": "scrypt(pw=b'longerpassword', salt=b'longersalt', N=16, r=1, p=1, dklen=64)",
-      "pass_hex": "6c6f6e67657270617373776f7264",
-      "salt_hex": "6c6f6e67657273616c74",
-      "n": 16,
-      "r": 1,
-      "p": 1,
-      "dklen": 64,
-      "input_hex": "6c6f6e67657273616c74",
-      "expected_hex": "407b9253e4fc9f2a79419e892a893f736fea4b90f0e8c96fd95d7246e551cad3c52a042ec3619e7ce45c314aa0cf4f0c1216fc86fadeeabcb96933a600061edc"
-    },
-    {
-      "desc": "scrypt(pw=b'longerpassword', salt=b'longersalt', N=32, r=1, p=1, dklen=64)",
-      "pass_hex": "6c6f6e67657270617373776f7264",
-      "salt_hex": "6c6f6e67657273616c74",
-      "n": 32,
-      "r": 1,
-      "p": 1,
-      "dklen": 64,
-      "input_hex": "6c6f6e67657273616c74",
-      "expected_hex": "aa00cbd8fab2d4803983ea3f1546f5f910f692f12f948daec2521deb6293eb346b7664a50bacdb9c18671494202fa65869e904f9dfe8612b6072936b75bf54bc"
-    },
-    {
-      "desc": "scrypt(pw=b'longerpassword', salt=b'longersalt', N=64, r=1, p=1, dklen=64)",
-      "pass_hex": "6c6f6e67657270617373776f7264",
-      "salt_hex": "6c6f6e67657273616c74",
-      "n": 64,
-      "r": 1,
-      "p": 1,
-      "dklen": 64,
-      "input_hex": "6c6f6e67657273616c74",
-      "expected_hex": "7ec778fc19a113d17d692f5b789314cabc50f7f09d3dd5c0bfd771c75de0e868f0a0816a51c86f282e7925e8d4bfe59bcd032e0d4550fa49aebefc85a99dd8d3"
+      "expected_hex": "575a05d73a6a6c76ec181d549318f63683c6f8fa939d7edc91e91e902cc8463ee00cace8ab3f0cac85baf08dae23c33eea0f393266d990736ccbf40d6b665601"
     }
   ]
 }

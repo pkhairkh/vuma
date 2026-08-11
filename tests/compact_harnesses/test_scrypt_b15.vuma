@@ -1,5 +1,7 @@
 // scrypt batch 15 (vector 15)
+// scrypt(pw=b'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', salt=b'bbbbbbbbbbbbbbbb', N=16, r=1, p=1, dklen=64)
 import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg};
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/pbkdf2.vuma"::{pbkdf2_hmac_sha256};
 import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/scrypt.vuma"::{scrypt};
 
 transform main() -> i32 {
@@ -7,14 +9,56 @@ transform main() -> i32 {
     let salt = state_new(HmacMsg);
     let out = state_new(HmacMsg);
     pass.bytes[0] = 97;
-    pass.bytes[1] = 98;
-    pass.bytes[2] = 99;
-    salt.bytes[0] = 100;
-    salt.bytes[1] = 101;
-    salt.bytes[2] = 102;
-    scrypt(pass, 3, salt, 3, 16, 1, 1, out, 32);
+    pass.bytes[1] = 97;
+    pass.bytes[2] = 97;
+    pass.bytes[3] = 97;
+    pass.bytes[4] = 97;
+    pass.bytes[5] = 97;
+    pass.bytes[6] = 97;
+    pass.bytes[7] = 97;
+    pass.bytes[8] = 97;
+    pass.bytes[9] = 97;
+    pass.bytes[10] = 97;
+    pass.bytes[11] = 97;
+    pass.bytes[12] = 97;
+    pass.bytes[13] = 97;
+    pass.bytes[14] = 97;
+    pass.bytes[15] = 97;
+    pass.bytes[16] = 97;
+    pass.bytes[17] = 97;
+    pass.bytes[18] = 97;
+    pass.bytes[19] = 97;
+    pass.bytes[20] = 97;
+    pass.bytes[21] = 97;
+    pass.bytes[22] = 97;
+    pass.bytes[23] = 97;
+    pass.bytes[24] = 97;
+    pass.bytes[25] = 97;
+    pass.bytes[26] = 97;
+    pass.bytes[27] = 97;
+    pass.bytes[28] = 97;
+    pass.bytes[29] = 97;
+    pass.bytes[30] = 97;
+    pass.bytes[31] = 97;
+    salt.bytes[0] = 98;
+    salt.bytes[1] = 98;
+    salt.bytes[2] = 98;
+    salt.bytes[3] = 98;
+    salt.bytes[4] = 98;
+    salt.bytes[5] = 98;
+    salt.bytes[6] = 98;
+    salt.bytes[7] = 98;
+    salt.bytes[8] = 98;
+    salt.bytes[9] = 98;
+    salt.bytes[10] = 98;
+    salt.bytes[11] = 98;
+    salt.bytes[12] = 98;
+    salt.bytes[13] = 98;
+    salt.bytes[14] = 98;
+    salt.bytes[15] = 98;
+    scrypt(pass, 32, salt, 16, 16, 1, 1, out, 64);
     let oi: u32 = 0;
-    while oi < 32 {
+    while oi < 64 {
         print_int(1000 + (out.bytes[oi] as u32));
         oi = oi + 1;
     }
