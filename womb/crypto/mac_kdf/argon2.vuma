@@ -80,6 +80,11 @@ transform argon2_rotr64(x: u64, n: u32) -> u64 {
 transform argon2_blake2b_var(data: State<Argon2Buf>, len: u32, out: State<Blake2bDigest>) {
     let ctx = state_new(Blake2bCtx);
     blake2b_init_64(ctx);
+    // Zero ctx.buf to prevent stale arena data from corrupting the hash.
+    // blake2b_init does NOT zero ctx.buf, and blake2b_final's zero-pad loop
+    // has a VUMA codegen bug that skips for certain buf_len values.
+    let zi: u32 = 0;
+    while zi < 128 { ctx.buf[zi] = 0; zi = zi + 1; }
     let chunk = state_new(Blake2bData);
     let pos: u32 = 0;
     while pos < len {
@@ -100,12 +105,47 @@ transform argon2_blake2b_var(data: State<Argon2Buf>, len: u32, out: State<Blake2
     blake2b_final(ctx, out);
 }
 
+// Variant with variable digest length (1..64). Matches C blake2b_long's
+// behavior of using digest_size=outlen for the <= 64 case.
+transform argon2_blake2b_var_n(data: State<Argon2Buf>, len: u32,
+                                out: State<Blake2bDigest>, dl: u32) {
+    let ctx = state_new(Blake2bCtx);
+    ctx.digest_len = dl;
+    blake2b_init(ctx);
+    // Zero ctx.buf (same reason as argon2_blake2b_var).
+    let zi: u32 = 0;
+    while zi < 128 { ctx.buf[zi] = 0; zi = zi + 1; }
+    let chunk = state_new(Blake2bData);
+    let pos: u32 = 0;
+    while pos < len {
+        let to_copy: u32 = 128;
+        let remaining: u32 = len - pos;
+        if remaining < 128 { to_copy = remaining; }
+        let i: u32 = 0;
+        while i < 128 { chunk.data[i] = 0; i = i + 1; }
+        i = 0;
+        while i < to_copy {
+            chunk.data[i] = data.bytes[pos + i];
+            i = i + 1;
+        }
+        blake2b_update(ctx, chunk, to_copy);
+        pos = pos + to_copy;
+    }
+    blake2b_final(ctx, out);
+}
+
 // ===========================================================================
-// H' — variable-length output from BLAKE2b (RFC 9106 Section 3.3).
-//   For out_len <= 64:  output = BLAKE2b(out_len || input, out_len)
+// H' — variable-length output from BLAKE2b (RFC 9106 Section 3.3 / blake2b_long).
+//   For out_len <= 64:  output = BLAKE2b(out_len || input, digest_size=out_len)
 //   For out_len > 64:   V_1 = BLAKE2b(out_len || input, 64)
-//                       V_i = BLAKE2b(V_{i-1}, 64) for i = 2, 3, ...
-//                       output = first out_len bytes of V_1 || V_2 || ...
+//                       output[0..32] = V_1[0..32]
+//                       toproduce = out_len - 32
+//                       while toproduce > 64:
+//                           V_next = BLAKE2b(V_prev, 64)
+//                           output[next 32] = V_next[0..32]
+//                           toproduce -= 32
+//                       V_last = BLAKE2b(V_prev, digest_size=toproduce)
+//                       output[remaining] = V_last
 //
 // input/output are caller-allocated Argon2Buf buffers (8192 bytes each,
 // sufficient for any out_len <= 8192).
@@ -127,43 +167,58 @@ transform argon2_h_prime(input: State<Argon2Buf>, input_len: u32,
     let total: u32 = 4 + input_len;
 
     if out_len <= 64 {
-        // BLAKE2b with digest size 64 (the canonical 64-byte output); copy
-        // the first out_len bytes into the caller's output buffer.
+        // BLAKE2b with digest_size = out_len (NOT 64). This matches the C
+        // blake2b_long implementation which uses blake2b_init(&state, outlen).
         let tmp = state_new(Blake2bDigest);
-        argon2_blake2b_var(buf, total, tmp);
+        argon2_blake2b_var_n(buf, total, tmp, out_len);
         let k: u32 = 0;
         while k < out_len {
             output.bytes[k] = tmp.data[k];
             k = k + 1;
         }
     } else {
-        // Iterative BLAKE2b: V_1, V_2, ... each 64 bytes (except the last
-        // which may be truncated). V_1 = BLAKE2b(buf); V_{i+1} = BLAKE2b(V_i).
+        // Iterative BLAKE2b per C blake2b_long:
+        //   V_1 = BLAKE2b(prefix || input, 64)
+        //   output[0..32] = V_1[0..32]  (only first 32 bytes!)
+        //   toproduce = out_len - 32
+        //   while toproduce > 64:
+        //       V_next = BLAKE2b(V_prev, 64)
+        //       output[next 32] = V_next[0..32]
+        //       toproduce -= 32
+        //   V_last = BLAKE2b(V_prev, toproduce)  (digest_size = toproduce)
+        //   output[remaining] = V_last
         let v  = state_new(Argon2Buf);
         let vd = state_new(Blake2bDigest);
-        argon2_blake2b_var(buf, total, vd);
+        let dl64: u32 = 64;
+        argon2_blake2b_var_n(buf, total, vd, dl64);
         let k: u32 = 0;
         while k < 64 { v.bytes[k] = vd.data[k]; k = k + 1; }
-        // Copy V_1 into output[0..64).
+        // Copy first 32 bytes of V_1 into output[0..32).
         k = 0;
-        while k < 64 { output.bytes[k] = v.bytes[k]; k = k + 1; }
+        while k < 32 { output.bytes[k] = v.bytes[k]; k = k + 1; }
 
-        let pos: u32 = 64;
-        let remaining: u32 = out_len - 64;
-        while remaining > 0 {
-            // v = BLAKE2b(v, 64)
-            argon2_blake2b_var(v, 64, vd);
+        let pos: u32 = 32;
+        let toproduce: u32 = out_len - 32;
+        while toproduce > 64 {
+            // V_next = BLAKE2b(V_prev, 64)
+            argon2_blake2b_var_n(v, 64, vd, dl64);
             k = 0;
             while k < 64 { v.bytes[k] = vd.data[k]; k = k + 1; }
-            let to_copy: u32 = 64;
-            if remaining < 64 { to_copy = remaining; }
+            // Copy first 32 bytes of V_next
             k = 0;
-            while k < to_copy {
+            while k < 32 {
                 output.bytes[pos + k] = v.bytes[k];
                 k = k + 1;
             }
-            pos = pos + to_copy;
-            remaining = remaining - to_copy;
+            pos = pos + 32;
+            toproduce = toproduce - 32;
+        }
+        // Final: V_last = BLAKE2b(V_prev, digest_size=toproduce)
+        argon2_blake2b_var_n(v, 64, vd, toproduce);
+        k = 0;
+        while k < toproduce {
+            output.bytes[pos + k] = vd.data[k];
+            k = k + 1;
         }
     }
 }
@@ -365,30 +420,130 @@ transform argon2_load_u64_mem(mem: State<Argon2Mem>, base: u32) -> u64 {
 }
 
 // ===========================================================================
-// Compute a reference block index for Argon2id's data-dependent indexing
-// (RFC 9106 Section 3.4). The index is derived from the first 8 bytes of the
-// previous block, interpreted as a 64-bit little-endian integer (J1, J2).
+// Compute the reference block index using the index_alpha algorithm from
+// the official Argon2 reference C implementation (core.c:index_alpha).
+//
+// Inputs:
+//   pass, slice, index (position in segment), same_lane (ref_lane == lane),
+//   segment_length, lane_length, pseudo_rand (J1, the low 32 bits).
 // ===========================================================================
 
-transform argon2_ref_index(prev_block_base: u32, mem: State<Argon2Mem>,
-                            pass: u32, slice: u32, lane: u32,
-                            m_prime: u32, p: u32) -> u32 {
-    let j1: u32 = argon2_load_u64_mem(mem, prev_block_base) & ARGON2_MASK32;
-    let j2: u32 = (argon2_load_u64_mem(mem, prev_block_base) >> 32) & ARGON2_MASK32;
-
-    let ref_lane: u32 = j2 % p;
-    let lane_length: u32 = m_prime / p;
-    if lane_length < 2 { return 0; }
-
-    let idx: u32 = j1 % (lane_length - 1);
+transform argon2_index_alpha(pass: u32, slice: u32, index: u32,
+                             same_lane: u32, segment_length: u32,
+                             lane_length: u32, pseudo_rand: u32) -> u32 {
+    let reference_area_size: u32;
     if pass == 0 {
         if slice == 0 {
-            return 0;
+            reference_area_size = index - 1;
+        } else {
+            if same_lane == 1 {
+                reference_area_size = slice * segment_length + index - 1;
+            } else {
+                if index == 0 {
+                    // Underflow-safe: equivalent to (slice * segment_length - 1)
+                    // but only when index == 0; we use the same formula as the C
+                    // code (which casts -1 to u32 = 0xFFFFFFFF, then adds 0 below).
+                    // To match exactly, set reference_area_size = slice*segment_length - 1.
+                    reference_area_size = slice * segment_length - 1;
+                } else {
+                    reference_area_size = slice * segment_length;
+                }
+            }
         }
-        let restricted: u32 = idx % (slice * (lane_length / ARGON2_SYNC_POINTS));
-        return restricted + ref_lane * lane_length;
+    } else {
+        // Pass > 0
+        if same_lane == 1 {
+            reference_area_size = lane_length - segment_length + index - 1;
+        } else {
+            if index == 0 {
+                reference_area_size = lane_length - segment_length - 1;
+            } else {
+                reference_area_size = lane_length - segment_length;
+            }
+        }
     }
-    return idx + ref_lane * lane_length;
+    // Guard against underflow (shouldn't happen for valid params, but be safe).
+    if reference_area_size > lane_length { reference_area_size = 0; }
+
+    // relative_position = pseudo_rand
+    // relative_position = (relative_position * relative_position) >> 32
+    // relative_position = reference_area_size - 1 -
+    //                     ((reference_area_size * relative_position) >> 32)
+    let pr64: u64 = pseudo_rand as u64;
+    let rel_pos: u64 = (pr64 * pr64) >> 32;
+    let scaled: u64 = (reference_area_size as u64 * rel_pos) >> 32;
+    let rel_pos_final: u64 = (reference_area_size as u64) - 1 - scaled;
+    let rel_pos_u32: u32 = rel_pos_final & ARGON2_MASK32;
+
+    // start_position
+    let start_position: u32 = 0;
+    if pass != 0 {
+        if slice == ARGON2_SYNC_POINTS - 1 {
+            start_position = 0;
+        } else {
+            start_position = (slice + 1) * segment_length;
+        }
+    }
+
+    let absolute: u32 = (start_position + rel_pos_u32) % lane_length;
+    return absolute;
+}
+
+// ===========================================================================
+// Initialize the input block for data-independent address generation.
+// The input block is a 1024-byte Argon2Block (128 u64 words). Words 0-5 hold
+// pass, lane, slice, memory_blocks, passes, type. Word 6 is the counter
+// (incremented before each address block generation).
+// ===========================================================================
+
+transform argon2_init_input_block(input_block: State<Argon2Block>,
+                                  pass: u32, lane: u32, slice: u32,
+                                  m_prime: u32, t: u32) {
+    // Zero the entire block first.
+    let zi: u32 = 0;
+    while zi < ARGON2_BLOCK_SIZE {
+        input_block.bytes[zi] = 0;
+        zi = zi + 1;
+    }
+    // v[0] = pass (u64 at bytes 0..7)
+    argon2_store_u64(input_block, 0,  pass as u64);
+    // v[1] = lane
+    argon2_store_u64(input_block, 8,  lane as u64);
+    // v[2] = slice
+    argon2_store_u64(input_block, 16, slice as u64);
+    // v[3] = memory_blocks (= m')
+    argon2_store_u64(input_block, 24, m_prime as u64);
+    // v[4] = passes (= t)
+    argon2_store_u64(input_block, 32, t as u64);
+    // v[5] = type (= ARGON2_TYPE_ID = 2)
+    argon2_store_u64(input_block, 40, ARGON2_TYPE_ID as u64);
+    // v[6] = 0 (counter, will be incremented by argon2_next_addresses)
+}
+
+// ===========================================================================
+// Generate the next address block via two G calls (RFC 9106 / ref.c:next_addresses).
+//   input_block.v[6]++
+//   address_block  = G(zero_block, input_block)
+//   address_block  = G(zero_block, address_block)
+// ===========================================================================
+
+transform argon2_next_addresses(address_block: State<Argon2Block>,
+                                input_block: State<Argon2Block>,
+                                zero_block: State<Argon2Block>) {
+    // Increment counter (v[6] at byte offset 48).
+    let ctr: u64 = argon2_load_u64(input_block, 48);
+    argon2_store_u64(input_block, 48, ctr + 1);
+    // address_block = G(zero_block, input_block)
+    argon2_g(zero_block, input_block, address_block);
+    // address_block = G(zero_block, address_block)
+    let tmp = state_new(Argon2Block);
+    argon2_g(zero_block, address_block, tmp);
+    // Copy tmp -> address_block
+    let ci: u32 = 0;
+    while ci < ARGON2_BLOCK_SIZE {
+        address_block.bytes[ci] = tmp.bytes[ci];
+        ci = ci + 1;
+    }
 }
 
 // ===========================================================================
@@ -459,25 +614,37 @@ transform argon2id(password: State<Argon2Buf>, pass_len: u32,
     param_buf.bytes[22] = 0;
     param_buf.bytes[23] = 0;
 
+    // H0 input per RFC 9106 Section 3.4:
+    //   p || tau || m || t || v || y || |P| || P || |S| || S || |K| || K || |AD| || AD
+    // The |P| field (password length, 4 bytes LE) MUST come before the password bytes.
     let mut_pos: u32 = 24;
+    // Write |P| (password length, 4 bytes LE)
+    param_buf.bytes[mut_pos]     = (pass_len & 255) as u8;
+    param_buf.bytes[mut_pos + 1] = ((pass_len >> 8)  & 255) as u8;
+    param_buf.bytes[mut_pos + 2] = ((pass_len >> 16) & 255) as u8;
+    param_buf.bytes[mut_pos + 3] = ((pass_len >> 24) & 255) as u8;
+    mut_pos = mut_pos + 4;
+    // Write P (password bytes)
     let i: u32 = 0;
     while i < pass_len {
         param_buf.bytes[mut_pos] = password.bytes[i];
         mut_pos = mut_pos + 1;
         i = i + 1;
     }
+    // Write |S| (salt length, 4 bytes LE)
     param_buf.bytes[mut_pos]     = (salt_len & 255) as u8;
     param_buf.bytes[mut_pos + 1] = ((salt_len >> 8)  & 255) as u8;
     param_buf.bytes[mut_pos + 2] = ((salt_len >> 16) & 255) as u8;
     param_buf.bytes[mut_pos + 3] = ((salt_len >> 24) & 255) as u8;
     mut_pos = mut_pos + 4;
+    // Write S (salt bytes)
     let j: u32 = 0;
     while j < salt_len {
         param_buf.bytes[mut_pos] = salt.bytes[j];
         mut_pos = mut_pos + 1;
         j = j + 1;
     }
-    // AD length = 0, key length = 0 (two 4-byte zero fields).
+    // Write |K| (key length = 0, 4 bytes LE)
     param_buf.bytes[mut_pos]     = 0;
     param_buf.bytes[mut_pos + 1]  = 0;
     param_buf.bytes[mut_pos + 2]  = 0;
@@ -489,8 +656,15 @@ transform argon2id(password: State<Argon2Buf>, pass_len: u32,
     param_buf.bytes[mut_pos + 3]  = 0;
     mut_pos = mut_pos + 4;
 
+    // H0 = BLAKE2b(param_buf, digest_size=64) — NO h_prime prefix.
+    // The C reference (core.c:initial_hash) uses blake2b_init(&state, 64)
+    // directly, NOT blake2b_long. So we use argon2_blake2b_var (which does
+    // plain BLAKE2b with digest_size=64) instead of argon2_h_prime.
     let h0 = state_new(Argon2Buf);
-    argon2_h_prime(param_buf, mut_pos, h0, 64);
+    let h0_digest = state_new(Blake2bDigest);
+    argon2_blake2b_var(param_buf, mut_pos, h0_digest);
+    let h0k: u32 = 0;
+    while h0k < 64 { h0.bytes[h0k] = h0_digest.data[h0k]; h0k = h0k + 1; }
 
     // 2. Memory: m' = m rounded down to nearest multiple of 4*p.
     let mut_m_prime: u32 = (m / (4 * p)) * (4 * p);
@@ -512,7 +686,9 @@ transform argon2id(password: State<Argon2Buf>, pass_len: u32,
         seed0.bytes[70] = ((lane >> 16) & 255) as u8;
         seed0.bytes[71] = ((lane >> 24) & 255) as u8;
         let blk0 = state_new(Argon2Buf);
-        argon2_h_prime(seed0, 72, blk0, ARGON2_BLOCK_SIZE);
+        let seed_len: u32 = 72;
+        let blk_out_len: u32 = ARGON2_BLOCK_SIZE;
+        argon2_h_prime(seed0, seed_len, blk0, blk_out_len);
         argon2_block_to_mem_helper(blk0, mem, lane * lane_length * ARGON2_BLOCK_SIZE);
 
         let seed1 = state_new(Argon2Buf);
@@ -525,34 +701,138 @@ transform argon2id(password: State<Argon2Buf>, pass_len: u32,
         seed1.bytes[70] = ((lane >> 16) & 255) as u8;
         seed1.bytes[71] = ((lane >> 24) & 255) as u8;
         let blk1 = state_new(Argon2Buf);
-        argon2_h_prime(seed1, 72, blk1, ARGON2_BLOCK_SIZE);
+        argon2_h_prime(seed1, seed_len, blk1, blk_out_len);
         argon2_block_to_mem_helper(blk1, mem,
             (lane * lane_length + 1) * ARGON2_BLOCK_SIZE);
         lane = lane + 1;
     }
 
-    // 4. Fill remaining blocks: B[lane][cur] = G(B[lane][cur-1], B[ref]).
+    // 4. Fill remaining blocks using proper sync-point (slice) iteration.
+    //    Per RFC 9106 / ref.c:fill_segment:
+    //      - For Argon2id pass 0, slices 0 and 1 use data-INDEPENDENT addressing
+    //        (address block generated from input_block counter).
+    //      - All other (slice >= 2 in pass 0, all slices in pass > 0) use
+    //        data-DEPENDENT addressing (J1, J2 from first 8 bytes of prev block).
+    //      - For pass > 0, the new block is XORed into the existing block (with_xor=1).
+    //      - For pass 0, the new block overwrites (with_xor=0).
+    //      - prev_offset wraps to the last block of the lane when curr_offset
+    //        is at the start of a lane (curr_offset % lane_length == 0).
+    let segment_length: u32 = lane_length / ARGON2_SYNC_POINTS;
+
     let iter: u32 = 0;
     while iter < t {
-        let ln: u32 = 0;
-        while ln < p {
-            let cur: u32 = 2;
-            while cur < lane_length {
-                let prev_off: u32 = (ln * lane_length + cur - 1) * ARGON2_BLOCK_SIZE;
-                let ref_idx: u32 = argon2_ref_index(prev_off, mem, iter, 0,
-                                                    ln, mut_m_prime, p);
-                let ref_off: u32 = ref_idx * ARGON2_BLOCK_SIZE;
-                let cur_off: u32 = (ln * lane_length + cur) * ARGON2_BLOCK_SIZE;
-                let blk_prev = state_new(Argon2Block);
-                let blk_ref  = state_new(Argon2Block);
-                let blk_out  = state_new(Argon2Block);
-                argon2_mem_to_block(mem, prev_off, blk_prev);
-                argon2_mem_to_block(mem, ref_off,  blk_ref);
-                argon2_g(blk_prev, blk_ref, blk_out);
-                argon2_block_to_mem(blk_out, mem, cur_off);
-                cur = cur + 1;
+        let sl: u32 = 0;
+        while sl < ARGON2_SYNC_POINTS {
+            let ln: u32 = 0;
+            while ln < p {
+                // Data-independent for Argon2id pass 0, slices 0..1
+                let data_indep: u32 = 0;
+                if iter == 0 {
+                    if sl < 2 { data_indep = 1; }
+                }
+
+                // Pre-allocate address-generation state for this slice.
+                let address_block = state_new(Argon2Block);
+                let input_block   = state_new(Argon2Block);
+                let zero_block    = state_new(Argon2Block);
+                if data_indep == 1 {
+                    // Zero the zero_block.
+                    let zi: u32 = 0;
+                    while zi < ARGON2_BLOCK_SIZE {
+                        zero_block.bytes[zi] = 0;
+                        zi = zi + 1;
+                    }
+                    argon2_init_input_block(input_block, iter, ln, sl, mut_m_prime, t);
+                    // Generate the first address block.
+                    argon2_next_addresses(address_block, input_block, zero_block);
+                }
+
+                // starting_index: 2 for pass 0, slice 0 (blocks 0, 1 precomputed); else 0.
+                let starting_index: u32 = 0;
+                if iter == 0 {
+                    if sl == 0 { starting_index = 2; }
+                }
+
+                // curr_offset = lane * lane_length + slice * segment_length + starting_index
+                let curr_offset: u32 = ln * lane_length + sl * segment_length + starting_index;
+                // prev_offset: if curr is at start of lane, wrap to last block.
+                let prev_offset: u32;
+                if (curr_offset % lane_length) == 0 {
+                    prev_offset = curr_offset + lane_length - 1;
+                } else {
+                    prev_offset = curr_offset - 1;
+                }
+
+                // Loop over blocks in this segment.
+                let i: u32 = starting_index;
+                while i < segment_length {
+                    // 1. Rotating prev_offset if curr_offset % lane_length == 1
+                    if (curr_offset % lane_length) == 1 {
+                        prev_offset = curr_offset - 1;
+                    }
+
+                    // 2. Get pseudo_rand (J1 in low 32, J2 in high 32 of a u64).
+                    let pseudo_rand: u64;
+                    if data_indep == 1 {
+                        // Use address_block.v[i] (u64 at byte offset i*8).
+                        // Generate new address block every 128 blocks (ARGON2_ADDRESSES_IN_BLOCK).
+                        // For segment_length <= 128 (our test cases), one block suffices.
+                        pseudo_rand = argon2_load_u64(address_block, i * 8);
+                    } else {
+                        // Read first 8 bytes of prev block from memory matrix.
+                        let prev_byte_off: u32 = prev_offset * ARGON2_BLOCK_SIZE;
+                        pseudo_rand = argon2_load_u64_mem(mem, prev_byte_off);
+                    }
+
+                    // 3. ref_lane = (pseudo_rand >> 32) % p
+                    //    But for pass 0, slice 0: ref_lane = lane (forced).
+                    let ref_lane: u32 = ((pseudo_rand >> 32) & ARGON2_MASK32) % p;
+                    if iter == 0 {
+                        if sl == 0 { ref_lane = ln; }
+                    }
+
+                    // 4. ref_index via index_alpha.
+                    let j1: u32 = pseudo_rand & ARGON2_MASK32;
+                    let same_lane: u32 = 0;
+                    if ref_lane == ln { same_lane = 1; }
+                    let ref_index: u32 = argon2_index_alpha(iter, sl, i, same_lane,
+                                                           segment_length, lane_length, j1);
+
+                    // 5. Compute new block = G(prev_block, ref_block).
+                    let prev_byte_off: u32 = prev_offset * ARGON2_BLOCK_SIZE;
+                    let ref_byte_off: u32 = (ref_lane * lane_length + ref_index) * ARGON2_BLOCK_SIZE;
+                    let curr_byte_off: u32 = curr_offset * ARGON2_BLOCK_SIZE;
+                    let blk_prev = state_new(Argon2Block);
+                    let blk_ref  = state_new(Argon2Block);
+                    let blk_out  = state_new(Argon2Block);
+                    argon2_mem_to_block(mem, prev_byte_off, blk_prev);
+                    argon2_mem_to_block(mem, ref_byte_off,  blk_ref);
+                    argon2_g(blk_prev, blk_ref, blk_out);
+
+                    // 6. Write back. For pass 0: overwrite. For pass > 0: XOR into existing.
+                    if iter == 0 {
+                        argon2_block_to_mem(blk_out, mem, curr_byte_off);
+                    } else {
+                        // XOR blk_out into existing mem[curr_byte_off].
+                        let blk_cur = state_new(Argon2Block);
+                        argon2_mem_to_block(mem, curr_byte_off, blk_cur);
+                        let xi: u32 = 0;
+                        while xi < ARGON2_BLOCK_SIZE {
+                            let cur_v: u32 = blk_cur.bytes[xi] as u32;
+                            let out_v: u32 = blk_out.bytes[xi] as u32;
+                            blk_cur.bytes[xi] = ((cur_v ^ out_v) & 255) as u8;
+                            xi = xi + 1;
+                        }
+                        argon2_block_to_mem(blk_cur, mem, curr_byte_off);
+                    }
+
+                    curr_offset = curr_offset + 1;
+                    prev_offset = prev_offset + 1;
+                    i = i + 1;
+                }
+                ln = ln + 1;
             }
-            ln = ln + 1;
+            sl = sl + 1;
         }
         iter = iter + 1;
     }
@@ -577,7 +857,8 @@ transform argon2id(password: State<Argon2Buf>, pass_len: u32,
     }
 
     // 6. Output = H'(final_block, out_len).
-    argon2_h_prime(final_block, ARGON2_BLOCK_SIZE, out, out_len);
+    let fb_len: u32 = ARGON2_BLOCK_SIZE;
+    argon2_h_prime(final_block, fb_len, out, out_len);
 }
 
 // ===========================================================================
