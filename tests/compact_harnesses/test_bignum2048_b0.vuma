@@ -1,0 +1,92 @@
+// bignum2048 batch 0 (vector 0) — op=add
+// bn2048_add 0+0
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum2048.vuma"::{Bn2048Ctx, bn2048_add};
+
+transform main() -> i32 {
+    let a = state_new(Bn2048Ctx);
+    let b = state_new(Bn2048Ctx);
+    let r = state_new(Bn2048Ctx);
+
+    a.limbs[0] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[1] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[2] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[3] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[4] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[5] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[6] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[7] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[8] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[9] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[10] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[11] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[12] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[13] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[14] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[15] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[16] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[17] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[18] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[19] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[20] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[21] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[22] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[23] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[24] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[25] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[26] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[27] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[28] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[29] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[30] = ((0 as u64) << 32) | (0 as u64);
+    a.limbs[31] = ((0 as u64) << 32) | (0 as u64);
+
+    b.limbs[0] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[1] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[2] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[3] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[4] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[5] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[6] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[7] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[8] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[9] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[10] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[11] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[12] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[13] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[14] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[15] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[16] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[17] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[18] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[19] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[20] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[21] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[22] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[23] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[24] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[25] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[26] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[27] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[28] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[29] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[30] = ((0 as u64) << 32) | (0 as u64);
+    b.limbs[31] = ((0 as u64) << 32) | (0 as u64);
+
+    bn2048_add(r, a, b);
+    let oi: u32 = 0;
+    while oi < 32 {
+        let v = r.limbs[31 - oi];
+        print_int(1000 + (((v >> 56) & 255) as u32));
+        print_int(1000 + (((v >> 48) & 255) as u32));
+        print_int(1000 + (((v >> 40) & 255) as u32));
+        print_int(1000 + (((v >> 32) & 255) as u32));
+        print_int(1000 + (((v >> 24) & 255) as u32));
+        print_int(1000 + (((v >> 16) & 255) as u32));
+        print_int(1000 + (((v >> 8) & 255) as u32));
+        print_int(1000 + ((v & 255) as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

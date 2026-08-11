@@ -573,5 +573,10 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "bignum2048|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
