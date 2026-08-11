@@ -1,0 +1,20 @@
+// Test bn256_divmod_512 with simple values: 100 mod 7 = 2
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, Bn512Ctx, bn256_divmod_512, bn256_zero, bn256_set_u32};
+
+transform main() -> i32 {
+    // dividend = 100 (in 512-bit buffer, limb[0]=100)
+    let dividend = state_new(Bn512Ctx);
+    let divisor = state_new(Bn256Ctx);
+    let quotient = state_new(Bn512Ctx);
+    let remainder = state_new(Bn256Ctx);
+
+    dividend.limbs[0] = 100;
+    bn256_set_u32(divisor, 7);
+
+    bn256_divmod_512(dividend, divisor, quotient, remainder);
+
+    // remainder should be 2 (100 mod 7 = 2)
+    print_int(1000 + (remainder.limbs[0] as u32));
+    print_int(999);
+    return 0;
+}

@@ -552,11 +552,16 @@ transform p256_proj_add_mixed_mont(x3: State<Bn256Ctx>, y3: State<Bn256Ctx>, z3:
 // ===========================================================================
 
 // Affine point doubling: (rx, ry) = 2 * (px, py) on y^2 = x^3 + ax + b
-// a = -3 for P-256. Uses bn256_mod_mul_mont and bn256_mod_inv_fermat.
+// a = -3 for P-256. Loads p internally to keep param count at 5.
 transform p256_affine_double(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>,
                              px: State<Bn256Ctx>, py: State<Bn256Ctx>,
-                             a_bn: State<Bn256Ctx>, p_bn: State<Bn256Ctx>) {
-    // λ = (3*px^2 + a) / (2*py) mod p
+                             a_bn: State<Bn256Ctx>) {
+    // Load P-256 prime internally
+    let p_be = state_new(B32);
+    p256_p(p_be);
+    let p_bn = state_new(Bn256Ctx);
+    be32_to_bn256(p_bn, p_be);
+
     let t1 = state_new(Bn256Ctx);
     let t2 = state_new(Bn256Ctx);
     let t3 = state_new(Bn256Ctx);
@@ -589,25 +594,21 @@ transform p256_affine_double(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>,
 }
 
 // Affine point addition: (rx, ry) = (px, py) + (qx, qy)
-// Handles identity, P==P (double), P==-P (identity).
-transform p256_affine_add(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>,
-                          px: State<Bn256Ctx>, py: State<Bn256Ctx>,
-                          qx: State<Bn256Ctx>, qy: State<Bn256Ctx>,
-                          p_bn: State<Bn256Ctx>) {
-    // Check P == Q → double
-    if bn256_cmp(px, qx) == 0 {
-        if bn256_cmp(py, qy) == 0 {
-            // P == Q: need to double, but we don't have a_bn here.
-            // Caller should handle this case. For now, return identity.
-            bn256_zero(rx);
-            bn256_zero(ry);
-            return;
-        }
-        // P == -Q: return identity
-        bn256_zero(rx);
-        bn256_zero(ry);
-        return;
-    }
+// 5 params: qx and qy are loaded from the base point internally.
+// Actually we pass qx, qy but skip p_bn (loaded internally).
+// To keep 5 params, we merge the "add base point" use case: caller passes
+// qx and qy as the SAME state as px and py when doubling is needed.
+// For the scalar_mul loop, we only add the FIXED base point P, so we can
+// load it internally.
+transform p256_affine_add_base(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>,
+                               px: State<Bn256Ctx>, py: State<Bn256Ctx>,
+                               qx: State<Bn256Ctx>, qy: State<Bn256Ctx>) {
+    // Load P-256 prime internally
+    let p_be = state_new(B32);
+    p256_p(p_be);
+    let p_bn = state_new(Bn256Ctx);
+    be32_to_bn256(p_bn, p_be);
+
     // λ = (qy - py) / (qx - px) mod p
     let t1 = state_new(Bn256Ctx);
     let t2 = state_new(Bn256Ctx);
@@ -635,55 +636,118 @@ transform p256_affine_add(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>,
     bn256_mod_sub(ry, t2, py, p_bn);
 }
 
-transform p256_scalar_mul_bn(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, k: State<Bn256Ctx>, px: State<Bn256Ctx>, py: State<Bn256Ctx>, p_bn: State<Bn256Ctx>) {
-    // Handle k == 0: return identity (0, 0)
+// Scalar multiplication step: double R in place.
+// 4 params + 3 state_new = 7 State vars (safe).
+transform p256_scalar_step_double(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, a_val: State<Bn256Ctx>, p_bn: State<Bn256Ctx>) {
+    let tx = state_new(Bn256Ctx);
+    let ty = state_new(Bn256Ctx);
+    let slope = state_new(Bn256Ctx);
+    let slope_sq = state_new(Bn256Ctx);
+    let t1 = state_new(Bn256Ctx);
+    let t2 = state_new(Bn256Ctx);
+    let t3 = state_new(Bn256Ctx);
+
+    // λ = (3*rx^2 + a) / (2*ry) mod p
+    bn256_mod_mul(t1, rx, rx, p_bn);           // t1 = rx^2
+    bn256_mod_add(t2, t1, t1, p_bn);           // t2 = 2*rx^2
+    bn256_mod_add(t2, t2, t1, p_bn);           // t2 = 3*rx^2
+    bn256_mod_add(t2, t2, a_val, p_bn);        // t2 = 3*rx^2 + a
+    bn256_mod_add(t3, ry, ry, p_bn);           // t3 = 2*ry
+    bn256_mod_inv_fermat(t1, t3, p_bn);        // t1 = (2*ry)^(-1)
+    bn256_mod_mul(slope, t2, t1, p_bn);        // slope = (3*rx^2 + a) / (2*ry)
+
+    // rx_new = slope^2 - 2*rx
+    bn256_mod_mul(slope_sq, slope, slope, p_bn);
+    bn256_mod_add(t3, rx, rx, p_bn);           // 2*rx
+    bn256_mod_sub(tx, slope_sq, t3, p_bn);
+
+    // ry_new = slope*(rx - rx_new) - ry
+    bn256_mod_sub(t1, rx, tx, p_bn);
+    bn256_mod_mul(t2, slope, t1, p_bn);
+    bn256_mod_sub(ty, t2, ry, p_bn);
+
+    bn256_copy(rx, tx);
+    bn256_copy(ry, ty);
+}
+
+// Scalar multiplication step: add base point (qx, qy) to R in place.
+// 7 params + 5 state_new = 12 State vars. Test if this works.
+transform p256_scalar_step_add(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, qx: State<Bn256Ctx>, qy: State<Bn256Ctx>, p_bn: State<Bn256Ctx>, a_val: State<Bn256Ctx>, unused: State<Bn256Ctx>) {
+    let t1 = state_new(Bn256Ctx);
+    let t2 = state_new(Bn256Ctx);
+    let slope = state_new(Bn256Ctx);
+    let slope_sq = state_new(Bn256Ctx);
+    let t2_inv = state_new(Bn256Ctx);
+
+    // λ = (qy - ry) / (qx - rx) mod p
+    bn256_mod_sub(t1, qy, ry, p_bn);
+    bn256_mod_sub(t2, qx, rx, p_bn);
+    bn256_mod_inv_fermat(t2_inv, t2, p_bn);
+    bn256_mod_mul(slope, t1, t2_inv, p_bn);
+
+    // rx_new = slope^2 - rx - qx
+    bn256_mod_mul(slope_sq, slope, slope, p_bn);
+    bn256_mod_sub(t1, slope_sq, rx, p_bn);
+    bn256_mod_sub(t1, t1, qx, p_bn);
+
+    // ry_new = slope*(rx - rx_new) - ry
+    bn256_mod_sub(t2, rx, t1, p_bn);
+    bn256_mod_mul(slope_sq, slope, t2, p_bn);
+    bn256_mod_sub(t2, slope_sq, ry, p_bn);
+
+    bn256_copy(rx, t1);
+    bn256_copy(ry, t2);
+}
+// Specialized scalar_mul: k * G (base point loaded internally).
+// 3 params + 6 state_new = 9 State vars (safe).
+transform p256_scalar_mul_base(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, k: State<Bn256Ctx>) {
     if bn256_is_zero(k) == 1 {
         bn256_zero(rx);
         bn256_zero(ry);
         return;
     }
 
-    // Affine double-and-add scalar multiplication.
-    // Uses bn256_mod_mul_mont (Montgomery) for speed and
-    // bn256_mod_inv_fermat (Fermat's little theorem) for modular inverse.
-    // a = -3 mod p for P-256.
+    // Load P-256 prime
+    let p_bn = state_new(Bn256Ctx);
+    let p_be = state_new(B32);
+    p256_p(p_be);
+    be32_to_bn256(p_bn, p_be);
+
+    // Load base point G
+    let px = state_new(Bn256Ctx);
+    let py = state_new(Bn256Ctx);
+    let gx_be = state_new(B32);
+    let gy_be = state_new(B32);
+    p256_gx(gx_be);
+    p256_gy(gy_be);
+    be32_to_bn256(px, gx_be);
+    be32_to_bn256(py, gy_be);
+
+    // a = -3 mod p
     let a_val = state_new(Bn256Ctx);
     bn256_copy(a_val, p_bn);
     let lo_a = a_val.limbs[0];
     a_val.limbs[0] = lo_a - 3;
 
-    // R = identity (0, 0)
+    // R = identity
     let rx_j = state_new(Bn256Ctx);
     let ry_j = state_new(Bn256Ctx);
     bn256_zero(rx_j);
     bn256_zero(ry_j);
 
-    // Temporaries for point operations
-    let tx = state_new(Bn256Ctx);
-    let ty = state_new(Bn256Ctx);
-
     let bits: u32 = bn256_bitlen(k);
     let i: u32 = bits;
     while i > 0 {
         let ii = i - 1;
-
-        // R = 2*R (affine double, only if R is not identity)
         if bn256_is_zero(rx_j) == 0 {
-            p256_affine_double(tx, ty, rx_j, ry_j, a_val, p_bn);
-            bn256_copy(rx_j, tx);
-            bn256_copy(ry_j, ty);
+            p256_scalar_step_double(rx_j, ry_j, a_val, p_bn);
         }
-
         if bn256_get_bit(k, ii) == 1 {
-            // R = R + P (affine add)
             if bn256_is_zero(rx_j) == 1 {
-                // R is identity, R = P
                 bn256_copy(rx_j, px);
                 bn256_copy(ry_j, py);
             } else {
-                p256_affine_add(tx, ty, rx_j, ry_j, px, py, p_bn);
-                bn256_copy(rx_j, tx);
-                bn256_copy(ry_j, ty);
+                p256_scalar_step_add(rx_j, ry_j, px, py, p_bn, a_val, a_val);
             }
         }
         i = ii;
@@ -730,7 +794,7 @@ transform ecdsa_p256_keygen(privkey_be: State<B32>, pubkey_x_be: State<B32>, pub
 
     let qx_bn = state_new(Bn256Ctx);
     let qy_bn = state_new(Bn256Ctx);
-    p256_scalar_mul_bn(qx_bn, qy_bn, d_bn, gx_bn, gy_bn, p_bn);
+    p256_scalar_mul_bn(qx_bn, qy_bn, d_bn, gx_bn, gy_bn);
 
     bn256_to_be32(pubkey_x_be, qx_bn);
     bn256_to_be32(pubkey_y_be, qy_bn);
@@ -883,7 +947,7 @@ transform ecdsa_p256_sign(msg: State<B256>, msg_len: u32, privkey_be: State<B32>
 
     let rx = state_new(Bn256Ctx);
     let ry = state_new(Bn256Ctx);
-    p256_scalar_mul_bn(rx, ry, k_bn, gx_bn, gy_bn, p_bn);
+    p256_scalar_mul_bn(rx, ry, k_bn, gx_bn, gy_bn);
 
     let r_bn = state_new(Bn256Ctx);
     bn256_copy(r_bn, rx);
@@ -963,10 +1027,10 @@ transform ecdsa_p256_verify(msg: State<B256>, msg_len: u32, pubkey_x_be: State<B
 
     let r1x = state_new(Bn256Ctx);
     let r1y = state_new(Bn256Ctx);
-    p256_scalar_mul_bn(r1x, r1y, u1, gx_bn, gy_bn, p_bn);
+    p256_scalar_mul_bn(r1x, r1y, u1, gx_bn, gy_bn);
     let r2x = state_new(Bn256Ctx);
     let r2y = state_new(Bn256Ctx);
-    p256_scalar_mul_bn(r2x, r2y, u2, qx_bn, qy_bn, p_bn);
+    p256_scalar_mul_bn(r2x, r2y, u2, qx_bn, qy_bn);
     let ptx = state_new(Bn256Ctx);
     let pty = state_new(Bn256Ctx);
     p256_point_add_bn(ptx, pty, r1x, r1y, r2x, r2y, p_bn);
@@ -1010,7 +1074,7 @@ transform p256_scalar_mul_wrap(rx_be: State<B32>, ry_be: State<B32>, k_be: State
     be32_to_bn256(py_bn, py_be);
     let rx_bn = state_new(Bn256Ctx);
     let ry_bn = state_new(Bn256Ctx);
-    p256_scalar_mul_bn(rx_bn, ry_bn, k_bn, px_bn, py_bn, p_bn);
+    p256_scalar_mul_bn(rx_bn, ry_bn, k_bn, px_bn, py_bn);
     bn256_to_be32(rx_be, rx_bn);
     bn256_to_be32(ry_be, ry_bn);
 }

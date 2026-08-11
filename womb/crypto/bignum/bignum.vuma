@@ -321,11 +321,26 @@ transform bn256_divmod_512(dividend: State<Bn512Ctx>, divisor: State<Bn256Ctx>, 
     while i < 8 { quotient.limbs[i] = 0; i = i + 1; }
     bn256_zero(remainder);
 
+    // The intermediate value after shift+add can be up to 2*divisor - 1,
+    // which may exceed 256 bits. We track the overflow bit separately.
+    // The actual value is: overflow * 2^256 + remainder
+    // After subtract (if needed), the value is < divisor, so overflow becomes 0.
+    let overflow: u32 = 0;
+
     let bit: u32 = 512;
     while bit > 0 {
         bit = bit - 1;
-        // r = (r << 1) | bit(bit of dividend)
-        bn256_lshift1(remainder, remainder);
+
+        // Shift left: (overflow, remainder) = (overflow, remainder) << 1
+        // New overflow = old overflow << 1 | carry_out_from_lshift1
+        // But overflow is 0 after subtract, so overflow << 1 = 0.
+        // Actually overflow could be 1 if we didn't subtract last iteration
+        // (which happens when value < divisor). In that case, overflow must be 0
+        // because value < divisor < 2^256, so shifting left gives < 2^257.
+        // So overflow is always 0 at this point.
+        let carry_out: u32 = bn256_lshift1(remainder, remainder);
+        overflow = carry_out;  // overflow was 0, now it's just carry_out
+
         let word = bit / 64;
         let pos = bit % 64;
         let d_word = dividend.limbs[word];
@@ -334,14 +349,47 @@ transform bn256_divmod_512(dividend: State<Bn512Ctx>, divisor: State<Bn256Ctx>, 
             let cur = remainder.limbs[0];
             remainder.limbs[0] = cur | 1;
         }
-        // If r >= divisor, subtract and set quotient bit.
-        if bn256_cmp(remainder, divisor) != 2 {
-            bn256_sub(remainder, remainder, divisor);
+
+        // Compare: is (overflow * 2^256 + remainder) >= divisor?
+        // If overflow == 1, value >= 2^256 > divisor (since divisor < 2^256), so yes.
+        // If overflow == 0, compare remainder vs divisor normally.
+        let need_sub: u32 = overflow;
+        if need_sub == 0 {
+            if bn256_cmp(remainder, divisor) != 2 {
+                need_sub = 1;
+            }
+        }
+
+        if need_sub == 1 {
+            // Subtract divisor from (overflow * 2^256 + remainder).
+            // If overflow == 1: value = 2^256 + remainder. Subtract divisor:
+            //   2^256 + remainder - divisor
+            //   If remainder >= divisor: result = 2^256 + (remainder - divisor), overflow stays 1
+            //     But then result >= 2^256 > divisor, so we need another subtract.
+            //     After second subtract: 2^256 + remainder - 2*divisor.
+            //     Since remainder < 2*divisor (from invariant), this is < 2^256. overflow = 0.
+            //   If remainder < divisor: result = 2^256 - (divisor - remainder) < 2^256. overflow = 0.
+            // If overflow == 0: simple subtract.
+            if overflow == 1 {
+                // Do first subtract
+                let borrow: u32 = bn256_sub(remainder, remainder, divisor);
+                if borrow == 0 {
+                    // remainder >= divisor, result = 2^256 + (remainder - divisor) >= 2^256
+                    // Need second subtract
+                    bn256_sub(remainder, remainder, divisor);
+                }
+                // borrow == 1: result < 2^256, done
+                overflow = 0;
+            } else {
+                bn256_sub(remainder, remainder, divisor);
+            }
+
             let q_word = bit / 64;
             let q_pos = bit % 64;
             let cur = quotient.limbs[q_word];
             quotient.limbs[q_word] = cur | (1 << q_pos);
         }
+        // After this, overflow is 0 and remainder < divisor (the invariant).
     }
 }
 

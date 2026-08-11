@@ -1,0 +1,39 @@
+// Direct test of bn256_divmod_512: compute Gx^2 mod P-256
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, Bn512Ctx, bn256_mul_512, bn256_divmod_512, bn256_zero};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ecdsa_p256.vuma"::{B32, p256_gx, p256_p, be32_to_bn256};
+
+transform main() -> i32 {
+    let gx_be = state_new(B32);
+    let p_be = state_new(B32);
+    let gx_bn = state_new(Bn256Ctx);
+    let p_bn = state_new(Bn256Ctx);
+    let prod = state_new(Bn512Ctx);
+    let quot = state_new(Bn512Ctx);
+    let rem = state_new(Bn256Ctx);
+    p256_gx(gx_be);
+    p256_p(p_be);
+    be32_to_bn256(gx_bn, gx_be);
+    be32_to_bn256(p_bn, p_be);
+
+    // prod = gx * gx (512-bit)
+    bn256_mul_512(prod, gx_bn, gx_bn);
+    // rem = prod mod p
+    bn256_divmod_512(prod, p_bn, quot, rem);
+
+    // Output rem (4 limbs)
+    let oi: u32 = 0;
+    while oi < 4 {
+        let v = rem.limbs[oi];
+        print_int(1000 + (((v >> 56) & 255) as u32));
+        print_int(1000 + (((v >> 48) & 255) as u32));
+        print_int(1000 + (((v >> 40) & 255) as u32));
+        print_int(1000 + (((v >> 32) & 255) as u32));
+        print_int(1000 + (((v >> 24) & 255) as u32));
+        print_int(1000 + (((v >> 16) & 255) as u32));
+        print_int(1000 + (((v >> 8) & 255) as u32));
+        print_int(1000 + ((v & 255) as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}
