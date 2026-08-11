@@ -1,0 +1,205 @@
+{
+  "module": "argon2",
+  "vectors": [
+    {
+      "desc": "argon2id empty pw/'salt1234' t=1 m=8 p=1 dklen=32",
+      "pass_hex": "",
+      "salt_hex": "73616c7431323334",
+      "t": 1,
+      "m": 8,
+      "p": 1,
+      "dklen": 32,
+      "expected_hex": "fb4fa60c834134118b779139b6a2e6c81ea4b6d5457291eacfe27378be7493c1"
+    },
+    {
+      "desc": "argon2id 'password'/'salt1234' t=1 m=8 p=1 dklen=32",
+      "pass_hex": "70617373776f7264",
+      "salt_hex": "73616c7431323334",
+      "t": 1,
+      "m": 8,
+      "p": 1,
+      "dklen": 32,
+      "expected_hex": "4fdd36739ed2f9350adac32639db0d868816dc0ce371d7141c771df41994df9e"
+    },
+    {
+      "desc": "argon2id 'password'/'salt1234' t=1 m=8 p=1 dklen=64",
+      "pass_hex": "70617373776f7264",
+      "salt_hex": "73616c7431323334",
+      "t": 1,
+      "m": 8,
+      "p": 1,
+      "dklen": 64,
+      "expected_hex": "f0295173c1924626f3f4e484e494290c00a5b76a50f802793f0076aeaca8644f6e7bce4bd3550be0fd8c39f162f1ce8a660f9337a24c823eb0bac2d3442d3317"
+    },
+    {
+      "desc": "argon2id 'password'/'salt1234' t=1 m=8 p=1 dklen=16",
+      "pass_hex": "70617373776f7264",
+      "salt_hex": "73616c7431323334",
+      "t": 1,
+      "m": 8,
+      "p": 1,
+      "dklen": 16,
+      "expected_hex": "a40fbb9214ed23606f5bcb5ed2ca7c7d"
+    },
+    {
+      "desc": "argon2id 'password'/'salt1234' t=2 m=8 p=1 dklen=32",
+      "pass_hex": "70617373776f7264",
+      "salt_hex": "73616c7431323334",
+      "t": 2,
+      "m": 8,
+      "p": 1,
+      "dklen": 32,
+      "expected_hex": "dece801901e328fbe31857919d99df8e1adebac9500ad23a359916e2fd63045e"
+    },
+    {
+      "desc": "argon2id 'password'/'salt1234' t=1 m=16 p=1 dklen=32",
+      "pass_hex": "70617373776f7264",
+      "salt_hex": "73616c7431323334",
+      "t": 1,
+      "m": 16,
+      "p": 1,
+      "dklen": 32,
+      "expected_hex": "f22915f4d3d307c03a746d4e28e46314f36f33f7067cd266302d9619e8abe032"
+    },
+    {
+      "desc": "argon2id 'password'/'salt1234' t=1 m=32 p=1 dklen=32",
+      "pass_hex": "70617373776f7264",
+      "salt_hex": "73616c7431323334",
+      "t": 1,
+      "m": 32,
+      "p": 1,
+      "dklen": 32,
+      "expected_hex": "118a77ac6a621a57e10845af1e6d87b1d7273a94c4a3ed34d62df9ccbdc22807"
+    },
+    {
+      "desc": "argon2id 'password'/'salt1234' t=1 m=64 p=1 dklen=32",
+      "pass_hex": "70617373776f7264",
+      "salt_hex": "73616c7431323334",
+      "t": 1,
+      "m": 64,
+      "p": 1,
+      "dklen": 32,
+      "expected_hex": "889088fbca9676fae6d1b4bad347423388dec2c31edf913d1a4429987779e417"
+    },
+    {
+      "desc": "argon2id 'password'/'salt1234' t=1 m=128 p=1 dklen=32",
+      "pass_hex": "70617373776f7264",
+      "salt_hex": "73616c7431323334",
+      "t": 1,
+      "m": 128,
+      "p": 1,
+      "dklen": 32,
+      "expected_hex": "ba701be4a8693f6d33a9f459139eb7cddf7e39cd9d75ee11ba8d17c98a4f41f2"
+    },
+    {
+      "desc": "argon2id 'longerpassword'/'longersalt' t=1 m=8 p=1 dklen=32",
+      "pass_hex": "6c6f6e67657270617373776f7264",
+      "salt_hex": "6c6f6e67657273616c74",
+      "t": 1,
+      "m": 8,
+      "p": 1,
+      "dklen": 32,
+      "expected_hex": "b4d9018efe0c810f71cb7d860842bba0e341431f922f1c479f2d2a00e01b29b8"
+    },
+    {
+      "desc": "argon2id empty/'somesalt' t=1 m=8 p=1 dklen=32",
+      "pass_hex": "",
+      "salt_hex": "736f6d6573616c74",
+      "t": 1,
+      "m": 8,
+      "p": 1,
+      "dklen": 32,
+      "expected_hex": "65eeedf51f4006be43eb26d1214182a97d5087767e3487bfbc849dd328145651"
+    },
+    {
+      "desc": "argon2id 'somepassword'/'minimums' t=1 m=8 p=1 dklen=32",
+      "pass_hex": "736f6d6570617373776f7264",
+      "salt_hex": "6d696e696d756d73",
+      "t": 1,
+      "m": 8,
+      "p": 1,
+      "dklen": 32,
+      "expected_hex": "a82b12c1117384b21ee784ae029bbedf926f499879688b490d943e20fe6a368a"
+    },
+    {
+      "desc": "argon2id binary pw/salt t=1 m=8 p=1 dklen=32",
+      "pass_hex": "000102030405060708090a0b0c0d0e0f",
+      "salt_hex": "101112131415161718191a1b1c1d1e1f",
+      "t": 1,
+      "m": 8,
+      "p": 1,
+      "dklen": 32,
+      "expected_hex": "afc4b8c09547e7d3d3bcf86be693c711f24de39230a5304c81b315f668b0f977"
+    },
+    {
+      "desc": "argon2id 'P@ssw0rd!'/'$4lty$4lt' t=1 m=8 p=1 dklen=32",
+      "pass_hex": "504073737730726421",
+      "salt_hex": "24346c747924346c74",
+      "t": 1,
+      "m": 8,
+      "p": 1,
+      "dklen": 32,
+      "expected_hex": "42a3f54f5b564450314eee2dcd0b322b3168e6189daa8ff477c8ffbc7220859a"
+    },
+    {
+      "desc": "argon2id 'a'*16/'b'*16 t=1 m=8 p=1 dklen=32",
+      "pass_hex": "61616161616161616161616161616161",
+      "salt_hex": "62626262626262626262626262626262",
+      "t": 1,
+      "m": 8,
+      "p": 1,
+      "dklen": 32,
+      "expected_hex": "f1ac996937b5532ef7009af99fcb49e0a5fc9188fe46e552348f96ea719e41ea"
+    },
+    {
+      "desc": "argon2id 'test'/'testsalt' t=3 m=8 p=1 dklen=32",
+      "pass_hex": "74657374",
+      "salt_hex": "7465737473616c74",
+      "t": 3,
+      "m": 8,
+      "p": 1,
+      "dklen": 32,
+      "expected_hex": "e8e6a6c213665c2194638ecbd1692724d55682f459b9940492cbcd0899564e00"
+    },
+    {
+      "desc": "argon2id 'test'/'testsalt' t=1 m=8 p=1 dklen=64",
+      "pass_hex": "74657374",
+      "salt_hex": "7465737473616c74",
+      "t": 1,
+      "m": 8,
+      "p": 1,
+      "dklen": 64,
+      "expected_hex": "a5674bed72bbfc164b3ba94dccc59689c90b8ac22470d6d6847e50b1c3649423fb2261c88b4326447626b21303fa49f3682c8a297ee43c39a32fd340e823e5c7"
+    },
+    {
+      "desc": "argon2id 'test'/'testsalt' t=1 m=8 p=1 dklen=24",
+      "pass_hex": "74657374",
+      "salt_hex": "7465737473616c74",
+      "t": 1,
+      "m": 8,
+      "p": 1,
+      "dklen": 24,
+      "expected_hex": "6f562cd9303cb0180defc92ebbddc99c0cac47a83c02916b"
+    },
+    {
+      "desc": "argon2id 'xor'/'cryptosalt' t=2 m=16 p=1 dklen=48",
+      "pass_hex": "786f72",
+      "salt_hex": "63727970746f73616c74",
+      "t": 2,
+      "m": 16,
+      "p": 1,
+      "dklen": 48,
+      "expected_hex": "2152386da299f8b710889cc7a850bb80d3a09aa4dce684610f0ff6233c070ed73342649d7c419ac170e65671c809d800"
+    },
+    {
+      "desc": "argon2id 'final'/'vectorsalt' t=1 m=8 p=1 dklen=32",
+      "pass_hex": "66696e616c",
+      "salt_hex": "766563746f7273616c74",
+      "t": 1,
+      "m": 8,
+      "p": 1,
+      "dklen": 32,
+      "expected_hex": "7b2c310fc592e5775b6833aa4163f01095cf929628414e578b0c4c90ab0d794e"
+    }
+  ]
+}

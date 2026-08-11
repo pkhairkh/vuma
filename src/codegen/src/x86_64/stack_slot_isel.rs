@@ -1420,6 +1420,29 @@ pub fn allocate_registers(func: &IRFunction) -> Result<AllocatedFunction, Backen
         emit(encode_sub_reg_imm32(Gpr::Rsp, frame_size as i32), "sub_rsp");
     }
 
+    // ── Stack probe (Linux guard-page safety) ──
+    // When `frame_size > 4096` (one page), `sub rsp, frame_size` may skip
+    // past the kernel's stack guard page (typically 4KB). Subsequent writes
+    // to the bottom of the new frame (e.g., [rbp - frame_size]) would
+    // fault with SIGBUS/SIGSEGV because the kernel didn't allocate the
+    // intermediate pages. Fix: touch each 4KB page from RSP+0 down to
+    // RSP+frame_size-4096 (the last page is touched by normal code).
+    // Encoding: mov byte ptr [rsp + disp32], 0  = C6 84 24 <disp32 LE> 00
+    if frame_size > 4096 {
+        // Probe every 4KB page from 0 up to (and including) the last page
+        // that contains the bottom of the frame.
+        let probe_end = frame_size;
+        let mut offset: u32 = 0;
+        while offset < probe_end as u32 {
+            let mut probe_code = Vec::new();
+            probe_code.extend_from_slice(&[0xC6, 0x84, 0x24]);
+            probe_code.extend_from_slice(&offset.to_le_bytes());
+            probe_code.push(0x00);
+            emit(probe_code, "stack_probe");
+            offset += 4096;
+        }
+    }
+
     // zero the per-function channel sequence counter slot so the
     // first ChannelSend starts at sequence=0.  Uses RAX (caller-saved, free
     // at this point) as a scratch.

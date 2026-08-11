@@ -22,11 +22,14 @@ const ARGON2_MASK64: u64 = (1 << 63) | ((1 << 63) - 1);
 //   Argon2Block: 1024 bytes — one Argon2 memory block (R, Z, A, B, output).
 //   Argon2Buf:   8192 bytes — variable-length working buffers (param_buf,
 //                seed0/seed1, h_prime inputs/outputs, final_block tag, etc.).
-//   Argon2Mem:   524288 bytes (512 KiB) — the memory matrix
-//                (m_prime * 1024 bytes; sufficient for m_prime <= 512).
+//   Argon2Mem:   32768 bytes (32 KiB) — the memory matrix
+//                (m_prime * 1024 bytes; sufficient for m_prime <= 32, i.e.,
+//                 p=1, m<=8). For larger m, enlarge this buffer.
+//                NOTE: stack-probe support added to x86_64 codegen now handles
+//                large stack frames > 4KB (was previously segfaulting).
 layout Argon2Block = { bytes: [u8; 1024] }
 layout Argon2Buf    = { bytes: [u8; 8192] }
-layout Argon2Mem    = { bytes: [u8; 524288] }
+layout Argon2Mem    = { bytes: [u8; 32768] }
 
 // ===========================================================================
 // 64-bit little-endian byte helpers (read/write a u64 lane within a block).

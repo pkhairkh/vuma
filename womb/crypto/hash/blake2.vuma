@@ -640,10 +640,21 @@ transform blake2b_compress(ctx: State<Blake2bCtx>, last: u32) {
 transform blake2b_update(ctx: State<Blake2bCtx>, data: State<Blake2bData>, len: u32) {
     let i: u32 = 0;
     while i < len {
+        // If buffer is full from a previous update call, compress it first
+        // (with f=0) before writing the new byte. This handles multi-call
+        // scenarios where ctx.len == 128 at entry.
+        if ctx.len == 128 {
+            blake2b_add_bytes(ctx, 128);
+            blake2b_compress(ctx, 0);
+            ctx.len = 0;
+        }
         let bl = ctx.len;
         ctx.buf[bl] = data.data[i];
         ctx.len = bl + 1;
         i = i + 1;
+        // If buffer is now full AND there's more data coming in this call,
+        // compress now. The last full block of the LAST update call is kept
+        // buffered for blake2b_final to compress with f=1.
         if ctx.len == 128 && i < len {
             blake2b_add_bytes(ctx, 128);
             blake2b_compress(ctx, 0);

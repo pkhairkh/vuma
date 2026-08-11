@@ -120,6 +120,36 @@ pub fn emit_function_regalloc_full(
     // sub rsp, frame_size
     all_code.extend(encode_sub_reg_imm32(Gpr::Rsp, frame_size as i32));
 
+    // ── Stack probe (Linux guard-page safety) ──
+    // When `frame_size > 4096` (one page), `sub rsp, frame_size` may skip
+    // past the kernel's stack guard page (typically 4KB). Subsequent writes
+    // to the bottom of the new frame (e.g., [rbp - frame_size]) would
+    // then fault with SIGBUS/SIGSEGV because the kernel didn't allocate
+    // the intermediate pages. The fix: touch each 4KB page (write 0 to
+    // byte 0 of each page) from the OLD rsp down to the NEW rsp.
+    //
+    // We use RAX as a scratch register (it's caller-saved in System V ABI
+    // and not used in the prologue before the argument shuffle). The probe
+    // loop writes a single byte to [rsp + 0], [rsp + 0x1000], [rsp + 0x2000],
+    // ... up to (but not including) the top of the new frame. The frame's
+    // top byte will be touched by subsequent code, so we only need to probe
+    // up to frame_size - 4096.
+    if frame_size > 4096 {
+        // We want to probe pages from RSP+0 up to RSP+frame_size-4096
+        // (the last page will be touched by normal code).
+        // Use RAX as scratch (mov byte ptr [rsp + offset], 0)
+        // Encoding: mov byte ptr [rsp + disp32], 0  = C6 84 24 <disp32> 00
+        let probe_end = frame_size - 4096; // probe pages 0..probe_end-1
+        let mut offset: u32 = 0;
+        while offset < probe_end {
+            // C6 84 24 <disp32 LE> 00  =  mov byte ptr [rsp + disp32], 0
+            all_code.extend_from_slice(&[0xC6, 0x84, 0x24]);
+            all_code.extend_from_slice(&offset.to_le_bytes());
+            all_code.push(0x00);
+            offset += 4096;
+        }
+    }
+
     let prologue_instr = AllocatedInstruction {
         opcode: "prologue".to_string(),
         reads: vec![],

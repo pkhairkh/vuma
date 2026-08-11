@@ -1,0 +1,30 @@
+// argon2 batch 15 (vector 15)
+// argon2id 'test'/'testsalt' t=3 m=8 p=1 dklen=32
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/blake2.vuma"::{Blake2bCtx, Blake2bData, Blake2bDigest, blake2b_init_64, blake2b_update, blake2b_final};
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/argon2.vuma"::{Argon2Buf, argon2id};
+
+transform main() -> i32 {
+    let password = state_new(Argon2Buf);
+    let salt = state_new(Argon2Buf);
+    let out = state_new(Argon2Buf);
+    password.bytes[0] = 116;
+    password.bytes[1] = 101;
+    password.bytes[2] = 115;
+    password.bytes[3] = 116;
+    salt.bytes[0] = 116;
+    salt.bytes[1] = 101;
+    salt.bytes[2] = 115;
+    salt.bytes[3] = 116;
+    salt.bytes[4] = 115;
+    salt.bytes[5] = 97;
+    salt.bytes[6] = 108;
+    salt.bytes[7] = 116;
+    argon2id(password, 4, salt, 8, 3, 8, 1, out, 32);
+    let oi: u32 = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}
