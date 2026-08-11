@@ -1,46 +1,33 @@
 // drbg batch 19 (vector 19)
+// DRBG: 16-byte entropy, no nonce, 96 bytes
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, hmac_sha256};
 import "/home/z/my-project/workdir/vuma/womb/crypto/drbg/drbg.vuma"::{DrbgCtx, DrbgData, DrbgOut, drbg_init, drbg_generate};
 
 transform main() -> i32 {
     let drbg = state_new(DrbgCtx);
     let entropy = state_new(DrbgData);
+    let nonce = state_new(DrbgData);
     let out = state_new(DrbgOut);
-    entropy.bytes[0] = 67;
-    entropy.bytes[1] = 98;
-    entropy.bytes[2] = 129;
-    entropy.bytes[3] = 160;
-    entropy.bytes[4] = 191;
-    entropy.bytes[5] = 222;
-    entropy.bytes[6] = 253;
-    entropy.bytes[7] = 28;
-    entropy.bytes[8] = 59;
-    entropy.bytes[9] = 90;
-    entropy.bytes[10] = 121;
-    entropy.bytes[11] = 152;
-    entropy.bytes[12] = 183;
-    entropy.bytes[13] = 214;
-    entropy.bytes[14] = 245;
-    entropy.bytes[15] = 20;
-    entropy.bytes[16] = 51;
-    entropy.bytes[17] = 82;
-    entropy.bytes[18] = 113;
-    entropy.bytes[19] = 144;
-    entropy.bytes[20] = 175;
-    entropy.bytes[21] = 206;
-    entropy.bytes[22] = 237;
-    entropy.bytes[23] = 12;
-    entropy.bytes[24] = 43;
-    entropy.bytes[25] = 74;
-    entropy.bytes[26] = 105;
-    entropy.bytes[27] = 136;
-    entropy.bytes[28] = 167;
-    entropy.bytes[29] = 198;
-    entropy.bytes[30] = 229;
-    entropy.bytes[31] = 4;
-    drbg_init(drbg, entropy, 32, entropy, 0);
-    drbg_generate(drbg, out, 32);
+    entropy.bytes[0] = 170;
+    entropy.bytes[1] = 187;
+    entropy.bytes[2] = 204;
+    entropy.bytes[3] = 221;
+    entropy.bytes[4] = 238;
+    entropy.bytes[5] = 255;
+    entropy.bytes[6] = 0;
+    entropy.bytes[7] = 17;
+    entropy.bytes[8] = 34;
+    entropy.bytes[9] = 51;
+    entropy.bytes[10] = 68;
+    entropy.bytes[11] = 85;
+    entropy.bytes[12] = 102;
+    entropy.bytes[13] = 119;
+    entropy.bytes[14] = 136;
+    entropy.bytes[15] = 153;
+    drbg_init(drbg, entropy, 16, nonce, 0);
+    drbg_generate(drbg, out, 96);
     let oi: u32 = 0;
-    while oi < 32 {
+    while oi < 96 {
         print_int(1000 + (out.bytes[oi] as u32));
         oi = oi + 1;
     }

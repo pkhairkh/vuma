@@ -1,144 +1,165 @@
 {
+  "module": "drbg",
   "vectors": [
     {
-      "desc": "HMAC-DRBG-SHA256 test 0",
-      "entropy_hex": "001f3e5d7c9bbad9f81736557493b2d1f00f2e4d6c8baac9e80726456483a2c1",
-      "input_hex": "001f3e5d7c9bbad9f81736557493b2d1f00f2e4d6c8baac9e80726456483a2c1",
-      "expected_hex": "95a73f7ec8e348d3b3b76bbb644f65eb570a0c885f94356f2114a48f1b942685",
-      "out_len": 32
+      "desc": "DRBG: 4-byte entropy, no nonce, 32 bytes",
+      "entropy_hex": "01020304",
+      "nonce_hex": "",
+      "personalization_hex": "",
+      "out_len": 32,
+      "expected_hex": "5f440f9338798e38923f21bde6b1cfd12d44e11f22f27b571e4bc9f6d367cde9"
     },
     {
-      "desc": "HMAC-DRBG-SHA256 test 1",
-      "entropy_hex": "11304f6e8daccbea0928476685a4c3e201203f5e7d9cbbdaf91837567594b3d2",
-      "input_hex": "11304f6e8daccbea0928476685a4c3e201203f5e7d9cbbdaf91837567594b3d2",
-      "expected_hex": "4ab58dcaac1e34abfd880d496fa6ad52c75cd293fec8be94fbffbb1964a866f5",
-      "out_len": 32
+      "desc": "DRBG: 8-byte entropy, no nonce, 32 bytes",
+      "entropy_hex": "0102030405060708",
+      "nonce_hex": "",
+      "personalization_hex": "",
+      "out_len": 32,
+      "expected_hex": "68281b089fc30ed85f0136b967bfb4b2ba53b83d5c5250cc7ffb67a623c8b045"
     },
     {
-      "desc": "HMAC-DRBG-SHA256 test 2",
-      "entropy_hex": "2241607f9ebddcfb1a39587796b5d4f31231506f8eadcceb0a29486786a5c4e3",
-      "input_hex": "2241607f9ebddcfb1a39587796b5d4f31231506f8eadcceb0a29486786a5c4e3",
-      "expected_hex": "05722e29359cc187ee07e5110ea26cfe7bb6a2bfb899d199ba456d2f751acb3e",
-      "out_len": 32
+      "desc": "DRBG: 16-byte entropy, no nonce, 32 bytes",
+      "entropy_hex": "00112233445566778899aabbccddeeff",
+      "nonce_hex": "",
+      "personalization_hex": "",
+      "out_len": 32,
+      "expected_hex": "260695f4b8960d0b274ea29e8d2b5a35a1f27c13cd151badb54f0591eec485dd"
     },
     {
-      "desc": "HMAC-DRBG-SHA256 test 3",
-      "entropy_hex": "33527190afceed0c2b4a6988a7c6e504234261809fbeddfc1b3a597897b6d5f4",
-      "input_hex": "33527190afceed0c2b4a6988a7c6e504234261809fbeddfc1b3a597897b6d5f4",
-      "expected_hex": "a62c53c43e86966a252254b504860549f65e5494ac490f9b1c2dc924bf1dee96",
-      "out_len": 32
+      "desc": "DRBG: 32-byte entropy, no nonce, 32 bytes",
+      "entropy_hex": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+      "nonce_hex": "",
+      "personalization_hex": "",
+      "out_len": 32,
+      "expected_hex": "48d3b45aab65ef92ccfcb9427ef20c90297065ecc1b8a525bfe4dc6ff36d0e38"
     },
     {
-      "desc": "HMAC-DRBG-SHA256 test 4",
-      "entropy_hex": "446382a1c0dffe1d3c5b7a99b8d7f61534537291b0cfee0d2c4b6a89a8c7e605",
-      "input_hex": "446382a1c0dffe1d3c5b7a99b8d7f61534537291b0cfee0d2c4b6a89a8c7e605",
-      "expected_hex": "ca94b428c79bda0322aca65ec4c28723b37943e5f58f0734c9c35d5bc70dde42",
-      "out_len": 32
+      "desc": "DRBG: 4-byte entropy, no nonce, 16 bytes",
+      "entropy_hex": "01020304",
+      "nonce_hex": "",
+      "personalization_hex": "",
+      "out_len": 16,
+      "expected_hex": "5f440f9338798e38923f21bde6b1cfd1"
     },
     {
-      "desc": "HMAC-DRBG-SHA256 test 5",
-      "entropy_hex": "557493b2d1f00f2e4d6c8baac9e80726456483a2c1e0ff1e3d5c7b9ab9d8f716",
-      "input_hex": "557493b2d1f00f2e4d6c8baac9e80726456483a2c1e0ff1e3d5c7b9ab9d8f716",
-      "expected_hex": "3607d12fde1bf2e07c2385da5662ebb8c9d85fd4a56790fd4d40f46eb5b8ffe6",
-      "out_len": 32
+      "desc": "DRBG: 4-byte entropy, no nonce, 64 bytes",
+      "entropy_hex": "01020304",
+      "nonce_hex": "",
+      "personalization_hex": "",
+      "out_len": 64,
+      "expected_hex": "5f440f9338798e38923f21bde6b1cfd12d44e11f22f27b571e4bc9f6d367cde98c8db1f97aea98d4918732600536a18d41fe36a32a6fadf5a78dadf65a29ae41"
     },
     {
-      "desc": "HMAC-DRBG-SHA256 test 6",
-      "entropy_hex": "6685a4c3e201203f5e7d9cbbdaf91837567594b3d2f1102f4e6d8cabcae90827",
-      "input_hex": "6685a4c3e201203f5e7d9cbbdaf91837567594b3d2f1102f4e6d8cabcae90827",
-      "expected_hex": "8b795c704643a006ce073eb929027f5842da33a0528b9e6b8aad5c5e9ebbdcdf",
-      "out_len": 32
+      "desc": "DRBG: 4-byte entropy, no nonce, 128 bytes",
+      "entropy_hex": "01020304",
+      "nonce_hex": "",
+      "personalization_hex": "",
+      "out_len": 128,
+      "expected_hex": "5f440f9338798e38923f21bde6b1cfd12d44e11f22f27b571e4bc9f6d367cde98c8db1f97aea98d4918732600536a18d41fe36a32a6fadf5a78dadf65a29ae41f42fe6f567605a915a434dc29bc38aef1434a9a5409f3fe4e185a9f36961b690dc2013c07a0a3ec43405d41448b783e6f8f8713def40b15e75ceb91c86f33756"
     },
     {
-      "desc": "HMAC-DRBG-SHA256 test 7",
-      "entropy_hex": "7796b5d4f31231506f8eadcceb0a29486786a5c4e30221405f7e9dbcdbfa1938",
-      "input_hex": "7796b5d4f31231506f8eadcceb0a29486786a5c4e30221405f7e9dbcdbfa1938",
-      "expected_hex": "cc0f60b7b6785333cd40f6b8d9a8d6e5fb6f479fcb5a95cdb2a3adc5cfda59e0",
-      "out_len": 32
+      "desc": "DRBG: empty entropy, no nonce, 32 bytes",
+      "entropy_hex": "",
+      "nonce_hex": "",
+      "personalization_hex": "",
+      "out_len": 32,
+      "expected_hex": "b44299907e4e42aa4fded5d6153e8bac3f35987bbe5fa08865c45339214784a2"
     },
     {
-      "desc": "HMAC-DRBG-SHA256 test 8",
-      "entropy_hex": "88a7c6e504234261809fbeddfc1b3a597897b6d5f4133251708faecdec0b2a49",
-      "input_hex": "88a7c6e504234261809fbeddfc1b3a597897b6d5f4133251708faecdec0b2a49",
-      "expected_hex": "df19c7d4f8db8e4a3769933eb17d5c7befa621e11941e4e6c831a7ee60ae7fa4",
-      "out_len": 32
+      "desc": "DRBG: 'a'*8 entropy, no nonce, 32 bytes",
+      "entropy_hex": "6161616161616161",
+      "nonce_hex": "",
+      "personalization_hex": "",
+      "out_len": 32,
+      "expected_hex": "f6205350a6f353fdbe607a3f9841ce494d019ad193fc52c43e97e116f3929b3c"
     },
     {
-      "desc": "HMAC-DRBG-SHA256 test 9",
-      "entropy_hex": "99b8d7f61534537291b0cfee0d2c4b6a89a8c7e60524436281a0bfdefd1c3b5a",
-      "input_hex": "99b8d7f61534537291b0cfee0d2c4b6a89a8c7e60524436281a0bfdefd1c3b5a",
-      "expected_hex": "91142ec8e2340bcb849f85b4a6033d7a51eb67a21557136f2b32af5e8636b2a5",
-      "out_len": 32
+      "desc": "DRBG: 'P@ssw0rd' entropy, no nonce, 32 bytes",
+      "entropy_hex": "5040737377307264",
+      "nonce_hex": "",
+      "personalization_hex": "",
+      "out_len": 32,
+      "expected_hex": "16287120d97983fe261742beb7102f77c1d4c1e6e148d2e1be8f7aa502e17553"
     },
     {
-      "desc": "HMAC-DRBG-SHA256 test 10",
-      "entropy_hex": "aac9e80726456483a2c1e0ff1e3d5c7b9ab9d8f71635547392b1d0ef0e2d4c6b",
-      "input_hex": "aac9e80726456483a2c1e0ff1e3d5c7b9ab9d8f71635547392b1d0ef0e2d4c6b",
-      "expected_hex": "d69d2cbf77551887efbea7e5dfde6bbd8cf00fe351f5b3908c875ec4f9f3f9f2",
-      "out_len": 32
+      "desc": "DRBG: 16-byte entropy, 8-byte nonce, 32 bytes",
+      "entropy_hex": "00112233445566778899aabbccddeeff",
+      "nonce_hex": "0102030405060708",
+      "personalization_hex": "",
+      "out_len": 32,
+      "expected_hex": "8eff84a740275e0065c418e1c8c41eefde3c3a4031c3bb09e97cb8a91b25434d"
     },
     {
-      "desc": "HMAC-DRBG-SHA256 test 11",
-      "entropy_hex": "bbdaf91837567594b3d2f1102f4e6d8cabcae90827466584a3c2e1001f3e5d7c",
-      "input_hex": "bbdaf91837567594b3d2f1102f4e6d8cabcae90827466584a3c2e1001f3e5d7c",
-      "expected_hex": "8237534f2ae96ef03367b4306ae6457f176ad19d2443aa3d1ad671cedb3adc6e",
-      "out_len": 32
+      "desc": "DRBG: 16-byte entropy, no nonce, 32 bytes (v2)",
+      "entropy_hex": "ffeeddccbbaa99887766554433221100",
+      "nonce_hex": "",
+      "personalization_hex": "",
+      "out_len": 32,
+      "expected_hex": "16583775ae55d82ed68e3ddd097eabbb82aa8784afdf889683526fb19f451a5c"
     },
     {
-      "desc": "HMAC-DRBG-SHA256 test 12",
-      "entropy_hex": "cceb0a29486786a5c4e30221405f7e9dbcdbfa1938577695b4d3f211304f6e8d",
-      "input_hex": "cceb0a29486786a5c4e30221405f7e9dbcdbfa1938577695b4d3f211304f6e8d",
-      "expected_hex": "418c732cd8c7fb8bc07a116878a93c99fb48dc8d8c86e7d2990a177bbf3c02f9",
-      "out_len": 32
+      "desc": "DRBG: 16-byte entropy, no nonce, 48 bytes",
+      "entropy_hex": "00112233445566778899aabbccddeeff",
+      "nonce_hex": "",
+      "personalization_hex": "",
+      "out_len": 48,
+      "expected_hex": "260695f4b8960d0b274ea29e8d2b5a35a1f27c13cd151badb54f0591eec485dd1f5219ff6afd615af7b8bd49b2bbce8c"
     },
     {
-      "desc": "HMAC-DRBG-SHA256 test 13",
-      "entropy_hex": "ddfc1b3a597897b6d5f4133251708faecdec0b2a496887a6c5e4032241607f9e",
-      "input_hex": "ddfc1b3a597897b6d5f4133251708faecdec0b2a496887a6c5e4032241607f9e",
-      "expected_hex": "255aae26b57027047bbff5c3b6206a242eb8e9fd4a2e1fb822997b53aa6136a9",
-      "out_len": 32
+      "desc": "DRBG: 16-byte entropy, no nonce, 24 bytes",
+      "entropy_hex": "00112233445566778899aabbccddeeff",
+      "nonce_hex": "",
+      "personalization_hex": "",
+      "out_len": 24,
+      "expected_hex": "260695f4b8960d0b274ea29e8d2b5a35a1f27c13cd151bad"
     },
     {
-      "desc": "HMAC-DRBG-SHA256 test 14",
-      "entropy_hex": "ee0d2c4b6a89a8c7e60524436281a0bfdefd1c3b5a7998b7d6f51433527190af",
-      "input_hex": "ee0d2c4b6a89a8c7e60524436281a0bfdefd1c3b5a7998b7d6f51433527190af",
-      "expected_hex": "aefedb4b64ba9d44d653f7716e4d7ebbdcf7993b441c741dd769ba9874d162ab",
-      "out_len": 32
+      "desc": "DRBG: binary entropy 0..15, 32 bytes",
+      "entropy_hex": "000102030405060708090a0b0c0d0e0f",
+      "nonce_hex": "",
+      "personalization_hex": "",
+      "out_len": 32,
+      "expected_hex": "099427d6192f1b0ab5a1312edf280eef0753776a581062952ce07a737f79ae45"
     },
     {
-      "desc": "HMAC-DRBG-SHA256 test 15",
-      "entropy_hex": "ff1e3d5c7b9ab9d8f71635547392b1d0ef0e2d4c6b8aa9c8e70625446382a1c0",
-      "input_hex": "ff1e3d5c7b9ab9d8f71635547392b1d0ef0e2d4c6b8aa9c8e70625446382a1c0",
-      "expected_hex": "5de2f0ff39ab77946c095f829b15042e090ae0e1fc95e865cf03662908c433f4",
-      "out_len": 32
+      "desc": "DRBG: 32-byte entropy (binary), 32 bytes",
+      "entropy_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "nonce_hex": "",
+      "personalization_hex": "",
+      "out_len": 32,
+      "expected_hex": "3226437dd9f98b17591aad731383303213439f64d029a5764e84e36256ddeb79"
     },
     {
-      "desc": "HMAC-DRBG-SHA256 test 16",
-      "entropy_hex": "102f4e6d8cabcae90827466584a3c2e1001f3e5d7c9bbad9f81736557493b2d1",
-      "input_hex": "102f4e6d8cabcae90827466584a3c2e1001f3e5d7c9bbad9f81736557493b2d1",
-      "expected_hex": "2bf3ae513acca39acab03a645f06c3123f41f0207a58918a978120aa94b098bb",
-      "out_len": 32
+      "desc": "DRBG: 8-byte entropy v2, 32 bytes",
+      "entropy_hex": "deadbeefcafebabe",
+      "nonce_hex": "",
+      "personalization_hex": "",
+      "out_len": 32,
+      "expected_hex": "72caa9dff87036a62c1ba60bd1382384f8c3099a8ca978c47cbbb274303735fc"
     },
     {
-      "desc": "HMAC-DRBG-SHA256 test 17",
-      "entropy_hex": "21405f7e9dbcdbfa1938577695b4d3f211304f6e8daccbea0928476685a4c3e2",
-      "input_hex": "21405f7e9dbcdbfa1938577695b4d3f211304f6e8daccbea0928476685a4c3e2",
-      "expected_hex": "9290b29cf2e321ea1436eba2a575bd188ebe779ad0ba3261b06788d6da671843",
-      "out_len": 32
+      "desc": "DRBG: 4-byte entropy, 4-byte nonce, 32 bytes",
+      "entropy_hex": "11223344",
+      "nonce_hex": "55667788",
+      "personalization_hex": "",
+      "out_len": 32,
+      "expected_hex": "65edb278decc86093e75869c30338b15ccd0ab03f2f6003d03d1f62fd5839970"
     },
     {
-      "desc": "HMAC-DRBG-SHA256 test 18",
-      "entropy_hex": "3251708faecdec0b2a496887a6c5e4032241607f9ebddcfb1a39587796b5d4f3",
-      "input_hex": "3251708faecdec0b2a496887a6c5e4032241607f9ebddcfb1a39587796b5d4f3",
-      "expected_hex": "651372511ad02b6fdcd12601813492406ed47db880d9671c4c70ec6538ad2584",
-      "out_len": 32
+      "desc": "DRBG: 8-byte entropy, no nonce, 80 bytes",
+      "entropy_hex": "1122334455667788",
+      "nonce_hex": "",
+      "personalization_hex": "",
+      "out_len": 80,
+      "expected_hex": "65edb278decc86093e75869c30338b15ccd0ab03f2f6003d03d1f62fd58399700491adcff303f34bf09d364b404165e143ddcef57fc27a36cff7106787bb14c961abf5cb7da5c218cb3ebaa7b2747c47"
     },
     {
-      "desc": "HMAC-DRBG-SHA256 test 19",
-      "entropy_hex": "436281a0bfdefd1c3b5a7998b7d6f51433527190afceed0c2b4a6988a7c6e504",
-      "input_hex": "436281a0bfdefd1c3b5a7998b7d6f51433527190afceed0c2b4a6988a7c6e504",
-      "expected_hex": "d45b73c587a08c97593133d96401e02991fda3065fbc2f455b41934f59370b13",
-      "out_len": 32
+      "desc": "DRBG: 16-byte entropy, no nonce, 96 bytes",
+      "entropy_hex": "aabbccddeeff00112233445566778899",
+      "nonce_hex": "",
+      "personalization_hex": "",
+      "out_len": 96,
+      "expected_hex": "5c059d44042658b9c502dce72ffa6d59493dd7bbc0bf6925e3665e22b69b8a0c7c1bde8bd6ca3f7dc031ca6869d4a8ce01edfb71ee5852c8386d06e4585203c2de8df8d3b749de82f5e594225275e7c816ef7e6112386284d39df4c7b5e35c62"
     }
   ]
 }

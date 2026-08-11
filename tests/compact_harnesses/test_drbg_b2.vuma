@@ -1,43 +1,30 @@
 // drbg batch 2 (vector 2)
+// DRBG: 16-byte entropy, no nonce, 32 bytes
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, hmac_sha256};
 import "/home/z/my-project/workdir/vuma/womb/crypto/drbg/drbg.vuma"::{DrbgCtx, DrbgData, DrbgOut, drbg_init, drbg_generate};
 
 transform main() -> i32 {
     let drbg = state_new(DrbgCtx);
     let entropy = state_new(DrbgData);
+    let nonce = state_new(DrbgData);
     let out = state_new(DrbgOut);
-    entropy.bytes[0] = 34;
-    entropy.bytes[1] = 65;
-    entropy.bytes[2] = 96;
-    entropy.bytes[3] = 127;
-    entropy.bytes[4] = 158;
-    entropy.bytes[5] = 189;
-    entropy.bytes[6] = 220;
-    entropy.bytes[7] = 251;
-    entropy.bytes[8] = 26;
-    entropy.bytes[9] = 57;
-    entropy.bytes[10] = 88;
-    entropy.bytes[11] = 119;
-    entropy.bytes[12] = 150;
-    entropy.bytes[13] = 181;
-    entropy.bytes[14] = 212;
-    entropy.bytes[15] = 243;
-    entropy.bytes[16] = 18;
-    entropy.bytes[17] = 49;
-    entropy.bytes[18] = 80;
-    entropy.bytes[19] = 111;
-    entropy.bytes[20] = 142;
-    entropy.bytes[21] = 173;
-    entropy.bytes[22] = 204;
-    entropy.bytes[23] = 235;
-    entropy.bytes[24] = 10;
-    entropy.bytes[25] = 41;
-    entropy.bytes[26] = 72;
-    entropy.bytes[27] = 103;
-    entropy.bytes[28] = 134;
-    entropy.bytes[29] = 165;
-    entropy.bytes[30] = 196;
-    entropy.bytes[31] = 227;
-    drbg_init(drbg, entropy, 32, entropy, 0);
+    entropy.bytes[0] = 0;
+    entropy.bytes[1] = 17;
+    entropy.bytes[2] = 34;
+    entropy.bytes[3] = 51;
+    entropy.bytes[4] = 68;
+    entropy.bytes[5] = 85;
+    entropy.bytes[6] = 102;
+    entropy.bytes[7] = 119;
+    entropy.bytes[8] = 136;
+    entropy.bytes[9] = 153;
+    entropy.bytes[10] = 170;
+    entropy.bytes[11] = 187;
+    entropy.bytes[12] = 204;
+    entropy.bytes[13] = 221;
+    entropy.bytes[14] = 238;
+    entropy.bytes[15] = 255;
+    drbg_init(drbg, entropy, 16, nonce, 0);
     drbg_generate(drbg, out, 32);
     let oi: u32 = 0;
     while oi < 32 {

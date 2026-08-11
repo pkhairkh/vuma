@@ -1,43 +1,30 @@
 // drbg batch 11 (vector 11)
+// DRBG: 16-byte entropy, no nonce, 32 bytes (v2)
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, hmac_sha256};
 import "/home/z/my-project/workdir/vuma/womb/crypto/drbg/drbg.vuma"::{DrbgCtx, DrbgData, DrbgOut, drbg_init, drbg_generate};
 
 transform main() -> i32 {
     let drbg = state_new(DrbgCtx);
     let entropy = state_new(DrbgData);
+    let nonce = state_new(DrbgData);
     let out = state_new(DrbgOut);
-    entropy.bytes[0] = 187;
-    entropy.bytes[1] = 218;
-    entropy.bytes[2] = 249;
-    entropy.bytes[3] = 24;
-    entropy.bytes[4] = 55;
-    entropy.bytes[5] = 86;
-    entropy.bytes[6] = 117;
-    entropy.bytes[7] = 148;
-    entropy.bytes[8] = 179;
-    entropy.bytes[9] = 210;
-    entropy.bytes[10] = 241;
-    entropy.bytes[11] = 16;
-    entropy.bytes[12] = 47;
-    entropy.bytes[13] = 78;
-    entropy.bytes[14] = 109;
-    entropy.bytes[15] = 140;
-    entropy.bytes[16] = 171;
-    entropy.bytes[17] = 202;
-    entropy.bytes[18] = 233;
-    entropy.bytes[19] = 8;
-    entropy.bytes[20] = 39;
-    entropy.bytes[21] = 70;
-    entropy.bytes[22] = 101;
-    entropy.bytes[23] = 132;
-    entropy.bytes[24] = 163;
-    entropy.bytes[25] = 194;
-    entropy.bytes[26] = 225;
-    entropy.bytes[27] = 0;
-    entropy.bytes[28] = 31;
-    entropy.bytes[29] = 62;
-    entropy.bytes[30] = 93;
-    entropy.bytes[31] = 124;
-    drbg_init(drbg, entropy, 32, entropy, 0);
+    entropy.bytes[0] = 255;
+    entropy.bytes[1] = 238;
+    entropy.bytes[2] = 221;
+    entropy.bytes[3] = 204;
+    entropy.bytes[4] = 187;
+    entropy.bytes[5] = 170;
+    entropy.bytes[6] = 153;
+    entropy.bytes[7] = 136;
+    entropy.bytes[8] = 119;
+    entropy.bytes[9] = 102;
+    entropy.bytes[10] = 85;
+    entropy.bytes[11] = 68;
+    entropy.bytes[12] = 51;
+    entropy.bytes[13] = 34;
+    entropy.bytes[14] = 17;
+    entropy.bytes[15] = 0;
+    drbg_init(drbg, entropy, 16, nonce, 0);
     drbg_generate(drbg, out, 32);
     let oi: u32 = 0;
     while oi < 32 {

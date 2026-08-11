@@ -1,43 +1,22 @@
 // drbg batch 8 (vector 8)
+// DRBG: 'a'*8 entropy, no nonce, 32 bytes
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, hmac_sha256};
 import "/home/z/my-project/workdir/vuma/womb/crypto/drbg/drbg.vuma"::{DrbgCtx, DrbgData, DrbgOut, drbg_init, drbg_generate};
 
 transform main() -> i32 {
     let drbg = state_new(DrbgCtx);
     let entropy = state_new(DrbgData);
+    let nonce = state_new(DrbgData);
     let out = state_new(DrbgOut);
-    entropy.bytes[0] = 136;
-    entropy.bytes[1] = 167;
-    entropy.bytes[2] = 198;
-    entropy.bytes[3] = 229;
-    entropy.bytes[4] = 4;
-    entropy.bytes[5] = 35;
-    entropy.bytes[6] = 66;
+    entropy.bytes[0] = 97;
+    entropy.bytes[1] = 97;
+    entropy.bytes[2] = 97;
+    entropy.bytes[3] = 97;
+    entropy.bytes[4] = 97;
+    entropy.bytes[5] = 97;
+    entropy.bytes[6] = 97;
     entropy.bytes[7] = 97;
-    entropy.bytes[8] = 128;
-    entropy.bytes[9] = 159;
-    entropy.bytes[10] = 190;
-    entropy.bytes[11] = 221;
-    entropy.bytes[12] = 252;
-    entropy.bytes[13] = 27;
-    entropy.bytes[14] = 58;
-    entropy.bytes[15] = 89;
-    entropy.bytes[16] = 120;
-    entropy.bytes[17] = 151;
-    entropy.bytes[18] = 182;
-    entropy.bytes[19] = 213;
-    entropy.bytes[20] = 244;
-    entropy.bytes[21] = 19;
-    entropy.bytes[22] = 50;
-    entropy.bytes[23] = 81;
-    entropy.bytes[24] = 112;
-    entropy.bytes[25] = 143;
-    entropy.bytes[26] = 174;
-    entropy.bytes[27] = 205;
-    entropy.bytes[28] = 236;
-    entropy.bytes[29] = 11;
-    entropy.bytes[30] = 42;
-    entropy.bytes[31] = 73;
-    drbg_init(drbg, entropy, 32, entropy, 0);
+    drbg_init(drbg, entropy, 8, nonce, 0);
     drbg_generate(drbg, out, 32);
     let oi: u32 = 0;
     while oi < 32 {
