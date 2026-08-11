@@ -1,0 +1,85 @@
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha384.vuma"::{Sha384Ctx, Sha384Data, Sha384Digest, sha384_init, sha384_update, sha384_final};
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, HmacBuf, hmac_sha512, hmac_sha512_hash};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ecdsa_p384.vuma"::{B48, B256, Bn384Ctx, ecdsa_p384_sign};
+
+transform main() -> i32 {
+    let msg = state_new(B256);
+    let privkey = state_new(B48);
+    let r_out = state_new(B48);
+    let s_out = state_new(B48);
+    msg.bytes[0] = 101;
+    msg.bytes[1] = 99;
+    msg.bytes[2] = 100;
+    msg.bytes[3] = 115;
+    msg.bytes[4] = 97;
+    msg.bytes[5] = 32;
+    msg.bytes[6] = 116;
+    msg.bytes[7] = 101;
+    msg.bytes[8] = 115;
+    msg.bytes[9] = 116;
+    msg.bytes[10] = 32;
+    msg.bytes[11] = 49;
+    msg.bytes[12] = 54;
+    privkey.bytes[0] = 49;
+    privkey.bytes[1] = 66;
+    privkey.bytes[2] = 45;
+    privkey.bytes[3] = 242;
+    privkey.bytes[4] = 220;
+    privkey.bytes[5] = 90;
+    privkey.bytes[6] = 124;
+    privkey.bytes[7] = 203;
+    privkey.bytes[8] = 64;
+    privkey.bytes[9] = 96;
+    privkey.bytes[10] = 8;
+    privkey.bytes[11] = 95;
+    privkey.bytes[12] = 122;
+    privkey.bytes[13] = 162;
+    privkey.bytes[14] = 23;
+    privkey.bytes[15] = 105;
+    privkey.bytes[16] = 236;
+    privkey.bytes[17] = 76;
+    privkey.bytes[18] = 34;
+    privkey.bytes[19] = 133;
+    privkey.bytes[20] = 84;
+    privkey.bytes[21] = 236;
+    privkey.bytes[22] = 249;
+    privkey.bytes[23] = 231;
+    privkey.bytes[24] = 143;
+    privkey.bytes[25] = 107;
+    privkey.bytes[26] = 231;
+    privkey.bytes[27] = 156;
+    privkey.bytes[28] = 129;
+    privkey.bytes[29] = 97;
+    privkey.bytes[30] = 89;
+    privkey.bytes[31] = 78;
+    privkey.bytes[32] = 37;
+    privkey.bytes[33] = 185;
+    privkey.bytes[34] = 65;
+    privkey.bytes[35] = 172;
+    privkey.bytes[36] = 32;
+    privkey.bytes[37] = 225;
+    privkey.bytes[38] = 25;
+    privkey.bytes[39] = 132;
+    privkey.bytes[40] = 0;
+    privkey.bytes[41] = 72;
+    privkey.bytes[42] = 102;
+    privkey.bytes[43] = 153;
+    privkey.bytes[44] = 197;
+    privkey.bytes[45] = 58;
+    privkey.bytes[46] = 3;
+    privkey.bytes[47] = 87;
+    ecdsa_p384_sign(msg, 13, privkey, r_out, s_out);
+    let oi: u32 = 0;
+    while oi < 48 {
+        print_int(1000 + (r_out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    let oi: u32 = 0;
+    while oi < 48 {
+        print_int(1000 + (s_out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

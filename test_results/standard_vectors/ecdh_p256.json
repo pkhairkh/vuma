@@ -9,7 +9,8 @@
       "bob_priv_hex": "22089ec832e658be2dcb00ae036c2126d153db7a6edb100177a9387aad0f37e4",
       "bob_pub_x_hex": "f6e8be91befd8caf6aa0f983664f79bb0862a3b304fa689cb7cc26c07258c972",
       "bob_pub_y_hex": "84eab68296a572ba52a7e7056f8e8aedff58250d45783f8a0e668bc0e12c9711",
-      "shared_hex": "1642677df94cf418c22bc6073b9a0f3de6f9c62585cdae1b3c400d36533b14f9"
+      "shared_hex": "1642677df94cf418c22bc6073b9a0f3de6f9c62585cdae1b3c400d36533b14f9",
+      "expected_hex": "1642677df94cf418c22bc6073b9a0f3de6f9c62585cdae1b3c400d36533b14f9"
     },
     {
       "desc": "ecdh_p256 key agreement 1",
@@ -19,7 +20,8 @@
       "bob_priv_hex": "df031a89ef3a26c42af104c79c62d8f4a118aeb7999aa11750dbf15e99736ea5",
       "bob_pub_x_hex": "6fb9f2a44c500416c582af41749296c79368594159cca15a62cfa0a09f19cd3a",
       "bob_pub_y_hex": "cc8425122d13b0335520ead6aaad0b987acb59b9cf543d4c26ada648e9eb2b93",
-      "shared_hex": "b76fa3e442fb558187734694868d9ec5067581ba1d7f63b3cf708bcf77e705f1"
+      "shared_hex": "b76fa3e442fb558187734694868d9ec5067581ba1d7f63b3cf708bcf77e705f1",
+      "expected_hex": "b76fa3e442fb558187734694868d9ec5067581ba1d7f63b3cf708bcf77e705f1"
     },
     {
       "desc": "ecdh_p256 key agreement 2",
@@ -29,7 +31,8 @@
       "bob_priv_hex": "cedfec497a09b4b0f333f784d443680db7f33ad0001114ab5d74cd2daa324da0",
       "bob_pub_x_hex": "c9a1488e76373ee2a9362d4aaa5e99fa23e049b74f8e651fe584269b62549d68",
       "bob_pub_y_hex": "97b2e7fc15ed6ed34ac03ad31a2d94400470aae02b189181de08485b33c23e19",
-      "shared_hex": "560140417a8d9141125f4fca2d1609057b5391f98de6cca3a0af288a959ca034"
+      "shared_hex": "560140417a8d9141125f4fca2d1609057b5391f98de6cca3a0af288a959ca034",
+      "expected_hex": "560140417a8d9141125f4fca2d1609057b5391f98de6cca3a0af288a959ca034"
     },
     {
       "desc": "ecdh_p256 key agreement 3",
@@ -39,7 +42,8 @@
       "bob_priv_hex": "ed43452b9ee29ad078bf185e858c818e185c4eabc0e036d564e96337fe1650c2",
       "bob_pub_x_hex": "be69f75cd62e5410eba45802bae78d4f8e35b51a251e863618d05c75f8cb80f",
       "bob_pub_y_hex": "152d63818678a23ed941ce5ed17e1c34568eda42ffbf8a2e14aeee878f228621",
-      "shared_hex": "aed8ff3b2082c696dfdf8070ef2569905a14f7ef9730ca0f0c5bf84405c8cfa6"
+      "shared_hex": "aed8ff3b2082c696dfdf8070ef2569905a14f7ef9730ca0f0c5bf84405c8cfa6",
+      "expected_hex": "aed8ff3b2082c696dfdf8070ef2569905a14f7ef9730ca0f0c5bf84405c8cfa6"
     },
     {
       "desc": "ecdh_p256 key agreement 4",
@@ -49,7 +53,8 @@
       "bob_priv_hex": "5294d04de4a0db80b35c3d52f362ce0f4ebba1bbf23b873f49d5875736c75b55",
       "bob_pub_x_hex": "c56324eb07c7e7618e15da0355a914150a1a6d1d6a262dd60caf0f6c1bc1e0d5",
       "bob_pub_y_hex": "f39bf833a8373403e20be76bb541ad738e766c9da9e8745b5f580df1eed2be39",
-      "shared_hex": "47533e1f623a520869063cd999edb033c3984d01386085c218440046a886442a"
+      "shared_hex": "47533e1f623a520869063cd999edb033c3984d01386085c218440046a886442a",
+      "expected_hex": "47533e1f623a520869063cd999edb033c3984d01386085c218440046a886442a"
     },
     {
       "desc": "ecdh_p256 key agreement 5",
@@ -59,7 +64,8 @@
       "bob_priv_hex": "7238b37f974f60a149e63bc590ba7954ef66da3399b085dc48b6f4ab0ce45398",
       "bob_pub_x_hex": "730eadd5e91a9652c3d0a69912fb431802905e0656d3bded9a72bee869036d26",
       "bob_pub_y_hex": "d43b3ec2f293eed90f9bbcd1407887820d3e786a4580a345804abf4b33545ce1",
-      "shared_hex": "c787803b70d183e0347fc304cd5131fd36d979c43d3008a9972b359e9eda7000"
+      "shared_hex": "c787803b70d183e0347fc304cd5131fd36d979c43d3008a9972b359e9eda7000",
+      "expected_hex": "c787803b70d183e0347fc304cd5131fd36d979c43d3008a9972b359e9eda7000"
     },
     {
       "desc": "ecdh_p256 key agreement 6",
@@ -69,7 +75,8 @@
       "bob_priv_hex": "b06a56794ad30dbbd2d30a22683bad7c8f13e2c5b91daeeba1f4f3daf8e72789",
       "bob_pub_x_hex": "712f97a46b1cb977217a01b07254524d0a067f5e9e56bf1fb6f315dc8c2f145c",
       "bob_pub_y_hex": "9b7a346ea8bf712ed4b28c5c894d5c8c16e5b9a4d27465e056ffb04fc998ac61",
-      "shared_hex": "f941e71596f6a50a6fcd950b61309abc97c8fafbbfe7281a049a78b958dde37e"
+      "shared_hex": "f941e71596f6a50a6fcd950b61309abc97c8fafbbfe7281a049a78b958dde37e",
+      "expected_hex": "f941e71596f6a50a6fcd950b61309abc97c8fafbbfe7281a049a78b958dde37e"
     },
     {
       "desc": "ecdh_p256 key agreement 7",
@@ -79,7 +86,8 @@
       "bob_priv_hex": "6cd0636f69b251054b3245ecdbcc45fd0e0298cf378f770bef07e0513dbca795",
       "bob_pub_x_hex": "1d1a367506d1d10ea123bc37339babe95343551359799398a3f02f6618363e2c",
       "bob_pub_y_hex": "226d70e97286f8da09ac6eb4d1811f7af9facfb45a524abf1db2af5acb24df87",
-      "shared_hex": "6270b6f3ddbf2a2ad1f3fdb228f6f14864494590a5cac21dbd6bbc9ebcbeb47b"
+      "shared_hex": "6270b6f3ddbf2a2ad1f3fdb228f6f14864494590a5cac21dbd6bbc9ebcbeb47b",
+      "expected_hex": "6270b6f3ddbf2a2ad1f3fdb228f6f14864494590a5cac21dbd6bbc9ebcbeb47b"
     },
     {
       "desc": "ecdh_p256 key agreement 8",
@@ -89,7 +97,8 @@
       "bob_priv_hex": "895678f50abb8672efeca1e3096d11eb1234b6f83313860295ed34b5efa5958d",
       "bob_pub_x_hex": "d60eb18758951d8764d33f0daf7de6b1a801bff766c8349d30e78f3d8abfe93f",
       "bob_pub_y_hex": "2ba7f527b587dc295526921dc3d434467df5999ef477be02247b006038e48733",
-      "shared_hex": "232f7ced9c58e6642cd281f1cf034c8cd35966a6bf05362661d1ec278fd4674c"
+      "shared_hex": "232f7ced9c58e6642cd281f1cf034c8cd35966a6bf05362661d1ec278fd4674c",
+      "expected_hex": "232f7ced9c58e6642cd281f1cf034c8cd35966a6bf05362661d1ec278fd4674c"
     },
     {
       "desc": "ecdh_p256 key agreement 9",
@@ -99,7 +108,8 @@
       "bob_priv_hex": "c2188298ad850a28d91ba81053749fd48d03b3e45086df240e9979ab2094fab7",
       "bob_pub_x_hex": "d7d4170492e1caafa6b53bad7ec64cb46be9b59815a07c39d2310b4c63fe8f23",
       "bob_pub_y_hex": "a0268927b282bef234c585041ecbcd45eaf793120cc97cbb664e266912804c33",
-      "shared_hex": "f3d30793c821d8ce2596647ab229a9c07b3e9120039de8e90842eb4a80b1b358"
+      "shared_hex": "f3d30793c821d8ce2596647ab229a9c07b3e9120039de8e90842eb4a80b1b358",
+      "expected_hex": "f3d30793c821d8ce2596647ab229a9c07b3e9120039de8e90842eb4a80b1b358"
     },
     {
       "desc": "ecdh_p256 key agreement 10",
@@ -109,7 +119,8 @@
       "bob_priv_hex": "40a3b068d93b373a413834b0c4decc360ed54fa306c78915c105989f10f38672",
       "bob_pub_x_hex": "2bd8b35acdaa213a831636a0b4cd4cd74326247f3c310f2487ea632196fd6328",
       "bob_pub_y_hex": "b9633529260343d6d6b2b62189433cd70d6663e85298465abd94cb82dbd29fc",
-      "shared_hex": "169b74921264385fc44d4eef866021912c7ac8e0ea7bdc523d5547a9628ba990"
+      "shared_hex": "169b74921264385fc44d4eef866021912c7ac8e0ea7bdc523d5547a9628ba990",
+      "expected_hex": "169b74921264385fc44d4eef866021912c7ac8e0ea7bdc523d5547a9628ba990"
     },
     {
       "desc": "ecdh_p256 key agreement 11",
@@ -119,7 +130,8 @@
       "bob_priv_hex": "737a190d4f677f76e58dccbd539fde2fd11c744b71af9cb15522615eab1d9d8a",
       "bob_pub_x_hex": "4ad854f7fda9504475f1efb3aa90e459ab70269ab1006f033a1d11f107b17350",
       "bob_pub_y_hex": "1d683156c1270cc3947b844e3752ea92709472d4e715a48a1a42b48aba0417d4",
-      "shared_hex": "0efa0d80d31e8220165c62fbe26459b7b9ca376589c0a44ffddb58e67632906c"
+      "shared_hex": "0efa0d80d31e8220165c62fbe26459b7b9ca376589c0a44ffddb58e67632906c",
+      "expected_hex": "0efa0d80d31e8220165c62fbe26459b7b9ca376589c0a44ffddb58e67632906c"
     },
     {
       "desc": "ecdh_p256 key agreement 12",
@@ -129,7 +141,8 @@
       "bob_priv_hex": "ea2e5e565fc0f0fbf19b63acc04a69a17b2a5f3363590173a999a30b44b8bfaa",
       "bob_pub_x_hex": "6a70f3782c250ff97d3403539d8f1880168ca921324bef42cc63b2c09871fb3c",
       "bob_pub_y_hex": "2b3d23230e4883b8b99e06b842d903ce931187339f6366d45cc649c2e43de5ad",
-      "shared_hex": "49d0f63905c96103592dc3e003680327a0c5f596fb4b2cd224d30b95e7bb227b"
+      "shared_hex": "49d0f63905c96103592dc3e003680327a0c5f596fb4b2cd224d30b95e7bb227b",
+      "expected_hex": "49d0f63905c96103592dc3e003680327a0c5f596fb4b2cd224d30b95e7bb227b"
     },
     {
       "desc": "ecdh_p256 key agreement 13",
@@ -139,7 +152,8 @@
       "bob_priv_hex": "dc476e482aeaf012920ac814dbc98e0e7f1c7e3bcb863cb92421184ae0c123cc",
       "bob_pub_x_hex": "120c83b5b9610d00123c741b07cbb26488071e588c3e3156aa5de93bb4407cef",
       "bob_pub_y_hex": "8d1aebe3c39b05b7ce6935c1e0c568d4a17e0c5b74d3d0076ea805443d187310",
-      "shared_hex": "66bd7df7981e4ab1122a05b572d729e957d693054779d821e32c859e233ca072"
+      "shared_hex": "66bd7df7981e4ab1122a05b572d729e957d693054779d821e32c859e233ca072",
+      "expected_hex": "66bd7df7981e4ab1122a05b572d729e957d693054779d821e32c859e233ca072"
     },
     {
       "desc": "ecdh_p256 key agreement 14",
@@ -149,7 +163,8 @@
       "bob_priv_hex": "cfedd03752b7cee99921fbc2f983f0c7a8f8150a043c44a1f5b5c1bd41b8f4fd",
       "bob_pub_x_hex": "7b89a6b0bd612df8963dbc29b919a366e08f2373b6e7d1cd40e3a9dddfa60e40",
       "bob_pub_y_hex": "78adafc9200fb25cb0595883e94914c4a330cb64226a788ecc4aa83199356864",
-      "shared_hex": "f0b833257ca03c3583de40fa79ad3f3b053f776bbefe6d47e958900ebae074cc"
+      "shared_hex": "f0b833257ca03c3583de40fa79ad3f3b053f776bbefe6d47e958900ebae074cc",
+      "expected_hex": "f0b833257ca03c3583de40fa79ad3f3b053f776bbefe6d47e958900ebae074cc"
     },
     {
       "desc": "ecdh_p256 key agreement 15",
@@ -159,7 +174,8 @@
       "bob_priv_hex": "e8d716b9952d7d3337a65c4d8c4cc199dedec68670b463b26b20c4b8dd987882",
       "bob_pub_x_hex": "55f2c79f1323c578d3ac85423b2b483d794d3dfa6dda1d21138fa2ba7189cee5",
       "bob_pub_y_hex": "45fda90df604bebc5e5c755b64c8b34b670aa9c9d69471477938dcb69e88e06d",
-      "shared_hex": "36822b41cf0fe3a9b0c6b5e810be726cba22bcc45cb1b9736c2d086b75ab83ba"
+      "shared_hex": "36822b41cf0fe3a9b0c6b5e810be726cba22bcc45cb1b9736c2d086b75ab83ba",
+      "expected_hex": "36822b41cf0fe3a9b0c6b5e810be726cba22bcc45cb1b9736c2d086b75ab83ba"
     },
     {
       "desc": "ecdh_p256 key agreement 16",
@@ -169,7 +185,8 @@
       "bob_priv_hex": "1f6b3fcd2ff3ee47edc3ab08509b61feb5302a1bf9407da184dd4fb7da96b4f3",
       "bob_pub_x_hex": "d06ee09342a6be6120dff07c421d19cc849307be5c0c59b36f3ad3c61bba40d3",
       "bob_pub_y_hex": "f4e7c9801417c9a7d573dcbe6dc4a274f276e674c46532fae55858e9a51e90fa",
-      "shared_hex": "ecf69ac58065057a11936673a636934c1d1b9a49dee5d47467e144aa360e19e8"
+      "shared_hex": "ecf69ac58065057a11936673a636934c1d1b9a49dee5d47467e144aa360e19e8",
+      "expected_hex": "ecf69ac58065057a11936673a636934c1d1b9a49dee5d47467e144aa360e19e8"
     },
     {
       "desc": "ecdh_p256 key agreement 17",
@@ -179,7 +196,8 @@
       "bob_priv_hex": "60b98a736ffc4b83938d72e3b9534ac66359c309530a98ef8b865c0930e1f404",
       "bob_pub_x_hex": "497159cf5107d7bffdb4b9147c5bcec08d592366f8ad690e1e75a045eca23cd7",
       "bob_pub_y_hex": "60718010f944d163ab4b17028decc51acd916563fe8716eb17ed36ab8d13adc7",
-      "shared_hex": "dc8fb1f31841b99a413a7b72a0c4dd7622f77214d440776dc09fb4d6f81678d8"
+      "shared_hex": "dc8fb1f31841b99a413a7b72a0c4dd7622f77214d440776dc09fb4d6f81678d8",
+      "expected_hex": "dc8fb1f31841b99a413a7b72a0c4dd7622f77214d440776dc09fb4d6f81678d8"
     },
     {
       "desc": "ecdh_p256 key agreement 18",
@@ -189,7 +207,8 @@
       "bob_priv_hex": "4dea54ebe358787adfbfc7ecb0fc953e6878332611f03d8d02c1ec99ea8bd2c",
       "bob_pub_x_hex": "383a154eb0d1d0643f7e18e3e1e3eb9145929ded4e7bb1b20be0d91e5be77ab3",
       "bob_pub_y_hex": "1f43837f0d3155f1632d9d98155ec8860c274bd7a2d74e42b9191bf21817b273",
-      "shared_hex": "10321c2737111407af7fa9cbfd29134a3330d891afdf3de7921e28c63ffe2b83"
+      "shared_hex": "10321c2737111407af7fa9cbfd29134a3330d891afdf3de7921e28c63ffe2b83",
+      "expected_hex": "10321c2737111407af7fa9cbfd29134a3330d891afdf3de7921e28c63ffe2b83"
     },
     {
       "desc": "ecdh_p256 key agreement 19",
@@ -199,7 +218,8 @@
       "bob_priv_hex": "d6b3f52904be8f8f39ee27529985345b35baf3a8c41ab5b72eb125b346907225",
       "bob_pub_x_hex": "10c42cc73672be9d4a1b0629419673dea6aa4ec31d56be460224b168049de5b6",
       "bob_pub_y_hex": "768a450451d2d9c083b8fa4a6e9e792d37975841fdc0f3d10c2b8d7dd90cfb8f",
-      "shared_hex": "77d1a3e6a7296ac963a5b85e71255d2d2a4cb81fdba5993956e4740545059762"
+      "shared_hex": "77d1a3e6a7296ac963a5b85e71255d2d2a4cb81fdba5993956e4740545059762",
+      "expected_hex": "77d1a3e6a7296ac963a5b85e71255d2d2a4cb81fdba5993956e4740545059762"
     }
   ]
 }

@@ -1,0 +1,73 @@
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_mod_add, bn256_mod_inv, bn256_mod_mul, bn256_mod_sub, bn256_mod_exp, bn256_set_u32, bn256_copy, bn256_zero, bn256_add, bn256_sub, bn256_cmp, bn256_bitlen, bn256_get_bit, bn256_mont_mul, bn256_mont_mu, bn256_mont_r2, bn256_mod_inv_fermat, bn256_rshift1, bn256_is_zero};
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha256_sha224.vuma"::{Sha256Ctx, Sha256Data, Sha256Digest, sha256_init, sha256_update, sha256_final};
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, HmacBuf, hmac_sha256, hmac_sha256_hash};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/secp256k1.vuma"::{B32, B256, secp256k1_sign};
+
+transform main() -> i32 {
+    let msg = state_new(B256);
+    let privkey = state_new(B32);
+    let r_out = state_new(B32);
+    let s_out = state_new(B32);
+    msg.bytes[0] = 115;
+    msg.bytes[1] = 101;
+    msg.bytes[2] = 99;
+    msg.bytes[3] = 112;
+    msg.bytes[4] = 50;
+    msg.bytes[5] = 53;
+    msg.bytes[6] = 54;
+    msg.bytes[7] = 107;
+    msg.bytes[8] = 49;
+    msg.bytes[9] = 32;
+    msg.bytes[10] = 116;
+    msg.bytes[11] = 101;
+    msg.bytes[12] = 115;
+    msg.bytes[13] = 116;
+    msg.bytes[14] = 32;
+    msg.bytes[15] = 55;
+    privkey.bytes[0] = 176;
+    privkey.bytes[1] = 96;
+    privkey.bytes[2] = 45;
+    privkey.bytes[3] = 107;
+    privkey.bytes[4] = 91;
+    privkey.bytes[5] = 13;
+    privkey.bytes[6] = 179;
+    privkey.bytes[7] = 236;
+    privkey.bytes[8] = 79;
+    privkey.bytes[9] = 139;
+    privkey.bytes[10] = 55;
+    privkey.bytes[11] = 19;
+    privkey.bytes[12] = 253;
+    privkey.bytes[13] = 83;
+    privkey.bytes[14] = 68;
+    privkey.bytes[15] = 61;
+    privkey.bytes[16] = 241;
+    privkey.bytes[17] = 152;
+    privkey.bytes[18] = 188;
+    privkey.bytes[19] = 46;
+    privkey.bytes[20] = 203;
+    privkey.bytes[21] = 156;
+    privkey.bytes[22] = 58;
+    privkey.bytes[23] = 196;
+    privkey.bytes[24] = 4;
+    privkey.bytes[25] = 83;
+    privkey.bytes[26] = 249;
+    privkey.bytes[27] = 222;
+    privkey.bytes[28] = 206;
+    privkey.bytes[29] = 116;
+    privkey.bytes[30] = 76;
+    privkey.bytes[31] = 219;
+    secp256k1_sign(msg, 16, privkey, r_out, s_out);
+    let oi: u32 = 0;
+    while oi < 32 {
+        print_int(1000 + (r_out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    let oi: u32 = 0;
+    while oi < 32 {
+        print_int(1000 + (s_out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}
