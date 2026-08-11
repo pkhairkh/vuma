@@ -375,6 +375,53 @@ transform bn256_mod_mul(r: State<Bn256Ctx>, a: State<Bn256Ctx>, b: State<Bn256Ct
     bn256_divmod_512(prod, m, quot, r);
 }
 
+// Fast modular multiplication using Montgomery form.
+// Computes mprime internally (small overhead per call, ~100x faster than divmod).
+// Only works for odd m (required for Montgomery). Falls back to divmod for even m.
+transform bn256_mod_mul_mont(r: State<Bn256Ctx>, a: State<Bn256Ctx>, b: State<Bn256Ctx>, m: State<Bn256Ctx>) {
+    if (m.limbs[0] & 1) == 0 {
+        // Even modulus: fall back to slow path
+        let prod = state_new(Bn512Ctx);
+        let quot = state_new(Bn512Ctx);
+        bn256_mul_512(prod, a, b);
+        bn256_divmod_512(prod, m, quot, r);
+        return;
+    }
+    let m0: u64 = m.limbs[0];
+    let mprime: u64 = bn256_mont_mu(m0);
+    bn256_mont_mul(r, a, b, m, mprime);
+}
+
+// Fast modular inverse via Fermat's little theorem: a^(-1) = a^(m-2) mod m.
+// Only works for prime m. Uses Montgomery mod_exp (~100x faster than binary GCD).
+transform bn256_mod_inv_fermat(r: State<Bn256Ctx>, a: State<Bn256Ctx>, m: State<Bn256Ctx>) {
+    let exp = state_new(Bn256Ctx);
+    bn256_copy(exp, m);
+    // exp = m - 2
+    let lo = exp.limbs[0];
+    if lo >= 2 {
+        exp.limbs[0] = lo - 2;
+    } else {
+        // Borrow propagation (rare for crypto primes)
+        exp.limbs[0] = lo - 2;  // wraps via u64 underflow
+        let i = 1;
+        let need_borrow = 1;
+        while need_borrow == 1 {
+            if i >= 4 { break; }
+            let cur = exp.limbs[i];
+            if cur == 0 {
+                exp.limbs[i] = 18446744073709551614;  // 2^64 - 2
+                // continue borrowing
+            } else {
+                exp.limbs[i] = cur - 1;
+                need_borrow = 0;
+            }
+            i = i + 1;
+        }
+    }
+    bn256_mod_exp(r, a, exp, m);
+}
+
 // r = a mod m for any 256-bit a. Reduces via 512/256 long division by
 // treating `a` as the low 256 bits of a zero-extended 512-bit dividend.
 transform bn256_mod(r: State<Bn256Ctx>, a: State<Bn256Ctx>, m: State<Bn256Ctx>) {

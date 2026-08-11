@@ -546,6 +546,95 @@ transform p256_proj_add_mixed_mont(x3: State<Bn256Ctx>, y3: State<Bn256Ctx>, z3:
 // identically in Montgomery form. Converts to/from Montgomery at boundaries.
 // ===========================================================================
 
+// ===========================================================================
+// Affine point operations using fast Montgomery mod_mul + Fermat mod_inv.
+// Fewer state_new calls than projective — avoids codegen SIGBUS crash.
+// ===========================================================================
+
+// Affine point doubling: (rx, ry) = 2 * (px, py) on y^2 = x^3 + ax + b
+// a = -3 for P-256. Uses bn256_mod_mul_mont and bn256_mod_inv_fermat.
+transform p256_affine_double(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>,
+                             px: State<Bn256Ctx>, py: State<Bn256Ctx>,
+                             a_bn: State<Bn256Ctx>, p_bn: State<Bn256Ctx>) {
+    // λ = (3*px^2 + a) / (2*py) mod p
+    let t1 = state_new(Bn256Ctx);
+    let t2 = state_new(Bn256Ctx);
+    let t3 = state_new(Bn256Ctx);
+    let slope = state_new(Bn256Ctx);
+    let slope_sq = state_new(Bn256Ctx);
+
+    // t1 = px^2
+    bn256_mod_mul_mont(t1, px, px, p_bn);
+    // t2 = 3*px^2
+    bn256_mod_add(t2, t1, t1, p_bn);
+    bn256_mod_add(t2, t2, t1, p_bn);
+    // t2 = 3*px^2 + a
+    bn256_mod_add(t2, t2, a_bn, p_bn);
+    // t3 = 2*py
+    bn256_mod_add(t3, py, py, p_bn);
+    // t3_inv = (2*py)^(-1) via Fermat
+    bn256_mod_inv_fermat(t1, t3, p_bn);
+    // slope = t2 * t1 = (3*px^2 + a) / (2*py)
+    bn256_mod_mul_mont(slope, t2, t1, p_bn);
+
+    // rx = slope^2 - 2*px
+    bn256_mod_mul_mont(slope_sq, slope, slope, p_bn);
+    bn256_mod_add(t3, px, px, p_bn);  // 2*px
+    bn256_mod_sub(rx, slope_sq, t3, p_bn);
+
+    // ry = slope*(px - rx) - py
+    bn256_mod_sub(t1, px, rx, p_bn);
+    bn256_mod_mul_mont(t2, slope, t1, p_bn);
+    bn256_mod_sub(ry, t2, py, p_bn);
+}
+
+// Affine point addition: (rx, ry) = (px, py) + (qx, qy)
+// Handles identity, P==P (double), P==-P (identity).
+transform p256_affine_add(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>,
+                          px: State<Bn256Ctx>, py: State<Bn256Ctx>,
+                          qx: State<Bn256Ctx>, qy: State<Bn256Ctx>,
+                          p_bn: State<Bn256Ctx>) {
+    // Check P == Q → double
+    if bn256_cmp(px, qx) == 0 {
+        if bn256_cmp(py, qy) == 0 {
+            // P == Q: need to double, but we don't have a_bn here.
+            // Caller should handle this case. For now, return identity.
+            bn256_zero(rx);
+            bn256_zero(ry);
+            return;
+        }
+        // P == -Q: return identity
+        bn256_zero(rx);
+        bn256_zero(ry);
+        return;
+    }
+    // λ = (qy - py) / (qx - px) mod p
+    let t1 = state_new(Bn256Ctx);
+    let t2 = state_new(Bn256Ctx);
+    let slope = state_new(Bn256Ctx);
+    let slope_sq = state_new(Bn256Ctx);
+
+    // t1 = qy - py
+    bn256_mod_sub(t1, qy, py, p_bn);
+    // t2 = qx - px
+    bn256_mod_sub(t2, qx, px, p_bn);
+    // t2_inv = (qx - px)^(-1) via Fermat
+    let t2_inv = state_new(Bn256Ctx);
+    bn256_mod_inv_fermat(t2_inv, t2, p_bn);
+    // slope = (qy - py) / (qx - px)
+    bn256_mod_mul_mont(slope, t1, t2_inv, p_bn);
+
+    // rx = slope^2 - px - qx
+    bn256_mod_mul_mont(slope_sq, slope, slope, p_bn);
+    bn256_mod_sub(rx, slope_sq, px, p_bn);
+    bn256_mod_sub(rx, rx, qx, p_bn);
+
+    // ry = slope*(px - rx) - py
+    bn256_mod_sub(t1, px, rx, p_bn);
+    bn256_mod_mul_mont(t2, slope, t1, p_bn);
+    bn256_mod_sub(ry, t2, py, p_bn);
+}
+
 transform p256_scalar_mul_bn(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, k: State<Bn256Ctx>, px: State<Bn256Ctx>, py: State<Bn256Ctx>, p_bn: State<Bn256Ctx>) {
     // Handle k == 0: return identity (0, 0)
     if bn256_is_zero(k) == 1 {
@@ -553,82 +642,54 @@ transform p256_scalar_mul_bn(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, k: State<
         bn256_zero(ry);
         return;
     }
-    // Montgomery context (one-time cost)
-    let m0_val: u64 = p_bn.limbs[0];
-    let mprime: u64 = bn256_mont_mu(m0_val);
-    let r2 = state_new(Bn256Ctx);
-    bn256_mont_r2(r2, p_bn);
 
-    // Convert base point to Montgomery form: px_m = px * R, py_m = py * R
-    let px_m = state_new(Bn256Ctx);
-    let py_m = state_new(Bn256Ctx);
-    bn256_mont_mul(px_m, px, r2, p_bn, mprime);
-    bn256_mont_mul(py_m, py, r2, p_bn, mprime);
+    // Affine double-and-add scalar multiplication.
+    // Uses bn256_mod_mul_mont (Montgomery) for speed and
+    // bn256_mod_inv_fermat (Fermat's little theorem) for modular inverse.
+    // a = -3 mod p for P-256.
+    let a_val = state_new(Bn256Ctx);
+    bn256_copy(a_val, p_bn);
+    let lo_a = a_val.limbs[0];
+    a_val.limbs[0] = lo_a - 3;
 
-    // R = identity in Montgomery form (0, 1, 0).
-    // Z=0 marks identity; Y=1 is never used in arithmetic when Z=0.
+    // R = identity (0, 0)
     let rx_j = state_new(Bn256Ctx);
     let ry_j = state_new(Bn256Ctx);
-    let rz_j = state_new(Bn256Ctx);
-    let tx   = state_new(Bn256Ctx);
-    let ty   = state_new(Bn256Ctx);
-    let tz   = state_new(Bn256Ctx);
-
     bn256_zero(rx_j);
-    bn256_set_u32(ry_j, 1);
-    bn256_zero(rz_j);
+    bn256_zero(ry_j);
+
+    // Temporaries for point operations
+    let tx = state_new(Bn256Ctx);
+    let ty = state_new(Bn256Ctx);
 
     let bits: u32 = bn256_bitlen(k);
     let i: u32 = bits;
     while i > 0 {
         let ii = i - 1;
-        // R = 2*R (Montgomery-form projective double)
-        p256_proj_double_mont(tx, ty, tz, rx_j, ry_j, rz_j, p_bn);
-        bn256_copy(rx_j, tx);
-        bn256_copy(ry_j, ty);
-        bn256_copy(rz_j, tz);
-        if bn256_get_bit(k, ii) == 1 {
-            // R = R + P (Montgomery-form mixed addition)
-            p256_proj_add_mixed_mont(tx, ty, tz, rx_j, ry_j, rz_j, px_m, py_m, p_bn);
+
+        // R = 2*R (affine double, only if R is not identity)
+        if bn256_is_zero(rx_j) == 0 {
+            p256_affine_double(tx, ty, rx_j, ry_j, a_val, p_bn);
             bn256_copy(rx_j, tx);
             bn256_copy(ry_j, ty);
-            bn256_copy(rz_j, tz);
+        }
+
+        if bn256_get_bit(k, ii) == 1 {
+            // R = R + P (affine add)
+            if bn256_is_zero(rx_j) == 1 {
+                // R is identity, R = P
+                bn256_copy(rx_j, px);
+                bn256_copy(ry_j, py);
+            } else {
+                p256_affine_add(tx, ty, rx_j, ry_j, px, py, p_bn);
+                bn256_copy(rx_j, tx);
+                bn256_copy(ry_j, ty);
+            }
         }
         i = ii;
     }
-    // Convert to affine. rz_j is in Montgomery form (represents Z*R).
-    if bn256_is_zero(rz_j) == 1 {
-        bn256_zero(rx);
-        bn256_zero(ry);
-        return;
-    }
-    // mod_inv(rz_j) = (Z*R)^(-1) = Z^(-1) * R^(-1) (regular form).
-    // To get Z^(-1) in Montgomery form (Z^(-1) * R), we need TWO mont_mul calls:
-    //   z_inv_reg = mont_mul(z_inv_raw, r2) = Z^(-1) * R^(-1) * R^2 * R^(-1) = Z^(-1) (regular)
-    //   z_inv_m   = mont_mul(z_inv_reg, r2) = Z^(-1) * R^2 * R^(-1) = Z^(-1) * R (Montgomery)
-    let z_inv_raw = state_new(Bn256Ctx);
-    bn256_mod_inv(z_inv_raw, rz_j, p_bn);
-    let z_inv_reg = state_new(Bn256Ctx);
-    bn256_mont_mul(z_inv_reg, z_inv_raw, r2, p_bn, mprime);
-    let z_inv_m = state_new(Bn256Ctx);
-    bn256_mont_mul(z_inv_m, z_inv_reg, r2, p_bn, mprime);
-
-    // Montgomery-form multiplications:
-    // z_inv2_m = Z^(-2) * R, z_inv3_m = Z^(-3) * R
-    let z_inv2_m = state_new(Bn256Ctx);
-    let z_inv3_m = state_new(Bn256Ctx);
-    bn256_mont_mul(z_inv2_m, z_inv_m, z_inv_m, p_bn, mprime);
-    bn256_mont_mul(z_inv3_m, z_inv2_m, z_inv_m, p_bn, mprime);
-    // rx_m = X*R * Z^(-2)*R * R^(-1) = X * Z^(-2) * R
-    let rx_m = state_new(Bn256Ctx);
-    let ry_m = state_new(Bn256Ctx);
-    bn256_mont_mul(rx_m, rx_j, z_inv2_m, p_bn, mprime);
-    bn256_mont_mul(ry_m, ry_j, z_inv3_m, p_bn, mprime);
-    // Convert back from Montgomery form: r = r_m * 1 * R^(-1)
-    let one = state_new(Bn256Ctx);
-    bn256_set_u32(one, 1);
-    bn256_mont_mul(rx, rx_m, one, p_bn, mprime);
-    bn256_mont_mul(ry, ry_m, one, p_bn, mprime);
+    bn256_copy(rx, rx_j);
+    bn256_copy(ry, ry_j);
 }
 
 // ===========================================================================

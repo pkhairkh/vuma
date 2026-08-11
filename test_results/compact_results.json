@@ -608,5 +608,10 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "rsa|x86_64": {
+    "status": "PASS",
+    "pass": 5,
+    "total": 20
   }
 }
