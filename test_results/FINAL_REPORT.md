@@ -1,14 +1,16 @@
 # VUMA Womb Crypto — Faithfulness Validation Report
 
 Generated: 2026-08-11
-Repository HEAD: 1ea5816f (see git log)
+Repository HEAD: e87fa30a (see git log)
 
 ## Executive Summary
 
-- **x86_64 modules validated**: 33 (31 fully passing)
-- **Fully passing (≥20/20)**: 31
-- **Total vectors pass**: 590/630 (93.7%)
+- **x86_64 modules validated**: 34 (32 fully passing)
+- **Fully passing (≥20/20)**: 32
+- **Total vectors pass**: 610/650 (93.8%)
 - **Multi-backend**: 19 backends, 12 at 100% for validated modules
+- **Test vectors generated**: 7 additional modules (rsa, rsa_oaep_pss,
+  ecdsa_p256, ecdsa_p384, ecdh_p256, secp256k1, drbg_extra) — 140 vectors
 
 ## Critical Fixes Applied (This Session)
 
@@ -70,6 +72,27 @@ p256_scalar_mul_bn to use projective coordinates internally —
 1 final modular inversion instead of 256-512 per-step inversions.
 Verified: scalar_mul(k=1) returns correct base point G instantly.
 
+### 9. Argon2id Complete Rewrite (commit e87fa30a) — NEW
+Fixed 6 critical bugs in argon2id (RFC 9106) implementation:
+1. **H0 prefix bug**: Used h_prime (adds LE32 out_len prefix) instead of
+   plain BLAKE2b. The C reference (core.c:initial_hash) uses blake2b_init
+   directly. Fixed to use argon2_blake2b_var.
+2. **h_prime out_len > 64 bug**: Copied 64 bytes per V_i instead of 32
+   (C blake2b_long copies BLAKE2B_OUTBYTES/2 = 32). Also used digest_size=64
+   for final block instead of digest_size=toproduce.
+3. **h_prime out_len <= 64 bug**: Used digest_size=64 then truncated, but C
+   uses digest_size=out_len directly.
+4. **Missing |P| field**: param_buf was missing the 4-byte password length
+   field before the password bytes.
+5. **ctx.buf not zeroed**: blake2b_init doesn't zero ctx.buf, causing stale
+   arena data to corrupt hash. Added explicit zeroing.
+6. **Fill loop rewrite**: Proper sync-point iteration, data-independent
+   addressing for pass 0 slices 0-1, correct index_alpha formula, with_xor
+   for passes > 0.
+7. **Parameter-rebinding**: Changed argon2_h_prime calls to use variables
+   instead of literals to avoid VUMA codegen bug.
+Result: argon2 20/20 PASS on x86_64 (verified against argon2-cffi).
+
 ## Per-Module Results (x86_64)
 
 | Module | Score | Status |
@@ -106,21 +129,20 @@ Verified: scalar_mul(k=1) returns correct base point G instantly.
 | sha384 | 20/20 | ✅ PASS |
 | sha512 | 20/20 | ✅ PASS |
 | x25519 | 20/20 | ✅ PASS |
-| argon2 | 0/20 | ⚠️ BLOCKED (algo) |
+| argon2 | 20/20 | ✅ PASS |
 
 ## Modules NOT Yet Validated
 
 | Module | Status | Blocker |
 |--------|--------|---------|
-| argon2 | 0/20 | Algorithm bugs: fill loop (no slices), ref index (wrong formula), data-independent indexing missing |
-| drbg_extra | no vectors | Non-standard 32-byte seedlen (NIST requires 55 for SHA-256) |
+| drbg_extra | vectors ready | HASH_DRBG with 32-byte seedlen (non-standard); vectors generated but need to match module's HASH_DRBG impl (not HMAC-DRBG) |
 | ed25519 | 0/20 (vectors ready) | Performance: affine coords with per-step mod_inv. Needs extended Edwards coords rewrite. |
 | ecdsa_p256 | 0/0 | Performance: 256-bit scalar_mul takes >10 min even with projective coords. Needs Montgomery reduction. |
-| ecdsa_p384 | no vectors | Same as ecdsa_p256 (needs perf fix) |
-| ecdh_p256 | no vectors | Depends on ecdsa_p256 point ops |
-| secp256k1 | no vectors | Same perf issue as ecdsa_p256 |
-| rsa | no vectors | Needs 512+ bit bignum; mod_exp very slow |
-| rsa_oaep_pss | no vectors | Same as rsa |
+| ecdsa_p384 | vectors ready | Same as ecdsa_p256 (needs perf fix) |
+| ecdh_p256 | vectors ready | Depends on ecdsa_p256 point ops |
+| secp256k1 | vectors ready | Same perf issue as ecdsa_p256 |
+| rsa | vectors ready | Needs 512+ bit bignum; mod_exp very slow |
+| rsa_oaep_pss | vectors ready | Same as rsa |
 | rsa_pkcs1_ecdsa_extra | no vectors | Stubs for Ed448, P-521 need implementation |
 | ml_kem | no vectors | FIPS 203 / Kyber — complex PQ module |
 | ml_dsa | no vectors | FIPS 204 / Dilithium — complex PQ module |
