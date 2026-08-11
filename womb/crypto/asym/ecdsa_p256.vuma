@@ -197,7 +197,144 @@ transform p256_is_on_curve_bn(px: State<Bn256Ctx>, py: State<Bn256Ctx>, p_bn: St
 }
 
 // ===========================================================================
+// Projective coordinate operations (Jacobian, a = -3) — avoids per-step
+// modular inversions. ~10x fewer field operations per point op, and
+// eliminates the expensive bn256_mod_inv from the inner loop.
+// A point (X, Y, Z) represents affine (X/Z^2, Y/Z^3). Identity = Z=0.
+// ===========================================================================
+
+// Jacobian doubling with a = -3: (X1,Y1,Z1) -> (X3,Y3,Z3)
+// Uses the EFD "dbl-2001-b" formulas optimized for a=-3.
+transform p256_proj_double(x3: State<Bn256Ctx>, y3: State<Bn256Ctx>, z3: State<Bn256Ctx>,
+                           x1: State<Bn256Ctx>, y1: State<Bn256Ctx>, z1: State<Bn256Ctx>,
+                           p_bn: State<Bn256Ctx>) {
+    // If Z1 == 0, return identity (0, 1, 0)
+    if bn256_is_zero(z1) == 1 {
+        bn256_zero(x3);
+        bn256_set_u32(y3, 1);
+        bn256_zero(z3);
+        return;
+    }
+    let delta = state_new(Bn256Ctx);
+    let gamma = state_new(Bn256Ctx);
+    let beta  = state_new(Bn256Ctx);
+    let alpha = state_new(Bn256Ctx);
+    let t1    = state_new(Bn256Ctx);
+    let t2    = state_new(Bn256Ctx);
+    let t3    = state_new(Bn256Ctx);
+    let t4    = state_new(Bn256Ctx);
+    let eight_beta = state_new(Bn256Ctx);
+    let four_beta  = state_new(Bn256Ctx);
+    let eight_gamma2 = state_new(Bn256Ctx);
+
+    // delta = Z1^2
+    bn256_mod_mul(delta, z1, z1, p_bn);
+    // gamma = Y1^2
+    bn256_mod_mul(gamma, y1, y1, p_bn);
+    // beta = X1 * gamma
+    bn256_mod_mul(beta, x1, gamma, p_bn);
+    // alpha = 3 * (X1 - delta) * (X1 + delta) = 3*(X1^2 - delta^2)
+    bn256_mod_sub(t1, x1, delta, p_bn);
+    bn256_mod_add(t2, x1, delta, p_bn);
+    bn256_mod_mul(t3, t1, t2, p_bn);
+    bn256_mod_add(alpha, t3, t3, p_bn);
+    bn256_mod_add(alpha, alpha, t3, p_bn);  // alpha = 3*t3
+    // X3 = alpha^2 - 8*beta
+    bn256_mod_mul(t1, alpha, alpha, p_bn);   // alpha^2
+    bn256_mod_add(four_beta, beta, beta, p_bn);
+    bn256_mod_add(four_beta, four_beta, beta, p_bn);  // 3*beta
+    bn256_mod_add(four_beta, four_beta, beta, p_bn);  // 4*beta
+    bn256_mod_add(eight_beta, four_beta, four_beta, p_bn);  // 8*beta
+    bn256_mod_sub(x3, t1, eight_beta, p_bn);
+    // Z3 = (Y1 + Z1)^2 - gamma - delta
+    bn256_mod_add(t1, y1, z1, p_bn);
+    bn256_mod_mul(t2, t1, t1, p_bn);
+    bn256_mod_sub(z3, t2, gamma, p_bn);
+    bn256_mod_sub(z3, z3, delta, p_bn);
+    // Y3 = alpha * (4*beta - X3) - 8*gamma^2
+    bn256_mod_sub(t1, four_beta, x3, p_bn);   // 4*beta - X3
+    bn256_mod_mul(t2, alpha, t1, p_bn);        // alpha*(4*beta - X3)
+    bn256_mod_mul(t3, gamma, gamma, p_bn);     // gamma^2
+    // 8*gamma^2 = double gamma^2 three times
+    bn256_mod_add(t4, t3, t3, p_bn);   // 2*gamma^2
+    bn256_mod_add(t4, t4, t4, p_bn);   // 4*gamma^2
+    bn256_mod_add(eight_gamma2, t4, t4, p_bn);  // 8*gamma^2
+    bn256_mod_sub(y3, t2, eight_gamma2, p_bn);
+}
+
+// Jacobian mixed addition: (X1,Y1,Z1) + (X2,Y2,1) -> (X3,Y3,Z3)
+// P2 is affine (Z2=1). Faster than general addition.
+transform p256_proj_add_mixed(x3: State<Bn256Ctx>, y3: State<Bn256Ctx>, z3: State<Bn256Ctx>,
+                              x1: State<Bn256Ctx>, y1: State<Bn256Ctx>, z1: State<Bn256Ctx>,
+                              x2: State<Bn256Ctx>, y2: State<Bn256Ctx>,
+                              p_bn: State<Bn256Ctx>) {
+    // If Z1 == 0, return P2 in Jacobian (X2, Y2, 1)
+    if bn256_is_zero(z1) == 1 {
+        bn256_copy(x3, x2);
+        bn256_copy(y3, y2);
+        bn256_set_u32(z3, 1);
+        return;
+    }
+    let z1sq = state_new(Bn256Ctx);
+    let u2   = state_new(Bn256Ctx);
+    let s2   = state_new(Bn256Ctx);
+    let h    = state_new(Bn256Ctx);
+    let r    = state_new(Bn256Ctx);
+    let hh   = state_new(Bn256Ctx);  // H^2
+    let hhh  = state_new(Bn256Ctx);  // H^3
+    let t1   = state_new(Bn256Ctx);
+    let t2   = state_new(Bn256Ctx);
+
+    // z1sq = Z1^2
+    bn256_mod_mul(z1sq, z1, z1, p_bn);
+    // U2 = X2 * Z1^2
+    bn256_mod_mul(u2, x2, z1sq, p_bn);
+    // S2 = Y2 * Z1^3 = Y2 * Z1 * Z1^2
+    bn256_mod_mul(t1, z1, z1sq, p_bn);
+    bn256_mod_mul(s2, y2, t1, p_bn);
+    // H = U2 - X1
+    bn256_mod_sub(h, u2, x1, p_bn);
+    // r = S2 - Y1
+    bn256_mod_sub(r, s2, y1, p_bn);
+    // If H == 0:
+    //   if r == 0: P1 == P2, should double (caller handles)
+    //   else: result is identity
+    if bn256_is_zero(h) == 1 {
+        if bn256_is_zero(r) == 1 {
+            // P1 == P2: double P1
+            p256_proj_double(x3, y3, z3, x1, y1, z1, p_bn);
+            return;
+        } else {
+            // P1 == -P2: identity
+            bn256_zero(x3);
+            bn256_set_u32(y3, 1);
+            bn256_zero(z3);
+            return;
+        }
+    }
+    // HH = H^2
+    bn256_mod_mul(hh, h, h, p_bn);
+    // HHH = H * HH
+    bn256_mod_mul(hhh, h, hh, p_bn);
+    // X3 = r^2 - HHH - 2*X1*HH
+    bn256_mod_mul(t1, r, r, p_bn);          // r^2
+    bn256_mod_sub(t1, t1, hhh, p_bn);       // r^2 - H^3
+    bn256_mod_mul(t2, x1, hh, p_bn);        // X1*HH
+    bn256_mod_add(t2, t2, t2, p_bn);        // 2*X1*HH
+    bn256_mod_sub(x3, t1, t2, p_bn);        // X3 = r^2 - H^3 - 2*X1*HH
+    // Y3 = r*(X1*HH - X3) - Y1*HHH
+    bn256_mod_mul(t1, x1, hh, p_bn);        // X1*HH
+    bn256_mod_sub(t1, t1, x3, p_bn);        // X1*HH - X3
+    bn256_mod_mul(t2, r, t1, p_bn);         // r*(X1*HH - X3)
+    bn256_mod_mul(t1, y1, hhh, p_bn);       // Y1*HHH
+    bn256_mod_sub(y3, t2, t1, p_bn);        // Y3
+    // Z3 = Z1 * H
+    bn256_mod_mul(z3, z1, h, p_bn);
+}
+
+// ===========================================================================
 // Point operations (affine coordinates, mod p) — all in Bn256Ctx.
+// Kept for reference; scalar_mul now uses projective coordinates internally.
 // ===========================================================================
 
 transform p256_point_double_bn(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, px: State<Bn256Ctx>, py: State<Bn256Ctx>, p_bn: State<Bn256Ctx>) {
@@ -292,28 +429,62 @@ transform p256_point_add_bn(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, px: State<
 }
 
 transform p256_scalar_mul_bn(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, k: State<Bn256Ctx>, px: State<Bn256Ctx>, py: State<Bn256Ctx>, p_bn: State<Bn256Ctx>) {
-    bn256_zero(rx);
-    bn256_zero(ry);
+    // Handle k == 0: return identity (0, 0)
+    if bn256_is_zero(k) == 1 {
+        bn256_zero(rx);
+        bn256_zero(ry);
+        return;
+    }
+    // Projective scalar multiplication (double-and-add, MSB-first)
+    // R starts as identity (Z=0), P is the base point in affine (Z=1)
+    let rx_j = state_new(Bn256Ctx);
+    let ry_j = state_new(Bn256Ctx);
+    let rz_j = state_new(Bn256Ctx);
+    let tx   = state_new(Bn256Ctx);
+    let ty   = state_new(Bn256Ctx);
+    let tz   = state_new(Bn256Ctx);
 
-    let tx = state_new(Bn256Ctx);
-    let ty = state_new(Bn256Ctx);
+    // R = identity (0, 1, 0)
+    bn256_zero(rx_j);
+    bn256_set_u32(ry_j, 1);
+    bn256_zero(rz_j);
 
     let bits: u32 = bn256_bitlen(k);
-    if bits == 0 { return; }
-
     let i: u32 = bits;
     while i > 0 {
         let ii = i - 1;
-        p256_point_double_bn(tx, ty, rx, ry, p_bn);
-        bn256_copy(rx, tx);
-        bn256_copy(ry, ty);
+        // R = 2*R (projective double)
+        p256_proj_double(tx, ty, tz, rx_j, ry_j, rz_j, p_bn);
+        bn256_copy(rx_j, tx);
+        bn256_copy(ry_j, ty);
+        bn256_copy(rz_j, tz);
         if bn256_get_bit(k, ii) == 1 {
-            p256_point_add_bn(tx, ty, rx, ry, px, py, p_bn);
-            bn256_copy(rx, tx);
-            bn256_copy(ry, ty);
+            // R = R + P (mixed addition, P is affine)
+            p256_proj_add_mixed(tx, ty, tz, rx_j, ry_j, rz_j, px, py, p_bn);
+            bn256_copy(rx_j, tx);
+            bn256_copy(ry_j, ty);
+            bn256_copy(rz_j, tz);
         }
         i = ii;
     }
+    // Convert to affine: rx = RX * Z^(-1) mod p, ry = RY * Z^(-1) mod p
+    // where Z^(-1) is the modular inverse of Z.
+    // For Jacobian: x_affine = X / Z^2, y_affine = Y / Z^3.
+    // Compute z_inv = Z^(-1), then rx = X * z_inv^2, ry = Y * z_inv^3.
+    if bn256_is_zero(rz_j) == 1 {
+        // R is identity
+        bn256_zero(rx);
+        bn256_zero(ry);
+        return;
+    }
+    let z_inv   = state_new(Bn256Ctx);
+    let z_inv2  = state_new(Bn256Ctx);
+    let z_inv3  = state_new(Bn256Ctx);
+    bn256_mod_inv(z_inv, rz_j, p_bn);
+    bn256_mod_mul(z_inv2, z_inv, z_inv, p_bn);       // z_inv^2
+    bn256_mod_mul(z_inv3, z_inv2, z_inv, p_bn);      // z_inv^3
+    bn256_mod_mul(rx, rx_j, z_inv2, p_bn);            // X * z_inv^2
+    bn256_mod_mul(ry, ry_j, z_inv3, p_bn);            // Y * z_inv^3
 }
 
 // ===========================================================================
