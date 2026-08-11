@@ -60,14 +60,16 @@ transform bn256_is_zero(a: State<Bn256Ctx>) -> u32 {
     return 1;
 }
 
-// Three-way compare: returns 1 if a>b, -1 if a<b, 0 if equal.
-transform bn256_cmp(a: State<Bn256Ctx>, b: State<Bn256Ctx>) -> i32 {
+// Three-way compare: returns 1 if a>b, 2 if a<b, 0 if equal.
+// Uses u32 return type (not i32) to avoid VUMA codegen signed-comparison bug
+// where `i32 >= 0` on a function-call result defaults to unsigned comparison.
+transform bn256_cmp(a: State<Bn256Ctx>, b: State<Bn256Ctx>) -> u32 {
     let i: u32 = BN256_LIMBS - 1;
     while 1 == 1 {
         let av = a.limbs[i];
         let bv = b.limbs[i];
         if av > bv { return 1; }
-        if av < bv { return -1; }
+        if av < bv { return 2; }
         if i == 0 { break; }
         i = i - 1;
     }
@@ -333,7 +335,7 @@ transform bn256_divmod_512(dividend: State<Bn512Ctx>, divisor: State<Bn256Ctx>, 
             remainder.limbs[0] = cur | 1;
         }
         // If r >= divisor, subtract and set quotient bit.
-        if bn256_cmp(remainder, divisor) >= 0 {
+        if bn256_cmp(remainder, divisor) != 2 {
             bn256_sub(remainder, remainder, divisor);
             let q_word = bit / 64;
             let q_pos = bit % 64;
@@ -352,7 +354,7 @@ transform bn256_mod_add(r: State<Bn256Ctx>, a: State<Bn256Ctx>, b: State<Bn256Ct
     if carry == 1 {
         bn256_sub(r, r, m);
     } else {
-        if bn256_cmp(r, m) >= 0 {
+        if bn256_cmp(r, m) != 2 {
             bn256_sub(r, r, m);
         }
     }
@@ -435,7 +437,7 @@ transform bn256_gcd(r: State<Bn256Ctx>, a: State<Bn256Ctx>, b: State<Bn256Ctx>) 
         while bn256_get_bit(v, 0) == 0 {
             bn256_rshift1(v, v);
         }
-        if bn256_cmp(u, v) >= 0 {
+        if bn256_cmp(u, v) != 2 {
             bn256_sub(u, u, v);
         } else {
             bn256_sub(v, v, u);
@@ -464,13 +466,20 @@ transform bn256_mod_inv(r: State<Bn256Ctx>, a: State<Bn256Ctx>, m: State<Bn256Ct
     let v = state_new(Bn256Ctx);
     let x1 = state_new(Bn256Ctx);
     let x2 = state_new(Bn256Ctx);
+    let one = state_new(Bn256Ctx);
 
     bn256_copy(u, a);
     bn256_copy(v, m);
     bn256_set_u32(x1, 1);
     bn256_zero(x2);
+    bn256_set_u32(one, 1);
 
+    // Binary extended GCD: terminate when u==1 (result=x1) or v==1 (result=x2).
     while bn256_is_zero(u) == 0 {
+        // Check termination: if u == 1, result is x1
+        if bn256_cmp(u, one) == 0 { break; }
+        // If v == 1, result is x2 — copy to x1 for final mod
+        if bn256_cmp(v, one) == 0 { bn256_copy(x1, x2); break; }
         // Strip factors of 2 from u; x1 follows accordingly mod m.
         while bn256_get_bit(u, 0) == 0 {
             bn256_rshift1(u, u);
@@ -493,7 +502,7 @@ transform bn256_mod_inv(r: State<Bn256Ctx>, a: State<Bn256Ctx>, m: State<Bn256Ct
             }
         }
         // Now u, v both odd. Reduce the larger.
-        if bn256_cmp(u, v) >= 0 {
+        if bn256_cmp(u, v) != 2 {
             bn256_sub(u, u, v);
             bn256_mod_sub(x1, x1, x2, m);
         } else {
@@ -501,6 +510,6 @@ transform bn256_mod_inv(r: State<Bn256Ctx>, a: State<Bn256Ctx>, m: State<Bn256Ct
             bn256_mod_sub(x2, x2, x1, m);
         }
     }
-    // Result is x1 mod m (assuming gcd(a, m) == 1, so u ended at 1).
+    // Result is x1 mod m.
     bn256_mod(r, x1, m);
 }

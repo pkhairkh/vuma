@@ -502,7 +502,7 @@ transform ecdsa_p256_keygen(privkey_be: State<B32>, pubkey_x_be: State<B32>, pub
 
     let d_bn = state_new(Bn256Ctx);
     be32_to_bn256(d_bn, privkey_be);
-    if bn256_cmp(d_bn, n_bn) >= 0 {
+    if bn256_cmp(d_bn, n_bn) != 2 {
         bn256_sub(d_bn, d_bn, n_bn);
     }
     if bn256_is_zero(d_bn) == 1 {
@@ -553,7 +553,7 @@ transform rfc6979_p256_k(x_be: State<B32>, h_be: State<B32>, n_le: State<B32>, k
     let n_bn = state_new(Bn256Ctx);
     b32_to_bn256(h_bn, h_le);
     b32_to_bn256(n_bn, n_le);
-    if bn256_cmp(h_bn, n_bn) >= 0 { bn256_sub(h_bn, h_bn, n_bn); }
+    if bn256_cmp(h_bn, n_bn) != 2 { bn256_sub(h_bn, h_bn, n_bn); }
     let h_be_reduced = state_new(B32);
     bn256_to_be32(h_be_reduced, h_bn);
 
@@ -614,7 +614,7 @@ transform rfc6979_p256_k(x_be: State<B32>, h_be: State<B32>, n_le: State<B32>, k
             swap_endian_32(k_le, V);
             let k_bn = state_new(Bn256Ctx);
             b32_to_bn256(k_bn, k_le);
-            if bn256_cmp(k_bn, n_bn) >= 0 { bn256_sub(k_bn, k_bn, n_bn); }
+            if bn256_cmp(k_bn, n_bn) != 2 { bn256_sub(k_bn, k_bn, n_bn); }
             bn256_to_b32(k_le, k_bn);
             if bn256_is_zero(k_bn) == 0 {
                 accepted = 1;
@@ -666,8 +666,8 @@ transform ecdsa_p256_sign(msg: State<B256>, msg_len: u32, privkey_be: State<B32>
     be32_to_bn256(gx_bn, gx_be);
     be32_to_bn256(gy_bn, gy_be);
 
-    if bn256_cmp(d_bn, n_bn) >= 0 { bn256_sub(d_bn, d_bn, n_bn); }
-    if bn256_cmp(h_bn, n_bn) >= 0 { bn256_sub(h_bn, h_bn, n_bn); }
+    if bn256_cmp(d_bn, n_bn) != 2 { bn256_sub(d_bn, d_bn, n_bn); }
+    if bn256_cmp(h_bn, n_bn) != 2 { bn256_sub(h_bn, h_bn, n_bn); }
 
     let n_le = state_new(B32);
     swap_endian_32(n_le, n_be);
@@ -682,7 +682,7 @@ transform ecdsa_p256_sign(msg: State<B256>, msg_len: u32, privkey_be: State<B32>
 
     let r_bn = state_new(Bn256Ctx);
     bn256_copy(r_bn, rx);
-    if bn256_cmp(r_bn, n_bn) >= 0 { bn256_sub(r_bn, r_bn, n_bn); }
+    if bn256_cmp(r_bn, n_bn) != 2 { bn256_sub(r_bn, r_bn, n_bn); }
 
     let k_inv = state_new(Bn256Ctx);
     let rd = state_new(Bn256Ctx);
@@ -714,14 +714,14 @@ transform ecdsa_p256_verify(msg: State<B256>, msg_len: u32, pubkey_x_be: State<B
 
     if bn256_is_zero(r_bn) == 1 { return 0; }
     if bn256_is_zero(s_bn) == 1 { return 0; }
-    if bn256_cmp(r_bn, n_bn) >= 0 { return 0; }
-    if bn256_cmp(s_bn, n_bn) >= 0 { return 0; }
+    if bn256_cmp(r_bn, n_bn) != 2 { return 0; }
+    if bn256_cmp(s_bn, n_bn) != 2 { return 0; }
 
     let h_be = state_new(B32);
     p256_sha256_hash(msg, msg_len, h_be);
     let h_bn = state_new(Bn256Ctx);
     be32_to_bn256(h_bn, h_be);
-    if bn256_cmp(h_bn, n_bn) >= 0 { bn256_sub(h_bn, h_bn, n_bn); }
+    if bn256_cmp(h_bn, n_bn) != 2 { bn256_sub(h_bn, h_bn, n_bn); }
 
     let p_be = state_new(B32);
     let b_be = state_new(B32);
@@ -769,7 +769,7 @@ transform ecdsa_p256_verify(msg: State<B256>, msg_len: u32, pubkey_x_be: State<B
     if bn256_is_zero(ptx) == 0 || bn256_is_zero(pty) == 0 {
         let v = state_new(Bn256Ctx);
         bn256_copy(v, ptx);
-        if bn256_cmp(v, n_bn) >= 0 { bn256_sub(v, v, n_bn); }
+        if bn256_cmp(v, n_bn) != 2 { bn256_sub(v, v, n_bn); }
         if bn256_cmp(v, r_bn) == 0 { return 1; }
     }
     return 0;

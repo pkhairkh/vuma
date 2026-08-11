@@ -729,7 +729,7 @@ transform ed25519_verify(pubkey: State<B32>, msg: State<B256>, msg_len: u32, sig
     let l_bn = state_new(Bn256Ctx);
     b32_to_bn256(s_bn, s);
     b32_to_bn256(l_bn, l_le);
-    if bn256_cmp(s_bn, l_bn) >= 0 {
+    if bn256_cmp(s_bn, l_bn) != 2 {
         return 0;
     }
 
