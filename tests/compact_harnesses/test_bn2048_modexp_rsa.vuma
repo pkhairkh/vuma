@@ -1,0 +1,53 @@
+// Direct test of bn2048_mod_exp: 2^e mod n with actual RSA modulus
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum2048.vuma"::{Bn2048Ctx, Bn4096Ctx, Bn4160Ctx, Bn2048_64Ctx, Bn2112Ctx, bn2048_mod_exp, bn2048_mod, bn2048_zero, bn2048_set_u32, bn2048_copy, bn2048_bitlen, bn2048_get_bit, bn2048_mont_compute_r2, bn2048_mont_compute_m_prime, bn2048_mont_mul, bn2048_mont_reduce, bn2048_mul_4096, bn2048_mul_u64, bn2048_add, bn2048_sub, bn2048_cmp, bn2048_is_zero, bn2048_lshift1, bn2048_rshift1, bn2048_mod_add, bn2048_mod_sub, bn2048_mod_mul, bn2048_mod_inv, bn2048_divmod_4096, bn2048_gcd};
+
+transform main() -> i32 {
+    let base = state_new(Bn2048Ctx);
+    let exp = state_new(Bn2048Ctx);
+    let n = state_new(Bn2048Ctx);
+    let result = state_new(Bn2048Ctx);
+
+    // base = 2
+    bn2048_set_u32(base, 2);
+
+    // exp = 65537
+    bn2048_set_u32(exp, 65537);
+
+    // n = RSA modulus (1024-bit, 32 LE u64 limbs)
+    n.limbs[0] = ((3091362622 as u64) << 32) | (81916961 as u64);
+    n.limbs[1] = ((4272097266 as u64) << 32) | (2335738574 as u64);
+    n.limbs[2] = 2216648481382814545 as u64;
+    n.limbs[3] = 4614070657632332201 as u64;
+    n.limbs[4] = 4709577922619163076 as u64;
+    n.limbs[5] = ((2414714549 as u64) << 32) | (778642834 as u64);
+    n.limbs[6] = ((2952302095 as u64) << 32) | (2343598147 as u64);
+    n.limbs[7] = 277359819270103043 as u64;
+    n.limbs[8] = ((3025299700 as u64) << 32) | (2007284502 as u64);
+    n.limbs[9] = 170263481297356767 as u64;
+    n.limbs[10] = ((3355672032 as u64) << 32) | (1800933193 as u64);
+    n.limbs[11] = ((2635899629 as u64) << 32) | (1225614176 as u64);
+    n.limbs[12] = ((2262539510 as u64) << 32) | (3755498890 as u64);
+    n.limbs[13] = 9029517962989342525 as u64;
+    n.limbs[14] = ((2376857179 as u64) << 32) | (538637834 as u64);
+    n.limbs[15] = ((2936562703 as u64) << 32) | (1721290349 as u64);
+
+    // result = 2^65537 mod n
+    bn2048_mod_exp(result, base, exp, n);
+
+    // Output result as 32 bytes (first 4 limbs, LE → BE output)
+    let oi: u32 = 0;
+    while oi < 4 {
+        let v = result.limbs[3 - oi];
+        print_int(1000 + (((v >> 56) & 255) as u32));
+        print_int(1000 + (((v >> 48) & 255) as u32));
+        print_int(1000 + (((v >> 40) & 255) as u32));
+        print_int(1000 + (((v >> 32) & 255) as u32));
+        print_int(1000 + (((v >> 24) & 255) as u32));
+        print_int(1000 + (((v >> 16) & 255) as u32));
+        print_int(1000 + (((v >> 8) & 255) as u32));
+        print_int(1000 + ((v & 255) as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

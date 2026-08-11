@@ -1,0 +1,110 @@
+// Debug RSA: compute padded^d mod n directly (bypasses SHA-256/padding)
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum2048.vuma"::{Bn2048Ctx, Bn4096Ctx, Bn4160Ctx, Bn2048_64Ctx, Bn2112Ctx, bn2048_mod_exp, bn2048_mod_mul, bn2048_mod, bn2048_mod_inv, bn2048_mod_add, bn2048_mod_sub, bn2048_add, bn2048_sub, bn2048_cmp, bn2048_is_zero, bn2048_copy, bn2048_zero, bn2048_set_u32, bn2048_bitlen, bn2048_get_bit, bn2048_lshift1, bn2048_rshift1, bn2048_mul_4096, bn2048_divmod_4096, bn2048_mul_u64, bn2048_mont_compute_r2, bn2048_mont_compute_m_prime, bn2048_mont_reduce, bn2048_mont_mul, bn2048_gcd};
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha256_sha224.vuma"::{Sha256Ctx, Sha256Data, Sha256Digest, Sha256W, Sha256K, sha256_init, sha256_update, sha256_final};
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, HmacBuf, hmac_sha256};
+import "/home/z/my-project/workdir/vuma/womb/crypto/drbg/drbg.vuma"::{DrbgCtx, DrbgData, DrbgOut, DrbgMsg, drbg_init, drbg_generate, drbg_update, drbg_reseed};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/rsa.vuma"::{Rsa256, RsaKey, RsaBases, rsa_private_op};
+
+transform main() -> i32 {
+    let padded = state_new(Rsa256);
+    let d = state_new(Rsa256);
+    let n = state_new(Rsa256);
+    let sig = state_new(Rsa256);
+
+    // Padded message: 0001 FF...FF 00 3031300d... 1f6b17ab...
+    // (precomputed: 128 bytes for 1024-bit key)
+    padded.bytes[ 0] = 0; padded.bytes[ 1] = 1;
+    let i: u32 = 2;
+    while i < 98 { padded.bytes[i] = 255; i = i + 1; }
+    padded.bytes[98] = 0;
+    // DigestInfo prefix (19 bytes)
+    padded.bytes[ 99] = 48; padded.bytes[100] = 49; padded.bytes[101] = 48; padded.bytes[102] = 13;
+    padded.bytes[103] = 6;  padded.bytes[104] = 9;  padded.bytes[105] = 96; padded.bytes[106] = 134;
+    padded.bytes[107] = 72; padded.bytes[108] = 1;  padded.bytes[109] = 101; padded.bytes[110] = 3;
+    padded.bytes[111] = 4;  padded.bytes[112] = 2;  padded.bytes[113] = 1;  padded.bytes[114] = 5;
+    padded.bytes[115] = 0;  padded.bytes[116] = 4;  padded.bytes[117] = 32;
+    // SHA-256 hash of "rsa test message 0" = 1f6b17ab9ef2848c91ad2a5199525ee7aeac05f593dd548ad588f7dde3d196b9
+    padded.bytes[118] = 31;  padded.bytes[119] = 107; padded.bytes[120] = 23;  padded.bytes[121] = 171;
+    padded.bytes[122] = 158; padded.bytes[123] = 242; padded.bytes[124] = 132; padded.bytes[125] = 140;
+    padded.bytes[126] = 145; padded.bytes[127] = 173;
+
+    // d_hex = 2afdb39df8c43587c11168bc2f219027396a1d60e381f899532363e55b4bc886...
+    d.bytes[ 0] = 42;  d.bytes[ 1] = 253; d.bytes[ 2] = 179; d.bytes[ 3] = 157;
+    d.bytes[ 4] = 248; d.bytes[ 5] = 196; d.bytes[ 6] = 53;  d.bytes[ 7] = 135;
+    d.bytes[ 8] = 193; d.bytes[ 9] = 17;  d.bytes[10] = 104; d.bytes[11] = 188;
+    d.bytes[12] = 47;  d.bytes[13] = 33;  d.bytes[14] = 144; d.bytes[15] = 39;
+    d.bytes[16] = 57;  d.bytes[17] = 106; d.bytes[18] = 29;  d.bytes[19] = 96;
+    d.bytes[20] = 227; d.bytes[21] = 129; d.bytes[22] = 248; d.bytes[23] = 153;
+    d.bytes[24] = 83;  d.bytes[25] = 35;  d.bytes[26] = 99;  d.bytes[27] = 229;
+    d.bytes[28] = 91;  d.bytes[29] = 75;  d.bytes[30] = 200; d.bytes[31] = 134;
+    d.bytes[32] = 0;   d.bytes[33] = 91;  d.bytes[34] = 5;   d.bytes[35] = 69;
+    d.bytes[36] = 164; d.bytes[37] = 248; d.bytes[38] = 205; d.bytes[39] = 220;
+    d.bytes[40] = 250; d.bytes[41] = 163; d.bytes[42] = 168; d.bytes[43] = 234;
+    d.bytes[44] = 83;  d.bytes[45] = 83;  d.bytes[46] = 88;  d.bytes[47] = 197;
+    d.bytes[48] = 196; d.bytes[49] = 247; d.bytes[50] = 206; d.bytes[51] = 81;
+    d.bytes[52] = 161; d.bytes[53] = 3;   d.bytes[54] = 129; d.bytes[55] = 2;
+    d.bytes[56] = 72;  d.bytes[57] = 71;  d.bytes[58] = 41;  d.bytes[59] = 146;
+    d.bytes[60] = 74;  d.bytes[61] = 68;  d.bytes[62] = 194; d.bytes[63] = 210;
+    d.bytes[64] = 152; d.bytes[65] = 48;  d.bytes[66] = 6;   d.bytes[67] = 29;
+    d.bytes[68] = 214; d.bytes[69] = 155; d.bytes[70] = 237; d.bytes[71] = 152;
+    d.bytes[72] = 176; d.bytes[73] = 125; d.bytes[74] = 57;  d.bytes[75] = 185;
+    d.bytes[76] = 234; d.bytes[77] = 153; d.bytes[78] = 175; d.bytes[79] = 221;
+    d.bytes[80] = 120; d.bytes[81] = 110; d.bytes[82] = 246; d.bytes[83] = 233;
+    d.bytes[84] = 170; d.bytes[85] = 98;  d.bytes[86] = 101; d.bytes[87] = 99;
+    d.bytes[88] = 32;  d.bytes[89] = 63;  d.bytes[90] = 164; d.bytes[91] = 81;
+    d.bytes[92] = 94;  d.bytes[93] = 71;  d.bytes[94] = 16;  d.bytes[95] = 178;
+    d.bytes[96] = 25;  d.bytes[97] = 57;  d.bytes[98] = 158; d.bytes[99] = 94;
+    d.bytes[100] = 127; d.bytes[101] = 135; d.bytes[102] = 21;  d.bytes[103] = 116;
+    d.bytes[104] = 202; d.bytes[105] = 98;  d.bytes[106] = 35;  d.bytes[107] = 13;
+    d.bytes[108] = 140; d.bytes[109] = 191; d.bytes[110] = 106; d.bytes[111] = 52;
+    d.bytes[112] = 45;  d.bytes[113] = 136; d.bytes[114] = 116; d.bytes[115] = 111;
+    d.bytes[116] = 216; d.bytes[117] = 253; d.bytes[118] = 154; d.bytes[119] = 93;
+    d.bytes[120] = 106; d.bytes[121] = 141; d.bytes[122] = 225; d.bytes[123] = 112;
+    d.bytes[124] = 134; d.bytes[125] = 150; d.bytes[126] = 253; d.bytes[127] = 34;
+
+    // n_hex = af08640f6698ce6d8dabf65b201af60a7d4f4abf34fd0f3d86...
+    n.bytes[ 0] = 175; n.bytes[ 1] = 8;   n.bytes[ 2] = 100; n.bytes[ 3] = 15;
+    n.bytes[ 4] = 102; n.bytes[ 5] = 152; n.bytes[ 6] = 206; n.bytes[ 7] = 109;
+    n.bytes[ 8] = 141; n.bytes[ 9] = 171; n.bytes[10] = 246; n.bytes[11] = 91;
+    n.bytes[12] = 32;  n.bytes[13] = 26;  n.bytes[14] = 246; n.bytes[15] = 10;
+    n.bytes[16] = 125; n.bytes[17] = 79;  n.bytes[18] = 74;  n.bytes[19] = 191;
+    n.bytes[20] = 52;  n.bytes[21] = 253; n.bytes[22] = 15;  n.bytes[23] = 61;
+    n.bytes[24] = 134; n.bytes[25] = 161; n.bytes[26] = 120; n.bytes[27] = 2;
+    n.bytes[28] = 153; n.bytes[29] = 75;  n.bytes[30] = 198; n.bytes[31] = 98;
+    n.bytes[32] = 15;  n.bytes[33] = 131; n.bytes[34] = 56;  n.bytes[35] = 85;
+    n.bytes[36] = 5;   n.bytes[37] = 198; n.bytes[38] = 96;  n.bytes[39] = 188;
+    n.bytes[40] = 2;   n.bytes[41] = 77;  n.bytes[42] = 178; n.bytes[43] = 47;
+    n.bytes[44] = 231; n.bytes[45] = 7;   n.bytes[46] = 124; n.bytes[47] = 28;
+    n.bytes[48] = 156; n.bytes[49] = 9;   n.bytes[50] = 88;  n.bytes[51] = 228;
+    n.bytes[52] = 198; n.bytes[53] = 240; n.bytes[54] = 165; n.bytes[55] = 180;
+    n.bytes[56] = 184; n.bytes[57] = 155; n.bytes[58] = 144; n.bytes[59] = 241;
+    n.bytes[60] = 134; n.bytes[61] = 174; n.bytes[62] = 186; n.bytes[63] = 241;
+    n.bytes[64] = 175; n.bytes[65] = 167; n.bytes[66] = 114; n.bytes[67] = 245;
+    n.bytes[68] = 179; n.bytes[69] = 4;   n.bytes[70] = 174; n.bytes[71] = 106;
+    n.bytes[72] = 168; n.bytes[73] = 16;  n.bytes[74] = 169; n.bytes[75] = 236;
+    n.bytes[76] = 202; n.bytes[77] = 85;  n.bytes[78] = 205; n.bytes[79] = 237;
+    n.bytes[80] = 194; n.bytes[81] = 124; n.bytes[82] = 52;  n.bytes[83] = 237;
+    n.bytes[84] = 193; n.bytes[85] = 61;  n.bytes[86] = 152; n.bytes[87] = 177;
+    n.bytes[88] = 214; n.bytes[89] = 64;  n.bytes[90] = 77;  n.bytes[91] = 148;
+    n.bytes[92] = 31;  n.bytes[93] = 26;  n.bytes[94] = 129; n.bytes[95] = 101;
+    n.bytes[96] = 208; n.bytes[97] = 229; n.bytes[98] = 1;   n.bytes[99] = 160;
+    n.bytes[100] = 155; n.bytes[101] = 93; n.bytes[102] = 177; n.bytes[103] = 163;
+    n.bytes[104] = 122; n.bytes[105] = 105; n.bytes[106] = 127; n.bytes[107] = 22;
+    n.bytes[108] = 50;  n.bytes[109] = 39; n.bytes[110] = 92;  n.bytes[111] = 6;
+    n.bytes[112] = 5;   n.bytes[113] = 194; n.bytes[114] = 49; n.bytes[115] = 161;
+    n.bytes[116] = 93;  n.bytes[117] = 49; n.bytes[118] = 8;   n.bytes[119] = 202;
+    n.bytes[120] = 5;   n.bytes[121] = 175; n.bytes[122] = 205; n.bytes[123] = 147;
+    n.bytes[124] = 63;  n.bytes[125] = 44; n.bytes[126] = 49; n.bytes[127] = 145;
+
+    // sig = padded^d mod n (key_bytes = 128 for 1024-bit key)
+    rsa_private_op(sig, padded, d, n, 128);
+
+    // Output first 16 bytes of signature
+    let oi: u32 = 0;
+    while oi < 16 {
+        print_int(1000 + (sig.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

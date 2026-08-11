@@ -1,0 +1,64 @@
+// Round-trip test: load known value, convert to Bn2048Ctx, convert back
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum2048.vuma"::{Bn2048Ctx, bn2048_zero, bn2048_copy};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/rsa.vuma"::{Rsa256, rsa_bn_from_bytes, rsa_bn_to_bytes};
+
+transform main() -> i32 {
+    let input = state_new(Rsa256);
+    let bn = state_new(Bn2048Ctx);
+    let output = state_new(Rsa256);
+
+    // Load a known 128-byte value: 00 01 02 03 ... 7F
+    let i: u32 = 0;
+    while i < 128 {
+        input.bytes[i] = (i & 255) as u8;
+        i = i + 1;
+    }
+
+    // Convert to Bn2048Ctx (key_bytes = 128)
+    rsa_bn_from_bytes(bn, input, 128);
+
+    // Output bn.limbs[0] and bn.limbs[15] to verify conversion
+    // For 00 01 02 03 04 05 06 07 ... 78 79 7A 7B 7C 7D 7E 7F
+    // limb[0] (LSB) = bytes[120..127] = 78 79 7A 7B 7C 7D 7E 7F
+    //   = (0x78 << 56) | (0x79 << 48) | ... | 0x7F = 0x78797A7B7C7D7E7F
+    // limb[15] (MSB) = bytes[0..7] = 00 01 02 03 04 05 06 07
+    //   = (0x00 << 56) | (0x01 << 48) | ... | 0x07 = 0x0001020304050607
+
+    print_int(2000 + ((bn.limbs[0] >> 56) & 255) as u32);  // should be 0x78 = 120
+    print_int(2000 + ((bn.limbs[0] >> 48) & 255) as u32);  // 0x79 = 121
+    print_int(2000 + ((bn.limbs[0] >> 40) & 255) as u32);  // 0x7A = 122
+    print_int(2000 + ((bn.limbs[0] >> 32) & 255) as u32);  // 0x7B = 123
+    print_int(2000 + ((bn.limbs[0] >> 24) & 255) as u32);  // 0x7C = 124
+    print_int(2000 + ((bn.limbs[0] >> 16) & 255) as u32);  // 0x7D = 125
+    print_int(2000 + ((bn.limbs[0] >> 8) & 255) as u32);   // 0x7E = 126
+    print_int(2000 + (bn.limbs[0] & 255) as u32);          // 0x7F = 127
+    print_int(1999);  // delimiter
+
+    print_int(3000 + ((bn.limbs[15] >> 56) & 255) as u32); // 0x00 = 0
+    print_int(3000 + ((bn.limbs[15] >> 48) & 255) as u32); // 0x01 = 1
+    print_int(3000 + ((bn.limbs[15] >> 40) & 255) as u32); // 0x02 = 2
+    print_int(3000 + ((bn.limbs[15] >> 32) & 255) as u32); // 0x03 = 3
+    print_int(3000 + ((bn.limbs[15] >> 24) & 255) as u32); // 0x04 = 4
+    print_int(3000 + ((bn.limbs[15] >> 16) & 255) as u32); // 0x05 = 5
+    print_int(3000 + ((bn.limbs[15] >> 8) & 255) as u32);  // 0x06 = 6
+    print_int(3000 + (bn.limbs[15] & 255) as u32);         // 0x07 = 7
+    print_int(2999);  // delimiter
+
+    // Convert back
+    rsa_bn_to_bytes(output, bn, 128);
+
+    // Output first 8 bytes and last 8 bytes of output
+    let oi: u32 = 0;
+    while oi < 8 {
+        print_int(1000 + (output.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(1999);  // delimiter
+    oi = 120;
+    while oi < 128 {
+        print_int(1000 + (output.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

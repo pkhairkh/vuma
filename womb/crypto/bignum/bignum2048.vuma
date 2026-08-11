@@ -69,14 +69,16 @@ transform bn2048_is_zero(a: State<Bn2048Ctx>) -> u32 {
     return 1;
 }
 
-// Three-way compare: 1 if a>b, -1 if a<b, 0 if equal.
-transform bn2048_cmp(a: State<Bn2048Ctx>, b: State<Bn2048Ctx>) -> i32 {
+// Three-way compare: returns 1 if a>b, 2 if a<b, 0 if equal.
+// Uses u32 return type (not i32) to avoid VUMA codegen signed-comparison bug
+// where `i32 >= 0` on a function-call result defaults to unsigned comparison.
+transform bn2048_cmp(a: State<Bn2048Ctx>, b: State<Bn2048Ctx>) -> u32 {
     let i: u32 = BN2048_LIMBS - 1;
     while 1 == 1 {
         let av = a.limbs[i];
         let bv = b.limbs[i];
         if av > bv { return 1; }
-        if av < bv { return -1; }
+        if av < bv { return 2; }
         if i == 0 { break; }
         i = i - 1;
     }
@@ -302,7 +304,7 @@ transform bn2048_divmod_4096(dividend: State<Bn4096Ctx>, divisor: State<Bn2048Ct
             let cur = remainder.limbs[0];
             remainder.limbs[0] = cur | 1;
         }
-        if bn2048_cmp(remainder, divisor) >= 0 {
+        if bn2048_cmp(remainder, divisor) != 2 {
             bn2048_sub(remainder, remainder, divisor);
             let q_word = bit / 64;
             let q_pos = bit % 64;
@@ -321,7 +323,7 @@ transform bn2048_mod_add(r: State<Bn2048Ctx>, a: State<Bn2048Ctx>, b: State<Bn20
     if carry == 1 {
         bn2048_sub(r, r, m);
     } else {
-        if bn2048_cmp(r, m) >= 0 {
+        if bn2048_cmp(r, m) != 2 {
             bn2048_sub(r, r, m);
         }
     }
@@ -356,28 +358,75 @@ transform bn2048_mod(r: State<Bn2048Ctx>, a: State<Bn2048Ctx>, m: State<Bn2048Ct
     bn2048_divmod_4096(prod, m, quot, r);
 }
 
-// r = a^exp mod m via square-and-multiply.
+// r = a^exp mod m via square-and-multiply using Montgomery multiplication.
+// Falls back to slow divmod path if m is even (Montgomery requires odd modulus).
+// ~100x faster than divmod-based mod_mul for repeated multiplications.
 transform bn2048_mod_exp(r: State<Bn2048Ctx>, a: State<Bn2048Ctx>, exp: State<Bn2048Ctx>, m: State<Bn2048Ctx>) {
-    bn2048_zero(r);
-    r.limbs[0] = 1;  // r = 1
+    // Check if m is odd (required for Montgomery)
+    if (m.limbs[0] & 1) == 0 {
+        // Even modulus: fall back to slow path
+        bn2048_zero(r);
+        r.limbs[0] = 1;
+        let base_slow = state_new(Bn2048Ctx);
+        bn2048_mod(base_slow, a, m);
+        let bits_slow: u32 = bn2048_bitlen(exp);
+        if bits_slow == 0 { return; }
+        let i_slow = 0;
+        while i_slow < bits_slow {
+            if bn2048_get_bit(exp, i_slow) == 1 {
+                let tmp = state_new(Bn2048Ctx);
+                bn2048_mod_mul(tmp, r, base_slow, m);
+                bn2048_copy(r, tmp);
+            }
+            let sq = state_new(Bn2048Ctx);
+            bn2048_mod_mul(sq, base_slow, base_slow, m);
+            bn2048_copy(base_slow, sq);
+            i_slow = i_slow + 1;
+        }
+        return;
+    }
 
-    let base = state_new(Bn2048Ctx);
-    bn2048_mod(base, a, m);
+    // Montgomery path: m is odd.
+    // Precompute Montgomery context (one-time cost per mod_exp call).
+    let mprime: u64 = bn2048_mont_compute_m_prime(m);
+    let r2 = state_new(Bn2048Ctx);
+    bn2048_mont_compute_r2(r2, m);
+
+    // Convert base to Montgomery form: a_mont = a * R mod m = mont_mul(a, r2, m, mprime)
+    let base_mont = state_new(Bn2048Ctx);
+    bn2048_mod(base_mont, a, m);
+    let base_m = state_new(Bn2048Ctx);
+    bn2048_mont_mul(base_m, base_mont, r2, m, mprime);
+
+    // Result in Montgomery form starts as R mod m (= "1" in Montgomery form).
+    // R mod m = mont_mul(1, r2, m, mprime).
+    let one = state_new(Bn2048Ctx);
+    bn2048_set_u32(one, 1);
+    let res_m = state_new(Bn2048Ctx);
+    bn2048_mont_mul(res_m, one, r2, m, mprime);
 
     let bits: u32 = bn2048_bitlen(exp);
-    if bits == 0 { return; }
+    if bits == 0 {
+        bn2048_set_u32(r, 1);
+        return;
+    }
+
     let i = 0;
     while i < bits {
         if bn2048_get_bit(exp, i) == 1 {
             let tmp = state_new(Bn2048Ctx);
-            bn2048_mod_mul(tmp, r, base, m);
-            bn2048_copy(r, tmp);
+            bn2048_mont_mul(tmp, res_m, base_m, m, mprime);
+            bn2048_copy(res_m, tmp);
         }
         let sq = state_new(Bn2048Ctx);
-        bn2048_mod_mul(sq, base, base, m);
-        bn2048_copy(base, sq);
+        bn2048_mont_mul(sq, base_m, base_m, m, mprime);
+        bn2048_copy(base_m, sq);
         i = i + 1;
     }
+
+    // Convert result back from Montgomery form: r = res_m * R^(-1) mod m
+    // = mont_mul(res_m, 1, m, mprime).
+    bn2048_mont_mul(r, res_m, one, m, mprime);
 }
 
 // ===========================================================================
@@ -403,7 +452,7 @@ transform bn2048_gcd(r: State<Bn2048Ctx>, a: State<Bn2048Ctx>, b: State<Bn2048Ct
         while bn2048_get_bit(v, 0) == 0 {
             bn2048_rshift1(v, v);
         }
-        if bn2048_cmp(u, v) >= 0 {
+        if bn2048_cmp(u, v) != 2 {
             bn2048_sub(u, u, v);
         } else {
             bn2048_sub(v, v, u);
@@ -456,7 +505,7 @@ transform bn2048_mod_inv(r: State<Bn2048Ctx>, a: State<Bn2048Ctx>, m: State<Bn20
                 bn2048_rshift1(x2, x2);
             }
         }
-        if bn2048_cmp(u, v) >= 0 {
+        if bn2048_cmp(u, v) != 2 {
             bn2048_sub(u, u, v);
             bn2048_mod_sub(x1, x1, x2, m);
         } else {
@@ -511,7 +560,8 @@ transform bn2048_mont_compute_m_prime(m: State<Bn2048Ctx>) -> u64 {
         m_prime = m_prime * factor;
         i = i + 1;
     }
-    return 0 - m_prime;
+    let zero_u64: u64 = 0;
+    return zero_u64 - m_prime;
 }
 
 // Montgomery reduction: result = t * R^(-1) mod m, where R = 2^2048.

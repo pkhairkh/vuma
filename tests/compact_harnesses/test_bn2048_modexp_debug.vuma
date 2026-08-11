@@ -1,0 +1,43 @@
+// Direct test of bn2048_mod_exp: compute 2^e mod n
+// n is a 1024-bit RSA modulus, e = 65537
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum2048.vuma"::{Bn2048Ctx, Bn4096Ctx, Bn4160Ctx, Bn2048_64Ctx, Bn2112Ctx, bn2048_mod_exp, bn2048_mod_mul, bn2048_mod, bn2048_mod_inv, bn2048_mod_add, bn2048_mod_sub, bn2048_add, bn2048_sub, bn2048_cmp, bn2048_is_zero, bn2048_copy, bn2048_zero, bn2048_set_u32, bn2048_bitlen, bn2048_get_bit, bn2048_lshift1, bn2048_rshift1, bn2048_mul_4096, bn2048_divmod_4096, bn2048_mul_u64, bn2048_mont_compute_r2, bn2048_mont_compute_m_prime, bn2048_mont_reduce, bn2048_mont_mul, bn2048_gcd};
+
+transform main() -> i32 {
+    let base = state_new(Bn2048Ctx);
+    let exp = state_new(Bn2048Ctx);
+    let n = state_new(Bn2048Ctx);
+    let result = state_new(Bn2048Ctx);
+
+    // base = 2
+    bn2048_set_u32(base, 2);
+
+    // exp = 65537 = 0x10001
+    bn2048_set_u32(exp, 65537);
+
+    // n = RSA modulus (1024-bit, stored as LE limbs)
+    // n LE limbs[0] = 0xb842733e04e1f421
+    n.limbs[0] = ((4280942146 as u64) << 32) | (72619361 as u64);
+    // Remaining limbs will be set from Python-generated values
+    // n.limbs[1] through n.limbs[15] are non-zero
+    // n.limbs[16] through n.limbs[31] are 0 (already zero from state_new)
+
+    // For now, just test with a small prime to verify Montgomery works
+    // n = 1000003 (a prime)
+    bn2048_set_u32(n, 1000003);
+
+    // result = 2^65537 mod 1000003
+    bn2048_mod_exp(result, base, exp, n);
+
+    // Output result.limbs[0] as 8 bytes big-endian
+    let v = result.limbs[0];
+    print_int(1000 + (((v >> 56) & 255) as u32));
+    print_int(1000 + (((v >> 48) & 255) as u32));
+    print_int(1000 + (((v >> 40) & 255) as u32));
+    print_int(1000 + (((v >> 32) & 255) as u32));
+    print_int(1000 + (((v >> 24) & 255) as u32));
+    print_int(1000 + (((v >> 16) & 255) as u32));
+    print_int(1000 + (((v >> 8) & 255) as u32));
+    print_int(1000 + ((v & 255) as u32));
+    print_int(999);
+    return 0;
+}

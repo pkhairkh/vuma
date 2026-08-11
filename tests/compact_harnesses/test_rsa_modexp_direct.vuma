@@ -1,0 +1,57 @@
+// Debug: replicate rsa_bn_mod_exp directly in harness
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum2048.vuma"::{Bn2048Ctx, bn2048_mod_exp, bn2048_zero, bn2048_copy};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/rsa.vuma"::{Rsa256, rsa_bn_from_bytes, rsa_bn_to_bytes};
+
+transform main() -> i32 {
+    let padded = state_new(Rsa256);
+    let d = state_new(Rsa256);
+    let n = state_new(Rsa256);
+    let sig = state_new(Rsa256);
+
+    // Load padded = 2 (simple test: 2^d mod n should match)
+    padded.bytes[127] = 2;
+
+    // d = 65537 (0x10001)
+    d.bytes[126] = 1;
+    d.bytes[127] = 1;
+
+    // n = 1000003 (a prime) — stored big-endian in 128 bytes
+    // 1000003 = 0x000F4243
+    n.bytes[124] = 0;
+    n.bytes[125] = 15;
+    n.bytes[126] = 66;
+    n.bytes[127] = 67;
+
+    // Replicate rsa_bn_mod_exp(sig, padded, d, n, 128)
+    let c_bn = state_new(Bn2048Ctx);
+    let m_bn = state_new(Bn2048Ctx);
+    let e_bn = state_new(Bn2048Ctx);
+    let n_bn = state_new(Bn2048Ctx);
+
+    rsa_bn_from_bytes(m_bn, padded, 128);  // m_bn = 2
+    rsa_bn_from_bytes(e_bn, d, 128);       // e_bn = 65537
+    rsa_bn_from_bytes(n_bn, n, 128);       // n_bn = 1000003
+
+    // Output m_bn.limbs[0] (should be 2)
+    print_int(5000 + (m_bn.limbs[0] as u32));
+    print_int(5999);
+
+    // Output e_bn.limbs[0] (should be 65537)
+    print_int(6000 + ((e_bn.limbs[0] >> 16) as u32));
+    print_int(6000 + ((e_bn.limbs[0] & 65535) as u32));
+    print_int(5999);
+
+    // Output n_bn.limbs[0] (should be 1000003)
+    print_int(7000 + ((n_bn.limbs[0] >> 16) as u32));
+    print_int(7000 + ((n_bn.limbs[0] & 65535) as u32));
+    print_int(5999);
+
+    // c_bn = m_bn^e_bn mod n_bn
+    bn2048_mod_exp(c_bn, m_bn, e_bn, n_bn);
+
+    // Output c_bn.limbs[0] (should be 50199 = 0xC417)
+    print_int(8000 + ((c_bn.limbs[0] >> 16) as u32));
+    print_int(8000 + ((c_bn.limbs[0] & 65535) as u32));
+    print_int(999);
+    return 0;
+}

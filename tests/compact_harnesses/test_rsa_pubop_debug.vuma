@@ -1,0 +1,97 @@
+// Debug RSA: compute sig^e mod n (public op) — should give padded message
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum2048.vuma"::{Bn2048Ctx, Bn4096Ctx, Bn4160Ctx, Bn2048_64Ctx, Bn2112Ctx, bn2048_mod_exp, bn2048_mod_mul, bn2048_mod, bn2048_mod_inv, bn2048_mod_add, bn2048_mod_sub, bn2048_add, bn2048_sub, bn2048_cmp, bn2048_is_zero, bn2048_copy, bn2048_zero, bn2048_set_u32, bn2048_bitlen, bn2048_get_bit, bn2048_lshift1, bn2048_rshift1, bn2048_mul_4096, bn2048_divmod_4096, bn2048_mul_u64, bn2048_mont_compute_r2, bn2048_mont_compute_m_prime, bn2048_mont_reduce, bn2048_mont_mul, bn2048_gcd};
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha256_sha224.vuma"::{Sha256Ctx, Sha256Data, Sha256Digest, Sha256W, Sha256K, sha256_init, sha256_update, sha256_final};
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, HmacBuf, hmac_sha256};
+import "/home/z/my-project/workdir/vuma/womb/crypto/drbg/drbg.vuma"::{DrbgCtx, DrbgData, DrbgOut, DrbgMsg, drbg_init, drbg_generate, drbg_update, drbg_reseed};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/rsa.vuma"::{Rsa256, RsaKey, RsaBases, rsa_bn_from_bytes, rsa_bn_to_bytes, rsa_bn_mod_exp, rsa_public_op};
+
+transform main() -> i32 {
+    let sig = state_new(Rsa256);
+    let e = state_new(Rsa256);
+    let n = state_new(Rsa256);
+    let result = state_new(Rsa256);
+
+    // sig_hex = 8e36e2db... (expected signature from vector 0)
+    sig.bytes[ 0] = 142; sig.bytes[ 1] = 54; sig.bytes[ 2] = 226; sig.bytes[ 3] = 219;
+    sig.bytes[ 4] = 34; sig.bytes[ 5] = 81; sig.bytes[ 6] = 171; sig.bytes[ 7] = 206;
+    sig.bytes[ 8] = 150; sig.bytes[ 9] = 161; sig.bytes[10] = 12; sig.bytes[11] = 98;
+    sig.bytes[12] = 247; sig.bytes[13] = 227; sig.bytes[14] = 5; sig.bytes[15] = 1;
+    sig.bytes[16] = 236; sig.bytes[17] = 242; sig.bytes[18] = 229; sig.bytes[19] = 213;
+    sig.bytes[20] = 163; sig.bytes[21] = 202; sig.bytes[22] = 101; sig.bytes[23] = 119;
+    sig.bytes[24] = 229; sig.bytes[25] = 239; sig.bytes[26] = 43; sig.bytes[27] = 201;
+    sig.bytes[28] = 140; sig.bytes[29] = 113; sig.bytes[30] = 152; sig.bytes[31] = 186;
+    sig.bytes[32] = 51; sig.bytes[33] = 196; sig.bytes[34] = 136; sig.bytes[35] = 209;
+    sig.bytes[36] = 209; sig.bytes[37] = 88; sig.bytes[38] = 155; sig.bytes[39] = 210;
+    sig.bytes[40] = 159; sig.bytes[41] = 250; sig.bytes[42] = 32; sig.bytes[43] = 196;
+    sig.bytes[44] = 231; sig.bytes[45] = 249; sig.bytes[46] = 237; sig.bytes[47] = 35;
+    sig.bytes[48] = 141; sig.bytes[49] = 109; sig.bytes[50] = 97; sig.bytes[51] = 117;
+    sig.bytes[52] = 160; sig.bytes[53] = 47; sig.bytes[54] = 193; sig.bytes[55] = 96;
+    sig.bytes[56] = 169; sig.bytes[57] = 207; sig.bytes[58] = 56; sig.bytes[59] = 67;
+    sig.bytes[60] = 240; sig.bytes[61] = 98; sig.bytes[62] = 54; sig.bytes[63] = 130;
+    sig.bytes[64] = 125; sig.bytes[65] = 113; sig.bytes[66] = 98; sig.bytes[67] = 209;
+    sig.bytes[68] = 184; sig.bytes[69] = 85; sig.bytes[70] = 86; sig.bytes[71] = 232;
+    sig.bytes[72] = 85; sig.bytes[73] = 89; sig.bytes[74] = 216; sig.bytes[75] = 29;
+    sig.bytes[76] = 203; sig.bytes[77] = 214; sig.bytes[78] = 68; sig.bytes[79] = 116;
+    sig.bytes[80] = 198; sig.bytes[81] = 22; sig.bytes[82] = 64; sig.bytes[83] = 32;
+    sig.bytes[84] = 117; sig.bytes[85] = 85; sig.bytes[86] = 15; sig.bytes[87] = 128;
+    sig.bytes[88] = 3; sig.bytes[89] = 47; sig.bytes[90] = 163; sig.bytes[91] = 190;
+    sig.bytes[92] = 223; sig.bytes[93] = 243; sig.bytes[94] = 50; sig.bytes[95] = 135;
+    sig.bytes[96] = 245; sig.bytes[97] = 2; sig.bytes[98] = 84; sig.bytes[99] = 139;
+    sig.bytes[100] = 231; sig.bytes[101] = 150; sig.bytes[102] = 54; sig.bytes[103] = 137;
+    sig.bytes[104] = 159; sig.bytes[105] = 75; sig.bytes[106] = 218; sig.bytes[107] = 184;
+    sig.bytes[108] = 165; sig.bytes[109] = 193; sig.bytes[110] = 105; sig.bytes[111] = 254;
+    sig.bytes[112] = 251; sig.bytes[113] = 2; sig.bytes[114] = 36; sig.bytes[115] = 50;
+    sig.bytes[116] = 32; sig.bytes[117] = 171; sig.bytes[118] = 235; sig.bytes[119] = 252;
+    sig.bytes[120] = 187; sig.bytes[121] = 60; sig.bytes[122] = 64; sig.bytes[123] = 43;
+    sig.bytes[124] = 25; sig.bytes[125] = 206; sig.bytes[126] = 237; sig.bytes[127] = 69;
+    sig.bytes[128] = 193;
+
+    // e = 0x10001 = 65537
+    e.bytes[124] = 0; e.bytes[125] = 1; e.bytes[126] = 0; e.bytes[127] = 1;
+
+    // n_hex = af08640f... (first 128 bytes)
+    n.bytes[ 0] = 175; n.bytes[ 1] = 8; n.bytes[ 2] = 100; n.bytes[ 3] = 15;
+    n.bytes[ 4] = 102; n.bytes[ 5] = 152; n.bytes[ 6] = 206; n.bytes[ 7] = 109;
+    n.bytes[ 8] = 141; n.bytes[ 9] = 171; n.bytes[10] = 246; n.bytes[11] = 91;
+    n.bytes[12] = 32; n.bytes[13] = 26; n.bytes[14] = 246; n.bytes[15] = 10;
+    n.bytes[16] = 125; n.bytes[17] = 79; n.bytes[18] = 74; n.bytes[19] = 191;
+    n.bytes[20] = 52; n.bytes[21] = 253; n.bytes[22] = 15; n.bytes[23] = 61;
+    n.bytes[24] = 134; n.bytes[25] = 161; n.bytes[26] = 120; n.bytes[27] = 2;
+    n.bytes[28] = 153; n.bytes[29] = 75; n.bytes[30] = 198; n.bytes[31] = 98;
+    n.bytes[32] = 15; n.bytes[33] = 131; n.bytes[34] = 56; n.bytes[35] = 85;
+    n.bytes[36] = 5; n.bytes[37] = 198; n.bytes[38] = 96; n.bytes[39] = 188;
+    n.bytes[40] = 2; n.bytes[41] = 77; n.bytes[42] = 178; n.bytes[43] = 47;
+    n.bytes[44] = 231; n.bytes[45] = 7; n.bytes[46] = 124; n.bytes[47] = 28;
+    n.bytes[48] = 156; n.bytes[49] = 9; n.bytes[50] = 88; n.bytes[51] = 228;
+    n.bytes[52] = 198; n.bytes[53] = 240; n.bytes[54] = 165; n.bytes[55] = 180;
+    n.bytes[56] = 184; n.bytes[57] = 155; n.bytes[58] = 144; n.bytes[59] = 241;
+    n.bytes[60] = 134; n.bytes[61] = 174; n.bytes[62] = 186; n.bytes[63] = 241;
+    n.bytes[64] = 175; n.bytes[65] = 167; n.bytes[66] = 114; n.bytes[67] = 245;
+    n.bytes[68] = 179; n.bytes[69] = 4; n.bytes[70] = 174; n.bytes[71] = 106;
+    n.bytes[72] = 168; n.bytes[73] = 16; n.bytes[74] = 169; n.bytes[75] = 236;
+    n.bytes[76] = 202; n.bytes[77] = 85; n.bytes[78] = 205; n.bytes[79] = 237;
+    n.bytes[80] = 194; n.bytes[81] = 124; n.bytes[82] = 52; n.bytes[83] = 237;
+    n.bytes[84] = 193; n.bytes[85] = 61; n.bytes[86] = 152; n.bytes[87] = 177;
+    n.bytes[88] = 214; n.bytes[89] = 64; n.bytes[90] = 77; n.bytes[91] = 148;
+    n.bytes[92] = 31; n.bytes[93] = 26; n.bytes[94] = 129; n.bytes[95] = 101;
+    n.bytes[96] = 208; n.bytes[97] = 229; n.bytes[98] = 1; n.bytes[99] = 160;
+    n.bytes[100] = 155; n.bytes[101] = 93; n.bytes[102] = 177; n.bytes[103] = 163;
+    n.bytes[104] = 122; n.bytes[105] = 105; n.bytes[106] = 127; n.bytes[107] = 22;
+    n.bytes[108] = 50; n.bytes[109] = 39; n.bytes[110] = 92; n.bytes[111] = 6;
+    n.bytes[112] = 5; n.bytes[113] = 194; n.bytes[114] = 49; n.bytes[115] = 161;
+    n.bytes[116] = 93; n.bytes[117] = 49; n.bytes[118] = 8; n.bytes[119] = 202;
+    n.bytes[120] = 5; n.bytes[121] = 175; n.bytes[122] = 205; n.bytes[123] = 147;
+    n.bytes[124] = 63; n.bytes[125] = 44; n.bytes[126] = 49; n.bytes[127] = 145;
+
+    // result = sig^e mod n (should give padded message: 00 01 FF...FF 00 DigestInfo hash)
+    rsa_public_op(result, sig, e, n);
+
+    // Output first 20 bytes of result
+    let oi: u32 = 0;
+    while oi < 20 {
+        print_int(1000 + (result.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

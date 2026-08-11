@@ -48,9 +48,15 @@ layout RsaBases = { bytes: [u8; 5] }
 // bignum2048 module stores 2048-bit values as 32 little-endian u64 limbs.
 // ===========================================================================
 
-transform rsa_bn_from_bytes(bn: State<Bn2048Ctx>, src: State<Rsa256>) {
+// Convert big-endian byte array to little-endian limbs.
+// key_bytes is the actual key size (128 for 1024-bit, 256 for 2048-bit).
+// The value is stored MSB-aligned in src.bytes[0..key_bytes-1].
+// Maps to bn.limbs[0..key_bytes/8-1] with limbs[key_bytes/8..31] = 0.
+transform rsa_bn_from_bytes(bn: State<Bn2048Ctx>, src: State<Rsa256>, key_bytes: u32) {
+    bn2048_zero(bn);
+    let n_limbs: u32 = key_bytes / 8;
     let i: u32 = 0;
-    while i < 32 {
+    while i < n_limbs {
         let off: u32 = i * 8;
         let b0: u64 = src.bytes[off + 0] as u64;
         let b1: u64 = src.bytes[off + 1] as u64;
@@ -60,25 +66,35 @@ transform rsa_bn_from_bytes(bn: State<Bn2048Ctx>, src: State<Rsa256>) {
         let b5: u64 = src.bytes[off + 5] as u64;
         let b6: u64 = src.bytes[off + 6] as u64;
         let b7: u64 = src.bytes[off + 7] as u64;
-        bn.limbs[i] = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+        bn.limbs[n_limbs - 1 - i] = (b0 << 56) | (b1 << 48) | (b2 << 40) | (b3 << 32) | (b4 << 24) | (b5 << 16) | (b6 << 8) | b7;
         i = i + 1;
     }
 }
 
-transform rsa_bn_to_bytes(dst: State<Rsa256>, bn: State<Bn2048Ctx>) {
+// Convert little-endian limbs to big-endian byte array.
+// key_bytes is the actual key size (128 for 1024-bit, 256 for 2048-bit).
+// Writes to dst.bytes[0..key_bytes-1], MSB-aligned.
+transform rsa_bn_to_bytes(dst: State<Rsa256>, bn: State<Bn2048Ctx>, key_bytes: u32) {
+    let n_limbs: u32 = key_bytes / 8;
     let i: u32 = 0;
-    while i < 32 {
+    while i < n_limbs {
         let off: u32 = i * 8;
-        let v: u64 = bn.limbs[i];
-        dst.bytes[off + 0] = (v & 255) as u8;
-        dst.bytes[off + 1] = ((v >> 8) & 255) as u8;
-        dst.bytes[off + 2] = ((v >> 16) & 255) as u8;
-        dst.bytes[off + 3] = ((v >> 24) & 255) as u8;
-        dst.bytes[off + 4] = ((v >> 32) & 255) as u8;
-        dst.bytes[off + 5] = ((v >> 40) & 255) as u8;
-        dst.bytes[off + 6] = ((v >> 48) & 255) as u8;
-        dst.bytes[off + 7] = ((v >> 56) & 255) as u8;
+        let v: u64 = bn.limbs[n_limbs - 1 - i];
+        dst.bytes[off + 0] = ((v >> 56) & 255) as u8;
+        dst.bytes[off + 1] = ((v >> 48) & 255) as u8;
+        dst.bytes[off + 2] = ((v >> 40) & 255) as u8;
+        dst.bytes[off + 3] = ((v >> 32) & 255) as u8;
+        dst.bytes[off + 4] = ((v >> 24) & 255) as u8;
+        dst.bytes[off + 5] = ((v >> 16) & 255) as u8;
+        dst.bytes[off + 6] = ((v >> 8) & 255) as u8;
+        dst.bytes[off + 7] = (v & 255) as u8;
         i = i + 1;
+    }
+    // Zero remaining bytes
+    let j: u32 = key_bytes;
+    while j < 256 {
+        dst.bytes[j] = 0;
+        j = j + 1;
     }
 }
 
@@ -163,43 +179,47 @@ transform rsa_bn_is_zero(a: State<Rsa256>) -> u32 {
     return 1;
 }
 
-// Three-way compare (byte-wise). 1 if a>b, -1 if a<b, 0 if equal.
-transform rsa_bn_cmp(a: State<Rsa256>, b: State<Rsa256>) -> i32 {
-    let i: u32 = 255;
-    while 1 == 1 {
+// Three-way compare (byte-wise, big-endian). Returns 1 if a>b, 2 if a<b, 0 if equal.
+// Uses u32 return type (not i32) to avoid VUMA codegen signed-comparison bug.
+// Iterates from MSB (byte[0]) to LSB (byte[255]) — correct for big-endian.
+transform rsa_bn_cmp(a: State<Rsa256>, b: State<Rsa256>) -> u32 {
+    let i: u32 = 0;
+    while i < 256 {
         let av: u32 = a.bytes[i] as u32;
         let bv: u32 = b.bytes[i] as u32;
         if av > bv { return 1; }
-        if av < bv { return -1; }
-        if i == 0 { break; }
-        i = i - 1;
+        if av < bv { return 2; }
+        i = i + 1;
     }
     return 0;
 }
 
+// Get bit `bit` of a big-endian 256-byte number. Bit 0 = LSB (byte[255] bit 0).
 transform rsa_bn_get_bit(a: State<Rsa256>, bit: u32) -> u32 {
-    let byte_idx: u32 = bit / 8;
-    if byte_idx >= 256 { return 0; }
+    if bit >= 2048 { return 0; }
+    let byte_idx: u32 = 255 - (bit / 8);
     let pos: u32 = bit % 8;
     let v: u32 = a.bytes[byte_idx] as u32;
     return (v >> pos) & 1;
 }
 
+// Bit length of a big-endian 256-byte number. Scans from MSB (byte[0]) to LSB.
 transform rsa_bn_bitlen(a: State<Rsa256>) -> u32 {
-    let i: u32 = 255;
-    while 1 == 1 {
+    let i: u32 = 0;
+    while i < 256 {
         if a.bytes[i] != 0 {
             let b: u32 = a.bytes[i] as u32;
             let bits: u32 = 8;
             while bits > 0 {
                 let p: u32 = bits - 1;
-                if ((b >> p) & 1) == 1 { return i * 8 + bits; }
+                if ((b >> p) & 1) == 1 {
+                    let remaining: u32 = 255 - i;
+                    return remaining * 8 + bits;
+                }
                 bits = bits - 1;
             }
-            return i * 8 + 1;
         }
-        if i == 0 { break; }
-        i = i - 1;
+        i = i + 1;
     }
     return 0;
 }
@@ -334,7 +354,7 @@ transform rsa_bn_mod_inv(r: State<Rsa256>, a: State<Rsa256>, m: State<Rsa256>) {
             }
         }
         // Reduce the larger of u, v; subtract the smaller; same for x1, x2
-        if rsa_bn_cmp(u, v) >= 0 {
+        if rsa_bn_cmp(u, v) != 2 {
             rsa_bn_sub(u, u, v);
             let borrow: u32 = rsa_bn_sub(x1, x1, x2);
             if borrow == 1 { rsa_bn_add(x1, x1, m); }
@@ -366,7 +386,7 @@ transform rsa_bn_mod(r: State<Rsa256>, a: State<Rsa256>, m: State<Rsa256>) {
             rem.bytes[0] = (rem.bytes[0] as u32 | 1) as u8;
         }
         // if rem >= m: rem -= m
-        if rsa_bn_cmp(rem, m) >= 0 {
+        if rsa_bn_cmp(rem, m) != 2 {
             rsa_bn_sub(rem, rem, m);
         }
         i = im1;
@@ -378,28 +398,28 @@ transform rsa_bn_mod(r: State<Rsa256>, a: State<Rsa256>, m: State<Rsa256>) {
 // Wrapper: r = a^exp mod m via the bn2048_mod_exp primitive. Converts the
 // byte-oriented operands into Bn2048Ctx limbs and back.
 // ===========================================================================
-transform rsa_bn_mod_exp(c: State<Rsa256>, m: State<Rsa256>, e: State<Rsa256>, n: State<Rsa256>) {
+transform rsa_bn_mod_exp(c: State<Rsa256>, m: State<Rsa256>, e: State<Rsa256>, n: State<Rsa256>, key_bytes: u32) {
     let c_bn = state_new(Bn2048Ctx);
     let m_bn = state_new(Bn2048Ctx);
     let e_bn = state_new(Bn2048Ctx);
     let n_bn = state_new(Bn2048Ctx);
-    rsa_bn_from_bytes(m_bn, m);
-    rsa_bn_from_bytes(e_bn, e);
-    rsa_bn_from_bytes(n_bn, n);
+    rsa_bn_from_bytes(m_bn, m, key_bytes);
+    rsa_bn_from_bytes(e_bn, e, key_bytes);
+    rsa_bn_from_bytes(n_bn, n, key_bytes);
     bn2048_mod_exp(c_bn, m_bn, e_bn, n_bn);
-    rsa_bn_to_bytes(c, c_bn);
+    rsa_bn_to_bytes(c, c_bn, key_bytes);
 }
 
-transform rsa_bn_mod_mul(r: State<Rsa256>, a: State<Rsa256>, b: State<Rsa256>, m: State<Rsa256>) {
+transform rsa_bn_mod_mul(r: State<Rsa256>, a: State<Rsa256>, b: State<Rsa256>, m: State<Rsa256>, key_bytes: u32) {
     let r_bn = state_new(Bn2048Ctx);
     let a_bn = state_new(Bn2048Ctx);
     let b_bn = state_new(Bn2048Ctx);
     let m_bn = state_new(Bn2048Ctx);
-    rsa_bn_from_bytes(a_bn, a);
-    rsa_bn_from_bytes(b_bn, b);
-    rsa_bn_from_bytes(m_bn, m);
+    rsa_bn_from_bytes(a_bn, a, key_bytes);
+    rsa_bn_from_bytes(b_bn, b, key_bytes);
+    rsa_bn_from_bytes(m_bn, m, key_bytes);
     bn2048_mod_mul(r_bn, a_bn, b_bn, m_bn);
-    rsa_bn_to_bytes(r, r_bn);
+    rsa_bn_to_bytes(r, r_bn, key_bytes);
 }
 
 // ===========================================================================
@@ -473,12 +493,12 @@ transform rsa_is_probably_prime(n: State<Rsa256>) -> u32 {
 
         let skip: u32 = 0;
         // If a >= n, skip (only matters for tiny n)
-        if rsa_bn_cmp(a, n) >= 0 { skip = 1; }
+        if rsa_bn_cmp(a, n) != 2 { skip = 1; }
 
         if skip == 0 {
             // x = a^d mod n
             let x = state_new(Rsa256);
-            rsa_bn_mod_exp(x, a, d, n);
+            rsa_bn_mod_exp(x, a, d, n, 256);
 
             let cont: u32 = 0;
             if rsa_bn_cmp(x, one) == 0 { cont = 1; }
@@ -491,7 +511,7 @@ transform rsa_is_probably_prime(n: State<Rsa256>) -> u32 {
             let mut_result: u32 = result;
             while mut_cont == 0 && ri + 1 < r {
                 let x2 = state_new(Rsa256);
-                rsa_bn_mod_mul(x2, x, x, n);
+                rsa_bn_mod_mul(x2, x, x, n, 256);
                 rsa_bn_copy(x, x2);
                 if rsa_bn_cmp(x, one) == 0 { mut_result = 0; break; }
                 if rsa_bn_cmp(x, nm1) == 0 { mut_cont = 1; break; }
@@ -619,12 +639,12 @@ transform rsa_keygen(key_out: State<RsaKey>, drbg: State<DrbgCtx>) -> u32 {
 // ===========================================================================
 // Core RSA primitive: c = m^e mod n (public op) and m = c^d mod n (private op)
 // ===========================================================================
-transform rsa_public_op(c: State<Rsa256>, m: State<Rsa256>, e: State<Rsa256>, n: State<Rsa256>) {
-    rsa_bn_mod_exp(c, m, e, n);
+transform rsa_public_op(c: State<Rsa256>, m: State<Rsa256>, e: State<Rsa256>, n: State<Rsa256>, key_bytes: u32) {
+    rsa_bn_mod_exp(c, m, e, n, key_bytes);
 }
 
-transform rsa_private_op(m: State<Rsa256>, c: State<Rsa256>, d: State<Rsa256>, n: State<Rsa256>) {
-    rsa_bn_mod_exp(m, c, d, n);
+transform rsa_private_op(m: State<Rsa256>, c: State<Rsa256>, d: State<Rsa256>, n: State<Rsa256>, key_bytes: u32) {
+    rsa_bn_mod_exp(m, c, d, n, key_bytes);
 }
 
 // CRT-accelerated private operation: m = c^d mod n = CRT(c^dp mod p, c^dq mod q).
@@ -651,15 +671,15 @@ transform rsa_private_op_crt(m: State<Rsa256>, c: State<Rsa256>, key: State<RsaK
     rsa_bn_mod(cq, c, q);
 
     let m1 = state_new(Rsa256); let m2 = state_new(Rsa256);
-    rsa_bn_mod_exp(m1, cp, dp, p);
-    rsa_bn_mod_exp(m2, cq, dq, q);
+    rsa_bn_mod_exp(m1, cp, dp, p, 128);
+    rsa_bn_mod_exp(m2, cq, dq, q, 128);
 
     // h = qinv * (m1 - m2) mod p
     let diff = state_new(Rsa256);
     let borrow: u32 = rsa_bn_sub(diff, m1, m2);
     if borrow == 1 { rsa_bn_add(diff, diff, p); }
     let t = state_new(Rsa256);
-    rsa_bn_mod_mul(t, qinv, diff, p);
+    rsa_bn_mod_mul(t, qinv, diff, p, 128);
 
     // m = m2 + t * q
     let tq = state_new(Rsa256);
@@ -731,7 +751,7 @@ transform rsa_pkcs1_v15_encrypt(msg: State<Rsa256>, msg_len: u32, e: State<Rsa25
     let padded = state_new(Rsa256);
     let pad_len: u32 = rsa_pkcs1_v15_pad_encrypt(msg, msg_len, key_size, random, padded);
     if pad_len == 0 { return 0; }
-    rsa_public_op(ciphertext, padded, e, n);
+    rsa_public_op(ciphertext, padded, e, n, key_size);
     return key_size;
 }
 
@@ -740,7 +760,7 @@ transform rsa_pkcs1_v15_encrypt(msg: State<Rsa256>, msg_len: u32, e: State<Rsa25
 // ===========================================================================
 transform rsa_pkcs1_v15_decrypt(ciphertext: State<Rsa256>, d: State<Rsa256>, n: State<Rsa256>, key_size: u32, msg: State<Rsa256>) -> u32 {
     let padded = state_new(Rsa256);
-    rsa_private_op(padded, ciphertext, d, n);
+    rsa_private_op(padded, ciphertext, d, n, key_size);
     if padded.bytes[0] != 0 { return 0; }
     if padded.bytes[1] != 2 { return 0; }
     let mut_i: u32 = 2;
@@ -772,7 +792,8 @@ transform rsa_pkcs1_v15_sign(msg: State<Rsa256>, msg_len: u32, d: State<Rsa256>,
     let padded = state_new(Rsa256);
     let pad_len: u32 = rsa_pkcs1_v15_pad_sign(hash, 32, key_size, padded);
     if pad_len == 0 { return 0; }
-    rsa_private_op(signature, padded, d, n);
+    // Call rsa_bn_mod_exp directly (bypassing rsa_private_op to avoid codegen param issue)
+    rsa_bn_mod_exp(signature, padded, d, n, key_size);
     return key_size;
 }
 
@@ -783,7 +804,8 @@ transform rsa_pkcs1_v15_verify(msg: State<Rsa256>, msg_len: u32, e: State<Rsa256
     let hash = state_new(Sha256Digest);
     rsa_sha256_hash(msg, msg_len, hash);
     let decrypted = state_new(Rsa256);
-    rsa_public_op(decrypted, signature, e, n);
+    // Call rsa_bn_mod_exp directly (bypassing rsa_public_op to avoid codegen param issue)
+    rsa_bn_mod_exp(decrypted, signature, e, n, key_size);
     let expected = state_new(Rsa256);
     let pad_len: u32 = rsa_pkcs1_v15_pad_sign(hash, 32, key_size, expected);
     if pad_len == 0 { return 0; }

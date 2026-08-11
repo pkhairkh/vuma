@@ -1,0 +1,33 @@
+// Debug: call rsa_bn_mod_exp directly (bypass rsa_private_op)
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum2048.vuma"::{Bn2048Ctx, bn2048_mod_exp, bn2048_zero};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/rsa.vuma"::{Rsa256, rsa_bn_from_bytes, rsa_bn_to_bytes, rsa_bn_mod_exp};
+
+transform main() -> i32 {
+    let padded = state_new(Rsa256);
+    let d = state_new(Rsa256);
+    let n = state_new(Rsa256);
+    let sig = state_new(Rsa256);
+
+    // Load padded = 2
+    padded.bytes[127] = 2;
+
+    // d = 65537 (0x10001) — big-endian: byte[125]=1, byte[127]=1
+    d.bytes[125] = 1;
+    d.bytes[127] = 1;
+
+    // n = 1000003 (0x000F4243) — big-endian: byte[124]=0, byte[125]=15, byte[126]=66, byte[127]=67
+    n.bytes[125] = 15;
+    n.bytes[126] = 66;
+    n.bytes[127] = 67;
+
+    // Call rsa_bn_mod_exp directly (bypass rsa_private_op)
+    rsa_bn_mod_exp(sig, padded, d, n, 128);
+
+    // Output sig bytes 124-127 (should contain the result)
+    print_int(1000 + (sig.bytes[124] as u32));
+    print_int(1000 + (sig.bytes[125] as u32));
+    print_int(1000 + (sig.bytes[126] as u32));
+    print_int(1000 + (sig.bytes[127] as u32));
+    print_int(999);
+    return 0;
+}
