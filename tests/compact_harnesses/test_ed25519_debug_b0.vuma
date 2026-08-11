@@ -1,0 +1,78 @@
+// Debug ed25519 sign — output intermediate values
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha512.vuma"::{Sha512Ctx, Sha512Data, Sha512Digest, sha512_init, sha512_update, sha512_final};
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_bitlen, bn256_cmp, bn256_get_bit, bn256_mod_add, bn256_mod_exp, bn256_mod_inv, bn256_mod_inv_fermat, bn256_mont_mul, bn256_mont_mu, bn256_mont_r2, bn256_mod_mul, bn256_mod_sub, bn256_set_u32, bn256_copy, bn256_zero, bn256_add, bn256_rshift1, bn256_sub};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ed25519.vuma"::{B32, B64, B256, ed25519_sha512_hash, ed25519_mod_l, ed25519_l, ed25519_keygen};
+
+transform main() -> i32 {
+    // Vector 10: seed=b26ceb17... msg=605c149f... (len=16)
+    let priv = state_new(B32);
+    let msg = state_new(B256);
+    priv.bytes[ 0] = 178; priv.bytes[ 1] = 108; priv.bytes[ 2] = 235; priv.bytes[ 3] =  23;
+    priv.bytes[ 4] = 240; priv.bytes[ 5] = 226; priv.bytes[ 6] = 238; priv.bytes[ 7] = 147;
+    priv.bytes[ 8] =  21; priv.bytes[ 9] =  67; priv.bytes[10] = 157; priv.bytes[11] =  73;
+    priv.bytes[12] =  28; priv.bytes[13] = 230; priv.bytes[14] = 150; priv.bytes[15] =  75;
+    priv.bytes[16] = 146; priv.bytes[17] = 100; priv.bytes[18] = 252; priv.bytes[19] = 248;
+    priv.bytes[20] = 253; priv.bytes[21] =  22; priv.bytes[22] =  25; priv.bytes[23] = 194;
+    priv.bytes[24] = 126; priv.bytes[25] = 228; priv.bytes[26] = 224; priv.bytes[27] = 121;
+    priv.bytes[28] = 148; priv.bytes[29] =  23; priv.bytes[30] =  66; priv.bytes[31] =  35;
+    msg.bytes[ 0] =  96; msg.bytes[ 1] =  92; msg.bytes[ 2] =  20; msg.bytes[ 3] = 159;
+    msg.bytes[ 4] =  38; msg.bytes[ 5] = 239; msg.bytes[ 6] = 117; msg.bytes[ 7] =  38;
+    msg.bytes[ 8] =  80; msg.bytes[ 9] =  61; msg.bytes[10] =  60; msg.bytes[11] = 101;
+    msg.bytes[12] = 146; msg.bytes[13] = 170; msg.bytes[14] = 150; msg.bytes[15] =  88;
+    let msg_len: u32 = 16;
+
+    // Step 1: h = SHA-512(seed)
+    let h_in = state_new(B256);
+    let n: u32 = 0;
+    while n < 32 { h_in.bytes[n] = priv.bytes[n]; n = n + 1; }
+    let h = state_new(B64);
+    ed25519_sha512_hash(h_in, 32, h);
+
+    // Output h (64 bytes) — should be 226a2a9d... (Python SHA-512)
+    let oi: u32 = 0;
+    while oi < 64 {
+        print_int(1000 + (h.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Step 2: extract prefix = h[32..63]
+    let prefix = state_new(B32);
+    let n3: u32 = 0;
+    while n3 < 32 { prefix.bytes[n3] = h.bytes[32 + n3]; n3 = n3 + 1; }
+
+    // Step 3: r_hash = SHA-512(prefix || msg)
+    let r_hash_in = state_new(B256);
+    let i: u32 = 0;
+    while i < 32 { r_hash_in.bytes[i] = prefix.bytes[i]; i = i + 1; }
+    let i2: u32 = 0;
+    while i2 < msg_len {
+        r_hash_in.bytes[32 + i2] = msg.bytes[i2];
+        i2 = i2 + 1;
+    }
+    let r_full = state_new(B64);
+    let r_total: u32 = 32 + msg_len;
+    ed25519_sha512_hash(r_hash_in, r_total, r_full);
+
+    // Output r_hash (64 bytes) — should be 4355dd03... (Python SHA-512)
+    let oi2: u32 = 0;
+    while oi2 < 64 {
+        print_int(1000 + (r_full.bytes[oi2] as u32));
+        oi2 = oi2 + 1;
+    }
+    print_int(999);
+
+    // Step 4: r = r_hash mod L
+    let r = state_new(B32);
+    ed25519_mod_l(r, r_full);
+
+    // Output r (32 bytes) — should be 1b102314... (LE mod L)
+    let oi3: u32 = 0;
+    while oi3 < 32 {
+        print_int(1000 + (r.bytes[oi3] as u32));
+        oi3 = oi3 + 1;
+    }
+    print_int(999);
+
+    return 0;
+}

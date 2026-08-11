@@ -1,0 +1,63 @@
+// Debug ed25519 mod_l step by step
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha512.vuma"::{Sha512Ctx, Sha512Data, Sha512Digest, sha512_init, sha512_update, sha512_final};
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_bitlen, bn256_cmp, bn256_get_bit, bn256_mod_add, bn256_mod_exp, bn256_mod_inv, bn256_mod_inv_fermat, bn256_mont_mul, bn256_mont_mu, bn256_mont_r2, bn256_mod_mul, bn256_mod_sub, bn256_set_u32, bn256_copy, bn256_zero, bn256_add, bn256_rshift1, bn256_sub};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ed25519.vuma"::{B32, B64, B256, ed25519_sha512_hash, ed25519_l, ed25519_mod_l};
+
+transform main() -> i32 {
+    // Use a simple known hash: all zeros except byte 0 = 1
+    // hash = 1 (LE), so r = 1 mod L = 1
+    let test_hash = state_new(B64);
+    let i: u32 = 0;
+    while i < 64 { test_hash.bytes[i] = 0; i = i + 1; }
+    test_hash.bytes[0] = 1;
+
+    let r = state_new(B32);
+    ed25519_mod_l(r, test_hash);
+
+    // Output r — should be 0100000000...00 (1 in LE)
+    let oi: u32 = 0;
+    while oi < 32 {
+        print_int(1000 + (r.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    // Test 2: hash = L (should give 0)
+    let L_hash = state_new(B64);
+    let j: u32 = 0;
+    while j < 64 { L_hash.bytes[j] = 0; j = j + 1; }
+    let L_le = state_new(B32);
+    ed25519_l(L_le);
+    let k: u32 = 0;
+    while k < 32 { L_hash.bytes[k] = L_le.bytes[k]; k = k + 1; }
+
+    let r2 = state_new(B32);
+    ed25519_mod_l(r2, L_hash);
+
+    let oi2: u32 = 0;
+    while oi2 < 32 {
+        print_int(1000 + (r2.bytes[oi2] as u32));
+        oi2 = oi2 + 1;
+    }
+    print_int(999);
+
+    // Test 3: hash = L + 1 (should give 1)
+    let Lp1_hash = state_new(B64);
+    let m: u32 = 0;
+    while m < 64 { Lp1_hash.bytes[m] = 0; m = m + 1; }
+    let n: u32 = 0;
+    while n < 32 { Lp1_hash.bytes[n] = L_le.bytes[n]; n = n + 1; }
+    Lp1_hash.bytes[0] = Lp1_hash.bytes[0] + 1;  // L + 1
+
+    let r3 = state_new(B32);
+    ed25519_mod_l(r3, Lp1_hash);
+
+    let oi3: u32 = 0;
+    while oi3 < 32 {
+        print_int(1000 + (r3.bytes[oi3] as u32));
+        oi3 = oi3 + 1;
+    }
+    print_int(999);
+
+    return 0;
+}

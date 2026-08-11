@@ -1,0 +1,61 @@
+// Test bn256_mod_add with aliasing and large values
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_mod_add, bn256_set_u32, bn256_copy, bn256_zero, bn256_cmp, bn256_sub};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ed25519.vuma"::{B32, ed25519_l, b32_to_bn256, bn256_to_b32};
+
+transform main() -> i32 {
+    let L_le = state_new(B32);
+    ed25519_l(L_le);
+    let L_bn = state_new(Bn256Ctx);
+    b32_to_bn256(L_bn, L_le);
+
+    // Test 1: rem = L-1, 1 doubling → L-2
+    let rem = state_new(Bn256Ctx);
+    let lm1_le = state_new(B32);
+    let k: u32 = 0;
+    while k < 32 { lm1_le.bytes[k] = L_le.bytes[k]; k = k + 1; }
+    lm1_le.bytes[0] = lm1_le.bytes[0] - 1;
+    b32_to_bn256(rem, lm1_le);
+
+    // Double: rem = (rem + rem) mod L
+    let tmp = state_new(Bn256Ctx);
+    bn256_copy(tmp, rem);
+    bn256_mod_add(rem, rem, tmp, L_bn);
+
+    let out1 = state_new(B32);
+    bn256_to_b32(out1, rem);
+    let oi: u32 = 0;
+    while oi < 32 { print_int(1000 + (out1.bytes[oi] as u32)); oi = oi + 1; }
+    print_int(999);
+
+    // Test 2: rem = L-1, 8 doublings → (L-1)*256 mod L = L-256
+    let rem2 = state_new(Bn256Ctx);
+    b32_to_bn256(rem2, lm1_le);
+    let d: u32 = 0;
+    while d < 8 {
+        let tmp2 = state_new(Bn256Ctx);
+        bn256_copy(tmp2, rem2);
+        bn256_mod_add(rem2, rem2, tmp2, L_bn);
+        d = d + 1;
+    }
+    let out2 = state_new(B32);
+    bn256_to_b32(out2, rem2);
+    let oi2: u32 = 0;
+    while oi2 < 32 { print_int(1000 + (out2.bytes[oi2] as u32)); oi2 = oi2 + 1; }
+    print_int(999);
+
+    // Test 3: rem = L-1, 8 doublings with ALIASED args (rem, rem, rem)
+    let rem3 = state_new(Bn256Ctx);
+    b32_to_bn256(rem3, lm1_le);
+    let d3: u32 = 0;
+    while d3 < 8 {
+        bn256_mod_add(rem3, rem3, rem3, L_bn);
+        d3 = d3 + 1;
+    }
+    let out3 = state_new(B32);
+    bn256_to_b32(out3, rem3);
+    let oi3: u32 = 0;
+    while oi3 < 32 { print_int(1000 + (out3.bytes[oi3] as u32)); oi3 = oi3 + 1; }
+    print_int(999);
+
+    return 0;
+}

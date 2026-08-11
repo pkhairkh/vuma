@@ -1,0 +1,50 @@
+// Test bn256_mul_512 with R*R
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, Bn512Ctx, bn256_mul_512, bn256_mod_mul, bn256_set_u32, bn256_copy, bn256_cmp, bn256_sub, bn256_lshift1};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ed25519.vuma"::{B32, ed25519_l, b32_to_bn256, bn256_to_b32};
+
+transform main() -> i32 {
+    // R = 2^256 mod L
+    let R_le = state_new(B32);
+    R_le.bytes[ 0] =  29; R_le.bytes[ 1] = 149; R_le.bytes[ 2] = 152; R_le.bytes[ 3] = 141;
+    R_le.bytes[ 4] = 116; R_le.bytes[ 5] =  49; R_le.bytes[ 6] = 236; R_le.bytes[ 7] = 214;
+    R_le.bytes[ 8] = 112; R_le.bytes[ 9] = 207; R_le.bytes[10] = 125; R_le.bytes[11] = 115;
+    R_le.bytes[12] = 244; R_le.bytes[13] =  91; R_le.bytes[14] = 239; R_le.bytes[15] = 198;
+    R_le.bytes[16] = 254; R_le.bytes[17] = 255; R_le.bytes[18] = 255; R_le.bytes[19] = 255;
+    R_le.bytes[20] = 255; R_le.bytes[21] = 255; R_le.bytes[22] = 255; R_le.bytes[23] = 255;
+    R_le.bytes[24] = 255; R_le.bytes[25] = 255; R_le.bytes[26] = 255; R_le.bytes[27] = 255;
+    R_le.bytes[28] = 255; R_le.bytes[29] = 255; R_le.bytes[30] = 255; R_le.bytes[31] =  15;
+    let R_bn = state_new(Bn256Ctx);
+    b32_to_bn256(R_bn, R_le);
+
+    // Compute R*R as 512-bit product
+    let prod = state_new(Bn512Ctx);
+    bn256_mul_512(prod, R_bn, R_bn);
+
+    // Output 512-bit product (8 limbs, each output as 8 bytes LE)
+    // Convert each limb to 8 bytes and output
+    let oi: u32 = 0;
+    while oi < 8 {
+        let limb = prod.limbs[oi];
+        // Output 8 bytes of this limb (LE)
+        let b0: u32 = (limb & 255) as u32;
+        let b1: u32 = ((limb >> 8) & 255) as u32;
+        let b2: u32 = ((limb >> 16) & 255) as u32;
+        let b3: u32 = ((limb >> 24) & 255) as u32;
+        let b4: u32 = ((limb >> 32) & 255) as u32;
+        let b5: u32 = ((limb >> 40) & 255) as u32;
+        let b6: u32 = ((limb >> 48) & 255) as u32;
+        let b7: u32 = ((limb >> 56) & 255) as u32;
+        print_int(1000 + b0);
+        print_int(1000 + b1);
+        print_int(1000 + b2);
+        print_int(1000 + b3);
+        print_int(1000 + b4);
+        print_int(1000 + b5);
+        print_int(1000 + b6);
+        print_int(1000 + b7);
+        oi = oi + 1;
+    }
+    print_int(999);
+
+    return 0;
+}

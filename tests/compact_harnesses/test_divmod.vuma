@@ -1,0 +1,86 @@
+// Test bn256_divmod_512 with known values
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, Bn512Ctx, bn256_mul_512, bn256_mod_mul, bn256_divmod_512, bn256_set_u32, bn256_copy, bn256_cmp, bn256_sub, bn256_zero};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ed25519.vuma"::{B32, ed25519_l, b32_to_bn256, bn256_to_b32};
+
+transform main() -> i32 {
+    // Test 1: 6 / 3 = 2 rem 0
+    // Dividend = 6 (as 512-bit)
+    let dividend1 = state_new(Bn512Ctx);
+    let i: u32 = 0;
+    while i < 8 { dividend1.limbs[i] = 0; i = i + 1; }
+    dividend1.limbs[0] = 6;
+    let divisor1 = state_new(Bn256Ctx);
+    bn256_set_u32(divisor1, 3);
+    let quot1 = state_new(Bn512Ctx);
+    let rem1 = state_new(Bn256Ctx);
+    bn256_divmod_512(dividend1, divisor1, quot1, rem1);
+    // Output remainder (should be 0)
+    let out1 = state_new(B32);
+    bn256_to_b32(out1, rem1);
+    let oi: u32 = 0;
+    while oi < 32 { print_int(1000 + (out1.bytes[oi] as u32)); oi = oi + 1; }
+    print_int(999);
+
+    // Test 2: 100 / 7 = 14 rem 2
+    let dividend2 = state_new(Bn512Ctx);
+    let i2: u32 = 0;
+    while i2 < 8 { dividend2.limbs[i2] = 0; i2 = i2 + 1; }
+    dividend2.limbs[0] = 100;
+    let divisor2 = state_new(Bn256Ctx);
+    bn256_set_u32(divisor2, 7);
+    let quot2 = state_new(Bn512Ctx);
+    let rem2 = state_new(Bn256Ctx);
+    bn256_divmod_512(dividend2, divisor2, quot2, rem2);
+    let out2 = state_new(B32);
+    bn256_to_b32(out2, rem2);
+    let oi2: u32 = 0;
+    while oi2 < 32 { print_int(1000 + (out2.bytes[oi2] as u32)); oi2 = oi2 + 1; }
+    print_int(999);
+
+    // Test 3: (L-1) * (L-1) mod L = 1
+    let L_le = state_new(B32);
+    ed25519_l(L_le);
+    let L_bn = state_new(Bn256Ctx);
+    b32_to_bn256(L_bn, L_le);
+    let lm1_le = state_new(B32);
+    let j: u32 = 0;
+    while j < 32 { lm1_le.bytes[j] = L_le.bytes[j]; j = j + 1; }
+    lm1_le.bytes[0] = lm1_le.bytes[0] - 1;
+    let lm1_bn = state_new(Bn256Ctx);
+    b32_to_bn256(lm1_bn, lm1_le);
+    let prod3 = state_new(Bn512Ctx);
+    bn256_mul_512(prod3, lm1_bn, lm1_bn);
+    let quot3 = state_new(Bn512Ctx);
+    let rem3 = state_new(Bn256Ctx);
+    bn256_divmod_512(prod3, L_bn, quot3, rem3);
+    let out3 = state_new(B32);
+    bn256_to_b32(out3, rem3);
+    let oi3: u32 = 0;
+    while oi3 < 32 { print_int(1000 + (out3.bytes[oi3] as u32)); oi3 = oi3 + 1; }
+    print_int(999);
+
+    // Test 4: R * R mod L
+    let R_le = state_new(B32);
+    R_le.bytes[ 0] =  29; R_le.bytes[ 1] = 149; R_le.bytes[ 2] = 152; R_le.bytes[ 3] = 141;
+    R_le.bytes[ 4] = 116; R_le.bytes[ 5] =  49; R_le.bytes[ 6] = 236; R_le.bytes[ 7] = 214;
+    R_le.bytes[ 8] = 112; R_le.bytes[ 9] = 207; R_le.bytes[10] = 125; R_le.bytes[11] = 115;
+    R_le.bytes[12] = 244; R_le.bytes[13] =  91; R_le.bytes[14] = 239; R_le.bytes[15] = 198;
+    R_le.bytes[16] = 254; R_le.bytes[17] = 255; R_le.bytes[18] = 255; R_le.bytes[19] = 255;
+    R_le.bytes[20] = 255; R_le.bytes[21] = 255; R_le.bytes[22] = 255; R_le.bytes[23] = 255;
+    R_le.bytes[24] = 255; R_le.bytes[25] = 255; R_le.bytes[26] = 255; R_le.bytes[27] = 255;
+    R_le.bytes[28] = 255; R_le.bytes[29] = 255; R_le.bytes[30] = 255; R_le.bytes[31] =  15;
+    let R_bn = state_new(Bn256Ctx);
+    b32_to_bn256(R_bn, R_le);
+    let prod4 = state_new(Bn512Ctx);
+    bn256_mul_512(prod4, R_bn, R_bn);
+    let quot4 = state_new(Bn512Ctx);
+    let rem4 = state_new(Bn256Ctx);
+    bn256_divmod_512(prod4, L_bn, quot4, rem4);
+    let out4 = state_new(B32);
+    bn256_to_b32(out4, rem4);
+    let oi4: u32 = 0;
+    while oi4 < 32 { print_int(1000 + (out4.bytes[oi4] as u32)); oi4 = oi4 + 1; }
+    print_int(999);
+
+    return 0;
+}

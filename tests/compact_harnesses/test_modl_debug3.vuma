@@ -1,0 +1,72 @@
+// Test bn256_mod_mul and bn256_mod_add with actual ed25519 values
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_bitlen, bn256_cmp, bn256_get_bit, bn256_mod_add, bn256_mod_exp, bn256_mod_inv, bn256_mod_inv_fermat, bn256_mont_mul, bn256_mont_mu, bn256_mont_r2, bn256_mod_mul, bn256_mod_sub, bn256_set_u32, bn256_copy, bn256_zero, bn256_add, bn256_rshift1, bn256_sub};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ed25519.vuma"::{B32, B64, B256, ed25519_l, b32_to_bn256, bn256_to_b32};
+
+transform main() -> i32 {
+    // L
+    let L_le = state_new(B32);
+    ed25519_l(L_le);
+    let L_bn = state_new(Bn256Ctx);
+    b32_to_bn256(L_bn, L_le);
+
+    // R = 2^256 mod L
+    let R_le = state_new(B32);
+    R_le.bytes[ 0] =  29; R_le.bytes[ 1] = 149; R_le.bytes[ 2] = 152; R_le.bytes[ 3] = 141;
+    R_le.bytes[ 4] = 116; R_le.bytes[ 5] =  49; R_le.bytes[ 6] = 236; R_le.bytes[ 7] = 214;
+    R_le.bytes[ 8] = 112; R_le.bytes[ 9] = 207; R_le.bytes[10] = 125; R_le.bytes[11] = 115;
+    R_le.bytes[12] = 244; R_le.bytes[13] =  91; R_le.bytes[14] = 239; R_le.bytes[15] = 198;
+    R_le.bytes[16] = 254; R_le.bytes[17] = 255; R_le.bytes[18] = 255; R_le.bytes[19] = 255;
+    R_le.bytes[20] = 255; R_le.bytes[21] = 255; R_le.bytes[22] = 255; R_le.bytes[23] = 255;
+    R_le.bytes[24] = 255; R_le.bytes[25] = 255; R_le.bytes[26] = 255; R_le.bytes[27] = 255;
+    R_le.bytes[28] = 255; R_le.bytes[29] = 255; R_le.bytes[30] = 255; R_le.bytes[31] =  15;
+    let R_bn = state_new(Bn256Ctx);
+    b32_to_bn256(R_bn, R_le);
+
+    // high = hash[32:64] = 5326dded78db23429088b240997da9bfb4f6e5f0889a5b0749487e0156713008
+    let high_le = state_new(B32);
+    high_le.bytes[ 0] = 0x53; high_le.bytes[ 1] = 0x26; high_le.bytes[ 2] = 0xdd; high_le.bytes[ 3] = 0xed;
+    high_le.bytes[ 4] = 0x78; high_le.bytes[ 5] = 0xdb; high_le.bytes[ 6] = 0x23; high_le.bytes[ 7] = 0x42;
+    high_le.bytes[ 8] = 0x90; high_le.bytes[ 9] = 0x88; high_le.bytes[10] = 0xb2; high_le.bytes[11] = 0x40;
+    high_le.bytes[12] = 0x99; high_le.bytes[13] = 0x7d; high_le.bytes[14] = 0xa9; high_le.bytes[15] = 0xbf;
+    high_le.bytes[16] = 0xb4; high_le.bytes[17] = 0xf6; high_le.bytes[18] = 0xe5; high_le.bytes[19] = 0xf0;
+    high_le.bytes[20] = 0x88; high_le.bytes[21] = 0x9a; high_le.bytes[22] = 0x5b; high_le.bytes[23] = 0x07;
+    high_le.bytes[24] = 0x49; high_le.bytes[25] = 0x48; high_le.bytes[26] = 0x7e; high_le.bytes[27] = 0x01;
+    high_le.bytes[28] = 0x56; high_le.bytes[29] = 0x71; high_le.bytes[30] = 0x30; high_le.bytes[31] = 0x08;
+    let high_bn = state_new(Bn256Ctx);
+    b32_to_bn256(high_bn, high_le);
+
+    // low = hash[0:32] = 4355dd03a578d007d52a39f42a8a5fa0fe739e762a2a8d9d6e643005df0ed953
+    let low_le = state_new(B32);
+    low_le.bytes[ 0] = 0x43; low_le.bytes[ 1] = 0x55; low_le.bytes[ 2] = 0xdd; low_le.bytes[ 3] = 0x03;
+    low_le.bytes[ 4] = 0xa5; low_le.bytes[ 5] = 0x78; low_le.bytes[ 6] = 0xd0; low_le.bytes[ 7] = 0x07;
+    low_le.bytes[ 8] = 0xd5; low_le.bytes[ 9] = 0x2a; low_le.bytes[10] = 0x39; low_le.bytes[11] = 0xf4;
+    low_le.bytes[12] = 0x2a; low_le.bytes[13] = 0x8a; low_le.bytes[14] = 0x5f; low_le.bytes[15] = 0xa0;
+    low_le.bytes[16] = 0xfe; low_le.bytes[17] = 0x73; low_le.bytes[18] = 0x9e; low_le.bytes[19] = 0x76;
+    low_le.bytes[20] = 0x2a; low_le.bytes[21] = 0x2a; low_le.bytes[22] = 0x8d; low_le.bytes[23] = 0x9d;
+    low_le.bytes[24] = 0x6e; low_le.bytes[25] = 0x64; low_le.bytes[26] = 0x30; low_le.bytes[27] = 0x05;
+    low_le.bytes[28] = 0xdf; low_le.bytes[29] = 0x0e; low_le.bytes[30] = 0xd9; low_le.bytes[31] = 0x53;
+    let low_bn = state_new(Bn256Ctx);
+    b32_to_bn256(low_bn, low_le);
+
+    // hr = (high * R) mod L
+    let hr = state_new(Bn256Ctx);
+    bn256_mod_mul(hr, high_bn, R_bn, L_bn);
+
+    let hr_out = state_new(B32);
+    bn256_to_b32(hr_out, hr);
+    let oi: u32 = 0;
+    while oi < 32 { print_int(1000 + (hr_out.bytes[oi] as u32)); oi = oi + 1; }
+    print_int(999);
+
+    // result = (hr + low) mod L
+    let result_bn = state_new(Bn256Ctx);
+    bn256_mod_add(result_bn, hr, low_bn, L_bn);
+
+    let result_out = state_new(B32);
+    bn256_to_b32(result_out, result_bn);
+    let oi2: u32 = 0;
+    while oi2 < 32 { print_int(1000 + (result_out.bytes[oi2] as u32)); oi2 = oi2 + 1; }
+    print_int(999);
+
+    return 0;
+}

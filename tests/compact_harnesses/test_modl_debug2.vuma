@@ -1,0 +1,61 @@
+// Debug mod_l with actual hash — output intermediate values
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha512.vuma"::{Sha512Ctx, Sha512Data, Sha512Digest, sha512_init, sha512_update, sha512_final};
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_bitlen, bn256_cmp, bn256_get_bit, bn256_mod_add, bn256_mod_exp, bn256_mod_inv, bn256_mod_inv_fermat, bn256_mont_mul, bn256_mont_mu, bn256_mont_r2, bn256_mod_mul, bn256_mod_sub, bn256_set_u32, bn256_copy, bn256_zero, bn256_add, bn256_rshift1, bn256_sub};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ed25519.vuma"::{B32, B64, B256, ed25519_sha512_hash, ed25519_l, ed25519_mod_l, b32_to_bn256, bn256_to_b32};
+
+transform main() -> i32 {
+    // Actual r_hash from vector 10
+    let hash_64 = state_new(B64);
+    hash_64.bytes[ 0] = 0x43; hash_64.bytes[ 1] = 0x55; hash_64.bytes[ 2] = 0xdd; hash_64.bytes[ 3] = 0x03;
+    hash_64.bytes[ 4] = 0xa5; hash_64.bytes[ 5] = 0x78; hash_64.bytes[ 6] = 0xd0; hash_64.bytes[ 7] = 0x07;
+    hash_64.bytes[ 8] = 0xd5; hash_64.bytes[ 9] = 0x2a; hash_64.bytes[10] = 0x39; hash_64.bytes[11] = 0xf4;
+    hash_64.bytes[12] = 0x2a; hash_64.bytes[13] = 0x8a; hash_64.bytes[14] = 0x5f; hash_64.bytes[15] = 0xa0;
+    hash_64.bytes[16] = 0xfe; hash_64.bytes[17] = 0x73; hash_64.bytes[18] = 0x9e; hash_64.bytes[19] = 0x76;
+    hash_64.bytes[20] = 0x2a; hash_64.bytes[21] = 0x2a; hash_64.bytes[22] = 0x8d; hash_64.bytes[23] = 0x9d;
+    hash_64.bytes[24] = 0x6e; hash_64.bytes[25] = 0x64; hash_64.bytes[26] = 0x30; hash_64.bytes[27] = 0x05;
+    hash_64.bytes[28] = 0xdf; hash_64.bytes[29] = 0x0e; hash_64.bytes[30] = 0xd9; hash_64.bytes[31] = 0x53;
+    hash_64.bytes[32] = 0x53; hash_64.bytes[33] = 0x26; hash_64.bytes[34] = 0xdd; hash_64.bytes[35] = 0xed;
+    hash_64.bytes[36] = 0x78; hash_64.bytes[37] = 0xdb; hash_64.bytes[38] = 0x23; hash_64.bytes[39] = 0x42;
+    hash_64.bytes[40] = 0x90; hash_64.bytes[41] = 0x88; hash_64.bytes[42] = 0xb2; hash_64.bytes[43] = 0x40;
+    hash_64.bytes[44] = 0x99; hash_64.bytes[45] = 0x7d; hash_64.bytes[46] = 0xa9; hash_64.bytes[47] = 0xbf;
+    hash_64.bytes[48] = 0xb4; hash_64.bytes[49] = 0xf6; hash_64.bytes[50] = 0xe5; hash_64.bytes[51] = 0xf0;
+    hash_64.bytes[52] = 0x88; hash_64.bytes[53] = 0x9a; hash_64.bytes[54] = 0x5b; hash_64.bytes[55] = 0x07;
+    hash_64.bytes[56] = 0x49; hash_64.bytes[57] = 0x48; hash_64.bytes[58] = 0x7e; hash_64.bytes[59] = 0x01;
+    hash_64.bytes[60] = 0x56; hash_64.bytes[61] = 0x71; hash_64.bytes[62] = 0x30; hash_64.bytes[63] = 0x08;
+
+    // Compute low_bn and high_bn
+    let low_le = state_new(B32);
+    let i: u32 = 0;
+    while i < 32 { low_le.bytes[i] = hash_64.bytes[i]; i = i + 1; }
+    let low_bn = state_new(Bn256Ctx);
+    b32_to_bn256(low_bn, low_le);
+
+    let high_le = state_new(B32);
+    let i2: u32 = 0;
+    while i2 < 32 { high_le.bytes[i2] = hash_64.bytes[32 + i2]; i2 = i2 + 1; }
+    let high_bn = state_new(Bn256Ctx);
+    b32_to_bn256(high_bn, high_le);
+
+    // Output low_bn as B32 (should be the LE interpretation of hash[0:32])
+    let low_out = state_new(B32);
+    bn256_to_b32(low_out, low_bn);
+    let oi: u32 = 0;
+    while oi < 32 { print_int(1000 + (low_out.bytes[oi] as u32)); oi = oi + 1; }
+    print_int(999);
+
+    // Output high_bn as B32
+    let high_out = state_new(B32);
+    bn256_to_b32(high_out, high_bn);
+    let oi2: u32 = 0;
+    while oi2 < 32 { print_int(1000 + (high_out.bytes[oi2] as u32)); oi2 = oi2 + 1; }
+    print_int(999);
+
+    // Now call ed25519_mod_l and output r
+    let r = state_new(B32);
+    ed25519_mod_l(r, hash_64);
+    let oi3: u32 = 0;
+    while oi3 < 32 { print_int(1000 + (r.bytes[oi3] as u32)); oi3 = oi3 + 1; }
+    print_int(999);
+
+    return 0;
+}

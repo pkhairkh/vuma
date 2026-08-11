@@ -111,8 +111,8 @@
   },
   "des_rc4_aria_camellia|x86_64": {
     "status": "PASS",
-    "pass": 15,
-    "total": 15
+    "pass": 20,
+    "total": 20
   },
   "aes_extra_modes|x86_64": {
     "status": "PASS",
