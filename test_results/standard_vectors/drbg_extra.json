@@ -1,0 +1,145 @@
+{
+  "module": "drbg_extra",
+  "vectors": [
+    {
+      "desc": "hmac-drbg-sha256 32-byte seed 0",
+      "entropy_hex": "9d0620c5406ff4d289537a027f8648376de8c3220c44158795a682faa730b0ef",
+      "nonce_hex": "0eae7f00b3b985a4c0411b370bd99200",
+      "pers_hex": "",
+      "expected_hex": "04056ea8ba09b10288761b8e2c03b21784837216c3919f8a3ddfb55d01c696f7"
+    },
+    {
+      "desc": "hmac-drbg-sha256 32-byte seed 1",
+      "entropy_hex": "fbfaabab46c5aa0f99e8e74cd543dd9772825d633e903f87bb8e4f4ae82d4427",
+      "nonce_hex": "dbc5bda9b2d75948018e6bde00b3be66",
+      "pers_hex": "",
+      "expected_hex": "8a36c72cd650a846aef46ee92630ce9f7adb563b5a16d508db7b3491d2d3f0c7"
+    },
+    {
+      "desc": "hmac-drbg-sha256 32-byte seed 2",
+      "entropy_hex": "11fd7fb675b78148895b74dfabc43518c287772f743ba2e9a346c8a886158bd4",
+      "nonce_hex": "fc56eb034fa2909b22381e17ea54a5d2",
+      "pers_hex": "",
+      "expected_hex": "9ebd005bfa4eb2c949bdf8a2c170a36361a7dc31782f8237581832a9ff1ae3d1"
+    },
+    {
+      "desc": "hmac-drbg-sha256 32-byte seed 3",
+      "entropy_hex": "6649927272a325baa7f367ef5bc06b546739bda384092b0c3c550bf1f11b536d",
+      "nonce_hex": "ea7ed598613f943f56fb403f0d9bacb5",
+      "pers_hex": "",
+      "expected_hex": "52d8b99a1b1a6c214248f7bab4adb46092e49a41923a8a88a7090eec01809488"
+    },
+    {
+      "desc": "hmac-drbg-sha256 32-byte seed 4",
+      "entropy_hex": "8a01fc17121d63e6899d0de2de614b2f728638f26bfe791ecda8873e7ec04397",
+      "nonce_hex": "3150847e1e36f8a00bdc563bfbe8596a",
+      "pers_hex": "",
+      "expected_hex": "d53e6d43be72b7384adb8f73ae31867f3bada4def4f87abc14a7902bac4e27b4"
+    },
+    {
+      "desc": "hmac-drbg-sha256 32-byte seed 5",
+      "entropy_hex": "7f6c06ff7c5ceb1ed07d6096292744353651c368bf6aaa5d8c0e6a6f45b63e56",
+      "nonce_hex": "b40e9c57fe223d77b7bbd34344cce644",
+      "pers_hex": "",
+      "expected_hex": "9ba77e06c4f8e62a26302743b2d4d38bf25e02e715b4bc5695bf01630bb98b72"
+    },
+    {
+      "desc": "hmac-drbg-sha256 32-byte seed 6",
+      "entropy_hex": "b6f7317893b1ae3ac470dc1a5a3abdd1ae2861ffc5dac3b058bc0253c38186fd",
+      "nonce_hex": "f8ec5461d05ec0d43570eb57c0799bcf",
+      "pers_hex": "",
+      "expected_hex": "158545bbe1511bed2d6b6ce63bd9b65b5b651bed03b7094f6f6305efccb5de67"
+    },
+    {
+      "desc": "hmac-drbg-sha256 32-byte seed 7",
+      "entropy_hex": "d6878fef1ac818502daf11101a7fbd30568a8e7a23a5a7248023e8d139fc35e0",
+      "nonce_hex": "91e6e17b3ee028021b139edddb25f5f9",
+      "pers_hex": "",
+      "expected_hex": "ecafe83a3efb6a4422462167317ed910b12daeef5346fc3c7ce791970e8dc865"
+    },
+    {
+      "desc": "hmac-drbg-sha256 32-byte seed 8",
+      "entropy_hex": "ac49f07118ccbec17c523d94c38a5a286255d4dac14944e741e4aaf6e04fd0f4",
+      "nonce_hex": "a24df788aa4e4640155a420af75886a8",
+      "pers_hex": "",
+      "expected_hex": "83f84125a719f30afb95a8d7d01765f5252b1943c51c7a9e7574d5c1e5c9d798"
+    },
+    {
+      "desc": "hmac-drbg-sha256 32-byte seed 9",
+      "entropy_hex": "a126ac5229ec131350515fec230d60e7923522c22dedd0b7c2f382b74554703e",
+      "nonce_hex": "176854617e428f6d0b597eb613bd6f59",
+      "pers_hex": "",
+      "expected_hex": "14642a12ceac9c18e404c538682ff17e1c7589ec956cacf1922a23b27e29e623"
+    },
+    {
+      "desc": "hmac-drbg-sha256 32-byte seed 10",
+      "entropy_hex": "4d75a1db3ec1ec877648a9869b406523a4afc0bc9e1c70d6c65c14665c02d60d",
+      "nonce_hex": "d2484d0f05377c84ae0f29b003282205",
+      "pers_hex": "",
+      "expected_hex": "9621c37ee7ffc7c0e225fe093760c08f191cbe9a56c1ac5ec487b208c56f54b9"
+    },
+    {
+      "desc": "hmac-drbg-sha256 32-byte seed 11",
+      "entropy_hex": "5a5faef353024dc16c61b900f160b3ac264a2e2cacfba60f1b94489bb355382d",
+      "nonce_hex": "de673d347e26b78eb4fd6cb55c92b5e7",
+      "pers_hex": "",
+      "expected_hex": "17428d9de6e511e00f79be20c134d3737fb6e71358616c54c22d7f7b9e251388"
+    },
+    {
+      "desc": "hmac-drbg-sha256 32-byte seed 12",
+      "entropy_hex": "c20225df8879ff0fa6cae9370fbce3b3fa46cc9af8f9fba802956a0c0575ad21",
+      "nonce_hex": "ab9e7e4b1cb87597d1759d719a54d4a7",
+      "pers_hex": "",
+      "expected_hex": "9c456d834a71f5d6cfe238ebbf236792510dd499bc2ad0a4c532e7f30e8b2968"
+    },
+    {
+      "desc": "hmac-drbg-sha256 32-byte seed 13",
+      "entropy_hex": "31ed6eb62fa925e7be2871aa3292bed4fc3883b59dd4240dc8b068c80c7a2dda",
+      "nonce_hex": "206bebf1edf6c9a6adf08db42572f0cf",
+      "pers_hex": "",
+      "expected_hex": "808ebff9eda44f23fe1951431e0619e6ddaf809fc9e2ddcd4dc773a5fc0c935c"
+    },
+    {
+      "desc": "hmac-drbg-sha256 32-byte seed 14",
+      "entropy_hex": "285eac5be3e86225266d2cdc439372bba9606d7805ccc81ca0a8d1d46b252858",
+      "nonce_hex": "b025b95a3a4477512b3c98f2abd2b8d4",
+      "pers_hex": "",
+      "expected_hex": "7857c7eaf6e5877807e3a64807a83d5dda5acf78543d5dee3412c6e05d0be956"
+    },
+    {
+      "desc": "hmac-drbg-sha256 32-byte seed 15",
+      "entropy_hex": "46f8bc945666bb5657bcce199332b94e797ed981047f7c2c9a3c0c083466de58",
+      "nonce_hex": "357d28e76b376dcaea2c5c04274d1c43",
+      "pers_hex": "",
+      "expected_hex": "6bbac87817ef84c2b5868735f48a5697f07da70d22536d4704885c4a123396ff"
+    },
+    {
+      "desc": "hmac-drbg-sha256 32-byte seed 16",
+      "entropy_hex": "140396ff5f8e7bff275e4d8a94df695ed0458c2cdeffc424538e0a9dccad0ead",
+      "nonce_hex": "7ae2cea50b904796e0a304d4537e625a",
+      "pers_hex": "",
+      "expected_hex": "f4ac5588d6215e1a8f35dc3c18a75727f8fc5f83c1a894d7be36f3118a8d017a"
+    },
+    {
+      "desc": "hmac-drbg-sha256 32-byte seed 17",
+      "entropy_hex": "04e2526662db3c2c122e01ff84694d2a16fbbceeb7c6ba531904d02ccf2f884f",
+      "nonce_hex": "fcbd951349efafa6e61e1d61e96b4e2b",
+      "pers_hex": "",
+      "expected_hex": "a566b7c2f2ba213d6e89f52b8482beee9f110754627ea1a16a4e21ce46646829"
+    },
+    {
+      "desc": "hmac-drbg-sha256 32-byte seed 18",
+      "entropy_hex": "29fcdc84c56fe56e92fd290339a01e2a2446da400ef3641392dd76549ae2e680",
+      "nonce_hex": "60e28f86c47a24429dedecd9a8fae2d4",
+      "pers_hex": "",
+      "expected_hex": "e2fdb5b287f52fdc565362b270434bed07c6cafdb8fe431377b81e4860f3451c"
+    },
+    {
+      "desc": "hmac-drbg-sha256 32-byte seed 19",
+      "entropy_hex": "83dd6425e97eb527a740992a5ef0edb61f4a15cab794eabfc45d499b5181773a",
+      "nonce_hex": "6f1637e21260e8d3808edbd6dc220b94",
+      "pers_hex": "",
+      "expected_hex": "4870c97e211b619a87400d5f8035127f2e02d9561ce334b595273964098547ac"
+    }
+  ]
+}
