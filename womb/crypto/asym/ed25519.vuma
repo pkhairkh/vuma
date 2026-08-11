@@ -49,13 +49,13 @@ transform ed25519_l(out: State<B32>) {
 
 transform ed25519_d(out: State<B32>) {
     out.bytes[ 0] = 163; out.bytes[ 1] = 120; out.bytes[ 2] =  89; out.bytes[ 3] =  19;
-    out.bytes[ 4] =  60; out.bytes[ 5] = 164; out.bytes[ 6] =  46; out.bytes[ 7] = 160;
-    out.bytes[ 8] = 134; out.bytes[ 9] = 105; out.bytes[10] = 194; out.bytes[11] = 140;
-    out.bytes[12] =   6; out.bytes[13] =  27; out.bytes[14] =  60; out.bytes[15] = 128;
-    out.bytes[16] =  92; out.bytes[17] =  20; out.bytes[18] =  58; out.bytes[19] = 107;
-    out.bytes[20] =  55; out.bytes[21] = 132; out.bytes[22] =  92; out.bytes[23] = 146;
-    out.bytes[24] =  71; out.bytes[25] = 212; out.bytes[26] =  77; out.bytes[27] = 156;
-    out.bytes[28] = 105; out.bytes[29] =  91; out.bytes[30] =  93; out.bytes[31] =  82;
+    out.bytes[ 4] = 202; out.bytes[ 5] =  77; out.bytes[ 6] = 235; out.bytes[ 7] = 117;
+    out.bytes[ 8] = 171; out.bytes[ 9] = 216; out.bytes[10] =  65; out.bytes[11] =  65;
+    out.bytes[12] =  77; out.bytes[13] =  10; out.bytes[14] = 112; out.bytes[15] =   0;
+    out.bytes[16] = 152; out.bytes[17] = 232; out.bytes[18] = 121; out.bytes[19] = 119;
+    out.bytes[20] = 121; out.bytes[21] =  64; out.bytes[22] = 199; out.bytes[23] = 140;
+    out.bytes[24] = 115; out.bytes[25] = 254; out.bytes[26] = 111; out.bytes[27] =  43;
+    out.bytes[28] = 238; out.bytes[29] = 108; out.bytes[30] =   3; out.bytes[31] =  82;
 }
 
 transform ed25519_sqrt_m1(out: State<B32>) {
@@ -343,12 +343,75 @@ transform ed25519_mod_l(r: State<B32>, hash_64: State<B64>) {
 // Inputs/outputs are B32 (LE bytes); arithmetic via Bn256Ctx.
 // ===========================================================================
 
-// Helper: compute dt = d * x1*x2 * y1*y2 using pre-loaded bn values
-transform ed25519_compute_dt(dt_out: State<Bn256Ctx>, x1_bn: State<Bn256Ctx>, x2_bn: State<Bn256Ctx>, y1_bn: State<Bn256Ctx>, y2_bn: State<Bn256Ctx>, p_bn: State<Bn256Ctx>) {
+// Part 1: Compute num_x, num_y, denom_x, denom_y for point addition.
+// 8 params + 5 state_new = 13 State vars (safe).
+transform ed25519_point_add_part1(
+    num_x: State<Bn256Ctx>, num_y: State<Bn256Ctx>,
+    denom_x: State<Bn256Ctx>, denom_y: State<Bn256Ctx>,
+    x1_bn: State<Bn256Ctx>, y1_bn: State<Bn256Ctx>,
+    x2_bn: State<Bn256Ctx>, y2_bn: State<Bn256Ctx>
+) {
+    // Load p and d internally
+    let p_le = state_new(B32);
+    let d_le = state_new(B32);
+    ed25519_p(p_le);
+    ed25519_d(d_le);
+    let p_bn = state_new(Bn256Ctx);
+    let d_bn = state_new(Bn256Ctx);
+    b32_to_bn256(p_bn, p_le);
+    b32_to_bn256(d_bn, d_le);
+
     let t = state_new(Bn256Ctx);
-    bn256_mod_mul(t, x1_bn, x2_bn, p_bn);     // t = x1*x2
-    bn256_mod_mul(dt_out, y1_bn, y2_bn, p_bn); // dt = y1*y2
-    bn256_mod_mul(dt_out, t, dt_out, p_bn);    // dt = (x1*x2) * (y1*y2) — ALIASING!
+    let t2 = state_new(Bn256Ctx);
+
+    // num_x = x1*y2 + x2*y1 (NO aliasing: output ≠ input)
+    bn256_mod_mul(t, x1_bn, y2_bn, p_bn);        // t = x1*y2
+    bn256_mod_mul(t2, x2_bn, y1_bn, p_bn);       // t2 = x2*y1
+    bn256_mod_add(num_x, t, t2, p_bn);            // num_x = t + t2 (no aliasing)
+
+    // num_y = y1*y2 + x1*x2 (NO aliasing)
+    bn256_mod_mul(t, x1_bn, x2_bn, p_bn);         // t = x1*x2
+    bn256_mod_mul(t2, y1_bn, y2_bn, p_bn);        // t2 = y1*y2
+    bn256_mod_add(num_y, t, t2, p_bn);            // num_y = t + t2 (no aliasing)
+
+    // dt = d * (x1*x2) * (y1*y2)
+    // t = x1*x2, t2 = y1*y2 (both still valid)
+    let t3 = state_new(Bn256Ctx);
+    let t4 = state_new(Bn256Ctx);
+    bn256_mod_mul(t3, t, t2, p_bn);               // t3 = (x1*x2) * (y1*y2)
+    bn256_mod_mul(t4, d_bn, t3, p_bn);             // t4 = d * (x1*x2) * (y1*y2) (no aliasing)
+
+    // denom_x = 1 + dt, denom_y = 1 - dt
+    let one = state_new(Bn256Ctx);
+    bn256_set_u32(one, 1);
+    bn256_mod_add(denom_x, one, t4, p_bn);        // no aliasing
+    bn256_mod_sub(denom_y, one, t4, p_bn);        // no aliasing
+}
+
+// Part 2: Compute rx = num_x / denom_x, ry = num_y / denom_y.
+// 4 params + 2 state_new = 6 State vars (safe).
+transform ed25519_point_add_part2(
+    rx: State<B32>, ry: State<B32>,
+    num_x: State<Bn256Ctx>, num_y: State<Bn256Ctx>,
+    denom_x: State<Bn256Ctx>, denom_y: State<Bn256Ctx>
+) {
+    let p_le = state_new(B32);
+    ed25519_p(p_le);
+    let p_bn = state_new(Bn256Ctx);
+    b32_to_bn256(p_bn, p_le);
+
+    let inv = state_new(Bn256Ctx);
+    let result = state_new(Bn256Ctx);
+
+    // rx = num_x * denom_x^(-1)
+    bn256_mod_inv_fermat(inv, denom_x, p_bn);
+    bn256_mod_mul(result, num_x, inv, p_bn);
+    bn256_to_b32(rx, result);
+
+    // ry = num_y * denom_y^(-1)
+    bn256_mod_inv_fermat(inv, denom_y, p_bn);
+    bn256_mod_mul(result, num_y, inv, p_bn);
+    bn256_to_b32(ry, result);
 }
 
 transform ed25519_point_add(
@@ -356,63 +419,24 @@ transform ed25519_point_add(
     x1: State<B32>, y1: State<B32>,
     x2: State<B32>, y2: State<B32>
 ) {
-    let p_le = state_new(B32);
-    let d_le = state_new(B32);
-    ed25519_p(p_le);
-    ed25519_d(d_le);
-
-    let p_bn = state_new(Bn256Ctx);
-    let d_bn = state_new(Bn256Ctx);
+    // Convert inputs to Bn256Ctx (6 state_new)
     let x1_bn = state_new(Bn256Ctx);
     let y1_bn = state_new(Bn256Ctx);
-    b32_to_bn256(p_bn, p_le);
-    b32_to_bn256(d_bn, d_le);
-    b32_to_bn256(x1_bn, x1);
-    b32_to_bn256(y1_bn, y1);
-
-    // num_x = x1*y2 + x2*y1 (need x2, y2 as bn)
     let x2_bn = state_new(Bn256Ctx);
     let y2_bn = state_new(Bn256Ctx);
+    b32_to_bn256(x1_bn, x1);
+    b32_to_bn256(y1_bn, y1);
     b32_to_bn256(x2_bn, x2);
     b32_to_bn256(y2_bn, y2);
 
+    // Compute numerators and denominators (4 state_new)
     let num_x = state_new(Bn256Ctx);
-    let t = state_new(Bn256Ctx);
-    bn256_mod_mul(num_x, x1_bn, y2_bn, p_bn);
-    bn256_mod_mul(t, x2_bn, y1_bn, p_bn);
-    bn256_mod_add(num_x, num_x, t, p_bn);
-
-    // num_y = y1*y2 + x1*x2
     let num_y = state_new(Bn256Ctx);
-    bn256_mod_mul(t, x1_bn, x2_bn, p_bn);       // t = x1*x2
-    bn256_mod_mul(num_y, y1_bn, y2_bn, p_bn);   // num_y = y1*y2
-    bn256_mod_add(num_y, num_y, t, p_bn);       // num_y = y1*y2 + x1*x2
+    let denom_x = state_new(Bn256Ctx);
+    let denom_y = state_new(Bn256Ctx);
 
-    // dt = d * (x1*x2) * (y1*y2)
-    // t = x1*x2 (already computed), need y1*y2
-    let t2 = state_new(Bn256Ctx);
-    let t3 = state_new(Bn256Ctx);
-    bn256_mod_mul(t2, y1_bn, y2_bn, p_bn);      // t2 = y1*y2
-    bn256_mod_mul(t3, t, t2, p_bn);              // t3 = (x1*x2) * (y1*y2)
-    bn256_mod_mul(t2, d_bn, t3, p_bn);           // t2 = d * (x1*x2) * (y1*y2)
-
-    // denom_x = 1 + dt, denom_y = 1 - dt
-    let one = state_new(Bn256Ctx);
-    let inv = state_new(Bn256Ctx);
-    bn256_set_u32(one, 1);
-    bn256_mod_add(t, one, t2, p_bn);            // t = 1 + dt = denom_x
-    bn256_mod_sub(t3, one, t2, p_bn);           // t3 = 1 - dt = denom_y
-
-    // ry = num_y * denom_y^(-1)
-    bn256_mod_inv_fermat(inv, t3, p_bn);
-    bn256_mod_mul(num_y, num_y, inv, p_bn);
-
-    // rx = num_x * denom_x^(-1)
-    bn256_mod_inv_fermat(inv, t, p_bn);
-    bn256_mod_mul(num_x, num_x, inv, p_bn);
-
-    bn256_to_b32(rx, num_x);
-    bn256_to_b32(ry, num_y);
+    ed25519_point_add_part1(num_x, num_y, denom_x, denom_y, x1_bn, y1_bn, x2_bn, y2_bn);
+    ed25519_point_add_part2(rx, ry, num_x, num_y, denom_x, denom_y);
 }
 
 // Scalar multiplication: R = k * P using double-and-add (MSB-first).
