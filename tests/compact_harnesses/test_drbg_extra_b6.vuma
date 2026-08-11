@@ -1,0 +1,71 @@
+// drbg_extra batch 6 (vector 6)
+// hash_drbg_sha256_32 seed=6
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha256_sha224.vuma"::{Sha256Ctx, Sha256Data, Sha256Digest, sha256_init, sha256_update, sha256_final};
+import "/home/z/my-project/workdir/vuma/womb/crypto/drbg/drbg_extra.vuma"::{DrbgExtraCtx, DrbgXBuf, hash_drbg_init, hash_drbg_generate};
+
+transform main() -> i32 {
+    let entropy = state_new(DrbgXBuf);
+    let nonce = state_new(DrbgXBuf);
+    let state = state_new(DrbgExtraCtx);
+    let out = state_new(DrbgXBuf);
+
+    entropy.bytes[0] = 182;
+    entropy.bytes[1] = 247;
+    entropy.bytes[2] = 49;
+    entropy.bytes[3] = 120;
+    entropy.bytes[4] = 147;
+    entropy.bytes[5] = 177;
+    entropy.bytes[6] = 174;
+    entropy.bytes[7] = 58;
+    entropy.bytes[8] = 196;
+    entropy.bytes[9] = 112;
+    entropy.bytes[10] = 220;
+    entropy.bytes[11] = 26;
+    entropy.bytes[12] = 90;
+    entropy.bytes[13] = 58;
+    entropy.bytes[14] = 189;
+    entropy.bytes[15] = 209;
+    entropy.bytes[16] = 174;
+    entropy.bytes[17] = 40;
+    entropy.bytes[18] = 97;
+    entropy.bytes[19] = 255;
+    entropy.bytes[20] = 197;
+    entropy.bytes[21] = 218;
+    entropy.bytes[22] = 195;
+    entropy.bytes[23] = 176;
+    entropy.bytes[24] = 88;
+    entropy.bytes[25] = 188;
+    entropy.bytes[26] = 2;
+    entropy.bytes[27] = 83;
+    entropy.bytes[28] = 195;
+    entropy.bytes[29] = 129;
+    entropy.bytes[30] = 134;
+    entropy.bytes[31] = 253;
+    nonce.bytes[0] = 248;
+    nonce.bytes[1] = 236;
+    nonce.bytes[2] = 84;
+    nonce.bytes[3] = 97;
+    nonce.bytes[4] = 208;
+    nonce.bytes[5] = 94;
+    nonce.bytes[6] = 192;
+    nonce.bytes[7] = 212;
+    nonce.bytes[8] = 53;
+    nonce.bytes[9] = 112;
+    nonce.bytes[10] = 235;
+    nonce.bytes[11] = 87;
+    nonce.bytes[12] = 192;
+    nonce.bytes[13] = 121;
+    nonce.bytes[14] = 155;
+    nonce.bytes[15] = 207;
+
+    hash_drbg_init(state, entropy, 32, nonce, 16);
+    hash_drbg_generate(state, out, 32);
+
+    let oi: u32 = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

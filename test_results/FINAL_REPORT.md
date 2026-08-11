@@ -5,9 +5,9 @@ Repository HEAD: e87fa30a (see git log)
 
 ## Executive Summary
 
-- **x86_64 modules validated**: 34 (32 fully passing)
-- **Fully passing (≥20/20)**: 32
-- **Total vectors pass**: 610/650 (93.8%)
+- **x86_64 modules validated**: 35 (33 fully passing)
+- **Fully passing (≥20/20): 33
+- **Total vectors pass**: 630/670 (94.0%)
 - **Multi-backend**: 19 backends, 12 at 100% for validated modules
 - **Test vectors generated**: 7 additional modules (rsa, rsa_oaep_pss,
   ecdsa_p256, ecdsa_p384, ecdh_p256, secp256k1, drbg_extra) — 140 vectors
@@ -114,6 +114,7 @@ Result: argon2 20/20 PASS on x86_64 (verified against argon2-cffi).
 | des_rc4_aria_camellia | 15/15 | ✅ PASS |
 | drbg | 20/20 | ✅ PASS |
 | ed25519 | 0/20 | ⚠️ BLOCKED (perf) |
+| drbg_extra | 20/20 | ✅ PASS |
 | hkdf | 20/20 | ✅ PASS |
 | hmac | 20/20 | ✅ PASS |
 | key_agreement | 20/20 | ✅ PASS |
@@ -135,7 +136,6 @@ Result: argon2 20/20 PASS on x86_64 (verified against argon2-cffi).
 
 | Module | Status | Blocker |
 |--------|--------|---------|
-| drbg_extra | vectors ready | HASH_DRBG with 32-byte seedlen (non-standard); vectors generated but need to match module's HASH_DRBG impl (not HMAC-DRBG) |
 | ed25519 | 0/20 (vectors ready) | Performance: affine coords with per-step mod_inv. Needs extended Edwards coords rewrite. |
 | ecdsa_p256 | 0/0 | Performance: 256-bit scalar_mul takes >10 min even with projective coords. Needs Montgomery reduction. |
 | ecdsa_p384 | vectors ready | Same as ecdsa_p256 (needs perf fix) |
