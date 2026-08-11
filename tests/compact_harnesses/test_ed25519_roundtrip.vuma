@@ -1,0 +1,30 @@
+// Test: load by into Bn256Ctx, convert back, check if same
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha512.vuma"::{Sha512Ctx, Sha512Data, Sha512Digest, sha512_init, sha512_update, sha512_final};
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_zero};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ed25519.vuma"::{B32, ed25519_by, b32_to_bn256, bn256_to_b32};
+
+transform main() -> i32 {
+    let by = state_new(B32);
+    let bn = state_new(Bn256Ctx);
+    let out = state_new(B32);
+
+    ed25519_by(by);        // Load base point y (LE)
+    b32_to_bn256(bn, by);  // Convert to Bn256Ctx
+    bn256_to_b32(out, bn); // Convert back to B32
+
+    // Output original by and converted out
+    let oi: u32 = 0;
+    while oi < 32 {
+        print_int(2000 + (by.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(1999);  // delimiter
+
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (out.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

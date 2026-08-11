@@ -1,0 +1,41 @@
+// Test ed25519_scalar_mul with k=1 (should return base point)
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha512.vuma"::{Sha512Ctx, Sha512Data, Sha512Digest, sha512_init, sha512_update, sha512_final};
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_bitlen, bn256_cmp, bn256_get_bit, bn256_mod_add, bn256_mod_exp, bn256_mod_inv, bn256_mod_inv_fermat, bn256_mont_mul, bn256_mont_mu, bn256_mont_r2, bn256_mod_mul, bn256_mod_sub, bn256_set_u32, bn256_copy, bn256_zero, bn256_add, bn256_rshift1, bn256_sub};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ed25519.vuma"::{B32, B64, B256, ed25519_p, ed25519_d, ed25519_bx, ed25519_by, ed25519_scalar_mul};
+
+transform main() -> i32 {
+    let k = state_new(B32);
+    let bx = state_new(B32);
+    let by = state_new(B32);
+    let p_le = state_new(B32);
+    let d_le = state_new(B32);
+
+    // k = 1 (LE)
+    let i: u32 = 0;
+    while i < 32 { k.bytes[i] = 0; i = i + 1; }
+    k.bytes[0] = 1;
+
+    ed25519_bx(bx);
+    ed25519_by(by);
+    ed25519_p(p_le);
+    ed25519_d(d_le);
+
+    let rx = state_new(B32);
+    let ry = state_new(B32);
+
+    ed25519_scalar_mul(rx, ry, k, bx, by, p_le, d_le);
+
+    // Output rx (32 bytes LE) then ry (32 bytes LE)
+    let oi: u32 = 0;
+    while oi < 32 {
+        print_int(1000 + (rx.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    oi = 0;
+    while oi < 32 {
+        print_int(1000 + (ry.bytes[oi] as u32));
+        oi = oi + 1;
+    }
+    print_int(999);
+    return 0;
+}

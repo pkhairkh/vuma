@@ -75,10 +75,10 @@ transform ed25519_bx(out: State<B32>) {
     out.bytes[ 4] =  96; out.bytes[ 5] =  45; out.bytes[ 6] =  86; out.bytes[ 7] = 201;
     out.bytes[ 8] = 178; out.bytes[ 9] = 167; out.bytes[10] =  37; out.bytes[11] = 149;
     out.bytes[12] =  96; out.bytes[13] = 199; out.bytes[14] =  44; out.bytes[15] = 105;
-    out.bytes[16] =  92; out.bytes[17] = 220; out.bytes[18] =   6; out.bytes[19] =  44;
-    out.bytes[20] = 211; out.bytes[21] = 139; out.bytes[22] = 133; out.bytes[23] = 138;
-    out.bytes[24] = 243; out.bytes[25] = 157; out.bytes[26] = 206; out.bytes[27] =  92;
-    out.bytes[28] = 225; out.bytes[29] =  73; out.bytes[30] = 166; out.bytes[31] =  33;
+    out.bytes[16] =  92; out.bytes[17] = 220; out.bytes[18] = 214; out.bytes[19] = 253;
+    out.bytes[20] =  49; out.bytes[21] = 226; out.bytes[22] = 164; out.bytes[23] = 192;
+    out.bytes[24] = 254; out.bytes[25] =  83; out.bytes[26] = 110; out.bytes[27] = 205;
+    out.bytes[28] = 211; out.bytes[29] =  54; out.bytes[30] = 105; out.bytes[31] =  33;
 }
 
 transform ed25519_by(out: State<B32>) {
@@ -343,65 +343,76 @@ transform ed25519_mod_l(r: State<B32>, hash_64: State<B64>) {
 // Inputs/outputs are B32 (LE bytes); arithmetic via Bn256Ctx.
 // ===========================================================================
 
+// Helper: compute dt = d * x1*x2 * y1*y2 using pre-loaded bn values
+transform ed25519_compute_dt(dt_out: State<Bn256Ctx>, x1_bn: State<Bn256Ctx>, x2_bn: State<Bn256Ctx>, y1_bn: State<Bn256Ctx>, y2_bn: State<Bn256Ctx>, p_bn: State<Bn256Ctx>) {
+    let t = state_new(Bn256Ctx);
+    bn256_mod_mul(t, x1_bn, x2_bn, p_bn);     // t = x1*x2
+    bn256_mod_mul(dt_out, y1_bn, y2_bn, p_bn); // dt = y1*y2
+    bn256_mod_mul(dt_out, t, dt_out, p_bn);    // dt = (x1*x2) * (y1*y2) — ALIASING!
+}
+
 transform ed25519_point_add(
     rx: State<B32>, ry: State<B32>,
     x1: State<B32>, y1: State<B32>,
-    x2: State<B32>, y2: State<B32>,
-    p_le: State<B32>, d_le: State<B32>
+    x2: State<B32>, y2: State<B32>
 ) {
+    let p_le = state_new(B32);
+    let d_le = state_new(B32);
+    ed25519_p(p_le);
+    ed25519_d(d_le);
+
     let p_bn = state_new(Bn256Ctx);
     let d_bn = state_new(Bn256Ctx);
     let x1_bn = state_new(Bn256Ctx);
     let y1_bn = state_new(Bn256Ctx);
-    let x2_bn = state_new(Bn256Ctx);
-    let y2_bn = state_new(Bn256Ctx);
     b32_to_bn256(p_bn, p_le);
     b32_to_bn256(d_bn, d_le);
     b32_to_bn256(x1_bn, x1);
     b32_to_bn256(y1_bn, y1);
+
+    // num_x = x1*y2 + x2*y1 (need x2, y2 as bn)
+    let x2_bn = state_new(Bn256Ctx);
+    let y2_bn = state_new(Bn256Ctx);
     b32_to_bn256(x2_bn, x2);
     b32_to_bn256(y2_bn, y2);
 
-    let t1 = state_new(Bn256Ctx);
-    let t2 = state_new(Bn256Ctx);
     let num_x = state_new(Bn256Ctx);
-    let t3 = state_new(Bn256Ctx);
-    let t4 = state_new(Bn256Ctx);
+    let t = state_new(Bn256Ctx);
+    bn256_mod_mul(num_x, x1_bn, y2_bn, p_bn);
+    bn256_mod_mul(t, x2_bn, y1_bn, p_bn);
+    bn256_mod_add(num_x, num_x, t, p_bn);
+
+    // num_y = y1*y2 + x1*x2
     let num_y = state_new(Bn256Ctx);
-    let t5 = state_new(Bn256Ctx);
-    let dt = state_new(Bn256Ctx);
+    bn256_mod_mul(t, x1_bn, x2_bn, p_bn);       // t = x1*x2
+    bn256_mod_mul(num_y, y1_bn, y2_bn, p_bn);   // num_y = y1*y2
+    bn256_mod_add(num_y, num_y, t, p_bn);       // num_y = y1*y2 + x1*x2
+
+    // dt = d * (x1*x2) * (y1*y2)
+    // t = x1*x2 (already computed), need y1*y2
+    let t2 = state_new(Bn256Ctx);
+    let t3 = state_new(Bn256Ctx);
+    bn256_mod_mul(t2, y1_bn, y2_bn, p_bn);      // t2 = y1*y2
+    bn256_mod_mul(t3, t, t2, p_bn);              // t3 = (x1*x2) * (y1*y2)
+    bn256_mod_mul(t2, d_bn, t3, p_bn);           // t2 = d * (x1*x2) * (y1*y2)
+
+    // denom_x = 1 + dt, denom_y = 1 - dt
     let one = state_new(Bn256Ctx);
-    let denom_x = state_new(Bn256Ctx);
-    let denom_y = state_new(Bn256Ctx);
-    let dx_inv = state_new(Bn256Ctx);
-    let dy_inv = state_new(Bn256Ctx);
-    let rx_bn = state_new(Bn256Ctx);
-    let ry_bn = state_new(Bn256Ctx);
-    let tmp = state_new(Bn256Ctx);
-
-    bn256_mod_mul(t1, x1_bn, y2_bn, p_bn);
-    bn256_mod_mul(t2, x2_bn, y1_bn, p_bn);
-    bn256_mod_add(num_x, t1, t2, p_bn);
-
-    bn256_mod_mul(t3, x1_bn, x2_bn, p_bn);
-    bn256_mod_mul(t4, y1_bn, y2_bn, p_bn);
-    bn256_mod_add(num_y, t4, t3, p_bn);
-
-    bn256_mod_mul(t5, t3, t4, p_bn);
-    bn256_mod_mul(dt, d_bn, t5, p_bn);
-
+    let inv = state_new(Bn256Ctx);
     bn256_set_u32(one, 1);
-    bn256_mod_add(denom_x, one, dt, p_bn);
-    bn256_mod_sub(denom_y, one, dt, p_bn);
+    bn256_mod_add(t, one, t2, p_bn);            // t = 1 + dt = denom_x
+    bn256_mod_sub(t3, one, t2, p_bn);           // t3 = 1 - dt = denom_y
 
-    bn256_mod_inv(dx_inv, denom_x, p_bn);
-    bn256_mod_mul(rx_bn, num_x, dx_inv, p_bn);
+    // ry = num_y * denom_y^(-1)
+    bn256_mod_inv_fermat(inv, t3, p_bn);
+    bn256_mod_mul(num_y, num_y, inv, p_bn);
 
-    bn256_mod_inv(dy_inv, denom_y, p_bn);
-    bn256_mod_mul(ry_bn, num_y, dy_inv, p_bn);
+    // rx = num_x * denom_x^(-1)
+    bn256_mod_inv_fermat(inv, t, p_bn);
+    bn256_mod_mul(num_x, num_x, inv, p_bn);
 
-    bn256_to_b32(rx, rx_bn);
-    bn256_to_b32(ry, ry_bn);
+    bn256_to_b32(rx, num_x);
+    bn256_to_b32(ry, num_y);
 }
 
 // Scalar multiplication: R = k * P using double-and-add (MSB-first).
@@ -425,12 +436,12 @@ transform ed25519_scalar_mul(
     let i: u32 = bits;
     while i > 0 {
         let ii = i - 1;
-        // R = 2*R = R + R
-        ed25519_point_add(tx, ty, rx, ry, rx, ry, p_le, d_le);
+        // R = 2*R = R + R (ed25519_point_add loads p,d internally now)
+        ed25519_point_add(tx, ty, rx, ry, rx, ry);
         b32_copy(rx, tx);
         b32_copy(ry, ty);
         if bn256_get_bit(k_bn, ii) == 1 {
-            ed25519_point_add(tx, ty, rx, ry, px, py, p_le, d_le);
+            ed25519_point_add(tx, ty, rx, ry, px, py);
             b32_copy(rx, tx);
             b32_copy(ry, ty);
         }
@@ -482,7 +493,7 @@ transform ed25519_recover_x(
     bn256_mod_sub(num, y_sq, one, p_bn);
     bn256_mod_mul(d_ysq, d_bn, y_sq, p_bn);
     bn256_mod_add(den, d_ysq, one, p_bn);
-    bn256_mod_inv(den_inv, den, p_bn);
+    bn256_mod_inv_fermat(den_inv, den, p_bn);
     bn256_mod_mul(rhs, num, den_inv, p_bn);
 
     // cand = rhs^((p+3)/8) mod p; exp = 2^252 - 2 (LE bytes)

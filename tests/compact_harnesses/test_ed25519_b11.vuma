@@ -1,7 +1,7 @@
 // ed25519 batch 11 (vector 11) — sign
 // seed=69281c8e4452ab37... msg_len=32 -> sig (64 bytes)
 import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha512.vuma"::{Sha512Ctx, Sha512Data, Sha512Digest, sha512_init, sha512_update, sha512_final};
-import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_bitlen, bn256_cmp, bn256_get_bit, bn256_mod_add, bn256_mod_exp, bn256_mod_inv, bn256_mod_mul, bn256_mod_sub, bn256_set_u32, bn256_copy, bn256_zero, bn256_add, bn256_rshift1, bn256_sub};
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_bitlen, bn256_cmp, bn256_get_bit, bn256_mod_add, bn256_mod_exp, bn256_mod_inv, bn256_mod_inv_fermat, bn256_mont_mul, bn256_mont_mu, bn256_mont_r2, bn256_mod_mul, bn256_mod_sub, bn256_set_u32, bn256_copy, bn256_zero, bn256_add, bn256_rshift1, bn256_sub};
 import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ed25519.vuma"::{B32, B64, B256, ed25519_sign};
 
 transform main() -> i32 {
