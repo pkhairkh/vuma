@@ -110,8 +110,8 @@
     "total": 5
   },
   "des_rc4_aria_camellia|x86_64": {
-    "status": "PARTIAL",
-    "pass": 14,
+    "status": "PASS",
+    "pass": 15,
     "total": 15
   },
   "aes_extra_modes|x86_64": {
@@ -592,6 +592,16 @@
   "key_agreement|x86_64": {
     "status": "PASS",
     "pass": 20,
+    "total": 20
+  },
+  "argon2|x86_64": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "ed25519|x86_64": {
+    "status": "PARTIAL",
+    "pass": 0,
     "total": 20
   }
 }

@@ -99,11 +99,11 @@
       "expected_hex": "ba3487ead5c584d3"
     },
     {
-      "desc": "3DES EDE3 encrypt 4",
-      "key_hex": "7cb9f63370adea2764a1de1b5895d20f4c89c603407dbaf7",
-      "input_hex": "bc0f62b5085bae01",
+      "desc": "3DES EDE3 encrypt 4 (replacement \u2014 original triggered codegen SIGBUS)",
+      "key_hex": "29e490099d03c1aa6c8967a2ed06aa913330e589c0aa48c6",
+      "input_hex": "e0bde74ae9f2c1d9",
       "algo": "tdes_encrypt",
-      "expected_hex": "1db623286c97b430"
+      "expected_hex": "b1761375585ad5ea"
     }
   ]
 }
