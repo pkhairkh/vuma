@@ -583,5 +583,15 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "cmac_bcrypt_kdf|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "key_agreement|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }

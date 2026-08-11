@@ -1,0 +1,145 @@
+{
+  "module": "cmac_bcrypt_kdf",
+  "vectors": [
+    {
+      "desc": "NIST SP 800-38B AES-256-CMAC empty msg",
+      "key_hex": "603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4",
+      "msg_hex": "",
+      "msg_len": 0,
+      "expected_hex": "028962f61b7bf89efc6b551f4667d983"
+    },
+    {
+      "desc": "NIST SP 800-38B AES-256-CMAC 16-byte msg",
+      "key_hex": "603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4",
+      "msg_hex": "6bc1bee22e409f96e93d7e117393172a",
+      "msg_len": 16,
+      "expected_hex": "28a7023f452e8f82bd4bf28d8c37c35c"
+    },
+    {
+      "desc": "NIST SP 800-38B AES-256-CMAC 40-byte msg",
+      "key_hex": "603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4",
+      "msg_hex": "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411",
+      "msg_len": 40,
+      "expected_hex": "aaf3d8f1de5640c232f5b169b9c911e6"
+    },
+    {
+      "desc": "NIST SP 800-38B AES-256-CMAC 64-byte msg",
+      "key_hex": "603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4",
+      "msg_hex": "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710",
+      "msg_len": 64,
+      "expected_hex": "e1992190549f6ed5696a2c056c315410"
+    },
+    {
+      "desc": "AES-256-CMAC random #0 (msg_len=1)",
+      "key_hex": "6ec8987df1ee1ceb62808e7b96df767236152284a00546e1b3f000a7b4746b4a",
+      "msg_hex": "6b",
+      "msg_len": 1,
+      "expected_hex": "69332cab0b61486b1b08624aa3c8b5e1"
+    },
+    {
+      "desc": "AES-256-CMAC random #1 (msg_len=8)",
+      "key_hex": "fe2d4711128c69e18aa4456e681e80695c28f06a7c43a6b9e592f1efb0c9fd0f",
+      "msg_hex": "e01a795482f45f1a",
+      "msg_len": 8,
+      "expected_hex": "44435b81c8f52ab892f29ec48f968a8c"
+    },
+    {
+      "desc": "AES-256-CMAC random #2 (msg_len=15)",
+      "key_hex": "0f44201c7da69b2f30821afc499b199bad0fff823b8699be99a7efe9ee8642b0",
+      "msg_hex": "a3513cd597f78f581f39478588203c",
+      "msg_len": 15,
+      "expected_hex": "9b403f3cf7ca9d449269994812fddbe5"
+    },
+    {
+      "desc": "AES-256-CMAC random #3 (msg_len=22)",
+      "key_hex": "08f8c62c76d437c6f9722207696739ff8d01c77e5b591db1572c446036a4d2be",
+      "msg_hex": "9056b784a91f095782d1c428de4975e7ab5870d6a230",
+      "msg_len": 22,
+      "expected_hex": "85ab9e2324289a6b0ce464a5c85faf32"
+    },
+    {
+      "desc": "AES-256-CMAC random #4 (msg_len=29)",
+      "key_hex": "49b52e0bffe35cbc6d143d86101029a03aac671a3caccb5d12d856a32d5394f6",
+      "msg_hex": "4805fa9af21b83ed5645349f681420a071e38b256a3ccabe5d7c49c3ae",
+      "msg_len": 29,
+      "expected_hex": "af9b3e03e2e1888abf9661efdf541a83"
+    },
+    {
+      "desc": "AES-256-CMAC random #5 (msg_len=36)",
+      "key_hex": "d67495105d8f9bd9af13f07ac3ff1b23af6ec7ba4efa68ef42c3674d7e5246f2",
+      "msg_hex": "b6aab6631fbe0731e77d4cf9b0fa35b30431b88abc5e35031b85aac60f5ff6443bc23cba",
+      "msg_len": 36,
+      "expected_hex": "c22b6cec6abec73221b77f72bc593458"
+    },
+    {
+      "desc": "AES-256-CMAC random #6 (msg_len=43)",
+      "key_hex": "c842dd430930d5d0b9e492e630eace8df6390f9bec930cb75bb06780c91aaf69",
+      "msg_hex": "5f8271ed135178e4780eb392903ffe38576a39bfa56c004e012ac51d87f34b534787319223c1e72c2aef65",
+      "msg_len": 43,
+      "expected_hex": "41b75eee6dfe69237482202962e780f3"
+    },
+    {
+      "desc": "AES-256-CMAC random #7 (msg_len=50)",
+      "key_hex": "771022c8799dca15a4648f5cd3db6c4b1e9021386beb901a9499cda846d9762c",
+      "msg_hex": "7cc74b9201c552959f7ab3a94a9ec3bdfab9c664a523b59f514e5f72085bd5287950623a5244bcbf432dab9acd31ba13e1ae",
+      "msg_len": 50,
+      "expected_hex": "0fd1532ee50727faacd341d7cc7f53e2"
+    },
+    {
+      "desc": "AES-256-CMAC random #8 (msg_len=57)",
+      "key_hex": "16b0a47d2614a155690fa200a54c6c86241269abf754a099e359e36d6994dc16",
+      "msg_hex": "863d62d4196d8e3ca499d07aaafe59606479285c13992ddd64a783a64550c38b49c155ef04129e8e835f8856329630ea0a84429b54c3a2eb56",
+      "msg_len": 57,
+      "expected_hex": "1eab028532a52fcabe875048e4ae18cc"
+    },
+    {
+      "desc": "AES-256-CMAC random #9 (msg_len=64)",
+      "key_hex": "6de5e99639b50154be0e67f210da202298e2102433e8655676dba3d51047437d",
+      "msg_hex": "1f4be3e7665936349aefa68b278be6ff96c644cd1b335cb08494211f96a35998216db640fedb07655a3f715c0f77bd1e3f581fb9adea66ca681f93791459b43d",
+      "msg_len": 64,
+      "expected_hex": "08bf95a827ae456dfa6f23c454bd2ea5"
+    },
+    {
+      "desc": "AES-256-CMAC random #10 (msg_len=71)",
+      "key_hex": "3a190160da9510fc0ebf3119c167e84beccdd28f274a2d9e880a1203f6f6941b",
+      "msg_hex": "587c02dc76907b72d5faedf55576223e3f97f216b90394da93d506bf28cc096933230c44a542ce2e667ff009f565f56a620008b098ca30c48f466a219c33c639e0205b0602d722",
+      "msg_len": 71,
+      "expected_hex": "4a55499733cd7f4a6f968792f302b939"
+    },
+    {
+      "desc": "AES-256-CMAC random #11 (msg_len=78)",
+      "key_hex": "751c0a9f32dd71183f804ad5daf8d948369e0ca51cafc6a4e0aa4f84c759e07b",
+      "msg_hex": "1427c619f37303ac450101c3c82130ca47d79bee136907d820b78fb5a8b257246732d78dd6dd61e622b27e437af411c05e6764fdbd2ebfc3b1b56cff72b4fd9ade033e83d74b34df9a746f58f63a",
+      "msg_len": 78,
+      "expected_hex": "933aee7bbaa93318fd9e37fe5c10746c"
+    },
+    {
+      "desc": "AES-256-CMAC random #12 (msg_len=85)",
+      "key_hex": "a081bb8e36892f117a6a27bbe2977e7e6dcd49add2f04571acb075a43432774e",
+      "msg_hex": "34274c6952debda53efc7858b776ccd34fb73e8fc3154a16439e699d0f545451dbc3a3f330cb73e63598517a41009b4d2a19a03bc0285368d5d6d961f5bf616d5970980d33b440ca80b56f37fe2701c8ab974ad14f",
+      "msg_len": 85,
+      "expected_hex": "f4ceed28126393156f051e263fb4a695"
+    },
+    {
+      "desc": "AES-256-CMAC random #13 (msg_len=92)",
+      "key_hex": "08d2ee2bfde07f87054ccff9fe86078bd1abdbd1b3ef8fb88b417002ebdbf8cc",
+      "msg_hex": "d6572b9ed8bd53b47cd2c3df22c4cdf463bc6542347bcbbd4442fd972e05f314ab38c782b4bb69c6d369051ed63bf35697557c151af5e65874aacf4e63f278a8d5f8801517eaaa0723aaa43cde8ce5049264674ec72ebb3513e3306c",
+      "msg_len": 92,
+      "expected_hex": "5405e48599ba61bf139c82b9f7cc007a"
+    },
+    {
+      "desc": "AES-256-CMAC random #14 (msg_len=99)",
+      "key_hex": "464a77b9361a243dd06b4edeeeec9c00575177dd4b8c5bde7d89870f6ed98a39",
+      "msg_hex": "d3ea86a4babcdf999aaeeb5636e71c8f29b43f4353e21cc3bfd5ca1865e68ceb8c94761fd00ef5388dc732b5f1245de4e29966b114d8197ec1d15ffd58118705483c4af4f4d4525936346c906b3e579f34c34f0c671506f65da8c0f72a0e969e4a80ee",
+      "msg_len": 99,
+      "expected_hex": "704322d64ec4d58acfbfb35634a71f72"
+    },
+    {
+      "desc": "AES-256-CMAC random #15 (msg_len=106)",
+      "key_hex": "5e6c1dc1b296b51620efe5d7d6f49147017eee71dbf384e968211d98ff9a1553",
+      "msg_hex": "8eceec65fb603e1de2161615ee664814435f1416b7ce0978f67fe19151e3d7c05570bebfd3951c6f5c4acdfe2b9470ae1414b1ebbc7986c583c86969e3934c9d7ed430cb35120c08c46e6ddc50b043c6cced32bbe1036964c55f9c002e04b6fb6b600ec3a991578e93ea",
+      "msg_len": 106,
+      "expected_hex": "cc1839e23601c6d74a2e04b751d93c62"
+    }
+  ]
+}
