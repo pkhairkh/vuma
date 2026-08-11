@@ -1,13 +1,16 @@
-// Test ecdsa_p256_keygen — exercises p256_scalar_mul_bn with Montgomery
-import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_mont_mul, bn256_mont_mu, bn256_mont_r2, bn256_mod_inv, bn256_mod_add, bn256_mod_sub, bn256_mod_mul, bn256_zero, bn256_set_u32, bn256_copy, bn256_cmp, bn256_sub, bn256_add, bn256_is_zero, bn256_bitlen, bn256_get_bit, bn256_lshift1, bn256_mul_512, bn256_divmod_512, bn256_rshift1, bn256_mod, bn256_mod_exp, Bn512Ctx, Bn64Ctx, bn_mul_u64, bn_load_u64, bn_store_u64, bn256_or, bn256_xor, bn256_and, bn256_gcd};
-import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ecdsa_p256.vuma"::{B32, ecdsa_p256_keygen};
+// Test ecdsa_p256 keygen — comprehensive imports, helper function pattern
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, Bn512Ctx, Bn64Ctx, bn256_mont_mul, bn256_mont_mu, bn256_mont_r2, bn256_mod_inv, bn256_mod_add, bn256_mod_sub, bn256_mod_mul, bn256_zero, bn256_set_u32, bn256_copy, bn256_cmp, bn256_sub, bn256_add, bn256_is_zero, bn256_bitlen, bn256_get_bit, bn256_lshift1, bn256_mul_512, bn256_divmod_512, bn256_rshift1, bn256_mod, bn256_mod_exp, bn_mul_u64, bn256_or, bn256_xor, bn256_and, bn256_gcd, bn_load_u64, bn_store_u64};
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha256_sha224.vuma"::{Sha256Ctx, Sha256Data, Sha256Digest, Sha256W, Sha256K, sha256_init, sha256_update, sha256_final};
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, HmacBuf, hmac_sha256};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ecdsa_p256.vuma"::{B32, B256, B128, p256_gx, p256_gy, p256_p, p256_n, be32_to_bn256, bn256_to_be32, ecdsa_p256_keygen};
 
 transform main() -> i32 {
+    print_int(5001);
     let privkey = state_new(B32);
     let pubx = state_new(B32);
     let puby = state_new(B32);
 
-    // priv_hex = b7e6ad05e4300226a083e2760604268777ddfceb2b4e558373862d26d0630a05
+    // priv_hex = b7e6ad05...0630a05
     privkey.bytes[ 0] = 183; privkey.bytes[ 1] = 230; privkey.bytes[ 2] = 173; privkey.bytes[ 3] =   5;
     privkey.bytes[ 4] = 228; privkey.bytes[ 5] =  48; privkey.bytes[ 6] =   2; privkey.bytes[ 7] =  38;
     privkey.bytes[ 8] = 160; privkey.bytes[ 9] = 131; privkey.bytes[10] = 226; privkey.bytes[11] = 118;
@@ -17,7 +20,9 @@ transform main() -> i32 {
     privkey.bytes[24] = 115; privkey.bytes[25] = 134; privkey.bytes[26] =  45; privkey.bytes[27] =  38;
     privkey.bytes[28] = 208; privkey.bytes[29] =  99; privkey.bytes[30] =  10; privkey.bytes[31] =   5;
 
+    print_int(5002);
     ecdsa_p256_keygen(privkey, pubx, puby);
+    print_int(5003);
 
     let oi: u32 = 0;
     while oi < 32 {

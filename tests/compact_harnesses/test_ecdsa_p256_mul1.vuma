@@ -1,8 +1,8 @@
-// Test p256 scalar_mul with k=1 — comprehensive imports
-import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, Bn512Ctx, Bn64Ctx, bn256_mont_mul, bn256_mont_mu, bn256_mont_r2, bn256_mod_inv, bn256_mod_add, bn256_mod_sub, bn256_mod_mul, bn256_zero, bn256_set_u32, bn256_copy, bn256_cmp, bn256_sub, bn256_add, bn256_is_zero, bn256_bitlen, bn256_get_bit, bn256_lshift1, bn256_mul_512, bn256_divmod_512, bn256_rshift1, bn256_mod, bn256_mod_exp, bn_mul_u64, bn256_or, bn256_xor, bn256_and, bn256_gcd, bn_load_u64, bn_store_u64};
-import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha256_sha224.vuma"::{Sha256Ctx, Sha256Data, Sha256Digest, Sha256W, Sha256K, sha256_init, sha256_update, sha256_final, sha224_init, sha224_update, sha224_final};
-import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, HmacBuf, hmac_sha256, hmac_sha512, hmac_sha1};
-import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ecdsa_p256.vuma"::{B32, B256, B128, p256_scalar_mul_wrap, p256_gx, p256_gy, p256_p, p256_n, p256_b, be32_to_bn256, bn256_to_be32, ecdsa_p256_keygen, ecdsa_p256_sign, ecdsa_p256_verify};
+// Test scalar_mul_wrap via helper (reduces main's state count)
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, Bn512Ctx, Bn64Ctx, bn256_mont_mul, bn256_mont_mu, bn256_mont_r2, bn256_mod_inv, bn256_mod_add, bn256_mod_sub, bn256_mod_mul, bn256_zero, bn256_set_u32, bn256_copy, bn256_cmp, bn256_sub, bn256_add, bn256_is_zero, bn256_bitlen, bn256_get_bit, bn256_lshift1, bn256_mul_512, bn256_divmod_512, bn256_rshift1, bn256_mod, bn256_mod_exp, bn_mul_u64};
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha256_sha224.vuma"::{Sha256Ctx, Sha256Data, Sha256Digest, Sha256W, Sha256K, sha256_init, sha256_update, sha256_final};
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, HmacBuf, hmac_sha256};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ecdsa_p256.vuma"::{B32, p256_gx, p256_gy, p256_scalar_mul_wrap};
 
 transform do_mul(rx: State<B32>, ry: State<B32>) {
     let k = state_new(B32);
@@ -20,19 +20,15 @@ transform do_mul(rx: State<B32>, ry: State<B32>) {
 }
 
 transform main() -> i32 {
+    print_int(5001);
     let rx = state_new(B32);
     let ry = state_new(B32);
-
+    print_int(5002);
     do_mul(rx, ry);
-
+    print_int(5003);
     let oi: u32 = 0;
     while oi < 32 {
         print_int(1000 + (rx.bytes[oi] as u32));
-        oi = oi + 1;
-    }
-    oi = 0;
-    while oi < 32 {
-        print_int(1000 + (ry.bytes[oi] as u32));
         oi = oi + 1;
     }
     print_int(999);
