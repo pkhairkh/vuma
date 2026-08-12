@@ -1648,5 +1648,40 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "hkdf|alpha": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hkdf|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hkdf|ppc64le": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hmac|ppc64le": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hmac|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hmac|s390x": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hmac|alpha": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
