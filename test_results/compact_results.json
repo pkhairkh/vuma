@@ -1233,5 +1233,30 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "blake2|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "blake2|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|s390x": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|alpha": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
