@@ -1683,5 +1683,120 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "aes_extra_modes|aarch64_be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "key_agreement|aarch64_be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "key_agreement|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "key_agreement|ppc64": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "key_agreement|ppc64le": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "key_agreement|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "bignum|aarch64_be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "bignum|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "bignum|ppc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "bignum|ppc64le": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "bignum|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "bignum2048|aarch64_be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "bignum2048|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "bignum2048|ppc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "bignum2048|ppc64le": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "bignum2048|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "bignum2048|alpha": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes_extra_modes|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes_extra_modes|ppc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes_extra_modes|ppc64le": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes_extra_modes|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes_extra_modes|s390x": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes_extra_modes|alpha": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
