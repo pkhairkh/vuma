@@ -1172,10 +1172,35 @@ transform ecdsa_p256_sign(msg: State<B256>, msg_len: u32, privkey_be: State<B32>
     let rd = state_new(Bn256Ctx);
     let h_rd = state_new(Bn256Ctx);
     let s_bn = state_new(Bn256Ctx);
-    bn256_mod_inv(k_inv, k_bn, n_bn);
-    bn256_mod_mul(rd, r_bn, d_bn, n_bn);
+    // Use Fermat's little theorem (Montgomery-based mod_exp) instead of binary
+    // GCD — binary GCD has pathological O(n²) iteration counts for some inputs.
+    bn256_mod_inv_fermat(k_inv, k_bn, n_bn);
+    // These two mod_mul are the slow divmod-based version. Replace with
+    // Montgomery-domain mul (convert in/out around the call).
+    // Since n_bn is reused, compute mprime + r2 once and reuse.
+    let n_m0: u64 = n_bn.limbs[0];
+    let n_mprime: u64 = bn256_mont_mu(n_m0);
+    let n_r2 = state_new(Bn256Ctx);
+    bn256_mont_r2(n_r2, n_bn);
+    // rd = r_bn * d_bn mod n  (via Montgomery)
+    let r_mont = state_new(Bn256Ctx);
+    let d_mont = state_new(Bn256Ctx);
+    bn256_mont_mul(r_mont, r_bn, n_r2, n_bn, n_mprime);
+    bn256_mont_mul(d_mont, d_bn, n_r2, n_bn, n_mprime);
+    let rd_mont = state_new(Bn256Ctx);
+    bn256_mont_mul(rd_mont, r_mont, d_mont, n_bn, n_mprime);
+    let one_bn = state_new(Bn256Ctx);
+    bn256_set_u32(one_bn, 1);
+    bn256_mont_mul(rd, rd_mont, one_bn, n_bn, n_mprime);  // convert back
     bn256_mod_add(h_rd, h_bn, rd, n_bn);
-    bn256_mod_mul(s_bn, k_inv, h_rd, n_bn);
+    // s_bn = k_inv * h_rd mod n  (via Montgomery)
+    let ki_mont = state_new(Bn256Ctx);
+    let hr_mont = state_new(Bn256Ctx);
+    bn256_mont_mul(ki_mont, k_inv, n_r2, n_bn, n_mprime);
+    bn256_mont_mul(hr_mont, h_rd, n_r2, n_bn, n_mprime);
+    let s_mont = state_new(Bn256Ctx);
+    bn256_mont_mul(s_mont, ki_mont, hr_mont, n_bn, n_mprime);
+    bn256_mont_mul(s_bn, s_mont, one_bn, n_bn, n_mprime);  // convert back
 
     bn256_to_be32(r_out, r_bn);
     bn256_to_be32(s_out, s_bn);
