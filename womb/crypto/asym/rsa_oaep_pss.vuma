@@ -8,6 +8,10 @@
 //   - bignum2048.vuma (bn2048_mod_exp on State<Bn2048Ctx>)
 //   - sha256_sha224.vuma (sha256_init / sha256_update / sha256_final)
 //   - sha3.vuma (sha3_256_oneshot on State<KeccakIn> / State<KeccakOut>)
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum2048.vuma"::{Bn2048Ctx, bn2048_mod_exp, bn2048_mod_mul, bn2048_mod, bn2048_mod_inv, bn2048_mod_add, bn2048_mod_sub, bn2048_add, bn2048_sub, bn2048_cmp, bn2048_is_zero, bn2048_copy, bn2048_zero, bn2048_set_u32, bn2048_bitlen, bn2048_get_bit, bn2048_lshift1, bn2048_rshift1, bn2048_mul_4096, bn2048_divmod_4096, bn2048_mul_u64, bn2048_mont_compute_r2, bn2048_mont_compute_m_prime, bn2048_mont_reduce, bn2048_mont_mul, bn2048_gcd};
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha256_sha224.vuma"::{Sha256Ctx, Sha256Data, Sha256Digest, sha256_init, sha256_update, sha256_final};
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha3.vuma"::{KeccakIn, KeccakOut, sha3_256_oneshot};
 //
 // Implements:
 //   - MGF1                (RFC 8017 Section B.2.1) with SHA-256 or SHA-3-256

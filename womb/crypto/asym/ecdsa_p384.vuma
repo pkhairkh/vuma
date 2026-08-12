@@ -8,6 +8,9 @@
 //
 // VUMA 2.0 PMT-native: state_new(Layout) / State<T> / typed arrays.
 
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha384.vuma"::{Sha384Ctx, Sha384Data, Sha384Digest, sha384_init, sha384_update, sha384_final};
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, HmacBuf, hmac_sha512, hmac_sha512_hash};
+
 const P384_LIMBS: u32 = 6;
 const P384_BYTES: u32 = 48;
 
