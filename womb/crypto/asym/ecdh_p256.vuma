@@ -13,6 +13,9 @@
 //
 // VUMA 2.0 PMT-native: state_new(Layout) / State<T> / typed arrays.
 
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ecdsa_p256.vuma"::{ecdsa_p256_keygen, p256_n, p256_is_on_curve_wrap, p256_scalar_mul_wrap, swap_endian_32_wrap};
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha256_sha224.vuma"::{Sha256Ctx, Sha256Data, Sha256Digest, sha256_init, sha256_update, sha256_final};
+
 // ===========================================================================
 // Layouts
 // ===========================================================================
