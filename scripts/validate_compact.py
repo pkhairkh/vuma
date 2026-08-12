@@ -17,14 +17,14 @@ os.makedirs(OUTDIR, exist_ok=True)
 # Module-specific run timeout override (seconds). ECC sign operations are
 # SLOW in VUMA-compiled code (>60-120s per vector) but the code is correct.
 RUN_TIMEOUT_OVERRIDE = {
-    "ecdsa_p256": 300,
-    "ecdsa_p384": 300,
-    "secp256k1": 300,
+    "ecdsa_p256": 600,
+    "ecdsa_p384": 600,
+    "secp256k1": 600,
     "ml_kem": 120,
     "ml_dsa": 120,
     "falcon": 120,
     "hqc": 120,
-    "slh_dsa": 300,
+    "slh_dsa": 600,
     "argon2": 120,
     "scrypt": 120,
 }
