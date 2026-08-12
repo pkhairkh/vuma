@@ -1438,5 +1438,35 @@
     "status": "PARTIAL",
     "pass": 0,
     "total": 5
+  },
+  "key_agreement|x86_32": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "key_agreement|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "key_agreement|riscv64": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "key_agreement|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "key_agreement|s390x": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "key_agreement|alpha": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
