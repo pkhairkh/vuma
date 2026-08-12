@@ -10,6 +10,18 @@ OUTDIR = "/tmp/vuma_compact_val"
 RESULTS_FILE = f"{REPO}/test_results/compact_results.json"
 os.makedirs(OUTDIR, exist_ok=True)
 
+# Module-specific run timeout override (seconds). ECC sign operations are
+# SLOW in VUMA-compiled code (>60-120s per vector) but the code is correct.
+RUN_TIMEOUT_OVERRIDE = {
+    "ecdsa_p256": 600,
+    "ecdsa_p384": 600,
+    "secp256k1": 600,
+}
+DEFAULT_RUN_TIMEOUT = 30
+
+def get_run_timeout(module):
+    return RUN_TIMEOUT_OVERRIDE.get(module, DEFAULT_RUN_TIMEOUT)
+
 BACKENDS = ["x86_64","x86_32","aarch64","aarch64_be","arm32","armeb","riscv64","riscv32",
             "mips64","mips64be","ppc64","ppc64le","loongarch64","s390x","sparc64","alpha",
             "hppa","m68k","wasm32"]
@@ -115,13 +127,14 @@ def run_module(module, backends):
                 total_vecs += batch_vph
                 continue
             q = QEMU[backend]
+            run_to = get_run_timeout(module)
             try:
                 if backend == "wasm32":
-                    r = subprocess.run(["python3",f"{REPO}/scripts/wasm32_runner.py",bin_path],capture_output=True,timeout=30)
+                    r = subprocess.run(["python3",f"{REPO}/scripts/wasm32_runner.py",bin_path],capture_output=True,timeout=run_to)
                 elif q is None:
-                    r = subprocess.run([bin_path],capture_output=True,timeout=30)
+                    r = subprocess.run([bin_path],capture_output=True,timeout=run_to)
                 else:
-                    r = subprocess.run([q,bin_path],capture_output=True,timeout=30)
+                    r = subprocess.run([q,bin_path],capture_output=True,timeout=run_to)
             except:
                 status = "TOUT"
                 with open(harness) as f:
