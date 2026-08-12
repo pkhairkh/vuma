@@ -1,0 +1,76 @@
+// Test Montgomery-based mod_mul vs divmod-based mod_mul for R*R mod L
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, Bn512Ctx, bn256_mod_mul, bn256_mod_mul_mont, bn256_mont_mul, bn256_mont_mu, bn256_mont_r2, bn256_set_u32, bn256_copy, bn256_zero, bn256_cmp, bn256_sub, bn256_add, bn256_lshift1};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ed25519.vuma"::{B32, ed25519_l, b32_to_bn256, bn256_to_b32};
+
+transform main() -> i32 {
+    let L_le = state_new(B32);
+    ed25519_l(L_le);
+    let L_bn = state_new(Bn256Ctx);
+    b32_to_bn256(L_bn, L_le);
+
+    // R = 2^256 mod L
+    let R_le = state_new(B32);
+    R_le.bytes[ 0] =  29; R_le.bytes[ 1] = 149; R_le.bytes[ 2] = 152; R_le.bytes[ 3] = 141;
+    R_le.bytes[ 4] = 116; R_le.bytes[ 5] =  49; R_le.bytes[ 6] = 236; R_le.bytes[ 7] = 214;
+    R_le.bytes[ 8] = 112; R_le.bytes[ 9] = 207; R_le.bytes[10] = 125; R_le.bytes[11] = 115;
+    R_le.bytes[12] = 244; R_le.bytes[13] =  91; R_le.bytes[14] = 239; R_le.bytes[15] = 198;
+    R_le.bytes[16] = 254; R_le.bytes[17] = 255; R_le.bytes[18] = 255; R_le.bytes[19] = 255;
+    R_le.bytes[20] = 255; R_le.bytes[21] = 255; R_le.bytes[22] = 255; R_le.bytes[23] = 255;
+    R_le.bytes[24] = 255; R_le.bytes[25] = 255; R_le.bytes[26] = 255; R_le.bytes[27] = 255;
+    R_le.bytes[28] = 255; R_le.bytes[29] = 255; R_le.bytes[30] = 255; R_le.bytes[31] =  15;
+    let R_bn = state_new(Bn256Ctx);
+    b32_to_bn256(R_bn, R_le);
+
+    // Test 1: divmod-based mod_mul (existing, buggy)
+    let r1 = state_new(Bn256Ctx);
+    bn256_mod_mul(r1, R_bn, R_bn, L_bn);
+    let out1 = state_new(B32);
+    bn256_to_b32(out1, r1);
+    let oi: u32 = 0;
+    while oi < 32 { print_int(1000 + (out1.bytes[oi] as u32)); oi = oi + 1; }
+    print_int(999);
+
+    // Test 2: Montgomery-based mod_mul (full, with form conversion)
+    let mprime: u64 = bn256_mont_mu(L_bn.limbs[0]);
+    let r2 = state_new(Bn256Ctx);
+    bn256_mont_r2(r2, L_bn);
+    let a_mont = state_new(Bn256Ctx);
+    bn256_mont_mul(a_mont, R_bn, r2, L_bn, mprime);
+    let b_mont = state_new(Bn256Ctx);
+    bn256_mont_mul(b_mont, R_bn, r2, L_bn, mprime);
+    let r_mont = state_new(Bn256Ctx);
+    bn256_mont_mul(r_mont, a_mont, b_mont, L_bn, mprime);
+    let one = state_new(Bn256Ctx);
+    bn256_set_u32(one, 1);
+    let r2_out = state_new(Bn256Ctx);
+    bn256_mont_mul(r2_out, r_mont, one, L_bn, mprime);
+    let out2 = state_new(B32);
+    bn256_to_b32(out2, r2_out);
+    let oi2: u32 = 0;
+    while oi2 < 32 { print_int(1000 + (out2.bytes[oi2] as u32)); oi2 = oi2 + 1; }
+    print_int(999);
+
+    // Test 3: Also test simple case (L-1)^2 mod L = 1
+    let lm1_le = state_new(B32);
+    let k: u32 = 0;
+    while k < 32 { lm1_le.bytes[k] = L_le.bytes[k]; k = k + 1; }
+    lm1_le.bytes[0] = lm1_le.bytes[0] - 1;
+    let lm1_bn = state_new(Bn256Ctx);
+    b32_to_bn256(lm1_bn, lm1_le);
+
+    let r3_mont = state_new(Bn256Ctx);
+    let a3_mont = state_new(Bn256Ctx);
+    bn256_mont_mul(a3_mont, lm1_bn, r2, L_bn, mprime);
+    let b3_mont = state_new(Bn256Ctx);
+    bn256_mont_mul(b3_mont, lm1_bn, r2, L_bn, mprime);
+    let r3_prod = state_new(Bn256Ctx);
+    bn256_mont_mul(r3_prod, a3_mont, b3_mont, L_bn, mprime);
+    bn256_mont_mul(r3_mont, r3_prod, one, L_bn, mprime);
+    let out3 = state_new(B32);
+    bn256_to_b32(out3, r3_mont);
+    let oi3: u32 = 0;
+    while oi3 < 32 { print_int(1000 + (out3.bytes[oi3] as u32)); oi3 = oi3 + 1; }
+    print_int(999);
+
+    return 0;
+}

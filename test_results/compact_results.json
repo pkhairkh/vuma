@@ -1408,5 +1408,10 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "ecdh_p256|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }

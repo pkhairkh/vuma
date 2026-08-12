@@ -1,0 +1,39 @@
+// Test bn256_mod_inv_fermat with P-256 prime
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, Bn512Ctx, bn256_mod_mul, bn256_mod_inv_fermat, bn256_mod_exp, bn256_set_u32, bn256_copy, bn256_zero, bn256_cmp, bn256_sub, bn256_add};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ecdsa_p256.vuma"::{B32, p256_p, p256_gx, be32_to_bn256, bn256_to_be32};
+
+transform main() -> i32 {
+    // Load P-256 prime
+    let p_be = state_new(B32);
+    p256_p(p_be);
+    let p_bn = state_new(Bn256Ctx);
+    be32_to_bn256(p_bn, p_be);
+
+    // Test: compute 2^(-1) mod p = (p+1)/2
+    let two = state_new(Bn256Ctx);
+    bn256_set_u32(two, 2);
+    let inv2 = state_new(Bn256Ctx);
+    bn256_mod_inv_fermat(inv2, two, p_bn);
+
+    let out = state_new(B32);
+    bn256_to_be32(out, inv2);
+    let oi: u32 = 0;
+    while oi < 32 { print_int(1000 + (out.bytes[oi] as u32)); oi = oi + 1; }
+    print_int(999);
+
+    // Test: compute Gx^(-1) mod p
+    let gx_be = state_new(B32);
+    p256_gx(gx_be);
+    let gx_bn = state_new(Bn256Ctx);
+    be32_to_bn256(gx_bn, gx_be);
+    let inv_gx = state_new(Bn256Ctx);
+    bn256_mod_inv_fermat(inv_gx, gx_bn, p_bn);
+
+    let out2 = state_new(B32);
+    bn256_to_be32(out2, inv_gx);
+    let oi2: u32 = 0;
+    while oi2 < 32 { print_int(1000 + (out2.bytes[oi2] as u32)); oi2 = oi2 + 1; }
+    print_int(999);
+
+    return 0;
+}

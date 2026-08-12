@@ -1,41 +1,41 @@
-// Test p256_scalar_step_double: 2*G
-import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, Bn512Ctx, Bn64Ctx, bn256_mod_mul, bn256_mod_inv, bn256_mod_add, bn256_mod_sub, bn256_mod_exp, bn256_mont_mul, bn256_mont_mu, bn256_mont_r2, bn256_zero, bn256_set_u32, bn256_copy, bn256_cmp, bn256_sub, bn256_add, bn256_is_zero, bn256_bitlen, bn256_get_bit, bn256_lshift1, bn256_mul_512, bn256_divmod_512, bn256_rshift1, bn256_mod, bn_mul_u64, bn256_mod_mul_mont, bn256_mod_inv_fermat};
-import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha256_sha224.vuma"::{Sha256Ctx, Sha256Data, Sha256Digest, Sha256W, Sha256K, sha256_init, sha256_update, sha256_final};
-import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, HmacBuf, hmac_sha256};
-import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ecdsa_p256.vuma"::{B32, B256, B128, p256_gx, p256_gy, p256_p, be32_to_bn256, bn256_to_be32, p256_scalar_step_double};
+// Test p256_scalar_step_double in isolation
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, Bn512Ctx, bn256_mod_mul, bn256_mod_inv_fermat, bn256_mod_exp, bn256_mod_add, bn256_mod_sub, bn256_set_u32, bn256_copy, bn256_zero, bn256_cmp, bn256_sub, bn256_add, bn256_bitlen, bn256_get_bit, bn256_mont_mul, bn256_mont_mu, bn256_mont_r2, bn256_mod_inv_fermat, bn256_rshift1, bn256_is_zero};
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha256_sha224.vuma"::{Sha256Ctx, Sha256Data, Sha256Digest, sha256_init, sha256_update, sha256_final};
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, HmacBuf, hmac_sha256, hmac_sha256_hash};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ecdsa_p256.vuma"::{B32, B256, p256_p, p256_n, p256_b, p256_gx, p256_gy, be32_to_bn256, bn256_to_be32, p256_scalar_step_double};
 
 transform main() -> i32 {
-    let gx_be = state_new(B32);
-    let gy_be = state_new(B32);
-    p256_gx(gx_be);
-    p256_gy(gy_be);
-
-    let gx_bn = state_new(Bn256Ctx);
-    let gy_bn = state_new(Bn256Ctx);
-    be32_to_bn256(gx_bn, gx_be);
-    be32_to_bn256(gy_bn, gy_be);
-
+    // Load P-256 prime
     let p_be = state_new(B32);
     p256_p(p_be);
     let p_bn = state_new(Bn256Ctx);
     be32_to_bn256(p_bn, p_be);
 
+    // a = -3 mod p
     let a_val = state_new(Bn256Ctx);
     bn256_copy(a_val, p_bn);
-    let lo = a_val.limbs[0];
-    a_val.limbs[0] = lo - 3;
+    let lo_a = a_val.limbs[0];
+    a_val.limbs[0] = lo_a - 3;
 
-    // Double G in place
-    p256_scalar_step_double(gx_bn, gy_bn, a_val, p_bn);
+    // Start with G as the point
+    let gx_be = state_new(B32);
+    let gy_be = state_new(B32);
+    p256_gx(gx_be);
+    p256_gy(gy_be);
+    let rx = state_new(Bn256Ctx);
+    let ry = state_new(Bn256Ctx);
+    be32_to_bn256(rx, gx_be);
+    be32_to_bn256(ry, gy_be);
 
-    let rx_be = state_new(B32);
-    bn256_to_be32(rx_be, gx_bn);
+    // Do one double: G -> 2G
+    p256_scalar_step_double(rx, ry, a_val, p_bn);
 
+    // Output 2G.x (should be known value for P-256: 2G = (0x7cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc47669978, ...))
+    let out = state_new(B32);
+    bn256_to_be32(out, rx);
     let oi: u32 = 0;
-    while oi < 32 {
-        print_int(1000 + (rx_be.bytes[oi] as u32));
-        oi = oi + 1;
-    }
+    while oi < 32 { print_int(1000 + (out.bytes[oi] as u32)); oi = oi + 1; }
     print_int(999);
+
     return 0;
 }

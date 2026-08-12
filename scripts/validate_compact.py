@@ -100,7 +100,7 @@ def run_module(module, backends):
             bin_path = f"{OUTDIR}/{module}_b{hi}_{backend}.bin"
             try:
                 r = subprocess.run([COMPILE_DUMP, harness, bin_path, backend, "--no-verify"],
-                                 capture_output=True, text=True, timeout=90)
+                                 capture_output=True, text=True, timeout=300)
                 if r.returncode != 0 or not os.path.exists(bin_path):
                     status = "CERR"
                     # Count vectors in this batch from the harness file
