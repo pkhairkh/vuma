@@ -1418,5 +1418,10 @@
     "status": "PARTIAL",
     "pass": 0,
     "total": 20
+  },
+  "blake2|aarch64_be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
