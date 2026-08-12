@@ -1908,5 +1908,65 @@
     "status": "PARTIAL",
     "pass": 0,
     "total": 20
+  },
+  "blake2|riscv32": {
+    "status": "PARTIAL",
+    "pass": 3,
+    "total": 20
+  },
+  "blake3|riscv32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "rc4|riscv32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "des|riscv32": {
+    "status": "PARTIAL",
+    "pass": 5,
+    "total": 20
+  },
+  "aes192|riscv32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes256|riscv32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes_modes|riscv32": {
+    "status": "PASS",
+    "pass": 21,
+    "total": 21
+  },
+  "aes_cfb_ofb|riscv32": {
+    "status": "PASS",
+    "pass": 12,
+    "total": 12
+  },
+  "aes_extra_modes|riscv32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "poly1305|riscv32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hmac|riscv32": {
+    "status": "PARTIAL",
+    "pass": 12,
+    "total": 20
+  },
+  "hkdf|riscv32": {
+    "status": "PARTIAL",
+    "pass": 8,
+    "total": 20
   }
 }
