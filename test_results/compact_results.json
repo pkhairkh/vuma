@@ -1288,5 +1288,70 @@
     "status": "PASS",
     "pass": 21,
     "total": 21
+  },
+  "aes_cfb_ofb|x86_32": {
+    "status": "PASS",
+    "pass": 12,
+    "total": 12
+  },
+  "aes_cfb_ofb|aarch64": {
+    "status": "PASS",
+    "pass": 12,
+    "total": 12
+  },
+  "aes_cfb_ofb|aarch64_be": {
+    "status": "PASS",
+    "pass": 12,
+    "total": 12
+  },
+  "aes_cfb_ofb|riscv64": {
+    "status": "PASS",
+    "pass": 12,
+    "total": 12
+  },
+  "aes_cfb_ofb|mips64": {
+    "status": "PASS",
+    "pass": 12,
+    "total": 12
+  },
+  "aes_cfb_ofb|mips64be": {
+    "status": "PASS",
+    "pass": 12,
+    "total": 12
+  },
+  "aes_cfb_ofb|ppc64": {
+    "status": "PASS",
+    "pass": 12,
+    "total": 12
+  },
+  "aes_cfb_ofb|ppc64le": {
+    "status": "PASS",
+    "pass": 12,
+    "total": 12
+  },
+  "aes_cfb_ofb|loongarch64": {
+    "status": "PASS",
+    "pass": 12,
+    "total": 12
+  },
+  "aes_cfb_ofb|s390x": {
+    "status": "PASS",
+    "pass": 12,
+    "total": 12
+  },
+  "aes_cfb_ofb|alpha": {
+    "status": "PASS",
+    "pass": 12,
+    "total": 12
+  },
+  "aes_extra_modes|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes_extra_modes|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
