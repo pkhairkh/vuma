@@ -1968,5 +1968,70 @@
     "status": "PARTIAL",
     "pass": 8,
     "total": 20
+  },
+  "blake3|arm32": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "rc4|arm32": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "drbg_extra|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "drbg_extra|aarch64_be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "drbg_extra|riscv64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "drbg_extra|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "drbg_extra|alpha": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "drbg_extra|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "drbg_extra|ppc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "drbg_extra|ppc64le": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "drbg_extra|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "drbg_extra|s390x": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "drbg_extra|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
