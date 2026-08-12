@@ -1058,13 +1058,13 @@ transform rfc6979_p256_k(x_be: State<B32>, h_be: State<B32>, n_le: State<B32>, k
 
     let tmp_out = state_new(HmacOut);
     let buf1_len: u32 = hlen + 1 + 64;
-    hmac_sha256(K, hlen, buf1, buf1_len, tmp_out);  // V <- HMAC_K(buf1)
-    let c1: u32 = 0;
-    while c1 < hlen { V.bytes[c1] = tmp_out.bytes[c1]; c1 = c1 + 1; }
-    hmac_sha256(K, hlen, buf1, buf1_len, tmp_out);  // K <- HMAC_K(buf1) → real K
+    // RFC 6979 step b: K = HMAC_K(V || 0x00 || x || h1); then V = HMAC_K(V).
+    // (Previous code incorrectly set V = HMAC_K(buf1) BEFORE updating K,
+    //  corrupting V for the subsequent V = HMAC_K(V) call.)
+    hmac_sha256(K, hlen, buf1, buf1_len, tmp_out);  // K <- HMAC_K(buf1)
     let c2: u32 = 0;
     while c2 < hlen { K.bytes[c2] = tmp_out.bytes[c2]; c2 = c2 + 1; }
-    hmac_sha256(K, hlen, V, hlen, tmp_out);          // V <- HMAC_K(V)
+    hmac_sha256(K, hlen, V, hlen, tmp_out);          // V <- HMAC_K(V) using new K and V=01..01
     let c3: u32 = 0;
     while c3 < hlen { V.bytes[c3] = tmp_out.bytes[c3]; c3 = c3 + 1; }
 
