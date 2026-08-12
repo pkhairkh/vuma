@@ -32,6 +32,14 @@
 // Parameters (FIPS 203 Table 1)
 // ===========================================================================
 
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha3.vuma"::{
+    KeccakCtx, KeccakIn, KeccakOut,
+    shake128_init, shake128_update, shake128_squeeze,
+    shake256_init, shake256_update, shake256_squeeze,
+    sha3_256_init, sha3_256_update, sha3_256_final,
+    sha3_512_init, sha3_512_update, sha3_512_final
+};
+
 const MLKEM_Q: u32 = 3329;
 const MLKEM_N: u32 = 256;
 const MLKEM_POLY_BYTES: u32 = 1024;         // 256 * 4

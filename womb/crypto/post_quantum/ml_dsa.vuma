@@ -11,6 +11,16 @@
 // but the dense polynomial buffers are stored inside a single 8192-byte
 // arena-backed State<MlDsaBuf> per call frame.
 
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha256_sha224.vuma"::{
+    Sha256Ctx, Sha256Data, Sha256Digest,
+    sha256_init, sha256_update, sha256_final
+};
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha3.vuma"::{
+    KeccakCtx, KeccakIn, KeccakOut,
+    shake128_init, shake128_update, shake128_squeeze,
+    shake256_init, shake256_update, shake256_squeeze
+};
+
 const MLDSA_Q: u32 = 8380417;
 const MLDSA_N: u32 = 256;
 const MLDSA_K: u32 = 6;   // matrix rows

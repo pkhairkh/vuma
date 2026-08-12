@@ -13,6 +13,15 @@
 // hypertree reconstruction is preserved only for the canonical keygen path;
 // sign/verify return well-formed but constant-length signatures.
 
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha256_sha224.vuma"::{
+    Sha256Ctx, Sha256Data, Sha256Digest,
+    sha256_init, sha256_update, sha256_final
+};
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha3.vuma"::{
+    KeccakCtx, KeccakIn, KeccakOut,
+    shake256_init, shake256_update, shake256_squeeze
+};
+
 const SLH_N: u32 = 16;        // hash output size (128 bits)
 const SLH_H: u32 = 63;        // total tree height
 const SLH_D: u32 = 7;         // number of subtrees

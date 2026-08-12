@@ -151,7 +151,7 @@
   },
   "sha1|riscv32": {
     "status": "PARTIAL",
-    "pass": 5,
+    "pass": 0,
     "total": 20
   },
   "sha1|mips64": {

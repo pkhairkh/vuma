@@ -9,6 +9,11 @@
 // arena-backed State<FalconBuf> byte arrays (32 KiB each) instead of
 // VUMA 1.x Address/allocate/free pointers.
 
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha3.vuma"::{
+    KeccakCtx, KeccakIn, KeccakOut,
+    shake256_init, shake256_update, shake256_squeeze
+};
+
 const FALCON_N: u32 = 512;
 const FALCON_Q: u32 = 12289;
 const FALCON_ETA: u32 = 2;
