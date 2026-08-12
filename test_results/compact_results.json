@@ -1353,5 +1353,60 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "x25519|x86_32": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "x25519|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "x25519|aarch64_be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "x25519|riscv64": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "x25519|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "x25519|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "x25519|ppc64": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "x25519|ppc64le": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "x25519|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "x25519|s390x": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "x25519|alpha": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
