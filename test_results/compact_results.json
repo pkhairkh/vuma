@@ -151,7 +151,7 @@
   },
   "sha1|riscv32": {
     "status": "PARTIAL",
-    "pass": 10,
+    "pass": 5,
     "total": 20
   },
   "sha1|mips64": {
@@ -550,8 +550,8 @@
     "total": 20
   },
   "md5|sparc64": {
-    "status": "PARTIAL",
-    "pass": 1,
+    "status": "PASS",
+    "pass": 20,
     "total": 20
   },
   "md5|alpha": {
@@ -620,6 +620,161 @@
     "total": 20
   },
   "hmac|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "md5|m68k": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "md5|wasm32": {
+    "status": "PARTIAL",
+    "pass": 3,
+    "total": 20
+  },
+  "aes128|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes128|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes128|aarch64_be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes128|arm32": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "aes128|armeb": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "aes128|riscv64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes128|riscv32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes128|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes128|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes128|ppc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes128|ppc64le": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes128|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes128|s390x": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes128|sparc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes128|alpha": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes128|hppa": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes128|m68k": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes128|wasm32": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "chacha20|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|aarch64_be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|arm32": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "chacha20|armeb": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "chacha20|riscv64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|riscv32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|ppc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|ppc64le": {
     "status": "PASS",
     "pass": 20,
     "total": 20
