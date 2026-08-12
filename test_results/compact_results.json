@@ -1423,5 +1423,20 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "aes_extra_modes|riscv64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "aes_extra_modes|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20_poly1305|x86_32": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 5
   }
 }
