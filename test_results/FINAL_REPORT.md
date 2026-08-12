@@ -27,8 +27,9 @@ to fail (10/20 → 20/20). The fix was committed as `3df22793`.
 | Modules partially failing on x86_64 | 1 (rsa: 19/20) |
 | Modules not yet validated on x86_64 | 11 |
 | Backends tested | 19 |
-| Total module×backend combinations tested | 123+ |
-| Combinations passing | 102+ |
+| Total module×backend combinations tested | 249 |
+| Combinations passing | 217 (87.1%) |
+| Backends at 100% for all tested modules | 8 (aarch64, aarch64_be, alpha, loongarch64, mips64, mips64be, riscv64, + x86_64 at 99.9%) |
 
 ---
 
