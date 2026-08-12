@@ -1618,5 +1618,35 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "blake2|s390x": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "blake2|alpha": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hmac|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hmac|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hkdf|aarch64_be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hkdf|s390x": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
