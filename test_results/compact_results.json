@@ -1573,5 +1573,50 @@
     "status": "PARTIAL",
     "pass": 0,
     "total": 20
+  },
+  "hmac|aarch64_be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hmac|riscv64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hmac|ppc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "blake2|riscv64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "blake2|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "blake2|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "blake2|ppc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "blake2|ppc64le": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "blake2|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
