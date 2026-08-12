@@ -1,0 +1,21 @@
+// Minimal test: time p256_scalar_mul_base with a small scalar.
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_set_u32, bn256_copy, bn256_zero, bn256_is_zero};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ecdsa_p256.vuma"::{B32, B256, p256_scalar_mul_base, p256_gx, p256_gy, be32_to_bn256, p256_p, p256_jac_to_affine, p256_proj_double, p256_proj_add_mixed};
+
+transform main() -> i32 {
+    // k = 2 (small scalar)
+    let k = state_new(Bn256Ctx);
+    bn256_set_u32(k, 2);
+
+    let rx = state_new(Bn256Ctx);
+    let ry = state_new(Bn256Ctx);
+
+    print_int(1111);  // marker: before mul
+    p256_scalar_mul_base(rx, ry, k);
+    print_int(2222);  // marker: after mul
+
+    // Print first 4 bytes of rx as a sanity check
+    print_int(1000 + ((rx.limbs[0] & 255) as u32));
+    print_int(999);
+    return 0;
+}

@@ -1,0 +1,32 @@
+// Test: time p256_scalar_mul_bn (general version) with 256-bit scalar.
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_set_u32, bn256_copy, bn256_zero, bn256_is_zero, bn256_bitlen};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ecdsa_p256.vuma"::{B32, B256, p256_scalar_mul_bn, p256_gx, p256_gy, be32_to_bn256, p256_p};
+
+transform main() -> i32 {
+    let k = state_new(Bn256Ctx);
+    k.limbs[0] = 1543134461;
+    k.limbs[1] = 3723289418;
+    k.limbs[2] = 2952743534;
+    k.limbs[3] = 3838386754;
+
+    // Load G as the point P
+    let gx_be = state_new(B32);
+    let gy_be = state_new(B32);
+    p256_gx(gx_be);
+    p256_gy(gy_be);
+    let px = state_new(Bn256Ctx);
+    let py = state_new(Bn256Ctx);
+    be32_to_bn256(px, gx_be);
+    be32_to_bn256(py, gy_be);
+
+    let rx = state_new(Bn256Ctx);
+    let ry = state_new(Bn256Ctx);
+
+    print_int(1111);
+    p256_scalar_mul_bn(rx, ry, k, px, py);
+    print_int(2222);
+
+    print_int(1000 + ((rx.limbs[0] & 255) as u32));
+    print_int(999);
+    return 0;
+}

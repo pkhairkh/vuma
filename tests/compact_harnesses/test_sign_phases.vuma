@@ -1,0 +1,77 @@
+// Test: call ecdsa_p256_sign with debug markers between each phase.
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_set_u32, bn256_copy, bn256_zero, bn256_is_zero, bn256_bitlen, bn256_cmp, bn256_mod_inv, bn256_mod_mul, bn256_mod_add, bn256_mod_sub, bn256_mont_mul, bn256_mont_mu, bn256_mont_r2};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ecdsa_p256.vuma"::{B32, B256, p256_p, p256_n, p256_gx, p256_gy, p256_scalar_mul_bn, p256_sha256_hash, rfc6979_p256_k, swap_endian_32, bn256_to_be32, b32_to_bn256, be32_to_bn256};
+
+transform main() -> i32 {
+    let msg = state_new(B256);
+    let privkey = state_new(B32);
+    let r_out = state_new(B32);
+    let s_out = state_new(B32);
+
+    msg.bytes[0] = 101; msg.bytes[1] = 99; msg.bytes[2] = 100; msg.bytes[3] = 115;
+    msg.bytes[4] = 97; msg.bytes[5] = 32; msg.bytes[6] = 116; msg.bytes[7] = 101;
+    msg.bytes[8] = 115; msg.bytes[9] = 116; msg.bytes[10] = 32; msg.bytes[11] = 48;
+
+    privkey.bytes[0] = 183; privkey.bytes[1] = 230; privkey.bytes[2] = 173; privkey.bytes[3] = 5;
+    privkey.bytes[4] = 228; privkey.bytes[5] = 48; privkey.bytes[6] = 2; privkey.bytes[7] = 38;
+    privkey.bytes[8] = 160; privkey.bytes[9] = 131; privkey.bytes[10] = 226; privkey.bytes[11] = 118;
+    privkey.bytes[12] = 6; privkey.bytes[13] = 4; privkey.bytes[14] = 38; privkey.bytes[15] = 135;
+    privkey.bytes[16] = 119; privkey.bytes[17] = 221; privkey.bytes[18] = 252; privkey.bytes[19] = 235;
+    privkey.bytes[20] = 43; privkey.bytes[21] = 78; privkey.bytes[22] = 85; privkey.bytes[23] = 131;
+    privkey.bytes[24] = 115; privkey.bytes[25] = 134; privkey.bytes[26] = 45; privkey.bytes[27] = 38;
+    privkey.bytes[28] = 208; privkey.bytes[29] = 99; privkey.bytes[30] = 233; privkey.bytes[31] = 138;
+
+    // Phase 1: SHA-256 hash
+    let h_be = state_new(B32);
+    print_int(1001);
+    p256_sha256_hash(msg, 12, h_be);
+    print_int(1002);
+
+    // Phase 2: rfc6979
+    let n_be = state_new(B32);
+    p256_n(n_be);
+    let n_le = state_new(B32);
+    swap_endian_32(n_le, n_be);
+    let k_le = state_new(B32);
+    print_int(1003);
+    rfc6979_p256_k(privkey, h_be, n_le, k_le);
+    print_int(1004);
+
+    // Phase 3: scalar_mul
+    let k_bn = state_new(Bn256Ctx);
+    b32_to_bn256(k_bn, k_le);
+    let gx_be = state_new(B32);
+    let gy_be = state_new(B32);
+    p256_gx(gx_be);
+    p256_gy(gy_be);
+    let gx_bn = state_new(Bn256Ctx);
+    let gy_bn = state_new(Bn256Ctx);
+    be32_to_bn256(gx_bn, gx_be);
+    be32_to_bn256(gy_bn, gy_be);
+    let rx = state_new(Bn256Ctx);
+    let ry = state_new(Bn256Ctx);
+    print_int(1005);
+    p256_scalar_mul_bn(rx, ry, k_bn, gx_bn, gy_bn);
+    print_int(1006);
+
+    // Phase 4: mod_inv (binary GCD)
+    let n_bn = state_new(Bn256Ctx);
+    be32_to_bn256(n_bn, n_be);
+    let k_inv = state_new(Bn256Ctx);
+    print_int(1007);
+    bn256_mod_inv(k_inv, k_bn, n_bn);
+    print_int(1008);
+
+    // Phase 5: mod_mul (divmod-based)
+    let d_bn = state_new(Bn256Ctx);
+    be32_to_bn256(d_bn, privkey);
+    let r_bn = state_new(Bn256Ctx);
+    bn256_copy(r_bn, rx);
+    let rd = state_new(Bn256Ctx);
+    print_int(1009);
+    bn256_mod_mul(rd, r_bn, d_bn, n_bn);
+    print_int(1010);
+
+    print_int(999);
+    return 0;
+}

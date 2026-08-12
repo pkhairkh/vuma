@@ -1,0 +1,23 @@
+// Test: time p256_scalar_mul_base with a realistic 256-bit scalar (4 limbs only).
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_set_u32, bn256_copy, bn256_zero, bn256_is_zero, bn256_bitlen};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ecdsa_p256.vuma"::{B32, B256, p256_scalar_mul_base, p256_gx, p256_gy, be32_to_bn256, p256_p};
+
+transform main() -> i32 {
+    let k = state_new(Bn256Ctx);
+    // 4 limbs = 256 bits (Bn256Ctx is 4 × u64)
+    k.limbs[0] = 1543134461;
+    k.limbs[1] = 3723289418;
+    k.limbs[2] = 2952743534;
+    k.limbs[3] = 3838386754;
+
+    let rx = state_new(Bn256Ctx);
+    let ry = state_new(Bn256Ctx);
+
+    print_int(1111);
+    p256_scalar_mul_base(rx, ry, k);
+    print_int(2222);
+
+    print_int(1000 + ((rx.limbs[0] & 255) as u32));
+    print_int(999);
+    return 0;
+}

@@ -1,0 +1,41 @@
+// Test: time rfc6979_p256_k in isolation.
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_set_u32, bn256_copy, bn256_zero, bn256_is_zero, bn256_bitlen};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ecdsa_p256.vuma"::{B32, B256, rfc6979_p256_k, p256_n, swap_endian_32};
+import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha256_sha224.vuma"::{Sha256Ctx, Sha256Data, Sha256Digest, sha256_init, sha256_update, sha256_final};
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, HmacBuf, hmac_sha256};
+
+transform main() -> i32 {
+    // x_be = privkey (32 bytes BE)
+    let x_be = state_new(B32);
+    x_be.bytes[0] = 183; x_be.bytes[1] = 230; x_be.bytes[2] = 173; x_be.bytes[3] = 5;
+    x_be.bytes[4] = 228; x_be.bytes[5] = 48; x_be.bytes[6] = 2; x_be.bytes[7] = 38;
+    x_be.bytes[8] = 160; x_be.bytes[9] = 131; x_be.bytes[10] = 226; x_be.bytes[11] = 118;
+    x_be.bytes[12] = 6; x_be.bytes[13] = 4; x_be.bytes[14] = 38; x_be.bytes[15] = 135;
+    x_be.bytes[16] = 119; x_be.bytes[17] = 221; x_be.bytes[18] = 252; x_be.bytes[19] = 235;
+    x_be.bytes[20] = 43; x_be.bytes[21] = 78; x_be.bytes[22] = 85; x_be.bytes[23] = 131;
+    x_be.bytes[24] = 115; x_be.bytes[25] = 134; x_be.bytes[26] = 45; x_be.bytes[27] = 38;
+    x_be.bytes[28] = 208; x_be.bytes[29] = 99; x_be.bytes[30] = 233; x_be.bytes[31] = 138;
+
+    // h_be = sha256("ecdsa test 0") — 32 bytes
+    let h_be = state_new(B32);
+    // Just use a fixed hash for timing
+    let i: u32 = 0;
+    while i < 32 { h_be.bytes[i] = (i + 1) as u8; i = i + 1; }
+
+    // n_le = n (curve order) in LE
+    let n_be = state_new(B32);
+    p256_n(n_be);
+    let n_le = state_new(B32);
+    swap_endian_32(n_le, n_be);
+
+    let k_le = state_new(B32);
+
+    print_int(1111);  // before rfc6979
+    rfc6979_p256_k(x_be, h_be, n_le, k_le);
+    print_int(2222);  // after rfc6979
+
+    // Print first byte of k
+    print_int(1000 + (k_le.bytes[0] as u32));
+    print_int(999);
+    return 0;
+}
