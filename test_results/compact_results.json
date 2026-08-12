@@ -1258,5 +1258,35 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "aes_modes|x86_32": {
+    "status": "PASS",
+    "pass": 21,
+    "total": 21
+  },
+  "aes_modes|aarch64": {
+    "status": "PASS",
+    "pass": 21,
+    "total": 21
+  },
+  "aes_modes|aarch64_be": {
+    "status": "PASS",
+    "pass": 21,
+    "total": 21
+  },
+  "aes_modes|riscv64": {
+    "status": "PASS",
+    "pass": 21,
+    "total": 21
+  },
+  "aes_modes|mips64": {
+    "status": "PASS",
+    "pass": 21,
+    "total": 21
+  },
+  "aes_modes|mips64be": {
+    "status": "PASS",
+    "pass": 21,
+    "total": 21
   }
 }
