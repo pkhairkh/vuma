@@ -610,8 +610,8 @@
     "total": 20
   },
   "rsa|x86_64": {
-    "status": "PARTIAL",
-    "pass": 19,
+    "status": "PASS",
+    "pass": 20,
     "total": 20
   },
   "hmac|x86_32": {
