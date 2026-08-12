@@ -751,6 +751,56 @@ transform p256_scalar_mul_base(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, k: Stat
 }
 
 // ===========================================================================
+// General scalar multiplication: R = k * P for any point P.
+// Uses left-to-right binary method with affine coordinates.
+// Starts with R = P (handles MSB), then processes remaining bits.
+// ===========================================================================
+transform p256_scalar_mul_bn(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, k: State<Bn256Ctx>, px: State<Bn256Ctx>, py: State<Bn256Ctx>) {
+    if bn256_is_zero(k) == 1 {
+        bn256_zero(rx);
+        bn256_zero(ry);
+        return;
+    }
+
+    // Load P-256 prime
+    let p_bn = state_new(Bn256Ctx);
+    let p_be = state_new(B32);
+    p256_p(p_be);
+    be32_to_bn256(p_bn, p_be);
+
+    // a = -3 mod p
+    let a_val = state_new(Bn256Ctx);
+    bn256_copy(a_val, p_bn);
+    let lo_a = a_val.limbs[0];
+    a_val.limbs[0] = lo_a - 3;
+
+    // Start with R = P (handles the MSB of k, which is always 1 for non-zero k)
+    let rx_j = state_new(Bn256Ctx);
+    let ry_j = state_new(Bn256Ctx);
+    bn256_copy(rx_j, px);
+    bn256_copy(ry_j, py);
+
+    // Save a copy of P for additions
+    let px_copy = state_new(Bn256Ctx);
+    let py_copy = state_new(Bn256Ctx);
+    bn256_copy(px_copy, px);
+    bn256_copy(py_copy, py);
+
+    let bits: u32 = bn256_bitlen(k);
+    let i: u32 = bits - 1;
+    while i > 0 {
+        let ii = i - 1;
+        p256_scalar_step_double(rx_j, ry_j, a_val, p_bn);
+        if bn256_get_bit(k, ii) == 1 {
+            p256_scalar_step_add(rx_j, ry_j, px_copy, py_copy, p_bn, a_val, a_val);
+        }
+        i = ii;
+    }
+    bn256_copy(rx, rx_j);
+    bn256_copy(ry, ry_j);
+}
+
+// ===========================================================================
 // Key generation: produce (private scalar d, public point Q).
 //   privkey_be (in/out) : 32-byte big-endian private scalar (caller seeds)
 //   pubkey_x_be (out)   : 32-byte big-endian Q.x
