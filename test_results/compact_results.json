@@ -903,5 +903,225 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "blake3|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "blake3|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "blake3|aarch64_be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "blake3|riscv64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "blake3|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "blake3|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "blake3|ppc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "blake3|ppc64le": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "blake3|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "blake3|s390x": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "blake3|alpha": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha3|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha3|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha3|aarch64_be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha3|riscv64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha3|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha3|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha3|ppc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha3|ppc64le": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha3|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha3|s390x": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "sha3|alpha": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "des|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "des|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "des|aarch64_be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "des|riscv64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "des|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "des|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "des|ppc64": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "des|ppc64le": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "des|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "des|s390x": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "des|alpha": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "rc4|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "rc4|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "rc4|aarch64_be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "rc4|riscv64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "rc4|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "rc4|mips64be": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "rc4|ppc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "rc4|ppc64le": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "rc4|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "rc4|s390x": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "rc4|alpha": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }
