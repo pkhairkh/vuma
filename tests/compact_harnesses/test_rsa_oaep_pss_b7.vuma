@@ -408,7 +408,7 @@ transform main() -> i32 {
     random.bytes[125] = 181;
     random.bytes[126] = 37;
     random.bytes[127] = 26;
-    rsa_oaep_encrypt(msg, 15, e, n, 1024, label, 0, random, ct);
+    rsa_oaep_encrypt(msg, 15, e, n, 128, label, 0, random, ct);
     let oi: u32 = 0;
     while oi < 128 {
         print_int(1000 + (ct.bytes[oi] as u32));

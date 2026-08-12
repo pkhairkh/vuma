@@ -1523,5 +1523,10 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "rsa_oaep_pss|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }

@@ -62,15 +62,23 @@ layout RsaHashInput = { bytes: [u8; 256] }
 // ===========================================================================
 
 // RSA mod_exp helper: result = base^exp mod n
-// All inputs/outputs are Rsa256 (256-byte LE byte arrays).
+// All inputs/outputs are Rsa256 (256-byte BE byte arrays — MSB at index 0).
+// `key_size` is the byte length (e.g. 128 for 1024-bit keys).
 // Extracted to reduce state_new count in caller functions.
-transform rsa_mod_exp_bytes(result: State<Rsa256>, base: State<Rsa256>, exp: State<Rsa256>, n: State<Rsa256>) {
+transform rsa_mod_exp_bytes(result: State<Rsa256>, base: State<Rsa256>, exp: State<Rsa256>, n: State<Rsa256>, key_size: u32) {
     let base_bn = state_new(Bn2048Ctx);
     let exp_bn = state_new(Bn2048Ctx);
     let n_bn = state_new(Bn2048Ctx);
     let result_bn = state_new(Bn2048Ctx);
+    bn2048_zero(base_bn);
+    bn2048_zero(exp_bn);
+    bn2048_zero(n_bn);
+    bn2048_zero(result_bn);
+    // Big-endian byte array → little-endian bn2048 limbs
+    // (matches rsa_bn_from_bytes in rsa.vuma).
+    let n_limbs: u32 = key_size / 8;
     let i: u32 = 0;
-    while i < 32 {
+    while i < n_limbs {
         let off: u32 = i * 8;
         let b0: u64 = base.bytes[off + 0] as u64;
         let b1: u64 = base.bytes[off + 1] as u64;
@@ -80,7 +88,7 @@ transform rsa_mod_exp_bytes(result: State<Rsa256>, base: State<Rsa256>, exp: Sta
         let b5: u64 = base.bytes[off + 5] as u64;
         let b6: u64 = base.bytes[off + 6] as u64;
         let b7: u64 = base.bytes[off + 7] as u64;
-        base_bn.limbs[i] = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+        base_bn.limbs[n_limbs - 1 - i] = (b0 << 56) | (b1 << 48) | (b2 << 40) | (b3 << 32) | (b4 << 24) | (b5 << 16) | (b6 << 8) | b7;
         let e0: u64 = exp.bytes[off + 0] as u64;
         let e1: u64 = exp.bytes[off + 1] as u64;
         let e2: u64 = exp.bytes[off + 2] as u64;
@@ -89,7 +97,7 @@ transform rsa_mod_exp_bytes(result: State<Rsa256>, base: State<Rsa256>, exp: Sta
         let e5: u64 = exp.bytes[off + 5] as u64;
         let e6: u64 = exp.bytes[off + 6] as u64;
         let e7: u64 = exp.bytes[off + 7] as u64;
-        exp_bn.limbs[i] = e0 | (e1 << 8) | (e2 << 16) | (e3 << 24) | (e4 << 32) | (e5 << 40) | (e6 << 48) | (e7 << 56);
+        exp_bn.limbs[n_limbs - 1 - i] = (e0 << 56) | (e1 << 48) | (e2 << 40) | (e3 << 32) | (e4 << 24) | (e5 << 16) | (e6 << 8) | e7;
         let n0: u64 = n.bytes[off + 0] as u64;
         let n1: u64 = n.bytes[off + 1] as u64;
         let n2: u64 = n.bytes[off + 2] as u64;
@@ -98,23 +106,30 @@ transform rsa_mod_exp_bytes(result: State<Rsa256>, base: State<Rsa256>, exp: Sta
         let n5: u64 = n.bytes[off + 5] as u64;
         let n6: u64 = n.bytes[off + 6] as u64;
         let n7: u64 = n.bytes[off + 7] as u64;
-        n_bn.limbs[i] = n0 | (n1 << 8) | (n2 << 16) | (n3 << 24) | (n4 << 32) | (n5 << 40) | (n6 << 48) | (n7 << 56);
+        n_bn.limbs[n_limbs - 1 - i] = (n0 << 56) | (n1 << 48) | (n2 << 40) | (n3 << 32) | (n4 << 24) | (n5 << 16) | (n6 << 8) | n7;
         i = i + 1;
     }
     bn2048_mod_exp(result_bn, base_bn, exp_bn, n_bn);
+    // Little-endian bn2048 limbs → big-endian byte array (matches rsa_bn_to_bytes).
     let i2: u32 = 0;
-    while i2 < 32 {
+    while i2 < n_limbs {
         let off: u32 = i2 * 8;
-        let v: u64 = result_bn.limbs[i2];
-        result.bytes[off + 0] = (v & 255) as u8;
-        result.bytes[off + 1] = ((v >> 8) & 255) as u8;
-        result.bytes[off + 2] = ((v >> 16) & 255) as u8;
-        result.bytes[off + 3] = ((v >> 24) & 255) as u8;
-        result.bytes[off + 4] = ((v >> 32) & 255) as u8;
-        result.bytes[off + 5] = ((v >> 40) & 255) as u8;
-        result.bytes[off + 6] = ((v >> 48) & 255) as u8;
-        result.bytes[off + 7] = ((v >> 56) & 255) as u8;
+        let v: u64 = result_bn.limbs[n_limbs - 1 - i2];
+        result.bytes[off + 0] = ((v >> 56) & 255) as u8;
+        result.bytes[off + 1] = ((v >> 48) & 255) as u8;
+        result.bytes[off + 2] = ((v >> 40) & 255) as u8;
+        result.bytes[off + 3] = ((v >> 32) & 255) as u8;
+        result.bytes[off + 4] = ((v >> 24) & 255) as u8;
+        result.bytes[off + 5] = ((v >> 16) & 255) as u8;
+        result.bytes[off + 6] = ((v >> 8) & 255) as u8;
+        result.bytes[off + 7] = (v & 255) as u8;
         i2 = i2 + 1;
+    }
+    // Zero remaining bytes
+    let j: u32 = key_size;
+    while j < 256 {
+        result.bytes[j] = 0;
+        j = j + 1;
     }
 }
 
@@ -300,8 +315,6 @@ transform rsa_oaep_encrypt(msg: State<Rsa256>, msg_len: u32, e: State<Rsa256>, n
     let dbMask  = state_new(Rsa256);
     let seedMask = state_new(RsaHash);
     let EM      = state_new(Rsa256);
-    let em_bn   = state_new(Rsa256);
-    let ct_bn   = state_new(Rsa256);
 
     // Length check: msg_len <= key_size - 2*hLen - 2
     let max_len: u32 = key_size - 2 * HLEN - 2;
@@ -357,10 +370,8 @@ transform rsa_oaep_encrypt(msg: State<Rsa256>, msg_len: u32, e: State<Rsa256>, n
         let i4: u32 = 0;
         while i4 < db_len { EM.bytes[1 + HLEN + i4] = DB.bytes[i4]; i4 = i4 + 1; }
 
-        // j) c = EM^e mod n  (via the rsa_mod_exp_bytes helper)
-        em_to_bn(em_bn, EM, key_size);
-        rsa_mod_exp_bytes(ct_bn, em_bn, e, n);
-        bn_to_em(ciphertext, ct_bn, key_size);
+        // j) c = EM^e mod n  (rsa_mod_exp_bytes handles BE byte order)
+        rsa_mod_exp_bytes(ciphertext, EM, e, n, key_size);
     }
 
     if err != 0 { return 0; }
