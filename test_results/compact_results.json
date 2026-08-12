@@ -1528,5 +1528,30 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "hkdf|x86_32": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hkdf|aarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hkdf|mips64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hkdf|ppc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "hkdf|loongarch64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }

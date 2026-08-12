@@ -6,15 +6,24 @@ This report documents the validation status of the VUMA Womb Crypto project — 
 crypto compiler that compiles `.vuma` source files to native binaries across 19 CPU
 architectures.
 
-### Key Achievements
+### Key Achievements (This Session)
 
-1. **Fixed ecdh_p256 SIGILL** — Root cause: `p256_scalar_mul_bn` was called 5 times but NEVER defined. Implemented the missing function.
+1. **Fixed RSA 19/20 → 20/20 on x86_64** — Root cause: test_rsa_b7 harness wrote 127 bytes
+   of d (even-length hex) without leading 0x00 pad, causing d to be interpreted as d*256.
+   Fix: prepend `d.bytes[0] = 0;` and shift all d.bytes writes by +1.
 
-2. **Fixed missing import statements** — All ECC modules (ecdsa_p256, ecdh_p256, secp256k1, ecdsa_p384, rsa_oaep_pss) called external functions without import statements, causing SIGILL at runtime.
+2. **Fixed rsa_oaep_pss 0/20 → 20/20 on x86_64** — Two bugs:
+   - Harnesses passed key_size=1024 (bits) instead of 128 (bytes), causing out-of-bounds
+     writes to DB.bytes[32..974] → SIGABRT.
+   - rsa_mod_exp_bytes read exp and n as little-endian, but harnesses store them big-endian.
+     Rewrote to use big-endian conversion (matching rsa_bn_from_bytes in rsa.vuma).
 
-3. **Fixed ed25519 sign** (previous session) — Root cause: wrong L constant (group order) in `ed25519_l()`.
+3. **Identified arm32 64-bit ShrL codegen bug** — Variable shift amounts >= 32 in the
+   64-bit ShrL CS branch produce wrong results. Fix: inlined rotr64 calls in SHA-512/384
+   sigma functions with literal shift amounts (partially fixes arm32 SHA-512/384).
 
-4. **Refactored rsa_oaep_pss** — Extracted `rsa_mod_exp_bytes` helper to reduce state_new count.
+4. **Added ECC run timeout override** — ecdsa_p256/p384/secp256k1 sign operations take
+   >120s per vector. Added 600s timeout override in validate_compact.py.
 
 ### Current State
 
@@ -22,12 +31,12 @@ architectures.
 |--------|-------|
 | Total modules in `womb/crypto/` | 46 |
 | Modules with ≥20 test vectors | 36 |
-| Modules validated on x86_64 | 36 |
-| Modules passing 20/20 on x86_64 | 35 |
-| Modules partially failing on x86_64 | 1 (rsa: 19/20) |
-| Modules not yet validated on x86_64 | 10 |
+| Modules validated on x86_64 | 37 |
+| Modules passing 20/20 on x86_64 | 37 (including rsa, rsa_oaep_pss) |
+| Modules not yet validated on x86_64 | 9 (ECC sign, PQ, Ed448/P-521 stubs) |
 | Backends tested | 19 |
-| Total module×backend combinations tested | 305 |
+| Total module×backend combinations tested | 311 |
+| Total PASS | 270 (86.8%) |
 | Combinations passing | 263 (86.2%) |
 | Total vectors tested | 5,973 |
 | Vectors passing | 5,290 (88.6%) |
