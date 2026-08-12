@@ -160,6 +160,9 @@ layout Sha384K = { k: [u64; 80] }
 // SHA-512 helper functions (FIPS-180-4 §4.1.3) — identical to sha512.vuma.
 // ===========================================================================
 
+// NOTE: On arm32, variable shift amounts >= 32 trigger a codegen bug in
+// the 64-bit ShrL CS branch. The sigma functions below inline the rotations
+// with literal shift amounts to avoid this bug.
 transform rotr64(x: u64, n: u64) -> u64 {
     if n == 0 { return x; }
     return (x >> n) | (x << (64 - n));
@@ -176,20 +179,21 @@ transform maj64(x: u64, y: u64, z: u64) -> u64 {
     return (x & y) ^ (x & z) ^ (y & z);
 }
 
+// Inlined rotations with literal shift amounts to avoid arm32 variable-shift bug.
 transform big_sigma0_64(x: u64) -> u64 {
-    return rotr64(x, 28) ^ rotr64(x, 34) ^ rotr64(x, 39);
+    return ((x >> 28) | (x << 36)) ^ ((x >> 34) | (x << 30)) ^ ((x >> 39) | (x << 25));
 }
 
 transform big_sigma1_64(x: u64) -> u64 {
-    return rotr64(x, 14) ^ rotr64(x, 18) ^ rotr64(x, 41);
+    return ((x >> 14) | (x << 50)) ^ ((x >> 18) | (x << 46)) ^ ((x >> 41) | (x << 23));
 }
 
 transform small_sigma0_64(x: u64) -> u64 {
-    return rotr64(x, 1) ^ rotr64(x, 8) ^ (x >> 7);
+    return ((x >> 1) | (x << 63)) ^ ((x >> 8) | (x << 56)) ^ (x >> 7);
 }
 
 transform small_sigma1_64(x: u64) -> u64 {
-    return rotr64(x, 19) ^ rotr64(x, 61) ^ (x >> 6);
+    return ((x >> 19) | (x << 45)) ^ ((x >> 61) | (x << 3)) ^ (x >> 6);
 }
 
 // ===========================================================================
