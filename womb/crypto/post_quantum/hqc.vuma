@@ -562,79 +562,116 @@ transform hqc_decaps(sk: State<HqcBuf>, pk: State<HqcBuf>,
     let u_base: u32 = 0;
     let v_base: u32 = HQC_N;
 
-    // v' = v XOR (s * u)
-    let su = state_new(HqcBuf);
-    gf2_vec_mul_at(su, 0, sk, s_sk_base, ct, u_base, HQC_N);
-    let v_prime = state_new(HqcBuf);
-    gf2_vec_add_at(v_prime, 0, ct, v_base, su, 0, HQC_N);
+    // ── Buffer-reuse strategy ────────────────────────────────────────────
+    // The original implementation made 15+ state_new(HqcBuf) calls, each
+    // 128 KiB, totalling ~1.9 MiB of live state — enough to overflow the
+    // per-function stack frame and trip the arena-overflow trap (SIGABRT,
+    // exit 134). We instead allocate FOUR reusable scratch buffers up front
+    // and recycle them phase-by-phase:
+    //
+    //   b1 — multipurpose scratch (su → sample_seed → hr → hash_in / fail_in)
+    //   b2 — multipurpose scratch (v_prime → m_enc)
+    //   b3 — message bits (preserved from decode through the final hash)
+    //   b4 — packed slab for the small per-phase artefacts (ones_wr,
+    //        ones_we, r_idx, e_idx, r_vec, e_vec) — see offset layout below.
+    //
+    // Layout of b4 (each region is aligned to a power of two so they
+    // never overlap; peak usage 39434 B ≪ HqcBuf size of 131072 B):
+    //   [    0 ..    75)  ones_wr   (HQC_WR bytes)
+    //   [  256 ..   337)  ones_we   (HQC_WE bytes)
+    //   [ 1024 ..  1324)  r_idx     (HQC_WR * 4 bytes)
+    //   [ 2048 ..  2372)  e_idx     (HQC_WE * 4 bytes)
+    //   [ 4096 .. 21765)  r_vec     (HQC_N bytes)
+    //   [21765 .. 39434)  e_vec     (HQC_N bytes)
+    //
+    // u_prime = r + e and v_prime2 = m_enc + hr + e are computed INLINE
+    // during the comparison loop, so they never need to be materialised.
+    let b1 = state_new(HqcBuf);
+    let b2 = state_new(HqcBuf);
+    let b3 = state_new(HqcBuf);
+    let b4 = state_new(HqcBuf);
 
-    // Decode m from the first HQC_M_ENC_LEN bits of v'.
-    let msg = state_new(HqcBuf);
-    hqc_decode_message_at(v_prime, 0, msg, 0);
+    let ones_wr_off: u32 = 0;
+    let ones_we_off: u32 = 256;
+    let r_idx_off:  u32 = 1024;
+    let e_idx_off:  u32 = 2048;
+    let r_vec_off:  u32 = 4096;
+    let e_vec_off:  u32 = 4096 + HQC_N;
 
-    // Re-encrypt: re-derive r, e from msg and rebuild (u', v').
-    let sample_seed = state_new(HqcBuf);
-    sha256_oneshot_at(msg, HQC_K, sample_seed);
+    // ── Phase 1: v' = v XOR (s * u) ──────────────────────────────────────
+    //   b1 ← su = s · u   (GF(2)[x]/(x^n+1) negacyclic product)
+    //   b2 ← v' = v XOR su
+    gf2_vec_mul_at(b1, 0, sk, s_sk_base, ct, u_base, HQC_N);
+    gf2_vec_add_at(b2, 0, ct, v_base, b1, 0, HQC_N);
 
-    let m_enc = state_new(HqcBuf);
-    hqc_encode_message_at(msg, 0, m_enc, 0);
+    // ── Phase 2: decode m' from the first HQC_M_ENC_LEN bits of v' ─────
+    //   b3 ← msg  (16 bits, one byte per bit). b1=su and b2=v' now dead.
+    hqc_decode_message_at(b2, 0, b3, 0);
 
-    let r_idx = state_new(HqcBuf);
-    let e_idx = state_new(HqcBuf);
-    let r_vec = state_new(HqcBuf);
-    let e_vec = state_new(HqcBuf);
-    let ones_wr = state_new(HqcBuf);
-    let ones_we = state_new(HqcBuf);
+    // ── Phase 3: re-derive r, e deterministically from msg ──────────────
+    //   b1 ← sample_seed = SHA-256(msg)
+    //   b2 ← m_enc       = RM-encode(msg) padded to HQC_N
+    sha256_oneshot_at(b3, HQC_K, b1);
+    hqc_encode_message_at(b3, 0, b2, 0);
+
+    // Initialise ones_wr / ones_we inside the b4 slab.
     let i: u32 = 0;
-    while i < HQC_WR { ones_wr.bytes[i] = 1; i = i + 1; }
+    while i < HQC_WR { b4.bytes[ones_wr_off + i] = 1; i = i + 1; }
     let j: u32 = 0;
-    while j < HQC_WE { ones_we.bytes[j] = 1; j = j + 1; }
+    while j < HQC_WE { b4.bytes[ones_we_off + j] = 1; j = j + 1; }
 
-    hqc_sample_sparse_at(sample_seed, 0, 32, 10, r_vec, 0,
-                          r_idx, 0, HQC_WR, HQC_N);
-    hqc_sample_sparse_at(sample_seed, 0, 32, 20, e_vec, 0,
-                          e_idx, 0, HQC_WE, HQC_N);
+    // Sample r, e into the b4 slab. sample_seed (b1) is still needed for
+    // the second call, then b1 becomes free for Phase 4.
+    hqc_sample_sparse_at(b1, 0, 32, 10, b4, r_vec_off,
+                          b4, r_idx_off, HQC_WR, HQC_N);
+    hqc_sample_sparse_at(b1, 0, 32, 20, b4, e_vec_off,
+                          b4, e_idx_off, HQC_WE, HQC_N);
 
-    let u_prime = state_new(HqcBuf);
-    gf2_vec_add_at(u_prime, 0, r_vec, 0, e_vec, 0, HQC_N);
+    // ── Phase 4: hr = h · r  (negacyclic sparse product) ────────────────
+    //   b1 ← hr = sparse_vec_mul(r_idx, ones_wr, h_sk)
+    //   (No conflict: b1 is now free, hr lives in a different buffer than
+    //    the r_idx/ones_wr inputs that live inside the b4 slab.)
+    sparse_vec_mul_at(b1, 0, b4, r_idx_off, b4, ones_wr_off,
+                       HQC_WR, sk, h_sk_base, HQC_N);
 
-    let hr = state_new(HqcBuf);
-    sparse_vec_mul_at(hr, 0, r_idx, 0, ones_wr, 0, HQC_WR,
-                       sk, h_sk_base, HQC_N);
-    let noise = state_new(HqcBuf);
-    gf2_vec_add_at(noise, 0, hr, 0, e_vec, 0, HQC_N);
-    let v_prime2 = state_new(HqcBuf);
-    gf2_vec_add_at(v_prime2, 0, m_enc, 0, noise, 0, HQC_N);
-
-    // Compare (u, v) with (u_prime, v_prime2).
+    // ── Phase 5: compare (u, v) with (r+e, m_enc+hr+e) INLINE ────────────
+    //   u' = r XOR e  (computed element-wise from r_vec, e_vec)
+    //   v'' = m_enc XOR hr XOR e_vec  (computed element-wise)
+    //   This avoids materialising u' and v'' in dedicated buffers — which
+    //   would otherwise need either a 5th allocation or careful aliasing
+    //   gymnastics inside gf2_vec_add_at.
     let mut_match: u32 = 1;
     let k: u32 = 0;
     while k < HQC_N {
+        let rv: u32 = b4.bytes[r_vec_off + k] as u32;
+        let ev: u32 = b4.bytes[e_vec_off + k] as u32;
+        let u_p: u32 = (rv ^ ev) & 1;
         let u_ct: u32 = ct.bytes[u_base + k] as u32;
-        let u_p:  u32 = u_prime.bytes[k] as u32;
-        if (u_ct & 1) != (u_p & 1) { mut_match = 0; }
+        if (u_ct & 1) != u_p { mut_match = 0; }
+
+        let mv: u32 = b2.bytes[k] as u32;
+        let hv: u32 = b1.bytes[k] as u32;
+        let v_p2: u32 = (mv ^ hv ^ ev) & 1;
         let v_ct: u32 = ct.bytes[v_base + k] as u32;
-        let v_p2: u32 = v_prime2.bytes[k] as u32;
-        if (v_ct & 1) != (v_p2 & 1) { mut_match = 0; }
+        if (v_ct & 1) != v_p2 { mut_match = 0; }
         k = k + 1;
     }
 
-    // ss = SHA-256(msg || ct) on success.
-    let hash_in = state_new(HqcBuf);
+    // ── Phase 6: ss = SHA-256(msg || ct) on success ─────────────────────
+    //   Reuse b1 (hr is now dead) as the hash input buffer.
     let ki: u32 = 0;
-    while ki < HQC_K { hash_in.bytes[ki] = msg.bytes[ki]; ki = ki + 1; }
+    while ki < HQC_K { b1.bytes[ki] = b3.bytes[ki]; ki = ki + 1; }
     let ci: u32 = 0;
-    while ci < HQC_CT_SIZE { hash_in.bytes[HQC_K + ci] = ct.bytes[ci]; ci = ci + 1; }
-    sha256_oneshot_at(hash_in, HQC_K + HQC_CT_SIZE, ss);
+    while ci < HQC_CT_SIZE { b1.bytes[HQC_K + ci] = ct.bytes[ci]; ci = ci + 1; }
+    sha256_oneshot_at(b1, HQC_K + HQC_CT_SIZE, ss);
 
-    // On failure, overwrite ss with SHA-256(fail_pad || ct) for CCA.
+    // ── Phase 7 (failure only): overwrite ss with SHA-256(fail_pad || ct)
     if mut_match == 0 {
-        let fail_in = state_new(HqcBuf);
         let z: u32 = 0;
-        while z < 32 { fail_in.bytes[z] = 0; z = z + 1; }
+        while z < 32 { b1.bytes[z] = 0; z = z + 1; }
         let m: u32 = 0;
-        while m < HQC_CT_SIZE { fail_in.bytes[32 + m] = ct.bytes[m]; m = m + 1; }
-        sha256_oneshot_at(fail_in, 32 + HQC_CT_SIZE, ss);
+        while m < HQC_CT_SIZE { b1.bytes[32 + m] = ct.bytes[m]; m = m + 1; }
+        sha256_oneshot_at(b1, 32 + HQC_CT_SIZE, ss);
         return 1;
     }
     return 0;

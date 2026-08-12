@@ -37,7 +37,7 @@ const MASK32: u32 = 4294967295;
 // Layouts
 // ===========================================================================
 //   MlDsaBuf: 8192 bytes — generic carrier for seeds, polynomials, signatures.
-layout MlDsaBuf = { bytes: [u8; 8192] }
+layout MlDsaBuf = { bytes: [u8; 65536] }
 
 // ===========================================================================
 // 32-bit little-endian load/store within an MlDsaBuf.

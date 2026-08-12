@@ -1,0 +1,239 @@
+// Debug harness for rfc6979_p256_k. Defines rfc6979_p256_k_dbg with print_int
+// markers, and a main() that calls it with the test vector 0 inputs.
+//
+// Test vector 0:
+//   privkey = b7e6ad05e4300226a083e2760604268777ddfceb2b4e558373862d26d063e98a
+//   hash    = fda7280508f26dc28bb271474df652be101105032eb5be3ed9f6e5fb63689366
+//   n (P-256 order) = ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551
+// Expected k (LE)   = 319bd14153641510cc6420414d2720598c815c85759eae06ba53128c22095dcf
+//
+// Markers:
+//   100001 = V_init, 100002 = K_init, 100003 = h_be_reduced
+//   100004 = buf1, 100005 = V_step1 (after first HMAC), 100006 = K_step2
+//   100007 = V_step3, 100008 = buf2, 100009 = K_stepc1, 100010 = V_stepc2
+//   100011 = V_kcand (k candidate), 100012 = k_le_after_reduce
+//   999    = separator between byte sequences
+//   99999  = end marker
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_cmp, bn256_sub, bn256_is_zero};
+import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, hmac_sha256};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/ecdsa_p256.vuma"::{B32, swap_endian_32, b32_to_bn256, bn256_to_be32, bn256_to_b32};
+
+transform rfc6979_p256_k_dbg(x_be: State<B32>, h_be: State<B32>, n_le: State<B32>, k_le: State<B32>) {
+    let hlen: u32 = 32;
+
+    let V = state_new(HmacMsg);
+    let K = state_new(HmacKey);
+    let i: u32 = 0;
+    while i < hlen { V.bytes[i] = 1; K.bytes[i] = 0; i = i + 1; }
+
+    // DBG: V_init
+    print_int(100001);
+    let pi1: u32 = 0;
+    while pi1 < hlen { print_int(V.bytes[pi1] as u32); pi1 = pi1 + 1; }
+    print_int(999);
+    // DBG: K_init
+    print_int(100002);
+    let pi2: u32 = 0;
+    while pi2 < hlen { print_int(K.bytes[pi2] as u32); pi2 = pi2 + 1; }
+    print_int(999);
+
+    // bits2octets(h) = h_be reduced mod n, in BE
+    let h_le = state_new(B32);
+    swap_endian_32(h_le, h_be);
+    let h_bn = state_new(Bn256Ctx);
+    let n_bn = state_new(Bn256Ctx);
+    b32_to_bn256(h_bn, h_le);
+    b32_to_bn256(n_bn, n_le);
+    if bn256_cmp(h_bn, n_bn) != 2 { bn256_sub(h_bn, h_bn, n_bn); }
+    let h_be_reduced = state_new(B32);
+    bn256_to_be32(h_be_reduced, h_bn);
+
+    // DBG: h_be_reduced
+    print_int(100003);
+    let pi3: u32 = 0;
+    while pi3 < hlen { print_int(h_be_reduced.bytes[pi3] as u32); pi3 = pi3 + 1; }
+    print_int(999);
+
+    // x_be_canon
+    let x_be_canon = state_new(B32);
+    let j: u32 = 0;
+    while j < 32 { x_be_canon.bytes[j] = x_be.bytes[j]; j = j + 1; }
+
+    // buf1 = V || 0x00 || x || h_reduced (97 bytes)
+    let buf1 = state_new(HmacMsg);
+    let p1: u32 = 0;
+    while p1 < hlen { buf1.bytes[p1] = V.bytes[p1]; p1 = p1 + 1; }
+    buf1.bytes[hlen] = 0;
+    let p2: u32 = 0;
+    while p2 < 32 { buf1.bytes[hlen + 1 + p2] = x_be_canon.bytes[p2]; p2 = p2 + 1; }
+    let p3: u32 = 0;
+    while p3 < 32 { buf1.bytes[hlen + 1 + 32 + p3] = h_be_reduced.bytes[p3]; p3 = p3 + 1; }
+
+    // DBG: buf1
+    print_int(100004);
+    let pi4: u32 = 0;
+    while pi4 < 97 { print_int(buf1.bytes[pi4] as u32); pi4 = pi4 + 1; }
+    print_int(999);
+
+    let tmp_out = state_new(HmacOut);
+    let buf1_len: u32 = hlen + 1 + 64;
+
+    // Step a1 (BUGGY): V <- HMAC_K(buf1)
+    hmac_sha256(K, hlen, buf1, buf1_len, tmp_out);
+    let c1: u32 = 0;
+    while c1 < hlen { V.bytes[c1] = tmp_out.bytes[c1]; c1 = c1 + 1; }
+
+    // DBG: V_step1
+    print_int(100005);
+    let pi5: u32 = 0;
+    while pi5 < hlen { print_int(V.bytes[pi5] as u32); pi5 = pi5 + 1; }
+    print_int(999);
+
+    // Step a2: K <- HMAC_K(buf1)
+    hmac_sha256(K, hlen, buf1, buf1_len, tmp_out);
+    let c2: u32 = 0;
+    while c2 < hlen { K.bytes[c2] = tmp_out.bytes[c2]; c2 = c2 + 1; }
+
+    // DBG: K_step2
+    print_int(100006);
+    let pi6: u32 = 0;
+    while pi6 < hlen { print_int(K.bytes[pi6] as u32); pi6 = pi6 + 1; }
+    print_int(999);
+
+    // Step a3: V <- HMAC_K(V)
+    hmac_sha256(K, hlen, V, hlen, tmp_out);
+    let c3: u32 = 0;
+    while c3 < hlen { V.bytes[c3] = tmp_out.bytes[c3]; c3 = c3 + 1; }
+
+    // DBG: V_step3
+    print_int(100007);
+    let pi7: u32 = 0;
+    while pi7 < hlen { print_int(V.bytes[pi7] as u32); pi7 = pi7 + 1; }
+    print_int(999);
+
+    // buf2 = V || 0x01 || x || h_reduced
+    let buf2 = state_new(HmacMsg);
+    let q1: u32 = 0;
+    while q1 < hlen { buf2.bytes[q1] = V.bytes[q1]; q1 = q1 + 1; }
+    buf2.bytes[hlen] = 1;
+    let q2: u32 = 0;
+    while q2 < 32 { buf2.bytes[hlen + 1 + q2] = x_be_canon.bytes[q2]; q2 = q2 + 1; }
+    let q3: u32 = 0;
+    while q3 < 32 { buf2.bytes[hlen + 1 + 32 + q3] = h_be_reduced.bytes[q3]; q3 = q3 + 1; }
+
+    // DBG: buf2
+    print_int(100008);
+    let pi8: u32 = 0;
+    while pi8 < 97 { print_int(buf2.bytes[pi8] as u32); pi8 = pi8 + 1; }
+    print_int(999);
+
+    // Step c1: K <- HMAC_K(buf2)
+    hmac_sha256(K, hlen, buf2, buf1_len, tmp_out);
+    let d1: u32 = 0;
+    while d1 < hlen { K.bytes[d1] = tmp_out.bytes[d1]; d1 = d1 + 1; }
+
+    // DBG: K_stepc1
+    print_int(100009);
+    let pi9: u32 = 0;
+    while pi9 < hlen { print_int(K.bytes[pi9] as u32); pi9 = pi9 + 1; }
+    print_int(999);
+
+    // Step c2: V <- HMAC_K(V)
+    hmac_sha256(K, hlen, V, hlen, tmp_out);
+    let d2: u32 = 0;
+    while d2 < hlen { V.bytes[d2] = tmp_out.bytes[d2]; d2 = d2 + 1; }
+
+    // DBG: V_stepc2
+    print_int(100010);
+    let pi10: u32 = 0;
+    while pi10 < hlen { print_int(V.bytes[pi10] as u32); pi10 = pi10 + 1; }
+    print_int(999);
+
+    // Generate candidate T = V (32 bytes), reduce mod n with rejection
+    let accepted: u32 = 0;
+    let attempts: u32 = 0;
+    while accepted == 0 {
+        if attempts >= 32 { accepted = 1; }
+        if accepted == 0 {
+            hmac_sha256(K, hlen, V, hlen, tmp_out);
+            let e1: u32 = 0;
+            while e1 < hlen { V.bytes[e1] = tmp_out.bytes[e1]; e1 = e1 + 1; }
+
+            // DBG: V_kcand
+            print_int(100011);
+            let pi11: u32 = 0;
+            while pi11 < hlen { print_int(V.bytes[pi11] as u32); pi11 = pi11 + 1; }
+            print_int(999);
+
+            swap_endian_32(k_le, V);
+            let k_bn = state_new(Bn256Ctx);
+            b32_to_bn256(k_bn, k_le);
+            if bn256_cmp(k_bn, n_bn) != 2 { bn256_sub(k_bn, k_bn, n_bn); }
+            bn256_to_b32(k_le, k_bn);
+
+            // DBG: k_le_after_reduce
+            print_int(100012);
+            let pi12: u32 = 0;
+            while pi12 < hlen { print_int(k_le.bytes[pi12] as u32); pi12 = pi12 + 1; }
+            print_int(999);
+
+            if bn256_is_zero(k_bn) == 0 {
+                accepted = 1;
+            } else {
+                let buf3 = state_new(HmacMsg);
+                let f1: u32 = 0;
+                while f1 < hlen { buf3.bytes[f1] = V.bytes[f1]; f1 = f1 + 1; }
+                buf3.bytes[hlen] = 0;
+                hmac_sha256(K, hlen, buf3, hlen + 1, tmp_out);
+                let g1: u32 = 0;
+                while g1 < hlen { K.bytes[g1] = tmp_out.bytes[g1]; g1 = g1 + 1; }
+                hmac_sha256(K, hlen, V, hlen, tmp_out);
+                let g2: u32 = 0;
+                while g2 < hlen { V.bytes[g2] = tmp_out.bytes[g2]; g2 = g2 + 1; }
+            }
+        }
+        attempts = attempts + 1;
+    }
+}
+
+transform main() -> i32 {
+    // privkey = b7e6ad05e4300226a083e2760604268777ddfceb2b4e558373862d26d063e98a
+    let privkey = state_new(B32);
+    privkey.bytes[0] = 183; privkey.bytes[1] = 230; privkey.bytes[2] = 173; privkey.bytes[3] = 5;
+    privkey.bytes[4] = 228; privkey.bytes[5] = 48; privkey.bytes[6] = 2; privkey.bytes[7] = 38;
+    privkey.bytes[8] = 160; privkey.bytes[9] = 131; privkey.bytes[10] = 226; privkey.bytes[11] = 118;
+    privkey.bytes[12] = 6; privkey.bytes[13] = 4; privkey.bytes[14] = 38; privkey.bytes[15] = 135;
+    privkey.bytes[16] = 119; privkey.bytes[17] = 221; privkey.bytes[18] = 252; privkey.bytes[19] = 235;
+    privkey.bytes[20] = 43; privkey.bytes[21] = 78; privkey.bytes[22] = 85; privkey.bytes[23] = 131;
+    privkey.bytes[24] = 115; privkey.bytes[25] = 134; privkey.bytes[26] = 45; privkey.bytes[27] = 38;
+    privkey.bytes[28] = 208; privkey.bytes[29] = 99; privkey.bytes[30] = 233; privkey.bytes[31] = 138;
+
+    // hash = fda7280508f26dc28bb271474df652be101105032eb5be3ed9f6e5fb63689366
+    let h_be = state_new(B32);
+    h_be.bytes[0] = 253; h_be.bytes[1] = 167; h_be.bytes[2] = 40; h_be.bytes[3] = 5;
+    h_be.bytes[4] = 8; h_be.bytes[5] = 242; h_be.bytes[6] = 109; h_be.bytes[7] = 194;
+    h_be.bytes[8] = 139; h_be.bytes[9] = 178; h_be.bytes[10] = 113; h_be.bytes[11] = 71;
+    h_be.bytes[12] = 77; h_be.bytes[13] = 246; h_be.bytes[14] = 82; h_be.bytes[15] = 190;
+    h_be.bytes[16] = 16; h_be.bytes[17] = 17; h_be.bytes[18] = 5; h_be.bytes[19] = 3;
+    h_be.bytes[20] = 46; h_be.bytes[21] = 181; h_be.bytes[22] = 190; h_be.bytes[23] = 62;
+    h_be.bytes[24] = 217; h_be.bytes[25] = 246; h_be.bytes[26] = 229; h_be.bytes[27] = 251;
+    h_be.bytes[28] = 99; h_be.bytes[29] = 104; h_be.bytes[30] = 147; h_be.bytes[31] = 102;
+
+    // n_le = swap(n_be) where n_be = ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551
+    let n_le = state_new(B32);
+    n_le.bytes[0] = 81; n_le.bytes[1] = 37; n_le.bytes[2] = 99; n_le.bytes[3] = 252;
+    n_le.bytes[4] = 194; n_le.bytes[5] = 202; n_le.bytes[6] = 185; n_le.bytes[7] = 243;
+    n_le.bytes[8] = 132; n_le.bytes[9] = 158; n_le.bytes[10] = 23; n_le.bytes[11] = 167;
+    n_le.bytes[12] = 173; n_le.bytes[13] = 250; n_le.bytes[14] = 230; n_le.bytes[15] = 188;
+    n_le.bytes[16] = 255; n_le.bytes[17] = 255; n_le.bytes[18] = 255; n_le.bytes[19] = 255;
+    n_le.bytes[20] = 255; n_le.bytes[21] = 255; n_le.bytes[22] = 255; n_le.bytes[23] = 255;
+    n_le.bytes[24] = 0; n_le.bytes[25] = 0; n_le.bytes[26] = 0; n_le.bytes[27] = 0;
+    n_le.bytes[28] = 255; n_le.bytes[29] = 255; n_le.bytes[30] = 255; n_le.bytes[31] = 255;
+
+    let k_le = state_new(B32);
+    rfc6979_p256_k_dbg(privkey, h_be, n_le, k_le);
+
+    print_int(99999);
+    return 0;
+}

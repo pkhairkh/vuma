@@ -1,0 +1,51 @@
+// Test: bn256_mul_512 with G.x * G.y.
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, Bn512Ctx, Bn64Ctx, bn256_set_u32, bn256_zero, bn256_mul_512};
+
+transform main() -> i32 {
+    let a = state_new(Bn256Ctx);
+    let b = state_new(Bn256Ctx);
+    let r = state_new(Bn512Ctx);
+    // a = 0x0000000000000000_0000000000000001 (limbs[0]=1, rest 0)
+    // b = 0x0000000000000000_0000000000000001
+    // r should = 1
+    bn256_set_u32(a, 1);
+    bn256_set_u32(b, 1);
+    bn256_mul_512(r, a, b);
+    // Print limbs[0] as two 32-bit halves
+    let lo32: u32 = (r.limbs[0] & 4294967295) as u32;
+    let hi32: u32 = (r.limbs[0] >> 32) as u32;
+    print_int(1000 + lo32);
+    print_int(1000 + hi32);
+    print_int(999);
+
+    // Test: a = 0xFFFFFFFF (limbs[0]=0xFFFFFFFF), b = 0xFFFFFFFF
+    // r = 0xFFFFFFFE00000001
+    bn256_set_u32(a, 4294967295);  // 2^32 - 1
+    bn256_set_u32(b, 4294967295);
+    bn256_mul_512(r, a, b);
+    lo32 = (r.limbs[0] & 4294967295) as u32;
+    hi32 = (r.limbs[0] >> 32) as u32;
+    print_int(1000 + lo32);
+    print_int(1000 + hi32);
+    print_int(999);
+    // Expected: lo32 = 1, hi32 = 0xFFFFFFFE
+    // 0xFFFFFFFF * 0xFFFFFFFF = 0xFFFFFFFE00000001
+
+    // Test: a = 2^64-1 (limbs[0] = 0xFFFFFFFFFFFFFFFF), b = 2^64-1
+    // r = (2^64-1)^2 = 2^128 - 2^65 + 1 = 0xFFFFFFFFFFFFFFFE0000000000000001
+    a.limbs[0] = 18446744073709551615;
+    b.limbs[0] = 18446744073709551615;
+    bn256_mul_512(r, a, b);
+    lo32 = (r.limbs[0] & 4294967295) as u32;
+    hi32 = (r.limbs[0] >> 32) as u32;
+    print_int(1000 + lo32);
+    print_int(1000 + hi32);
+    // limbs[1]
+    let lo32_1: u32 = (r.limbs[1] & 4294967295) as u32;
+    let hi32_1: u32 = (r.limbs[1] >> 32) as u32;
+    print_int(1000 + lo32_1);
+    print_int(1000 + hi32_1);
+    print_int(999);
+    // Expected: limbs[0] = 1, limbs[1] = 0xFFFFFFFFFFFFFFFE
+    return 0;
+}

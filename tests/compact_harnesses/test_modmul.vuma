@@ -1,0 +1,36 @@
+// Test: bn256_mod_mul with known values.
+// 5 * 7 mod 17 = 35 mod 17 = 1
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_set_u32, bn256_zero, bn256_mod_mul};
+
+transform main() -> i32 {
+    let a = state_new(Bn256Ctx);
+    let b = state_new(Bn256Ctx);
+    let m = state_new(Bn256Ctx);
+    let r = state_new(Bn256Ctx);
+    bn256_set_u32(a, 5);
+    bn256_set_u32(b, 7);
+    bn256_set_u32(m, 17);
+    bn256_mod_mul(r, a, b, m);
+    // Expected: r = 1
+    print_int(1000 + (r.limbs[0] as u32));
+    print_int(999);
+
+    // Test 2: large multiplication
+    // (2^64 - 1) * (2^64 - 1) mod (2^64 + 1) — too complex for u32
+    // Instead: 1000000 * 1000000 mod 999999937 (prime)
+    bn256_set_u32(a, 1000000);
+    bn256_set_u32(b, 1000000);
+    bn256_set_u32(m, 999999937);
+    bn256_mod_mul(r, a, b, m);
+    // Expected: 1000000000000 mod 999999937 = 1000000000000 - 1*999999937 = 63
+    print_int(1000 + (r.limbs[0] as u32));
+    print_int(999);
+
+    // Test 3: P-256 field multiplication
+    // G.x * G.y mod p
+    // G.x = 6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296
+    // G.y = 4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5
+    // p  = ffffffff00000001000000000000000000000000ffffffffffffffffffffffff
+    // We can't easily set 256-bit values, but we can verify the mod_mul works for small values.
+    return 0;
+}

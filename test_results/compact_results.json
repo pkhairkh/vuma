@@ -2033,5 +2033,10 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "ml_dsa|x86_64": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
   }
 }

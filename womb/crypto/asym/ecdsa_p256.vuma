@@ -876,13 +876,7 @@ transform p256_scalar_mul_base(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, k: Stat
     p256_p(p_be);
     be32_to_bn256(p_bn, p_be);
 
-    // Montgomery context
-    let m0_val: u64 = p_bn.limbs[0];
-    let mprime: u64 = bn256_mont_mu(m0_val);
-    let r2 = state_new(Bn256Ctx);
-    bn256_mont_r2(r2, p_bn);
-
-    // Load base point G and convert to Montgomery form
+    // Load base point G (affine)
     let gx_be = state_new(B32);
     let gy_be = state_new(B32);
     p256_gx(gx_be);
@@ -891,38 +885,32 @@ transform p256_scalar_mul_base(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, k: Stat
     let gy_bn = state_new(Bn256Ctx);
     be32_to_bn256(gx_bn, gx_be);
     be32_to_bn256(gy_bn, gy_be);
-    let gx_m = state_new(Bn256Ctx);
-    let gy_m = state_new(Bn256Ctx);
-    bn256_mont_mul(gx_m, gx_bn, r2, p_bn, mprime);
-    bn256_mont_mul(gy_m, gy_bn, r2, p_bn, mprime);
 
-    // R = (X, Y, Z) in Jacobian Mont. Identity = (0, R, 0) in Mont form.
+    // R = (X, Y, Z) in Jacobian. Start with R = identity (0, 1, 0).
     let rx_j = state_new(Bn256Ctx);
     let ry_j = state_new(Bn256Ctx);
     let rz_j = state_new(Bn256Ctx);
     bn256_zero(rx_j);
-    // R mod m (Mont form of 1) = mont_mul(1, r2, m, mprime)
-    let one = state_new(Bn256Ctx);
-    bn256_set_u32(one, 1);
-    bn256_mont_mul(ry_j, one, r2, p_bn, mprime);
+    bn256_set_u32(ry_j, 1);
     bn256_zero(rz_j);
 
     let bits: u32 = bn256_bitlen(k);
     let i: u32 = bits;
     while i > 0 {
         let ii = i - 1;
-        p256_proj_double_mont(rx_j, ry_j, rz_j, rx_j, ry_j, rz_j, p_bn, mprime);
+        p256_proj_double(rx_j, ry_j, rz_j, rx_j, ry_j, rz_j, p_bn);
         if bn256_get_bit(k, ii) == 1 {
-            p256_proj_add_mixed_mont(rx_j, ry_j, rz_j, rx_j, ry_j, rz_j, gx_m, gy_m, p_bn, mprime);
+            p256_proj_add_mixed(rx_j, ry_j, rz_j, rx_j, ry_j, rz_j, gx_bn, gy_bn, p_bn);
         }
         i = ii;
     }
-    // Convert to affine (does the single mod_inv + de-montgomery)
+    // Convert to affine (uses bn256_mod_inv_fermat — Montgomery-based, fast)
     p256_jac_to_affine(rx, ry, rx_j, ry_j, rz_j, p_bn);
 }
 
 // General scalar multiplication: R = k * P for any point P.
-// Uses MONTGOMERY-domain Jacobian projective coordinates.
+// Uses Jacobian projective coordinates with bn256_mod_mul (correct).
+// Single mod_inv at end via p256_jac_to_affine (uses bn256_mod_inv_fermat).
 transform p256_scalar_mul_bn(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, k: State<Bn256Ctx>, px: State<Bn256Ctx>, py: State<Bn256Ctx>) {
     if bn256_is_zero(k) == 1 {
         bn256_zero(rx);
@@ -936,35 +924,21 @@ transform p256_scalar_mul_bn(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, k: State<
     p256_p(p_be);
     be32_to_bn256(p_bn, p_be);
 
-    // Montgomery context
-    let m0_val: u64 = p_bn.limbs[0];
-    let mprime: u64 = bn256_mont_mu(m0_val);
-    let r2 = state_new(Bn256Ctx);
-    bn256_mont_r2(r2, p_bn);
-
-    // Convert P to Montgomery form
-    let px_m = state_new(Bn256Ctx);
-    let py_m = state_new(Bn256Ctx);
-    bn256_mont_mul(px_m, px, r2, p_bn, mprime);
-    bn256_mont_mul(py_m, py, r2, p_bn, mprime);
-
-    // R = (X, Y, Z) in Jacobian Mont. Identity = (0, R, 0).
+    // R = (X, Y, Z) in Jacobian. Start with R = identity.
     let rx_j = state_new(Bn256Ctx);
     let ry_j = state_new(Bn256Ctx);
     let rz_j = state_new(Bn256Ctx);
     bn256_zero(rx_j);
-    let one = state_new(Bn256Ctx);
-    bn256_set_u32(one, 1);
-    bn256_mont_mul(ry_j, one, r2, p_bn, mprime);
+    bn256_set_u32(ry_j, 1);
     bn256_zero(rz_j);
 
     let bits: u32 = bn256_bitlen(k);
     let i: u32 = bits;
     while i > 0 {
         let ii = i - 1;
-        p256_proj_double_mont(rx_j, ry_j, rz_j, rx_j, ry_j, rz_j, p_bn, mprime);
+        p256_proj_double(rx_j, ry_j, rz_j, rx_j, ry_j, rz_j, p_bn);
         if bn256_get_bit(k, ii) == 1 {
-            p256_proj_add_mixed_mont(rx_j, ry_j, rz_j, rx_j, ry_j, rz_j, px_m, py_m, p_bn, mprime);
+            p256_proj_add_mixed(rx_j, ry_j, rz_j, rx_j, ry_j, rz_j, px, py, p_bn);
         }
         i = ii;
     }
@@ -1175,32 +1149,11 @@ transform ecdsa_p256_sign(msg: State<B256>, msg_len: u32, privkey_be: State<B32>
     // Use Fermat's little theorem (Montgomery-based mod_exp) instead of binary
     // GCD — binary GCD has pathological O(n²) iteration counts for some inputs.
     bn256_mod_inv_fermat(k_inv, k_bn, n_bn);
-    // These two mod_mul are the slow divmod-based version. Replace with
-    // Montgomery-domain mul (convert in/out around the call).
-    // Since n_bn is reused, compute mprime + r2 once and reuse.
-    let n_m0: u64 = n_bn.limbs[0];
-    let n_mprime: u64 = bn256_mont_mu(n_m0);
-    let n_r2 = state_new(Bn256Ctx);
-    bn256_mont_r2(n_r2, n_bn);
-    // rd = r_bn * d_bn mod n  (via Montgomery)
-    let r_mont = state_new(Bn256Ctx);
-    let d_mont = state_new(Bn256Ctx);
-    bn256_mont_mul(r_mont, r_bn, n_r2, n_bn, n_mprime);
-    bn256_mont_mul(d_mont, d_bn, n_r2, n_bn, n_mprime);
-    let rd_mont = state_new(Bn256Ctx);
-    bn256_mont_mul(rd_mont, r_mont, d_mont, n_bn, n_mprime);
-    let one_bn = state_new(Bn256Ctx);
-    bn256_set_u32(one_bn, 1);
-    bn256_mont_mul(rd, rd_mont, one_bn, n_bn, n_mprime);  // convert back
+    // Use bn256_mod_mul (divmod-based, CORRECT) for these 2 final multiplications.
+    // The divmod is O(n³) but only 2 calls — correctness over speed here.
+    bn256_mod_mul(rd, r_bn, d_bn, n_bn);
     bn256_mod_add(h_rd, h_bn, rd, n_bn);
-    // s_bn = k_inv * h_rd mod n  (via Montgomery)
-    let ki_mont = state_new(Bn256Ctx);
-    let hr_mont = state_new(Bn256Ctx);
-    bn256_mont_mul(ki_mont, k_inv, n_r2, n_bn, n_mprime);
-    bn256_mont_mul(hr_mont, h_rd, n_r2, n_bn, n_mprime);
-    let s_mont = state_new(Bn256Ctx);
-    bn256_mont_mul(s_mont, ki_mont, hr_mont, n_bn, n_mprime);
-    bn256_mont_mul(s_bn, s_mont, one_bn, n_bn, n_mprime);  // convert back
+    bn256_mod_mul(s_bn, k_inv, h_rd, n_bn);
 
     bn256_to_be32(r_out, r_bn);
     bn256_to_be32(s_out, s_bn);
