@@ -1413,5 +1413,10 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "scrypt|x86_32": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
   }
 }
