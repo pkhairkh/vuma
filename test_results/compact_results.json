@@ -1798,5 +1798,115 @@
     "status": "PASS",
     "pass": 20,
     "total": 20
+  },
+  "aes_modes|ppc64": {
+    "status": "PASS",
+    "pass": 21,
+    "total": 21
+  },
+  "aes_modes|ppc64le": {
+    "status": "PASS",
+    "pass": 21,
+    "total": 21
+  },
+  "aes_modes|loongarch64": {
+    "status": "PASS",
+    "pass": 21,
+    "total": 21
+  },
+  "aes_modes|s390x": {
+    "status": "PASS",
+    "pass": 21,
+    "total": 21
+  },
+  "aes_modes|alpha": {
+    "status": "PASS",
+    "pass": 21,
+    "total": 21
+  },
+  "blake3|sparc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "blake3|hppa": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "blake3|m68k": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "rc4|sparc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "rc4|hppa": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "rc4|m68k": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|sparc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|hppa": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "chacha20|m68k": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "des|sparc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "des|hppa": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "des|m68k": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "salsa20|sparc64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "salsa20|hppa": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "salsa20|m68k": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "poly1305|hppa": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "poly1305|m68k": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
   }
 }
