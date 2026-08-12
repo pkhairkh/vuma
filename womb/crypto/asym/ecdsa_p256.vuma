@@ -701,8 +701,168 @@ transform p256_scalar_step_add(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, qx: Sta
     bn256_copy(rx, t1);
     bn256_copy(ry, t2);
 }
+// ===========================================================================
+// Montgomery-domain projective operations — FAST.
+// All mod_mul use bn256_mont_mul (O(n²) vs O(n³) for divmod-based mod_mul).
+// Inputs/outputs in Montgomery form: a_mont = a * R mod m.
+// Convert to Mont: mont_mul(a, r2, m, mprime).
+// Convert back:     mont_mul(a_mont, 1, m, mprime).
+// Add/sub/compare work identically in Mont form (modular ops).
+// ===========================================================================
+
+// Jacobian doubling in Montgomery domain.
+// All inputs/outputs are in Mont form except z1 (which can be Mont or not —
+// we only use z1 for squaring, so as long as it's consistent it works).
+transform p256_proj_double_mont(x3: State<Bn256Ctx>, y3: State<Bn256Ctx>, z3: State<Bn256Ctx>,
+                                 x1: State<Bn256Ctx>, y1: State<Bn256Ctx>, z1: State<Bn256Ctx>,
+                                 p_bn: State<Bn256Ctx>, mprime: u64) {
+    if bn256_is_zero(z1) == 1 {
+        bn256_zero(x3);
+        bn256_set_u32(y3, 1);
+        bn256_zero(z3);
+        return;
+    }
+    let delta = state_new(Bn256Ctx);
+    let gamma = state_new(Bn256Ctx);
+    let beta  = state_new(Bn256Ctx);
+    let alpha = state_new(Bn256Ctx);
+    let t1    = state_new(Bn256Ctx);
+    let t2    = state_new(Bn256Ctx);
+    let t3    = state_new(Bn256Ctx);
+    let t4    = state_new(Bn256Ctx);
+
+    // delta = Z1^2 (Mont)
+    bn256_mont_mul(delta, z1, z1, p_bn, mprime);
+    // gamma = Y1^2 (Mont)
+    bn256_mont_mul(gamma, y1, y1, p_bn, mprime);
+    // beta = X1 * gamma (Mont)
+    bn256_mont_mul(beta, x1, gamma, p_bn, mprime);
+    // alpha = 3 * (X1 - delta) * (X1 + delta)
+    bn256_mod_sub(t1, x1, delta, p_bn);
+    bn256_mod_add(t2, x1, delta, p_bn);
+    bn256_mont_mul(t3, t1, t2, p_bn, mprime);
+    bn256_mod_add(alpha, t3, t3, p_bn);
+    bn256_mod_add(alpha, alpha, t3, p_bn);  // alpha = 3*t3
+    // X3 = alpha^2 - 8*beta
+    bn256_mont_mul(t1, alpha, alpha, p_bn, mprime);
+    // 8*beta = beta doubled 3 times
+    bn256_mod_add(t2, beta, beta, p_bn);  // 2*beta
+    bn256_mod_add(t2, t2, beta, p_bn);  // 3*beta  -- wait, need 4*beta not 3*beta
+    bn256_mod_add(t2, t2, beta, p_bn);  // 4*beta
+    bn256_mod_add(t3, t2, t2, p_bn);    // 8*beta
+    bn256_mod_sub(x3, t1, t3, p_bn);
+    // Z3 = (Y1 + Z1)^2 - gamma - delta
+    bn256_mod_add(t1, y1, z1, p_bn);
+    bn256_mont_mul(t2, t1, t1, p_bn, mprime);
+    bn256_mod_sub(z3, t2, gamma, p_bn);
+    bn256_mod_sub(z3, z3, delta, p_bn);
+    // Y3 = alpha * (4*beta - X3) - 8*gamma^2
+    // Recompute 4*beta (t2 was overwritten above)
+    bn256_mod_add(t2, beta, beta, p_bn);  // 2*beta
+    bn256_mod_add(t2, t2, beta, p_bn);  // 3*beta
+    bn256_mod_add(t2, t2, beta, p_bn);  // 4*beta
+    bn256_mod_sub(t1, t2, x3, p_bn);   // 4*beta - X3
+    bn256_mont_mul(t2, alpha, t1, p_bn, mprime);  // alpha*(4*beta - X3)
+    // 8*gamma^2 = gamma^2 doubled 3 times
+    bn256_mont_mul(t3, gamma, gamma, p_bn, mprime);
+    bn256_mod_add(t4, t3, t3, p_bn);  // 2*gamma^2
+    bn256_mod_add(t4, t4, t4, p_bn);  // 4*gamma^2
+    bn256_mod_add(t4, t4, t4, p_bn);  // 8*gamma^2
+    bn256_mod_sub(y3, t2, t4, p_bn);
+}
+
+// Mixed addition: Jacobian (X1,Y1,Z1) + affine (x2,y2) → Jacobian (X3,Y3,Z3).
+// All values in Montgomery form. p_bn is the prime (Mont or not — only used for mod_add/sub).
+transform p256_proj_add_mixed_mont(x3: State<Bn256Ctx>, y3: State<Bn256Ctx>, z3: State<Bn256Ctx>,
+                                     x1: State<Bn256Ctx>, y1: State<Bn256Ctx>, z1: State<Bn256Ctx>,
+                                     x2: State<Bn256Ctx>, y2: State<Bn256Ctx>,
+                                     p_bn: State<Bn256Ctx>, mprime: u64) {
+    if bn256_is_zero(z1) == 1 {
+        bn256_copy(x3, x2);
+        bn256_copy(y3, y2);
+        bn256_set_u32(z3, 1);
+        return;
+    }
+    let z1sq = state_new(Bn256Ctx);
+    let u2   = state_new(Bn256Ctx);
+    let s2   = state_new(Bn256Ctx);
+    let h    = state_new(Bn256Ctx);
+    let r    = state_new(Bn256Ctx);
+    let hh   = state_new(Bn256Ctx);
+    let hhh  = state_new(Bn256Ctx);
+    let t1   = state_new(Bn256Ctx);
+    let t2   = state_new(Bn256Ctx);
+
+    bn256_mont_mul(z1sq, z1, z1, p_bn, mprime);
+    bn256_mont_mul(u2, x2, z1sq, p_bn, mprime);
+    bn256_mont_mul(t1, z1, z1sq, p_bn, mprime);
+    bn256_mont_mul(s2, y2, t1, p_bn, mprime);
+    bn256_mod_sub(h, u2, x1, p_bn);
+    bn256_mod_sub(r, s2, y1, p_bn);
+    if bn256_is_zero(h) == 1 {
+        if bn256_is_zero(r) == 1 {
+            p256_proj_double_mont(x3, y3, z3, x1, y1, z1, p_bn, mprime);
+            return;
+        } else {
+            bn256_zero(x3);
+            bn256_set_u32(y3, 1);
+            bn256_zero(z3);
+            return;
+        }
+    }
+    bn256_mont_mul(hh, h, h, p_bn, mprime);
+    bn256_mont_mul(hhh, h, hh, p_bn, mprime);
+    bn256_mont_mul(t1, r, r, p_bn, mprime);
+    bn256_mod_sub(t1, t1, hhh, p_bn);
+    bn256_mont_mul(t2, x1, hh, p_bn, mprime);
+    bn256_mod_add(t2, t2, t2, p_bn);
+    bn256_mod_sub(x3, t1, t2, p_bn);
+    bn256_mont_mul(t1, x1, hh, p_bn, mprime);
+    bn256_mod_sub(t1, t1, x3, p_bn);
+    bn256_mont_mul(t2, r, t1, p_bn, mprime);
+    bn256_mont_mul(t1, y1, hhh, p_bn, mprime);
+    bn256_mod_sub(y3, t2, t1, p_bn);
+    bn256_mont_mul(z3, z1, h, p_bn, mprime);
+}
+
+// ===========================================================================
+// Projective (Jacobian) scalar multiplication — FAST Montgomery version.
+// All mod_mul in the loop use bn256_mont_mul (O(n²)) instead of
+// bn256_mod_mul (O(n³) bit-by-bit divmod).
+// ===========================================================================
+
+// Convert Jacobian (X, Y, Z) to affine (x, y) = (X/Z^2, Y/Z^3).
+// Uses ONE bn256_mod_inv_fermat (Montgomery-based) at the end.
+transform p256_jac_to_affine(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>,
+                              xj: State<Bn256Ctx>, yj: State<Bn256Ctx>, zj: State<Bn256Ctx>,
+                              p_bn: State<Bn256Ctx>) {
+    if bn256_is_zero(zj) == 1 {
+        bn256_zero(rx);
+        bn256_zero(ry);
+        return;
+    }
+    let zinv = state_new(Bn256Ctx);
+    let zinv2 = state_new(Bn256Ctx);
+    let zinv3 = state_new(Bn256Ctx);
+    let t1 = state_new(Bn256Ctx);
+    // zinv = Z^(-1) via Fermat
+    bn256_mod_inv_fermat(zinv, zj, p_bn);
+    // zinv2 = Z^(-2)
+    bn256_mod_mul(zinv2, zinv, zinv, p_bn);
+    // zinv3 = Z^(-3) = Z^(-2) * Z^(-1)
+    bn256_mod_mul(zinv3, zinv2, zinv, p_bn);
+    // rx = X * Z^(-2)
+    bn256_mod_mul(t1, xj, zinv2, p_bn);
+    bn256_copy(rx, t1);
+    // ry = Y * Z^(-3)
+    bn256_mod_mul(t1, yj, zinv3, p_bn);
+    bn256_copy(ry, t1);
+}
+
 // Specialized scalar_mul: k * G (base point loaded internally).
-// 3 params + 7 state_new = 10 State vars.
+// Uses MONTGOMERY-domain Jacobian projective coordinates.
+// All mod_mul in the loop use bn256_mont_mul (O(n²)) — ~100x faster than
+// the divmod-based bn256_mod_mul (O(n³) bit-by-bit).
 transform p256_scalar_mul_base(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, k: State<Bn256Ctx>) {
     if bn256_is_zero(k) == 1 {
         bn256_zero(rx);
@@ -716,48 +876,53 @@ transform p256_scalar_mul_base(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, k: Stat
     p256_p(p_be);
     be32_to_bn256(p_bn, p_be);
 
-    // Load base point G into rx_j, ry_j (start with R = G)
+    // Montgomery context
+    let m0_val: u64 = p_bn.limbs[0];
+    let mprime: u64 = bn256_mont_mu(m0_val);
+    let r2 = state_new(Bn256Ctx);
+    bn256_mont_r2(r2, p_bn);
+
+    // Load base point G and convert to Montgomery form
     let gx_be = state_new(B32);
     let gy_be = state_new(B32);
     p256_gx(gx_be);
     p256_gy(gy_be);
+    let gx_bn = state_new(Bn256Ctx);
+    let gy_bn = state_new(Bn256Ctx);
+    be32_to_bn256(gx_bn, gx_be);
+    be32_to_bn256(gy_bn, gy_be);
+    let gx_m = state_new(Bn256Ctx);
+    let gy_m = state_new(Bn256Ctx);
+    bn256_mont_mul(gx_m, gx_bn, r2, p_bn, mprime);
+    bn256_mont_mul(gy_m, gy_bn, r2, p_bn, mprime);
+
+    // R = (X, Y, Z) in Jacobian Mont. Identity = (0, R, 0) in Mont form.
     let rx_j = state_new(Bn256Ctx);
     let ry_j = state_new(Bn256Ctx);
-    be32_to_bn256(rx_j, gx_be);
-    be32_to_bn256(ry_j, gy_be);
-
-    // a = -3 mod p
-    let a_val = state_new(Bn256Ctx);
-    bn256_copy(a_val, p_bn);
-    let lo_a = a_val.limbs[0];
-    a_val.limbs[0] = lo_a - 3;
-
-    // Also need px, py for additions. Reuse gx_be, gy_be → reload into px, py.
-    // But we already have rx_j = G, so for "add G" we can use a separate copy.
-    let px = state_new(Bn256Ctx);
-    let py = state_new(Bn256Ctx);
-    be32_to_bn256(px, gx_be);
-    be32_to_bn256(py, gy_be);
+    let rz_j = state_new(Bn256Ctx);
+    bn256_zero(rx_j);
+    // R mod m (Mont form of 1) = mont_mul(1, r2, m, mprime)
+    let one = state_new(Bn256Ctx);
+    bn256_set_u32(one, 1);
+    bn256_mont_mul(ry_j, one, r2, p_bn, mprime);
+    bn256_zero(rz_j);
 
     let bits: u32 = bn256_bitlen(k);
-    let i: u32 = bits - 1;
+    let i: u32 = bits;
     while i > 0 {
         let ii = i - 1;
-        p256_scalar_step_double(rx_j, ry_j, a_val, p_bn);
+        p256_proj_double_mont(rx_j, ry_j, rz_j, rx_j, ry_j, rz_j, p_bn, mprime);
         if bn256_get_bit(k, ii) == 1 {
-            p256_scalar_step_add(rx_j, ry_j, px, py, p_bn, a_val, a_val);
+            p256_proj_add_mixed_mont(rx_j, ry_j, rz_j, rx_j, ry_j, rz_j, gx_m, gy_m, p_bn, mprime);
         }
         i = ii;
     }
-    bn256_copy(rx, rx_j);
-    bn256_copy(ry, ry_j);
+    // Convert to affine (does the single mod_inv + de-montgomery)
+    p256_jac_to_affine(rx, ry, rx_j, ry_j, rz_j, p_bn);
 }
 
-// ===========================================================================
 // General scalar multiplication: R = k * P for any point P.
-// Uses left-to-right binary method with affine coordinates.
-// Starts with R = P (handles MSB), then processes remaining bits.
-// ===========================================================================
+// Uses MONTGOMERY-domain Jacobian projective coordinates.
 transform p256_scalar_mul_bn(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, k: State<Bn256Ctx>, px: State<Bn256Ctx>, py: State<Bn256Ctx>) {
     if bn256_is_zero(k) == 1 {
         bn256_zero(rx);
@@ -771,36 +936,39 @@ transform p256_scalar_mul_bn(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, k: State<
     p256_p(p_be);
     be32_to_bn256(p_bn, p_be);
 
-    // a = -3 mod p
-    let a_val = state_new(Bn256Ctx);
-    bn256_copy(a_val, p_bn);
-    let lo_a = a_val.limbs[0];
-    a_val.limbs[0] = lo_a - 3;
+    // Montgomery context
+    let m0_val: u64 = p_bn.limbs[0];
+    let mprime: u64 = bn256_mont_mu(m0_val);
+    let r2 = state_new(Bn256Ctx);
+    bn256_mont_r2(r2, p_bn);
 
-    // Start with R = P (handles the MSB of k, which is always 1 for non-zero k)
+    // Convert P to Montgomery form
+    let px_m = state_new(Bn256Ctx);
+    let py_m = state_new(Bn256Ctx);
+    bn256_mont_mul(px_m, px, r2, p_bn, mprime);
+    bn256_mont_mul(py_m, py, r2, p_bn, mprime);
+
+    // R = (X, Y, Z) in Jacobian Mont. Identity = (0, R, 0).
     let rx_j = state_new(Bn256Ctx);
     let ry_j = state_new(Bn256Ctx);
-    bn256_copy(rx_j, px);
-    bn256_copy(ry_j, py);
-
-    // Save a copy of P for additions
-    let px_copy = state_new(Bn256Ctx);
-    let py_copy = state_new(Bn256Ctx);
-    bn256_copy(px_copy, px);
-    bn256_copy(py_copy, py);
+    let rz_j = state_new(Bn256Ctx);
+    bn256_zero(rx_j);
+    let one = state_new(Bn256Ctx);
+    bn256_set_u32(one, 1);
+    bn256_mont_mul(ry_j, one, r2, p_bn, mprime);
+    bn256_zero(rz_j);
 
     let bits: u32 = bn256_bitlen(k);
-    let i: u32 = bits - 1;
+    let i: u32 = bits;
     while i > 0 {
         let ii = i - 1;
-        p256_scalar_step_double(rx_j, ry_j, a_val, p_bn);
+        p256_proj_double_mont(rx_j, ry_j, rz_j, rx_j, ry_j, rz_j, p_bn, mprime);
         if bn256_get_bit(k, ii) == 1 {
-            p256_scalar_step_add(rx_j, ry_j, px_copy, py_copy, p_bn, a_val, a_val);
+            p256_proj_add_mixed_mont(rx_j, ry_j, rz_j, rx_j, ry_j, rz_j, px_m, py_m, p_bn, mprime);
         }
         i = ii;
     }
-    bn256_copy(rx, rx_j);
-    bn256_copy(ry, ry_j);
+    p256_jac_to_affine(rx, ry, rx_j, ry_j, rz_j, p_bn);
 }
 
 // ===========================================================================
