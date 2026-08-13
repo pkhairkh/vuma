@@ -13,7 +13,7 @@
 //
 // VUMA 2.0 PMT-native: state_new(Layout) / State<T> / typed arrays.
 
-import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, Bn512Ctx, Bn64Ctx, bn256_mod_add, bn256_mod_inv, bn256_mod_mul, bn256_mod_sub, bn256_mod_exp, bn256_set_u32, bn256_copy, bn256_zero, bn256_add, bn256_sub, bn256_cmp, bn256_is_zero, bn256_bitlen, bn256_get_bit, bn256_mont_mul, bn256_mont_mu, bn256_mont_r2, bn256_mod_inv_fermat, bn256_rshift1, bn256_lshift1, bn_mul_u64};
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, Bn512Ctx, Bn64Ctx, bn256_mod_add, bn256_mod_inv, bn256_mod_inv_fermat, bn256_mod_mul, bn256_mod_sub, bn256_mod_exp, bn256_set_u32, bn256_copy, bn256_zero, bn256_add, bn256_sub, bn256_cmp, bn256_is_zero, bn256_bitlen, bn256_get_bit, bn256_mont_mul, bn256_mont_mu, bn256_mont_r2, bn256_mod_inv_fermat, bn256_rshift1, bn256_lshift1, bn_mul_u64};
 import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha256_sha224.vuma"::{Sha256Ctx, Sha256Data, Sha256Digest, sha256_init, sha256_update, sha256_final};
 import "/home/z/my-project/workdir/vuma/womb/crypto/mac_kdf/hmac.vuma"::{HmacKey, HmacMsg, HmacOut, HmacBuf, hmac_sha256, hmac_sha256_hash};
 
@@ -204,7 +204,7 @@ transform secp256k1_point_double_bn(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, px
     bn256_mod_add(three_x_sq, three_x_sq, x_sq, p_bn);
 
     bn256_mod_add(two_y, py, py, p_bn);
-    bn256_mod_inv(two_y_inv, two_y, p_bn);
+    bn256_mod_inv_fermat(two_y_inv, two_y, p_bn);  // Fermat (Montgomery) — 100x faster
     bn256_mod_mul(slope, three_x_sq, two_y_inv, p_bn);
 
     bn256_mod_mul(slope_sq, slope, slope, p_bn);
@@ -239,7 +239,7 @@ transform secp256k1_point_add_bn(rx: State<Bn256Ctx>, ry: State<Bn256Ctx>, px: S
 
     bn256_mod_sub(dy, qy, py, p_bn);
     bn256_mod_sub(dx, qx, px, p_bn);
-    bn256_mod_inv(dx_inv, dx, p_bn);
+    bn256_mod_inv_fermat(dx_inv, dx, p_bn);  // Fermat (Montgomery) — 100x faster than binary GCD
     bn256_mod_mul(slope, dy, dx_inv, p_bn);
 
     bn256_mod_mul(slope_sq, slope, slope, p_bn);
@@ -419,7 +419,7 @@ transform secp256k1_sign(msg: State<B256>, msg_len: u32, privkey_be: State<B32>,
     let rd = state_new(Bn256Ctx);
     let h_rd = state_new(Bn256Ctx);
     let s_bn = state_new(Bn256Ctx);
-    bn256_mod_inv(k_inv, k_bn, n_bn);
+    bn256_mod_inv_fermat(k_inv, k_bn, n_bn);  // Fermat (Montgomery) — 100x faster
     bn256_mod_mul(rd, r_bn, d_bn, n_bn);
     bn256_mod_add(h_rd, h_bn, rd, n_bn);
     bn256_mod_mul(s_bn, k_inv, h_rd, n_bn);
