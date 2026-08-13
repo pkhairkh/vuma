@@ -1,5 +1,6 @@
 //! Standalone tool to compile a .vuma file and dump the resulting ELF bytes.
 use std::fs;
+use std::time::Instant;
 use std::path::Path;
 use std::process::Command;
 use vuma::pipeline::{
@@ -173,7 +174,9 @@ fn compile_for_backend_with_path(
         max_inline_size: 0,  // Wave 0B: disable SCG inlining to fix State<T> pass-by-ref bug
         ..Default::default()
     };
+    let t_scg_start = Instant::now();
     let _ = run_scg_transforms(&mut scg, &o3_config);
+    eprintln!("[TIMING] SCG transforms: {}ms", t_scg_start.elapsed().as_millis());
 
     // (VUMA 2.0) IVE PMT verification — MANDATORY and a HARD gate.
     // There is no `// ive_skip` source marker anymore and the `--verify`
@@ -277,6 +280,7 @@ fn compile_for_backend_with_path(
         }
     }
 
+    let t_bridge_start = Instant::now();
     // Use the unified direct AST→codegen bridge (same path as vuma build/emit/run).
     let mut codegen_scg = bridge_ast_to_codegen_scg(&ast);
 
@@ -332,8 +336,11 @@ fn compile_for_backend_with_path(
     // verifier can label `#[secret]`-annotated vregs `Secret` and flag
     // real `Secret → Public` flows.
     let secret_vars = collect_secret_vars(&ast);
+    eprintln!("[TIMING] Bridge+bounds+IR build: {}ms", t_bridge_start.elapsed().as_millis());
+    let t_irpipe_start = Instant::now();
     let ir_program = run_ir_pipeline(ir_program, &o3_config, kind, &secret_vars, &mut timings)
         .map_err(|e| format!("ir_pipeline: {:?}", e))?;
+    eprintln!("[TIMING] IR pipeline: {}ms", t_irpipe_start.elapsed().as_millis());
 
     let backend = create_backend(kind).map_err(|e| format!("backend: {}", e))?;
 
@@ -424,7 +431,10 @@ fn compile_for_backend_with_path(
 
     // Parallel per-function codegen using std::thread::scope.
     let allocated: Vec<_> = par_collect_result(&ir_program.functions, |func| {
-        backend.allocate_registers(func)
+        let t_alloc = Instant::now();
+        let result = backend.allocate_registers(func);
+        eprintln!("[TIMING] allocate_registers ({}): {}ms", func.name, t_alloc.elapsed().as_millis());
+        result
     })
     .map_err(|e| format!("regalloc: {}", e))?;
     let total_code: usize = allocated.iter().map(|f| f.code_size).sum();
@@ -456,9 +466,11 @@ fn compile_for_backend_with_path(
         rodata_data,
         function_names,
     };
+    let t_encode = Instant::now();
     let binary = backend
         .encode_program(&program)
         .map_err(|e| format!("encode: {}", e))?;
+    eprintln!("[TIMING] encode_program: {}ms", t_encode.elapsed().as_millis());
     Ok((binary, ive_status))
 }
 

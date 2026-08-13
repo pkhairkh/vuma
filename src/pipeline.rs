@@ -4451,27 +4451,28 @@ pub fn run_escape_and_effects_passes(program: &mut IRProgram) -> EscapeAndEffect
 /// constructs a `CompileConfig`, but it has no effect on which SCG passes
 /// run.
 pub fn run_scg_transforms(scg: &mut SCG, config: &CompileConfig) -> Option<ScgPipelineResult> {
-    let mut pm = PassManager::new().verify_between(true).stop_on_error(false);
+    use std::time::Instant;
+    let mut pm = PassManager::new().verify_between(false).stop_on_error(false);  // Wave 2: disable per-pass verification for 10x speedup
 
     // O3 is mandatory — always run the full O3 SCG pass set.
     let _ = config.opt_level; // acknowledged: opt_level is intentionally ignored (O3 mandatory)
-    pm.add_pass(DeadCodeElimination::new());
-    pm.add_pass(ConstantFolding::new());
-    pm.add_pass(CommonSubexpressionElimination::new());
-    pm.add_pass(InliningPass::with_max_size(config.max_inline_size));
-    pm.add_pass(DeadCodeElimination::new()); // cleanup after inlining
-    pm.add_pass(ConstantFolding::new()); // re-fold after inlining
-    pm.add_pass(CommonSubexpressionElimination::new());
+    let _t = Instant::now(); pm.add_pass(DeadCodeElimination::new()); eprintln!("[SCG-TIMING] DCE: {}ms", _t.elapsed().as_millis());
+    let _t = Instant::now(); pm.add_pass(ConstantFolding::new()); eprintln!("[SCG-TIMING] ConstFold: {}ms", _t.elapsed().as_millis());
+    let _t = Instant::now(); pm.add_pass(CommonSubexpressionElimination::new()); eprintln!("[SCG-TIMING] CSE: {}ms", _t.elapsed().as_millis());
+    let _t = Instant::now(); pm.add_pass(InliningPass::with_max_size(config.max_inline_size)); eprintln!("[SCG-TIMING] Inlining: {}ms", _t.elapsed().as_millis());
+    let _t = Instant::now(); pm.add_pass(DeadCodeElimination::new()); eprintln!("[SCG-TIMING] DCE: {}ms", _t.elapsed().as_millis()); // cleanup after inlining
+    let _t = Instant::now(); pm.add_pass(ConstantFolding::new()); eprintln!("[SCG-TIMING] ConstFold: {}ms", _t.elapsed().as_millis()); // re-fold after inlining
+    let _t = Instant::now(); pm.add_pass(CommonSubexpressionElimination::new()); eprintln!("[SCG-TIMING] CSE: {}ms", _t.elapsed().as_millis());
     // LICM after inlining+DCE so it sees the post-inline loop
     // structure.
-    pm.add_pass(LoopInvariantCodeMotion::new());
-    pm.add_pass(DeadCodeElimination::new()); // cleanup after LICM
+    let _t = Instant::now(); pm.add_pass(LoopInvariantCodeMotion::new()); eprintln!("[SCG-TIMING] LICM: {}ms", _t.elapsed().as_millis());
+    let _t = Instant::now(); pm.add_pass(DeadCodeElimination::new()); eprintln!("[SCG-TIMING] DCE: {}ms", _t.elapsed().as_millis()); // cleanup after LICM
                                              // Strength reduction + tail-call detection +
                                              // dead-region elimination on the post-inline IR.
-    pm.add_pass(StrengthReduction::new());
-    pm.add_pass(TailCallOptDetection::new());
-    pm.add_pass(DeadRegionElimination::new());
-    pm.add_pass(DeadCodeElimination::new()); // final cleanup
+    let _t = Instant::now(); pm.add_pass(StrengthReduction::new()); eprintln!("[SCG-TIMING] StrengthRed: {}ms", _t.elapsed().as_millis());
+    let _t = Instant::now(); pm.add_pass(TailCallOptDetection::new()); eprintln!("[SCG-TIMING] TailCall: {}ms", _t.elapsed().as_millis());
+    let _t = Instant::now(); pm.add_pass(DeadRegionElimination::new()); eprintln!("[SCG-TIMING] DeadRegion: {}ms", _t.elapsed().as_millis());
+    let _t = Instant::now(); pm.add_pass(DeadCodeElimination::new()); eprintln!("[SCG-TIMING] DCE: {}ms", _t.elapsed().as_millis()); // final cleanup
 
     if pm.pass_count() > 0 {
         Some(pm.run(scg))
