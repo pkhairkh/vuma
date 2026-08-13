@@ -46,8 +46,8 @@ transform secp256k1_n(out: State<B32>) {
     out.bytes[12] = 255; out.bytes[13] = 255; out.bytes[14] = 255; out.bytes[15] = 254;
     out.bytes[16] = 186; out.bytes[17] = 174; out.bytes[18] = 220; out.bytes[19] = 230;
     out.bytes[20] = 175; out.bytes[21] =  72; out.bytes[22] = 160; out.bytes[23] =  59;
-    out.bytes[24] = 191; out.bytes[25] =  37; out.bytes[26] = 232; out.bytes[27] = 205;
-    out.bytes[28] =   3; out.bytes[29] = 100; out.bytes[30] =  20; out.bytes[31] =  65;
+    out.bytes[24] = 191; out.bytes[25] = 210; out.bytes[26] =  94; out.bytes[27] = 140;
+    out.bytes[28] = 208; out.bytes[29] =  54; out.bytes[30] =  65; out.bytes[31] =  65;
 }
 
 transform secp256k1_b(out: State<B32>) {
