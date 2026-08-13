@@ -654,17 +654,80 @@ transform hqc_decaps(sk: State<HqcBuf>, pk: State<HqcBuf>,
 
     // Sample r, e into the b4 slab. sample_seed (b1) is still needed for
     // the second call, then b1 becomes free for Phase 4.
-    hqc_sample_sparse_at(b1, 0, 32, 10, b4, r_vec_off,
-                          b4, r_idx_off, HQC_WR, HQC_N);
-    hqc_sample_sparse_at(b1, 0, 32, 20, b4, e_vec_off,
-                          b4, e_idx_off, HQC_WE, HQC_N);
+    // Inline hqc_sample_sparse_at(b1, 0, 32, 10, b4, r_vec_off, b4, r_idx_off, HQC_WR, HQC_N) — 10 params
+    let ss_z1: u32 = 0;
+    while ss_z1 < HQC_N { b4.bytes[r_vec_off + ss_z1] = 0; ss_z1 = ss_z1 + 1; }
+    let ss_prng_len1: u32 = HQC_WR * 4 * 4;
+    let ss_buf1 = state_new(HqcBuf);
+    hqc_prg_at(b1, 0, 32, 10, ss_buf1, 0, ss_prng_len1);
+    let ss_placed1: u32 = 0;
+    let ss_pos1: u32 = 0;
+    while ss_placed1 < HQC_WR {
+        if ss_pos1 + 4 > ss_prng_len1 {
+            hqc_prg_at(b1, 0, 32, 10 + 1 + ss_placed1, ss_buf1, 0, ss_prng_len1);
+            ss_pos1 = 0;
+        }
+        let ss_idx1: u32 = load_u32_le_at(ss_buf1, ss_pos1) % HQC_N;
+        ss_pos1 = ss_pos1 + 4;
+        if b4.bytes[r_vec_off + ss_idx1] == 0 {
+            b4.bytes[r_vec_off + ss_idx1] = 1;
+            store_u32_le_at(b4, r_idx_off + ss_placed1 * 4, ss_idx1);
+            ss_placed1 = ss_placed1 + 1;
+        }
+    }
+    // Inline hqc_sample_sparse_at(b1, 0, 32, 20, b4, e_vec_off, b4, e_idx_off, HQC_WE, HQC_N) — 10 params
+    let ss_z2: u32 = 0;
+    while ss_z2 < HQC_N { b4.bytes[e_vec_off + ss_z2] = 0; ss_z2 = ss_z2 + 1; }
+    let ss_prng_len2: u32 = HQC_WE * 4 * 4;
+    let ss_buf2 = state_new(HqcBuf);
+    hqc_prg_at(b1, 0, 32, 20, ss_buf2, 0, ss_prng_len2);
+    let ss_placed2: u32 = 0;
+    let ss_pos2: u32 = 0;
+    while ss_placed2 < HQC_WE {
+        if ss_pos2 + 4 > ss_prng_len2 {
+            hqc_prg_at(b1, 0, 32, 20 + 1 + ss_placed2, ss_buf2, 0, ss_prng_len2);
+            ss_pos2 = 0;
+        }
+        let ss_idx2: u32 = load_u32_le_at(ss_buf2, ss_pos2) % HQC_N;
+        ss_pos2 = ss_pos2 + 4;
+        if b4.bytes[e_vec_off + ss_idx2] == 0 {
+            b4.bytes[e_vec_off + ss_idx2] = 1;
+            store_u32_le_at(b4, e_idx_off + ss_placed2 * 4, ss_idx2);
+            ss_placed2 = ss_placed2 + 1;
+        }
+    }
 
     // ── Phase 4: hr = h · r  (negacyclic sparse product) ────────────────
     //   b1 ← hr = sparse_vec_mul(r_idx, ones_wr, h_sk)
     //   (No conflict: b1 is now free, hr lives in a different buffer than
     //    the r_idx/ones_wr inputs that live inside the b4 slab.)
-    sparse_vec_mul_at(b1, 0, b4, r_idx_off, b4, ones_wr_off,
-                       HQC_WR, sk, h_sk_base, HQC_N);
+    // Inline sparse_vec_mul_at(b1, 0, b4, r_idx_off, b4, ones_wr_off, HQC_WR, sk, h_sk_base, HQC_N) — 10 params
+    let svm_z: u32 = 0;
+    while svm_z < HQC_N { b1.bytes[svm_z] = 0; svm_z = svm_z + 1; }
+    let svm_k: u32 = 0;
+    while svm_k < HQC_WR {
+        let svm_idx: u32 = load_u32_le_at(b4, r_idx_off + svm_k * 4);
+        let svm_val: u32 = b4.bytes[ones_wr_off + svm_k] as u32;
+        if svm_val == 1 {
+            let svm_j: u32 = 0;
+            while svm_j < HQC_N {
+                let svm_dv: u32 = sk.bytes[h_sk_base + svm_j] as u32;
+                if svm_dv == 1 {
+                    let svm_pos: u32 = svm_idx + svm_j;
+                    if svm_pos < HQC_N {
+                        let svm_cur: u32 = b1.bytes[svm_pos] as u32;
+                        b1.bytes[svm_pos] = ((svm_cur ^ 1) & 1) as u8;
+                    } else {
+                        let svm_npos: u32 = svm_pos - HQC_N;
+                        let svm_cur: u32 = b1.bytes[svm_npos] as u32;
+                        b1.bytes[svm_npos] = ((svm_cur ^ 1) & 1) as u8;
+                    }
+                }
+                svm_j = svm_j + 1;
+            }
+        }
+        svm_k = svm_k + 1;
+    }
 
     // ── Phase 5: compare (u, v) with (r+e, m_enc+hr+e) INLINE ────────────
     //   u' = r XOR e  (computed element-wise from r_vec, e_vec)
