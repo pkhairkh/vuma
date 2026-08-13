@@ -369,9 +369,16 @@ transform hqc_prg_at_32(seed: State<HqcBuf>, counter: u32,
     kin.data[2] = ((counter >> 16) & 255) as u8;
     kin.data[3] = ((counter >> 24) & 255) as u8;
     shake256_update(ctx, kin, 4);
-    shake256_squeeze(ctx, kout, out_len);
-    let i: u32 = 0;
-    while i < out_len { out.bytes[i] = kout.data[i]; i = i + 1; }
+    let squeezed: u32 = 0;
+    while squeezed < out_len {
+        let chunk: u32 = 200;
+        let remaining: u32 = out_len - squeezed;
+        if remaining < 200 { chunk = remaining; }
+        shake256_squeeze(ctx, kout, chunk);
+        let ci: u32 = 0;
+        while ci < chunk { out.bytes[squeezed + ci] = kout.data[ci]; ci = ci + 1; }
+        squeezed = squeezed + chunk;
+    }
 }
 
 transform hqc_prg_at(seed: State<HqcBuf>, seed_base: u32, seed_len: u32,
