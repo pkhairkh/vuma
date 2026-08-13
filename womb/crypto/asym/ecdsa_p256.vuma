@@ -288,6 +288,10 @@ transform p256_proj_add_mixed(x3: State<Bn256Ctx>, y3: State<Bn256Ctx>, z3: Stat
     let hhh  = state_new(Bn256Ctx);  // H^3
     let t1   = state_new(Bn256Ctx);
     let t2   = state_new(Bn256Ctx);
+    // Local temporaries for output — avoids aliasing bug when x3==x1 etc.
+    let tx   = state_new(Bn256Ctx);
+    let ty   = state_new(Bn256Ctx);
+    let tz   = state_new(Bn256Ctx);
 
     // z1sq = Z1^2
     bn256_mod_mul(z1sq, z1, z1, p_bn);
@@ -325,15 +329,20 @@ transform p256_proj_add_mixed(x3: State<Bn256Ctx>, y3: State<Bn256Ctx>, z3: Stat
     bn256_mod_sub(t1, t1, hhh, p_bn);       // r^2 - H^3
     bn256_mod_mul(t2, x1, hh, p_bn);        // X1*HH
     bn256_mod_add(t2, t2, t2, p_bn);        // 2*X1*HH
-    bn256_mod_sub(x3, t1, t2, p_bn);        // X3 = r^2 - H^3 - 2*X1*HH
+    bn256_mod_sub(tx, t1, t2, p_bn);        // tx = r^2 - H^3 - 2*X1*HH
     // Y3 = r*(X1*HH - X3) - Y1*HHH
-    bn256_mod_mul(t1, x1, hh, p_bn);        // X1*HH
-    bn256_mod_sub(t1, t1, x3, p_bn);        // X1*HH - X3
+    // Use tx (not x3) — x3 may alias x1, and tx holds the new X3.
+    bn256_mod_mul(t1, x1, hh, p_bn);        // X1*HH (x1 still valid)
+    bn256_mod_sub(t1, t1, tx, p_bn);        // X1*HH - X3
     bn256_mod_mul(t2, r, t1, p_bn);         // r*(X1*HH - X3)
     bn256_mod_mul(t1, y1, hhh, p_bn);       // Y1*HHH
-    bn256_mod_sub(y3, t2, t1, p_bn);        // Y3
+    bn256_mod_sub(ty, t2, t1, p_bn);        // ty = Y3
     // Z3 = Z1 * H
-    bn256_mod_mul(z3, z1, h, p_bn);
+    bn256_mod_mul(tz, z1, h, p_bn);         // tz = Z3
+    // Copy temporaries to output
+    bn256_copy(x3, tx);
+    bn256_copy(y3, ty);
+    bn256_copy(z3, tz);
 }
 
 // ===========================================================================
