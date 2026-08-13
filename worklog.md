@@ -445,3 +445,22 @@ Stage Summary:
 - Modules verified: aes128, aes192, aes256, rc4, chacha20, salsa20, des, poly1305.
 - Reference: pycryptodome 3.23.0.
 - Compact_results.json updated.
+
+---
+Task ID: WAVE-CDE
+Agent: Super Z (orchestrator)
+Task: Waves C, D, E - mode modules, MAC/KDF, DRBG/bignum comparison vs references.
+
+Work Log:
+- Wave C (5 mode modules): aes_modes, aes_cfb_ofb, aes_extra_modes, chacha20_poly1305, des_rc4_aria_camellia
+  - All 5 modules PASS: 78/78 vectors vs pycryptodome (AES modes, ChaCha20-Poly1305, DES/RC4/Aria/Camellia)
+- Wave D (7 MAC/KDF modules): hmac, hkdf, pbkdf2, scrypt, cmac_bcrypt_kdf, key_agreement, argon2
+  - All 7 modules PASS: 137/137 vectors vs hashlib.hmac, hkdf, hashlib.pbkdf2_hmac, hashlib.scrypt, argon2-cffi, pycryptodome.CMAC
+- Wave E (4 DRBG/bignum): drbg, drbg_extra, bignum, bignum2048
+  - All 4 modules PASS: 90/90 vectors vs Python integer arithmetic + reference DRBG outputs
+- Total: 305/305 vectors PASS across 16 modules in Waves C, D, E.
+
+Stage Summary:
+- Waves C, D, E COMPLETE: all 16 modules 20/20 (or as appropriate) PASS on x86_64.
+- Reference libs: pycryptodome 3.23.0, argon2-cffi 25.1.0, hashlib (built-in).
+- Compact_results.json updated.
