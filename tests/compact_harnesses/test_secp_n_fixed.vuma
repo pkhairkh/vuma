@@ -1,0 +1,89 @@
+// test_secp_n_fixed.vuma — Verify that with CORRECT secp256k1 n bytes,
+// mu, r2, and inv ALL become correct. This proves the bug is in secp256k1_n().
+// (We do NOT modify secp256k1.vuma — that's Task 1.2. We just set the bytes inline.)
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{
+    Bn256Ctx, bn256_set_u32, bn256_zero, bn256_copy,
+    bn256_sub, bn256_cmp, bn256_mod_inv_fermat,
+    bn256_mont_mu, bn256_mont_r2, bn256_mont_mul, bn256_lshift1};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/secp256k1.vuma"::{
+    B32, secp256k1_p, secp256k1_n, be32_to_bn256, bn256_to_be32};
+
+transform print_bn256_be(a: State<Bn256Ctx>) {
+    let be = state_new(B32);
+    bn256_to_be32(be, a);
+    let i: u32 = 0;
+    while i < 32 { print_int(1000 + (be.bytes[i] as u32)); i = i + 1; }
+    print_int(999);
+}
+
+transform print_u64_be(v: u64) {
+    print_int(1000 + (((v >> 56) & 255) as u32));
+    print_int(1000 + (((v >> 48) & 255) as u32));
+    print_int(1000 + (((v >> 40) & 255) as u32));
+    print_int(1000 + (((v >> 32) & 255) as u32));
+    print_int(1000 + (((v >> 24) & 255) as u32));
+    print_int(1000 + (((v >> 16) & 255) as u32));
+    print_int(1000 + (((v >> 8) & 255) as u32));
+    print_int(1000 + ((v & 255) as u32));
+    print_int(999);
+}
+
+// Set m_be to CORRECT secp256k1 n bytes (inline, bypassing the buggy secp256k1_n()).
+transform set_secp_n_correct(out: State<B32>) {
+    out.bytes[ 0] = 255; out.bytes[ 1] = 255; out.bytes[ 2] = 255; out.bytes[ 3] = 255;
+    out.bytes[ 4] = 255; out.bytes[ 5] = 255; out.bytes[ 6] = 255; out.bytes[ 7] = 255;
+    out.bytes[ 8] = 255; out.bytes[ 9] = 255; out.bytes[10] = 255; out.bytes[11] = 255;
+    out.bytes[12] = 255; out.bytes[13] = 255; out.bytes[14] = 255; out.bytes[15] = 254;
+    out.bytes[16] = 186; out.bytes[17] = 174; out.bytes[18] = 220; out.bytes[19] = 230;
+    out.bytes[20] = 175; out.bytes[21] =  72; out.bytes[22] = 160; out.bytes[23] =  59;
+    out.bytes[24] = 191; out.bytes[25] = 210; out.bytes[26] =  94; out.bytes[27] = 140;
+    out.bytes[28] = 208; out.bytes[29] =  54; out.bytes[30] =  65; out.bytes[31] =  65;
+}
+
+transform main() -> i32 {
+    print_int(5000);
+    print_int(999);
+
+    let m_be = state_new(B32);
+    let m = state_new(Bn256Ctx);
+    let a = state_new(Bn256Ctx);
+    let r = state_new(Bn256Ctx);
+    let r2 = state_new(Bn256Ctx);
+    let base_m = state_new(Bn256Ctx);
+    let one = state_new(Bn256Ctx);
+    let rt = state_new(Bn256Ctx);
+
+    bn256_set_u32(a, 12345);
+    bn256_set_u32(one, 1);
+
+    // ===== secp256k1 n with CORRECT bytes (inline) =====
+    set_secp_n_correct(m_be);
+    be32_to_bn256(m, m_be);
+    let mu: u64 = bn256_mont_mu(m.limbs[0]);
+    print_u64_be(mu);
+    bn256_mont_r2(r2, m);
+    print_bn256_be(r2);
+    bn256_mod_inv_fermat(r, a, m);
+    print_bn256_be(r);
+    bn256_mont_mul(base_m, a, r2, m, mu);
+    bn256_mont_mul(rt, base_m, one, m, mu);
+    print_bn256_be(rt);
+
+    // ===== secp256k1 n via the BUGGY secp256k1_n() function (for comparison) =====
+    secp256k1_n(m_be);
+    be32_to_bn256(m, m_be);
+    let mu2: u64 = bn256_mont_mu(m.limbs[0]);
+    print_u64_be(mu2);
+    bn256_mont_r2(r2, m);
+    print_bn256_be(r2);
+    bn256_mod_inv_fermat(r, a, m);
+    print_bn256_be(r);
+    bn256_mont_mul(base_m, a, r2, m, mu2);
+    bn256_mont_mul(rt, base_m, one, m, mu2);
+    print_bn256_be(rt);
+
+    print_int(5001);
+    print_int(999);
+    return 0;
+}

@@ -1,0 +1,70 @@
+// test_bn_mont_mu_trace.vuma — Trace bn256_mont_mu Newton iteration
+// for secp256k1 n's m0 = 0xbfd25e8cd0364141 to find where VUMA diverges
+// from the correct math.
+//
+// Encoding: byte v -> 1000+v (1000..1255); SEP=999; START=5000; END=5001.
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{
+    Bn256Ctx, bn256_set_u32, bn256_zero, bn256_mont_mu};
+
+transform print_u64_be(v: u64) {
+    print_int(1000 + (((v >> 56) & 255) as u32));
+    print_int(1000 + (((v >> 48) & 255) as u32));
+    print_int(1000 + (((v >> 40) & 255) as u32));
+    print_int(1000 + (((v >> 32) & 255) as u32));
+    print_int(1000 + (((v >> 24) & 255) as u32));
+    print_int(1000 + (((v >> 16) & 255) as u32));
+    print_int(1000 + (((v >> 8) & 255) as u32));
+    print_int(1000 + ((v & 255) as u32));
+    print_int(999);
+}
+
+transform main() -> i32 {
+    print_int(5000);
+    print_int(999);
+
+    // m0 for secp256k1 n = 0xbfd25e8cd0364141.
+    // Build it byte-by-byte (high byte first) to avoid VUMA literal truncation.
+    let m0: u64 = 0;
+    m0 = m0 | (191 << 56);   // 0xbf
+    m0 = m0 | (210 << 48);   // 0xd2
+    m0 = m0 | (94  << 40);   // 0x5e
+    m0 = m0 | (140 << 32);   // 0x8c
+    m0 = m0 | (208 << 24);   // 0xd0
+    m0 = m0 | (54  << 16);   // 0x36
+    m0 = m0 | (65  << 8);    // 0x41
+    m0 = m0 | 65;            // 0x41
+
+    // Sanity: print m0
+    print_u64_be(m0);
+
+    // Run bn256_mont_mu and print result
+    let mu: u64 = bn256_mont_mu(m0);
+    print_u64_be(mu);
+
+    // Now manually replicate the Newton iteration, printing y, my, t each step
+    let zero_u64: u64 = 0;
+    let two_u64: u64 = 2;
+    let y: u64 = 1;
+    let i = 0;
+    while i < 6 {
+        let my: u64 = m0 * y;
+        let neg_my: u64 = zero_u64 - my;
+        let t: u64 = neg_my + two_u64;
+        // Print y, my, neg_my, t (each 8 bytes BE + SEP)
+        print_u64_be(y);
+        print_u64_be(my);
+        print_u64_be(neg_my);
+        print_u64_be(t);
+        y = y * t;
+        i = i + 1;
+    }
+    // Final y and mu = -y
+    print_u64_be(y);
+    let final_mu: u64 = zero_u64 - y;
+    print_u64_be(final_mu);
+
+    print_int(5001);
+    print_int(999);
+    return 0;
+}

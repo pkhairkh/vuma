@@ -1,0 +1,132 @@
+// test_mu_minimal.vuma — Find exactly when bn256_mont_mu goes wrong for secp256k1 n.
+// We test multiple paths to m0 = 0xbfd25e8cd0364141 and check mu each time:
+//   A. Build m0 directly with shifts (no modulus setup, no prior Montgomery work)
+//   B. Set m via secp256k1_n + be32_to_bn256, read m.limbs[0], compute mu
+//   C. Do P-256 p Montgomery work first, THEN compute mu for secp256k1 n
+//   D. Do P-256 p AND secp256k1 p Montgomery work first, THEN compute mu for secp256k1 n
+//   E. Full sequence like the original harness (all 3 prior moduli), then secp256k1 n
+//
+// For each path, print m0 (8 BE bytes) and mu (8 BE bytes), separated by 999.
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{
+    Bn256Ctx, bn256_set_u32, bn256_zero, bn256_copy,
+    bn256_sub, bn256_cmp, bn256_mod_inv_fermat,
+    bn256_mont_mu, bn256_mont_r2, bn256_mont_mul, bn256_lshift1};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/secp256k1.vuma"::{
+    B32, secp256k1_p, secp256k1_n, be32_to_bn256, bn256_to_be32};
+
+transform set_p256_p_be(out: State<B32>) {
+    out.bytes[ 0] = 255; out.bytes[ 1] = 255; out.bytes[ 2] = 255; out.bytes[ 3] = 255;
+    out.bytes[ 4] =   0; out.bytes[ 5] =   0; out.bytes[ 6] =   0; out.bytes[ 7] =   1;
+    out.bytes[ 8] =   0; out.bytes[ 9] =   0; out.bytes[10] =   0; out.bytes[11] =   0;
+    out.bytes[12] =   0; out.bytes[13] =   0; out.bytes[14] =   0; out.bytes[15] =   0;
+    out.bytes[16] =   0; out.bytes[17] =   0; out.bytes[18] =   0; out.bytes[19] =   0;
+    out.bytes[20] = 255; out.bytes[21] = 255; out.bytes[22] = 255; out.bytes[23] = 255;
+    out.bytes[24] = 255; out.bytes[25] = 255; out.bytes[26] = 255; out.bytes[27] = 255;
+    out.bytes[28] = 255; out.bytes[29] = 255; out.bytes[30] = 255; out.bytes[31] = 255;
+}
+
+transform print_u64_be(v: u64) {
+    print_int(1000 + (((v >> 56) & 255) as u32));
+    print_int(1000 + (((v >> 48) & 255) as u32));
+    print_int(1000 + (((v >> 40) & 255) as u32));
+    print_int(1000 + (((v >> 32) & 255) as u32));
+    print_int(1000 + (((v >> 24) & 255) as u32));
+    print_int(1000 + (((v >> 16) & 255) as u32));
+    print_int(1000 + (((v >> 8) & 255) as u32));
+    print_int(1000 + ((v & 255) as u32));
+    print_int(999);
+}
+
+transform main() -> i32 {
+    print_int(5000);
+    print_int(999);
+
+    let m_be = state_new(B32);
+    let m = state_new(Bn256Ctx);
+    let a = state_new(Bn256Ctx);
+    let r = state_new(Bn256Ctx);
+    let r2 = state_new(Bn256Ctx);
+    let base_m = state_new(Bn256Ctx);
+    let one = state_new(Bn256Ctx);
+    let rt = state_new(Bn256Ctx);
+
+    bn256_set_u32(a, 12345);
+    bn256_set_u32(one, 1);
+
+    // ===== Path A: Build m0 directly with shifts =====
+    let m0_a: u64 = 0;
+    m0_a = m0_a | (191 << 56);
+    m0_a = m0_a | (210 << 48);
+    m0_a = m0_a | (94  << 40);
+    m0_a = m0_a | (140 << 32);
+    m0_a = m0_a | (208 << 24);
+    m0_a = m0_a | (54  << 16);
+    m0_a = m0_a | (65  << 8);
+    m0_a = m0_a | 65;
+    print_u64_be(m0_a);
+    let mu_a: u64 = bn256_mont_mu(m0_a);
+    print_u64_be(mu_a);
+
+    // ===== Path B: Set m via secp256k1_n + be32_to_bn256, read m.limbs[0] =====
+    secp256k1_n(m_be);
+    be32_to_bn256(m, m_be);
+    let m0_b: u64 = m.limbs[0];
+    print_u64_be(m0_b);
+    let mu_b: u64 = bn256_mont_mu(m0_b);
+    print_u64_be(mu_b);
+
+    // ===== Path C: Do P-256 p Montgomery work first, THEN secp256k1 n =====
+    set_p256_p_be(m_be);
+    be32_to_bn256(m, m_be);
+    let mu_p256p: u64 = bn256_mont_mu(m.limbs[0]);
+    bn256_mont_r2(r2, m);
+    bn256_mod_inv_fermat(r, a, m);
+    bn256_mont_mul(base_m, a, r2, m, mu_p256p);
+    bn256_mont_mul(rt, base_m, one, m, mu_p256p);
+    // Now set up secp256k1 n
+    secp256k1_n(m_be);
+    be32_to_bn256(m, m_be);
+    let m0_c: u64 = m.limbs[0];
+    print_u64_be(m0_c);
+    let mu_c: u64 = bn256_mont_mu(m0_c);
+    print_u64_be(mu_c);
+
+    // ===== Path D: Do P-256 p AND secp256k1 p work first, THEN secp256k1 n =====
+    // Reset and do P-256 p
+    set_p256_p_be(m_be);
+    be32_to_bn256(m, m_be);
+    let mu_p256p_2: u64 = bn256_mont_mu(m.limbs[0]);
+    bn256_mont_r2(r2, m);
+    bn256_mod_inv_fermat(r, a, m);
+    bn256_mont_mul(base_m, a, r2, m, mu_p256p_2);
+    bn256_mont_mul(rt, base_m, one, m, mu_p256p_2);
+    // secp256k1 p
+    secp256k1_p(m_be);
+    be32_to_bn256(m, m_be);
+    let mu_secpp: u64 = bn256_mont_mu(m.limbs[0]);
+    bn256_mont_r2(r2, m);
+    bn256_mod_inv_fermat(r, a, m);
+    bn256_mont_mul(base_m, a, r2, m, mu_secpp);
+    bn256_mont_mul(rt, base_m, one, m, mu_secpp);
+    // Now secp256k1 n
+    secp256k1_n(m_be);
+    be32_to_bn256(m, m_be);
+    let m0_d: u64 = m.limbs[0];
+    print_u64_be(m0_d);
+    let mu_d: u64 = bn256_mont_mu(m0_d);
+    print_u64_be(mu_d);
+
+    // ===== Path E: Re-set secp256k1 n WITHOUT any prior work (sanity) =====
+    // (Just to verify the value is correct in isolation again)
+    secp256k1_n(m_be);
+    be32_to_bn256(m, m_be);
+    let m0_e: u64 = m.limbs[0];
+    print_u64_be(m0_e);
+    let mu_e: u64 = bn256_mont_mu(m0_e);
+    print_u64_be(mu_e);
+
+    print_int(5001);
+    print_int(999);
+    return 0;
+}

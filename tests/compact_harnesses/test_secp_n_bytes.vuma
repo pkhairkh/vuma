@@ -1,0 +1,55 @@
+// test_secp_n_bytes.vuma — Verify whether secp256k1_n() source bytes are correct.
+// Print all 32 bytes of m_be after:
+//   A. secp256k1_n(m_be)             — what the function produces
+//   B. Inline assignment of CORRECT secp256k1 n bytes (191, 210, 94, 140, ...)
+//   C. Inline assignment of the SAME bytes as secp256k1_n source (191, 37, 232, ...)
+// This isolates whether the bug is in source values vs VUMA codegen.
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{
+    Bn256Ctx, bn256_set_u32, bn256_zero};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/secp256k1.vuma"::{
+    B32, secp256k1_n, be32_to_bn256};
+
+transform print_b32(b: State<B32>) {
+    let i: u32 = 0;
+    while i < 32 { print_int(1000 + (b.bytes[i] as u32)); i = i + 1; }
+    print_int(999);
+}
+
+transform main() -> i32 {
+    print_int(5000);
+    print_int(999);
+
+    let m_be = state_new(B32);
+
+    // ===== A. secp256k1_n(m_be) — what the function actually produces =====
+    secp256k1_n(m_be);
+    print_b32(m_be);
+
+    // ===== B. Inline assignment with CORRECT secp256k1 n bytes =====
+    // n = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141
+    m_be.bytes[ 0] = 255; m_be.bytes[ 1] = 255; m_be.bytes[ 2] = 255; m_be.bytes[ 3] = 255;
+    m_be.bytes[ 4] = 255; m_be.bytes[ 5] = 255; m_be.bytes[ 6] = 255; m_be.bytes[ 7] = 255;
+    m_be.bytes[ 8] = 255; m_be.bytes[ 9] = 255; m_be.bytes[10] = 255; m_be.bytes[11] = 255;
+    m_be.bytes[12] = 255; m_be.bytes[13] = 255; m_be.bytes[14] = 255; m_be.bytes[15] = 254;
+    m_be.bytes[16] = 186; m_be.bytes[17] = 174; m_be.bytes[18] = 220; m_be.bytes[19] = 230;
+    m_be.bytes[20] = 175; m_be.bytes[21] =  72; m_be.bytes[22] = 160; m_be.bytes[23] =  59;
+    m_be.bytes[24] = 191; m_be.bytes[25] = 210; m_be.bytes[26] =  94; m_be.bytes[27] = 140;
+    m_be.bytes[28] = 208; m_be.bytes[29] =  54; m_be.bytes[30] =  65; m_be.bytes[31] =  65;
+    print_b32(m_be);
+
+    // ===== C. Inline assignment with the SAME bytes as secp256k1_n source (the WRONG values) =====
+    m_be.bytes[ 0] = 255; m_be.bytes[ 1] = 255; m_be.bytes[ 2] = 255; m_be.bytes[ 3] = 255;
+    m_be.bytes[ 4] = 255; m_be.bytes[ 5] = 255; m_be.bytes[ 6] = 255; m_be.bytes[ 7] = 255;
+    m_be.bytes[ 8] = 255; m_be.bytes[ 9] = 255; m_be.bytes[10] = 255; m_be.bytes[11] = 255;
+    m_be.bytes[12] = 255; m_be.bytes[13] = 255; m_be.bytes[14] = 255; m_be.bytes[15] = 254;
+    m_be.bytes[16] = 186; m_be.bytes[17] = 174; m_be.bytes[18] = 220; m_be.bytes[19] = 230;
+    m_be.bytes[20] = 175; m_be.bytes[21] =  72; m_be.bytes[22] = 160; m_be.bytes[23] =  59;
+    m_be.bytes[24] = 191; m_be.bytes[25] =  37; m_be.bytes[26] = 232; m_be.bytes[27] = 205;
+    m_be.bytes[28] =   3; m_be.bytes[29] = 100; m_be.bytes[30] =  20; m_be.bytes[31] =  65;
+    print_b32(m_be);
+
+    print_int(5001);
+    print_int(999);
+    return 0;
+}

@@ -1,0 +1,133 @@
+// test_bn_mod_exp_debug.vuma — Task 1.1 isolation harness.
+// For each of 4 moduli (P-256 p, P-256 n, secp256k1 p, secp256k1 n), emit:
+//   * mu  = bn256_mont_mu(m.limbs[0])          [8 bytes BE]  expected: -m^(-1) mod 2^64
+//   * r2  = bn256_mont_r2(m)                   [32 bytes BE] expected: 2^512 mod m
+//   * inv = 12345^(m-2) mod m                  [32 bytes BE] expected: pow(12345, m-2, m)
+//   * rt  = mont_reduce(mont_mul(12345, r2))   [32 bytes BE] expected: 12345
+// All sections separated by 999 markers; main starts with 1111 and ends with 2222.
+
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{
+    Bn256Ctx, bn256_set_u32, bn256_zero, bn256_copy,
+    bn256_sub, bn256_cmp, bn256_mod_inv_fermat,
+    bn256_mont_mu, bn256_mont_r2, bn256_mont_mul, bn256_lshift1};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/secp256k1.vuma"::{
+    B32, secp256k1_p, secp256k1_n, be32_to_bn256, bn256_to_be32};
+
+// ---- P-256 p (BE) ----
+transform set_p256_p_be(out: State<B32>) {
+    out.bytes[ 0] = 255; out.bytes[ 1] = 255; out.bytes[ 2] = 255; out.bytes[ 3] = 255;
+    out.bytes[ 4] =   0; out.bytes[ 5] =   0; out.bytes[ 6] =   0; out.bytes[ 7] =   1;
+    out.bytes[ 8] =   0; out.bytes[ 9] =   0; out.bytes[10] =   0; out.bytes[11] =   0;
+    out.bytes[12] =   0; out.bytes[13] =   0; out.bytes[14] =   0; out.bytes[15] =   0;
+    out.bytes[16] =   0; out.bytes[17] =   0; out.bytes[18] =   0; out.bytes[19] =   0;
+    out.bytes[20] = 255; out.bytes[21] = 255; out.bytes[22] = 255; out.bytes[23] = 255;
+    out.bytes[24] = 255; out.bytes[25] = 255; out.bytes[26] = 255; out.bytes[27] = 255;
+    out.bytes[28] = 255; out.bytes[29] = 255; out.bytes[30] = 255; out.bytes[31] = 255;
+}
+
+// ---- P-256 n (BE) ----
+transform set_p256_n_be(out: State<B32>) {
+    out.bytes[ 0] = 255; out.bytes[ 1] = 255; out.bytes[ 2] = 255; out.bytes[ 3] = 255;
+    out.bytes[ 4] =   0; out.bytes[ 5] =   0; out.bytes[ 6] =   0; out.bytes[ 7] =   0;
+    out.bytes[ 8] = 255; out.bytes[ 9] = 255; out.bytes[10] = 255; out.bytes[11] = 255;
+    out.bytes[12] = 255; out.bytes[13] = 255; out.bytes[14] = 255; out.bytes[15] = 255;
+    out.bytes[16] = 188; out.bytes[17] = 230; out.bytes[18] = 250; out.bytes[19] = 173;
+    out.bytes[20] = 167; out.bytes[21] =  23; out.bytes[22] = 158; out.bytes[23] = 132;
+    out.bytes[24] = 243; out.bytes[25] = 185; out.bytes[26] = 202; out.bytes[27] = 194;
+    out.bytes[28] = 252; out.bytes[29] =  99; out.bytes[30] =  37; out.bytes[31] =  81;
+}
+
+// Encoding: byte value v -> print_int(1000 + v)  (range 1000..1255)
+// Separator = 999, Start = 5000, End = 5001 (outside byte range, no collisions)
+transform print_bn256_be(a: State<Bn256Ctx>) {
+    let be = state_new(B32);
+    bn256_to_be32(be, a);
+    let i: u32 = 0;
+    while i < 32 { print_int(1000 + (be.bytes[i] as u32)); i = i + 1; }
+    print_int(999);
+}
+
+transform print_u64_be(v: u64) {
+    print_int(1000 + (((v >> 56) & 255) as u32));
+    print_int(1000 + (((v >> 48) & 255) as u32));
+    print_int(1000 + (((v >> 40) & 255) as u32));
+    print_int(1000 + (((v >> 32) & 255) as u32));
+    print_int(1000 + (((v >> 24) & 255) as u32));
+    print_int(1000 + (((v >> 16) & 255) as u32));
+    print_int(1000 + (((v >> 8) & 255) as u32));
+    print_int(1000 + ((v & 255) as u32));
+    print_int(999);
+}
+
+transform main() -> i32 {
+    print_int(5000);
+    print_int(999);
+
+    let m_be = state_new(B32);
+    let m = state_new(Bn256Ctx);
+    let a = state_new(Bn256Ctx);
+    let r = state_new(Bn256Ctx);
+    let r2 = state_new(Bn256Ctx);
+    let base_m = state_new(Bn256Ctx);
+    let one = state_new(Bn256Ctx);
+    let rt = state_new(Bn256Ctx);
+
+    bn256_set_u32(a, 12345);
+    bn256_set_u32(one, 1);
+
+    // ===== Modulus 1: P-256 p =====
+    set_p256_p_be(m_be);
+    be32_to_bn256(m, m_be);
+    let mu1: u64 = bn256_mont_mu(m.limbs[0]);
+    print_u64_be(mu1);
+    bn256_mont_r2(r2, m);
+    print_bn256_be(r2);
+    bn256_mod_inv_fermat(r, a, m);
+    print_bn256_be(r);
+    bn256_mont_mul(base_m, a, r2, m, mu1);
+    bn256_mont_mul(rt, base_m, one, m, mu1);
+    print_bn256_be(rt);
+
+    // ===== Modulus 2: P-256 n =====
+    set_p256_n_be(m_be);
+    be32_to_bn256(m, m_be);
+    let mu2: u64 = bn256_mont_mu(m.limbs[0]);
+    print_u64_be(mu2);
+    bn256_mont_r2(r2, m);
+    print_bn256_be(r2);
+    bn256_mod_inv_fermat(r, a, m);
+    print_bn256_be(r);
+    bn256_mont_mul(base_m, a, r2, m, mu2);
+    bn256_mont_mul(rt, base_m, one, m, mu2);
+    print_bn256_be(rt);
+
+    // ===== Modulus 3: secp256k1 p =====
+    secp256k1_p(m_be);
+    be32_to_bn256(m, m_be);
+    let mu3: u64 = bn256_mont_mu(m.limbs[0]);
+    print_u64_be(mu3);
+    bn256_mont_r2(r2, m);
+    print_bn256_be(r2);
+    bn256_mod_inv_fermat(r, a, m);
+    print_bn256_be(r);
+    bn256_mont_mul(base_m, a, r2, m, mu3);
+    bn256_mont_mul(rt, base_m, one, m, mu3);
+    print_bn256_be(rt);
+
+    // ===== Modulus 4: secp256k1 n =====
+    secp256k1_n(m_be);
+    be32_to_bn256(m, m_be);
+    let mu4: u64 = bn256_mont_mu(m.limbs[0]);
+    print_u64_be(mu4);
+    bn256_mont_r2(r2, m);
+    print_bn256_be(r2);
+    bn256_mod_inv_fermat(r, a, m);
+    print_bn256_be(r);
+    bn256_mont_mul(base_m, a, r2, m, mu4);
+    bn256_mont_mul(rt, base_m, one, m, mu4);
+    print_bn256_be(rt);
+
+    print_int(5001);
+    print_int(999);
+    return 0;
+}
