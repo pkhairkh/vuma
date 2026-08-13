@@ -57,25 +57,25 @@ transform secp256k1_b(out: State<B32>) {
 }
 
 transform secp256k1_gx(out: State<B32>) {
-    out.bytes[ 0] = 121; out.bytes[ 1] = 190; out.bytes[ 2] = 181; out.bytes[ 3] =  83;
-    out.bytes[ 4] =  59; out.bytes[ 5] =  76; out.bytes[ 6] = 165; out.bytes[ 7] = 207;
-    out.bytes[ 8] = 111; out.bytes[ 9] =  76; out.bytes[10] = 173; out.bytes[11] = 166;
-    out.bytes[12] = 109; out.bytes[13] = 119; out.bytes[14] = 145; out.bytes[15] = 151;
-    out.bytes[16] = 150; out.bytes[17] = 107; out.bytes[18] =  21; out.bytes[19] = 193;
-    out.bytes[20] = 236; out.bytes[21] =  85; out.bytes[22] =  75; out.bytes[23] = 210;
-    out.bytes[24] = 224; out.bytes[25] = 215; out.bytes[26] = 159; out.bytes[27] = 218;
-    out.bytes[28] = 119; out.bytes[29] =  38; out.bytes[30] = 234; out.bytes[31] =  87;
+    out.bytes[ 0] = 121; out.bytes[ 1] = 190; out.bytes[ 2] = 102; out.bytes[ 3] = 126;
+    out.bytes[ 4] = 249; out.bytes[ 5] = 220; out.bytes[ 6] = 187; out.bytes[ 7] = 172;
+    out.bytes[ 8] =  85; out.bytes[ 9] = 160; out.bytes[10] =  98; out.bytes[11] = 149;
+    out.bytes[12] = 206; out.bytes[13] = 135; out.bytes[14] =  11; out.bytes[15] =   7;
+    out.bytes[16] =   2; out.bytes[17] = 155; out.bytes[18] = 252; out.bytes[19] = 219;
+    out.bytes[20] =  45; out.bytes[21] = 206; out.bytes[22] =  40; out.bytes[23] = 217;
+    out.bytes[24] =  89; out.bytes[25] = 242; out.bytes[26] = 129; out.bytes[27] =  91;
+    out.bytes[28] =  22; out.bytes[29] = 248; out.bytes[30] =  23; out.bytes[31] = 152;
 }
 
 transform secp256k1_gy(out: State<B32>) {
-    out.bytes[ 0] =  19; out.bytes[ 1] = 173; out.bytes[ 2] = 207; out.bytes[ 3] =  80;
-    out.bytes[ 4] = 177; out.bytes[ 5] = 241; out.bytes[ 6] = 237; out.bytes[ 7] = 177;
-    out.bytes[ 8] =  79; out.bytes[ 9] = 194; out.bytes[10] = 103; out.bytes[11] = 232;
-    out.bytes[12] = 177; out.bytes[13] = 219; out.bytes[14] = 183; out.bytes[15] =  95;
-    out.bytes[16] = 238; out.bytes[17] =  30; out.bytes[18] =  31; out.bytes[19] = 150;
-    out.bytes[20] = 158; out.bytes[21] =  44; out.bytes[22] =   2; out.bytes[23] =  48;
-    out.bytes[24] =  66; out.bytes[25] =  84; out.bytes[26] = 121; out.bytes[27] =   9;
-    out.bytes[28] =  57; out.bytes[29] = 247; out.bytes[30] =  96; out.bytes[31] =  14;
+    out.bytes[ 0] =  72; out.bytes[ 1] =  58; out.bytes[ 2] = 218; out.bytes[ 3] = 119;
+    out.bytes[ 4] =  38; out.bytes[ 5] = 163; out.bytes[ 6] = 196; out.bytes[ 7] = 101;
+    out.bytes[ 8] =  93; out.bytes[ 9] = 164; out.bytes[10] = 251; out.bytes[11] = 252;
+    out.bytes[12] =  14; out.bytes[13] =  17; out.bytes[14] =   8; out.bytes[15] = 168;
+    out.bytes[16] = 253; out.bytes[17] =  23; out.bytes[18] = 180; out.bytes[19] =  72;
+    out.bytes[20] = 166; out.bytes[21] = 133; out.bytes[22] =  84; out.bytes[23] =  25;
+    out.bytes[24] = 156; out.bytes[25] =  71; out.bytes[26] = 208; out.bytes[27] = 143;
+    out.bytes[28] = 251; out.bytes[29] =  16; out.bytes[30] = 212; out.bytes[31] = 184;
 }
 
 transform swap_endian_32(dst: State<B32>, src: State<B32>) {
