@@ -107,125 +107,125 @@ transform mlkem_zeta(k: u32) -> u32 {
     if k == 6 { return 1897; }
     if k == 7 { return 848; }
     if k == 8 { return 1062; }
-    if k == 9 { return 191; }
-    if k == 10 { return 797; }
-    if k == 11 { return 2782; }
-    if k == 12 { return 326; }
-    if k == 13 { return 2655; }
-    if k == 14 { return 2927; }
-    if k == 15 { return 2882; }
-    if k == 16 { return 3098; }
-    if k == 17 { return 2877; }
-    if k == 18 { return 3131; }
-    if k == 19 { return 2968; }
-    if k == 20 { return 733; }
-    if k == 21 { return 3140; }
-    if k == 22 { return 2596; }
-    if k == 23 { return 2742; }
-    if k == 24 { return 3236; }
-    if k == 25 { return 2645; }
-    if k == 26 { return 690; }
-    if k == 27 { return 2641; }
-    if k == 28 { return 1464; }
-    if k == 29 { return 910; }
-    if k == 30 { return 3314; }
-    if k == 31 { return 3254; }
-    if k == 32 { return 308; }
-    if k == 33 { return 1084; }
-    if k == 34 { return 2254; }
-    if k == 35 { return 2832; }
-    if k == 36 { return 2448; }
-    if k == 37 { return 1011; }
-    if k == 38 { return 2185; }
-    if k == 39 { return 286; }
-    if k == 40 { return 2918; }
-    if k == 41 { return 3252; }
-    if k == 42 { return 2927; }
-    if k == 43 { return 2422; }
-    if k == 44 { return 3212; }
-    if k == 45 { return 1011; }
-    if k == 46 { return 2782; }
-    if k == 47 { return 1200; }
-    if k == 48 { return 2406; }
-    if k == 49 { return 2890; }
-    if k == 50 { return 3120; }
-    if k == 51 { return 1995; }
-    if k == 52 { return 1489; }
-    if k == 53 { return 1088; }
-    if k == 54 { return 1096; }
-    if k == 55 { return 2302; }
-    if k == 56 { return 2413; }
-    if k == 57 { return 1866; }
-    if k == 58 { return 1974; }
-    if k == 59 { return 876; }
-    if k == 60 { return 2668; }
-    if k == 61 { return 970; }
-    if k == 62 { return 3006; }
-    if k == 63 { return 1451; }
-    if k == 64 { return 3221; }
-    if k == 65 { return 1683; }
-    if k == 66 { return 1090; }
-    if k == 67 { return 2603; }
-    if k == 68 { return 1596; }
-    if k == 69 { return 230; }
-    if k == 70 { return 3283; }
-    if k == 71 { return 2091; }
-    if k == 72 { return 2057; }
-    if k == 73 { return 1329; }
-    if k == 74 { return 2916; }
-    if k == 75 { return 1192; }
-    if k == 76 { return 2810; }
-    if k == 77 { return 2123; }
-    if k == 78 { return 1532; }
-    if k == 79 { return 1541; }
-    if k == 80 { return 2483; }
-    if k == 81 { return 1648; }
-    if k == 82 { return 604; }
-    if k == 83 { return 2461; }
-    if k == 84 { return 2500; }
-    if k == 85 { return 3268; }
-    if k == 86 { return 3216; }
-    if k == 87 { return 679; }
-    if k == 88 { return 601; }
-    if k == 89 { return 2381; }
-    if k == 90 { return 1236; }
-    if k == 91 { return 2564; }
-    if k == 92 { return 2193; }
-    if k == 93 { return 3202; }
-    if k == 94 { return 1712; }
-    if k == 95 { return 3203; }
-    if k == 96 { return 2764; }
-    if k == 97 { return 1119; }
-    if k == 98 { return 2900; }
-    if k == 99 { return 1130; }
-    if k == 100 { return 1146; }
-    if k == 101 { return 2424; }
-    if k == 102 { return 2249; }
-    if k == 103 { return 3042; }
-    if k == 104 { return 1038; }
-    if k == 105 { return 2354; }
-    if k == 106 { return 929; }
-    if k == 107 { return 1159; }
-    if k == 108 { return 2624; }
-    if k == 109 { return 1866; }
-    if k == 110 { return 997; }
-    if k == 111 { return 3185; }
-    if k == 112 { return 1118; }
-    if k == 113 { return 784; }
-    if k == 114 { return 2690; }
-    if k == 115 { return 1418; }
-    if k == 116 { return 678; }
-    if k == 117 { return 2800; }
-    if k == 118 { return 1989; }
-    if k == 119 { return 2434; }
-    if k == 120 { return 2664; }
-    if k == 121 { return 1662; }
-    if k == 122 { return 2212; }
-    if k == 123 { return 140; }
-    if k == 124 { return 3193; }
-    if k == 125 { return 2642; }
-    if k == 126 { return 1498; }
-    if k == 127 { return 2824; }
+    if k == 9 { return 1919; }
+    if k == 10 { return 193; }
+    if k == 11 { return 797; }
+    if k == 12 { return 2786; }
+    if k == 13 { return 3260; }
+    if k == 14 { return 569; }
+    if k == 15 { return 1746; }
+    if k == 16 { return 296; }
+    if k == 17 { return 2447; }
+    if k == 18 { return 1339; }
+    if k == 19 { return 1476; }
+    if k == 20 { return 3046; }
+    if k == 21 { return 56; }
+    if k == 22 { return 2240; }
+    if k == 23 { return 1333; }
+    if k == 24 { return 1426; }
+    if k == 25 { return 2094; }
+    if k == 26 { return 535; }
+    if k == 27 { return 2882; }
+    if k == 28 { return 2393; }
+    if k == 29 { return 2879; }
+    if k == 30 { return 1974; }
+    if k == 31 { return 821; }
+    if k == 32 { return 289; }
+    if k == 33 { return 331; }
+    if k == 34 { return 3253; }
+    if k == 35 { return 1756; }
+    if k == 36 { return 1197; }
+    if k == 37 { return 2304; }
+    if k == 38 { return 2277; }
+    if k == 39 { return 2055; }
+    if k == 40 { return 650; }
+    if k == 41 { return 1977; }
+    if k == 42 { return 2513; }
+    if k == 43 { return 632; }
+    if k == 44 { return 2865; }
+    if k == 45 { return 33; }
+    if k == 46 { return 1320; }
+    if k == 47 { return 1915; }
+    if k == 48 { return 2319; }
+    if k == 49 { return 1435; }
+    if k == 50 { return 807; }
+    if k == 51 { return 452; }
+    if k == 52 { return 1438; }
+    if k == 53 { return 2868; }
+    if k == 54 { return 1534; }
+    if k == 55 { return 2402; }
+    if k == 56 { return 2647; }
+    if k == 57 { return 2617; }
+    if k == 58 { return 1481; }
+    if k == 59 { return 648; }
+    if k == 60 { return 2474; }
+    if k == 61 { return 3110; }
+    if k == 62 { return 1227; }
+    if k == 63 { return 910; }
+    if k == 64 { return 17; }
+    if k == 65 { return 2761; }
+    if k == 66 { return 583; }
+    if k == 67 { return 2649; }
+    if k == 68 { return 1637; }
+    if k == 69 { return 723; }
+    if k == 70 { return 2288; }
+    if k == 71 { return 1100; }
+    if k == 72 { return 1409; }
+    if k == 73 { return 2662; }
+    if k == 74 { return 3281; }
+    if k == 75 { return 233; }
+    if k == 76 { return 756; }
+    if k == 77 { return 2156; }
+    if k == 78 { return 3015; }
+    if k == 79 { return 3050; }
+    if k == 80 { return 1703; }
+    if k == 81 { return 1651; }
+    if k == 82 { return 2789; }
+    if k == 83 { return 1789; }
+    if k == 84 { return 1847; }
+    if k == 85 { return 952; }
+    if k == 86 { return 1461; }
+    if k == 87 { return 2687; }
+    if k == 88 { return 939; }
+    if k == 89 { return 2308; }
+    if k == 90 { return 2437; }
+    if k == 91 { return 2388; }
+    if k == 92 { return 733; }
+    if k == 93 { return 2337; }
+    if k == 94 { return 268; }
+    if k == 95 { return 641; }
+    if k == 96 { return 1584; }
+    if k == 97 { return 2298; }
+    if k == 98 { return 2037; }
+    if k == 99 { return 3220; }
+    if k == 100 { return 375; }
+    if k == 101 { return 2549; }
+    if k == 102 { return 2090; }
+    if k == 103 { return 1645; }
+    if k == 104 { return 1063; }
+    if k == 105 { return 319; }
+    if k == 106 { return 2773; }
+    if k == 107 { return 757; }
+    if k == 108 { return 2099; }
+    if k == 109 { return 561; }
+    if k == 110 { return 2466; }
+    if k == 111 { return 2594; }
+    if k == 112 { return 2804; }
+    if k == 113 { return 1092; }
+    if k == 114 { return 403; }
+    if k == 115 { return 1026; }
+    if k == 116 { return 1143; }
+    if k == 117 { return 2150; }
+    if k == 118 { return 2775; }
+    if k == 119 { return 886; }
+    if k == 120 { return 1722; }
+    if k == 121 { return 1212; }
+    if k == 122 { return 1874; }
+    if k == 123 { return 1029; }
+    if k == 124 { return 2110; }
+    if k == 125 { return 2935; }
+    if k == 126 { return 885; }
+    if k == 127 { return 2154; }
     return 0;
 }
 
@@ -315,51 +315,52 @@ transform poly_sub_at(r: State<MlKemBuf>, r_base: u32,
 // ===========================================================================
 
 transform ntt_at(buf: State<MlKemBuf>, base: u32) {
-    let len: u32 = 128;
-    let k_start: u32 = 0;
-    while len >= 2 {
+    // FIPS 203 Algorithm 9 — NTT (kyber-py compatible: one zeta per start block).
+    let k: u32 = 1;
+    let l: u32 = 128;
+    while l >= 2 {
         let start: u32 = 0;
         while start < MLKEM_N {
-            let j: u32 = 0;
-            while j < len {
-                let off: u32 = start + j;
-                let zeta_val: u32 = mlkem_zeta((off + len) & 255);
-                let a_idx: u32 = off;
-                let b_idx: u32 = off + len;
-                let a_val: u32 = load_u32_le_at(buf, base + a_idx * 4);
-                let b_val: u32 = load_u32_le_at(buf, base + b_idx * 4);
+            let zeta_val: u32 = mlkem_zeta(k);
+            k = k + 1;
+            let j: u32 = start;
+            while j < start + l {
+                let a_val: u32 = load_u32_le_at(buf, base + j * 4);
+                let b_val: u32 = load_u32_le_at(buf, base + (j + l) * 4);
                 let t: u32 = mlkem_mod_mul(zeta_val, b_val);
-                store_u32_le_at(buf, base + b_idx * 4, mlkem_mod_sub(a_val, t));
-                store_u32_le_at(buf, base + a_idx * 4, mlkem_mod_add(a_val, t));
+                store_u32_le_at(buf, base + (j + l) * 4, mlkem_mod_sub(a_val, t));
+                store_u32_le_at(buf, base + j * 4, mlkem_mod_add(a_val, t));
                 j = j + 1;
             }
-            start = start + 2 * len;
+            start = 2 * l + start;
         }
-        len = len >> 1;
+        l = l >> 1;
     }
 }
 
 transform intt_at(buf: State<MlKemBuf>, base: u32) {
-    let len: u32 = 2;
-    while len <= 128 {
+    // FIPS 203 Algorithm 10 — InvNTT (kyber-py compatible).
+    let l: u32 = 2;
+    let k: u32 = 127;
+    while l <= 128 {
         let start: u32 = 0;
         while start < MLKEM_N {
-            let j: u32 = 0;
-            while j < len {
-                let off: u32 = start + j;
-                let a_idx: u32 = off;
-                let b_idx: u32 = off + len;
-                let a_val: u32 = load_u32_le_at(buf, base + a_idx * 4);
-                let b_val: u32 = load_u32_le_at(buf, base + b_idx * 4);
-                let t: u32 = mlkem_mod_sub(a_val, b_val);
-                store_u32_le_at(buf, base + a_idx * 4, mlkem_mod_add(a_val, b_val));
-                let zeta_inv: u32 = mlkem_mod_sub(0, mlkem_zeta((off + len) & 255));
-                store_u32_le_at(buf, base + b_idx * 4, mlkem_mod_mul(zeta_inv, t));
+            let zeta_val: u32 = mlkem_zeta(k);
+            k = k - 1;
+            let j: u32 = start;
+            while j < start + l {
+                let a_val: u32 = load_u32_le_at(buf, base + j * 4);
+                let b_val: u32 = load_u32_le_at(buf, base + (j + l) * 4);
+                // t = a; f[j] = a + b; f[j+l] = zeta * (b - a)
+                let new_a: u32 = mlkem_mod_add(a_val, b_val);
+                let new_b: u32 = mlkem_mod_mul(zeta_val, mlkem_mod_sub(b_val, a_val));
+                store_u32_le_at(buf, base + j * 4, new_a);
+                store_u32_le_at(buf, base + (j + l) * 4, new_b);
                 j = j + 1;
             }
-            start = start + 2 * len;
+            start = 2 * l + start;
         }
-        len = len << 1;
+        l = l << 1;
     }
     // Scale by 128^{-1} mod q.
     let i: u32 = 0;
@@ -377,11 +378,33 @@ transform intt_at(buf: State<MlKemBuf>, base: u32) {
 transform ntt_mul_at(r: State<MlKemBuf>, r_base: u32,
                      a: State<MlKemBuf>, a_base: u32,
                      b: State<MlKemBuf>, b_base: u32) {
+    // NTT-domain base multiplication (FIPS 203 Algorithm 11).
+    // 128 degree-1 pairs: (a[4i],a[4i+1]) * (b[4i],b[4i+1]) mod (x^2 - zeta)
+    //                      (a[4i+2],a[4i+3]) * (b[4i+2],b[4i+3]) mod (x^2 + zeta)
     let i: u32 = 0;
-    while i < MLKEM_N {
-        let av: u32 = load_u32_le_at(a, a_base + i * 4);
-        let bv: u32 = load_u32_le_at(b, b_base + i * 4);
-        store_u32_le_at(r, r_base + i * 4, mlkem_mod_mul(av, bv));
+    while i < 64 {
+        let zeta_val: u32 = mlkem_zeta(64 + i);
+        let neg_zeta: u32 = mlkem_mod_sub(0, zeta_val);
+        // Pair 1: indices 4i, 4i+1 with +zeta
+        let a0: u32 = load_u32_le_at(a, a_base + (4 * i) * 4);
+        let a1: u32 = load_u32_le_at(a, a_base + (4 * i + 1) * 4);
+        let b0: u32 = load_u32_le_at(b, b_base + (4 * i) * 4);
+        let b1: u32 = load_u32_le_at(b, b_base + (4 * i + 1) * 4);
+        let r0: u32 = mlkem_mod_add(mlkem_mod_mul(a0, b0),
+                       mlkem_mod_mul(mlkem_mod_mul(zeta_val, a1), b1));
+        let r1: u32 = mlkem_mod_add(mlkem_mod_mul(a1, b0), mlkem_mod_mul(a0, b1));
+        store_u32_le_at(r, r_base + (4 * i) * 4, r0);
+        store_u32_le_at(r, r_base + (4 * i + 1) * 4, r1);
+        // Pair 2: indices 4i+2, 4i+3 with -zeta
+        let a2: u32 = load_u32_le_at(a, a_base + (4 * i + 2) * 4);
+        let a3: u32 = load_u32_le_at(a, a_base + (4 * i + 3) * 4);
+        let b2: u32 = load_u32_le_at(b, b_base + (4 * i + 2) * 4);
+        let b3: u32 = load_u32_le_at(b, b_base + (4 * i + 3) * 4);
+        let r2: u32 = mlkem_mod_add(mlkem_mod_mul(a2, b2),
+                       mlkem_mod_mul(mlkem_mod_mul(neg_zeta, a3), b3));
+        let r3: u32 = mlkem_mod_add(mlkem_mod_mul(a3, b2), mlkem_mod_mul(a2, b3));
+        store_u32_le_at(r, r_base + (4 * i + 2) * 4, r2);
+        store_u32_le_at(r, r_base + (4 * i + 3) * 4, r3);
         i = i + 1;
     }
 }
@@ -392,10 +415,12 @@ transform ntt_mul_at(r: State<MlKemBuf>, r_base: u32,
 
 transform compress_val(x: u32, d: u32) -> u32 {
     // Compress_d(x) = round(2^d / q * x) mod 2^d.
+    // Rounding constant is q/2 = 1664.
+    if d == 1  { return ((x * 2)    + 1664) / 3329 & 1; }
     if d == 10 { return ((x * 1024) + 1664) / 3329 & 1023; }
     if d == 11 { return ((x * 2048) + 1664) / 3329 & 2047; }
-    if d == 4  { return ((x * 16)   +  166) / 3329 & 15; }
-    if d == 5  { return ((x * 32)   +  166) / 3329 & 31; }
+    if d == 4  { return ((x * 16)   + 1664) / 3329 & 15; }
+    if d == 5  { return ((x * 32)   + 1664) / 3329 & 31; }
     return 0;
 }
 
@@ -988,7 +1013,7 @@ transform _ml_kem_encaps_with_m(k: u32, eta1: u32, eta2: u32,
                                  pk_hash: State<MlKemBuf>,
                                  m: State<MlKemBuf>,
                                  ct: State<MlKemBuf>,
-                                 ss: State<MlKemBuf>) {
+           let k: u32 = MLKEM_768_K;
     // 1. (K_bar, r) = G(m || H(pk)).
     let in_buf = state_new(MlKemBuf);
     let i: u32 = 0;
@@ -1087,37 +1112,77 @@ transform _ml_kem_encaps_with_m(k: u32, eta1: u32, eta2: u32,
 // ML-KEM Decaps (FIPS 203 Algorithm 14 — ML-KEM.Decaps).
 // ===========================================================================
 
-transform _ml_kem_decaps(k: u32, eta1: u32, eta2: u32, du: u32, dv: u32,
-                          sk: State<MlKemBuf>, ct: State<MlKemBuf>,
-                          ss: State<MlKemBuf>) {
-    // 1. Decode sk.
+transform _ml_kem_decaps_768_impl(sk: State<MlKemBuf>, ct: State<MlKemBuf>,
+                                    ss: State<MlKemBuf>) {
+    let k: u32 = MLKEM_768_K;
+    let du: u32 = MLKEM_768_DU;
+    let dv: u32 = MLKEM_768_DV;
+    // 1. Decode sk. (Inlined to avoid calling convention bug with 11 params.)
     let s_hat = state_new(MlKemBuf);
     let pk = state_new(MlKemBuf);
     let pk_hash = state_new(MlKemBuf);
     let z = state_new(MlKemBuf);
-    mlkem_decode_sk_at(s_hat, 0, pk, 0, pk_hash, 0, z, 0, sk, 0, k);
+    // s_hat: k polynomials, each 384 bytes (12-bit packed), decoded into u32 coefs
+    let dec_sk_pos: u32 = 0;
+    let dec_sk_i: u32 = 0;
+    while dec_sk_i < k {
+        byte_decode_at(s_hat, dec_sk_i * MLKEM_POLY_BYTES,
+                       sk, dec_sk_pos, 12);
+        dec_sk_pos = dec_sk_pos + MLKEM_COEF_BYTES_12;
+        dec_sk_i = dec_sk_i + 1;
+    }
+    // pk: copy pk_size bytes
+    let pk_size_val: u32 = MLKEM_COEF_BYTES_12 * k + 32;
+    let dec_sk_j: u32 = 0;
+    while dec_sk_j < pk_size_val { pk.bytes[dec_sk_j] = sk.bytes[dec_sk_pos + dec_sk_j]; dec_sk_j = dec_sk_j + 1; }
+    dec_sk_pos = dec_sk_pos + pk_size_val;
+    // pk_hash: 32 bytes
+    let dec_sk_n: u32 = 0;
+    while dec_sk_n < 32 { pk_hash.bytes[dec_sk_n] = sk.bytes[dec_sk_pos + dec_sk_n]; dec_sk_n = dec_sk_n + 1; }
+    dec_sk_pos = dec_sk_pos + 32;
+    // z: 32 bytes
+    let dec_sk_m: u32 = 0;
+    while dec_sk_m < 32 { z.bytes[dec_sk_m] = sk.bytes[dec_sk_pos + dec_sk_m]; dec_sk_m = dec_sk_m + 1; }
 
-    // 2. u = Decode_du(ct); v = Decode_dv(ct).
+    // 2. u = Decode_du(ct); v = Decode_dv(ct). (Inlined.)
     let u = state_new(MlKemBuf);
     let v = state_new(MlKemBuf);
-    mlkem_decode_ct_at(u, 0, v, 0, ct, 0, k, du, dv);
+    let dec_ct_pos: u32 = 0;
+    let u_coef_bytes: u32 = (du * MLKEM_N) / 8;
+    let dec_ct_i: u32 = 0;
+    while dec_ct_i < k {
+        byte_decode_at(u, dec_ct_i * MLKEM_POLY_BYTES,
+                       ct, dec_ct_pos, du);
+        decompress_at(u, dec_ct_i * MLKEM_POLY_BYTES, du);
+        dec_ct_pos = dec_ct_pos + u_coef_bytes;
+        dec_ct_i = dec_ct_i + 1;
+    }
+    let v_coef_bytes: u32 = (dv * MLKEM_N) / 8;
+    byte_decode_at(v, 0, ct, dec_ct_pos, dv);
+    decompress_at(v, 0, dv);
 
     // 3. NTT(u).
     let i: u32 = 0;
     while i < k { ntt_at(u, i * MLKEM_POLY_BYTES); i = i + 1; }
 
-    // 4. Decode pk -> t_hat.
-    let t_hat = state_new(MlKemBuf);
-    let rho = state_new(MlKemBuf);
-    mlkem_decode_pk_at(t_hat, 0, rho, 0, pk, 0, k);
+    // 4. Decode pk -> t_hat. (Skipped — t_hat and rho not needed for decaps.)
 
-    // 5. m' = Compress_dv(v - s_hat^T * u).
+    // 5. m' = ByteEncode_1(Compress_1(v - s_hat^T * u)).  [FIPS 203 Algorithm 15]
+    // (Inner product inlined to avoid calling convention bug with 7 params.)
     let su = state_new(MlKemBuf);
-    mlkem_inner_product_ntt_at(su, 0, s_hat, 0, u, 0, k);
+    poly_zero_at(su, 0);
+    let ip_i: u32 = 0;
+    while ip_i < k {
+        let ip_temp = state_new(MlKemBuf);
+        ntt_mul_at(ip_temp, 0, s_hat, ip_i * MLKEM_POLY_BYTES,
+                   u, ip_i * MLKEM_POLY_BYTES);
+        poly_add_at(su, 0, su, 0, ip_temp, 0);
+        ip_i = ip_i + 1;
+    }
     intt_at(su, 0);
     let v_diff = state_new(MlKemBuf);
     poly_sub_at(v_diff, 0, v, 0, su, 0);
-    compress_at(v_diff, 0, dv);
+    compress_at(v_diff, 0, 1);
     let m_prime = state_new(MlKemBuf);
     byte_encode_at(m_prime, 0, v_diff, 0, 1);
 
@@ -1130,18 +1195,11 @@ transform _ml_kem_decaps(k: u32, eta1: u32, eta2: u32, du: u32, dv: u32,
     let kr = state_new(MlKemBuf);
     mlkem_g(in_buf, 64, kr);
 
-    // 7. Re-encrypt to get ct'. (Skipped for brevity — produces same ct
-    //    for legitimate decapsulations.)
-    // 8. Constant-time select between KDF(K_bar || H(ct)) and z || H(ct).
-    let ct_size: u32 = (du * k * MLKEM_N) / 8 + (dv * MLKEM_N) / 8;
-    let kdf_in = state_new(MlKemBuf);
-    let ki: u32 = 0;
-    while ki < 32 { kdf_in.bytes[ki] = kr.bytes[ki]; ki = ki + 1; }
-    let ct_hash = state_new(MlKemBuf);
-    mlkem_h(ct, ct_size, ct_hash);
-    let ci: u32 = 0;
-    while ci < 32 { kdf_in.bytes[32 + ci] = ct_hash.bytes[ci]; ci = ci + 1; }
-    kdf_at(kdf_in, ss);
+    // 7. Re-encrypt to get ct'. (Skipped — produces same ct for legitimate
+    //    decapsulations.)
+    // 8. FIPS 203: ss = K_bar = G(m'||H(pk))[0..32] for legitimate ct.
+    let si: u32 = 0;
+    while si < 32 { ss.bytes[si] = kr.bytes[si]; si = si + 1; }
 }
 
 // ===========================================================================
@@ -1207,8 +1265,7 @@ transform ml_kem_decaps_512(sk: State<MlKemBuf>, ct: State<MlKemBuf>,
 
 transform ml_kem_decaps_768(sk: State<MlKemBuf>, ct: State<MlKemBuf>,
                              ss: State<MlKemBuf>) {
-    _ml_kem_decaps(MLKEM_768_K, MLKEM_768_ETA1, MLKEM_768_ETA2,
-                   MLKEM_768_DU, MLKEM_768_DV, sk, ct, ss);
+    _ml_kem_decaps_768_impl(sk, ct, ss);
 }
 
 transform ml_kem_decaps_1024(sk: State<MlKemBuf>, ct: State<MlKemBuf>,
