@@ -11,7 +11,8 @@
 
 import "/home/z/my-project/workdir/vuma/womb/crypto/hash/sha3.vuma"::{
     KeccakCtx, KeccakIn, KeccakOut,
-    shake256_init, shake256_update, shake256_squeeze
+    shake256_init, shake256_update,
+    keccak_pad, keccak_f1600
 };
 
 const FALCON_N: u32 = 512;
@@ -319,8 +320,13 @@ transform falcon_poly_inv_mod_q(a: State<FalconBuf>, a_base: u32, q: u32,
 
 transform falcon_shake256(src: State<FalconBuf>, src_len: u32,
                           dst: State<FalconBuf>, dst_len: u32) {
+    // Chunked SHAKE-256: absorb input in 200-byte KeccakIn chunks, then
+    // squeeze output directly into the dst FalconBuf in rate-sized (136)
+    // chunks.  Avoids OOB on the 200-byte KeccakOut buffer that the old
+    // `shake256_squeeze(ctx, kout, dst_len)` triggered whenever dst_len
+    // > 200 (e.g. FALCON_N=512 in hash_to_poly, FALCON_N*8=4096 in
+    // poly_sample_gaussian).
     let kin = state_new(KeccakIn);
-    let kout = state_new(KeccakOut);
     let ctx = state_new(KeccakCtx);
     shake256_init(ctx);
     let pos: u32 = 0;
@@ -335,9 +341,23 @@ transform falcon_shake256(src: State<FalconBuf>, src_len: u32,
         shake256_update(ctx, kin, to_copy);
         pos = pos + to_copy;
     }
-    shake256_squeeze(ctx, kout, dst_len);
-    let k: u32 = 0;
-    while k < dst_len { dst.bytes[k] = kout.data[k]; k = k + 1; }
+    // Finalize absorbing: pad + first Keccak-f[1600] permutation.
+    // After this, ctx.state[0..rate] holds the first squeeze block.
+    keccak_pad(ctx);
+    // Squeeze directly into dst in 136-byte (rate) chunks.
+    let rate: u32 = 136;
+    let opos: u32 = 0;
+    while opos < dst_len {
+        let to_copy: u32 = rate;
+        let remaining: u32 = dst_len - opos;
+        if remaining < rate { to_copy = remaining; }
+        let k: u32 = 0;
+        while k < to_copy { dst.bytes[opos + k] = ctx.state[k]; k = k + 1; }
+        opos = opos + to_copy;
+        if opos < dst_len {
+            keccak_f1600(ctx);
+        }
+    }
 }
 
 // CBD-sample a polynomial from a byte buffer (1 byte per coefficient).
@@ -449,7 +469,11 @@ transform hash_to_poly(msg: State<FalconBuf>, msg_len: u32,
     poly_sample_cbd_bytes_at(cbd_bytes, 0, out, out_base);
 }
 
-// poly_norm: L2 norm of centered representation.
+// poly_norm_sq: squared L2 norm of centered representation (f64).
+// NOTE: the original poly_norm_at called sqrt() which was never imported
+// from womb/lib/sys/math.vuma, causing SIGILL at runtime.  This version
+// returns the squared norm; callers should compare against the squared
+// bound.  falcon_verify uses the u32 variant falcon_compute_norm instead.
 transform poly_norm_at(a: State<FalconBuf>, a_base: u32) -> f64 {
     let mut_sum: f64 = 0.0;
     let i: u32 = 0;
@@ -460,7 +484,7 @@ transform poly_norm_at(a: State<FalconBuf>, a_base: u32) -> f64 {
         mut_sum = mut_sum + vf * vf;
         i = i + 1;
     }
-    return sqrt(mut_sum);
+    return mut_sum;
 }
 
 // falcon_compute_norm: ||s||_2^2 as u32 (saturating).
@@ -590,8 +614,11 @@ transform falcon_verify(pk: State<FalconBuf>, msg: State<FalconBuf>, msg_len: u3
     hash_to_poly(msg, msg_len, c, 0);
     poly_mul_at(t, 0, pk, h_base, sig, s_base);
 
-    let snorm: f64 = poly_norm_at(sig, s_base);
-    if snorm > 5000.0 { return 0; }
+    // L2 norm check: ||sig||_2^2 <= FALCON_SIG_L2_BOUND_SQ (25000000).
+    // Original code called sqrt() (unimported -> SIGILL).  Compare the
+    // squared norm directly against the squared bound instead.
+    let snorm_sq: u32 = falcon_compute_norm(sig, s_base);
+    if snorm_sq > FALCON_SIG_L2_BOUND_SQ { return 0; }
 
     if poly_check_centered_inf(t, 0, c, 0, FALCON_HASH_INF_BOUND) == 0 {
         return 0;
