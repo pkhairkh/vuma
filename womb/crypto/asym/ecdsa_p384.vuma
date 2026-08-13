@@ -507,11 +507,17 @@ transform p384_point_double_bn(rx: State<Bn384Ctx>, ry: State<Bn384Ctx>, px: Sta
 
     bn384_mod_mul(slope_sq, slope, slope, p_bn);
     bn384_mod_add(two_x, px, px, p_bn);
-    bn384_mod_sub(rx, slope_sq, two_x, p_bn);
+    // Use local temporaries (tx, ty) to avoid aliasing bug when rx aliases px
+    // (same fix as ecdsa_p256 — commit 987fd6be).
+    let tx = state_new(Bn384Ctx);
+    let ty = state_new(Bn384Ctx);
+    bn384_mod_sub(tx, slope_sq, two_x, p_bn);
 
-    bn384_mod_sub(x_minus_rx, px, rx, p_bn);
+    bn384_mod_sub(x_minus_rx, px, tx, p_bn);
     bn384_mod_mul(slope_x, slope, x_minus_rx, p_bn);
-    bn384_mod_sub(ry, slope_x, py, p_bn);
+    bn384_mod_sub(ty, slope_x, py, p_bn);
+    bn384_copy(rx, tx);
+    bn384_copy(ry, ty);
 }
 
 transform p384_point_add_bn(rx: State<Bn384Ctx>, ry: State<Bn384Ctx>, px: State<Bn384Ctx>, py: State<Bn384Ctx>, qx: State<Bn384Ctx>, qy: State<Bn384Ctx>, p_bn: State<Bn384Ctx>) {
