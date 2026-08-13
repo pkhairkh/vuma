@@ -251,6 +251,35 @@ transform bn384_mod_inv(r: State<Bn384Ctx>, a: State<Bn384Ctx>, m: State<Bn384Ct
     bn384_copy(r, x2);
 }
 
+// r = a^(-1) mod m via Fermat's little theorem: a^(m-2) mod m.
+// Only works for prime m. Uses bn384_mod_exp (correct, ~100x faster than binary GCD).
+transform bn384_mod_inv_fermat(r: State<Bn384Ctx>, a: State<Bn384Ctx>, m: State<Bn384Ctx>) {
+    let exp = state_new(Bn384Ctx);
+    bn384_copy(exp, m);
+    // exp = m - 2
+    let lo = exp.limbs[0];
+    if lo >= 2 {
+        exp.limbs[0] = lo - 2;
+    } else {
+        exp.limbs[0] = lo - 2;  // wraps via u64 underflow
+        let i = 1;
+        let need_borrow = 1;
+        while need_borrow == 1 {
+            if i >= 6 { break; }
+            let cur = exp.limbs[i];
+            if cur == 0 {
+                exp.limbs[i] = ~1;  // 2^64 - 2 (bitwise NOT of 1)
+            } else {
+                exp.limbs[i] = cur - 1;
+                need_borrow = 0;
+            }
+            i = i + 1;
+        }
+    }
+    bn384_mod_exp(r, a, exp, m);
+}
+
+
 // ===========================================================================
 // B48 ↔ Bn384Ctx conversion (LE bytes <-> 6 × u64 limbs)
 // ===========================================================================
@@ -522,7 +551,7 @@ transform p384_point_add_bn(rx: State<Bn384Ctx>, ry: State<Bn384Ctx>, px: State<
 
     bn384_mod_sub(dy, qy, py, p_bn);
     bn384_mod_sub(dx, qx, px, p_bn);
-    bn384_mod_inv(dx_inv, dx, p_bn);
+    bn384_mod_inv_fermat(dx_inv, dx, p_bn);
     bn384_mod_mul(slope, dy, dx_inv, p_bn);
 
     bn384_mod_mul(slope_sq, slope, slope, p_bn);
@@ -750,7 +779,7 @@ transform ecdsa_p384_sign(msg: State<B256>, msg_len: u32, privkey_be: State<B48>
     let rd = state_new(Bn384Ctx);
     let h_rd = state_new(Bn384Ctx);
     let s_bn = state_new(Bn384Ctx);
-    bn384_mod_inv(k_inv, k_bn, n_bn);
+    bn384_mod_inv_fermat(k_inv, k_bn, n_bn);
     bn384_mod_mul(rd, r_bn, d_bn, n_bn);
     bn384_mod_add(h_rd, h_bn, rd, n_bn);
     bn384_mod_mul(s_bn, k_inv, h_rd, n_bn);
@@ -812,7 +841,7 @@ transform ecdsa_p384_verify(msg: State<B256>, msg_len: u32, pubkey_x_be: State<B
     let w = state_new(Bn384Ctx);
     let u1 = state_new(Bn384Ctx);
     let u2 = state_new(Bn384Ctx);
-    bn384_mod_inv(w, s_bn, n_bn);
+    bn384_mod_inv_fermat(w, s_bn, n_bn);
     bn384_mod_mul(u1, h_bn, w, n_bn);
     bn384_mod_mul(u2, r_bn, w, n_bn);
 
