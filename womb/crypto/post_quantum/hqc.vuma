@@ -601,8 +601,40 @@ transform hqc_decaps(sk: State<HqcBuf>, pk: State<HqcBuf>,
     // ── Phase 1: v' = v XOR (s * u) ──────────────────────────────────────
     //   b1 ← su = s · u   (GF(2)[x]/(x^n+1) negacyclic product)
     //   b2 ← v' = v XOR su
-    gf2_vec_mul_at(b1, 0, sk, s_sk_base, ct, u_base, HQC_N);
-    gf2_vec_add_at(b2, 0, ct, v_base, b1, 0, HQC_N);
+    // Inline gf2_vec_mul_at(b1, 0, sk, s_sk_base, ct, u_base, HQC_N) — 7 params, calling convention bug
+    let gvm_z: u32 = 0;
+    while gvm_z < HQC_N { b1.bytes[gvm_z] = 0; gvm_z = gvm_z + 1; }
+    let gvm_i: u32 = 0;
+    while gvm_i < HQC_N {
+        let gvm_av: u32 = sk.bytes[s_sk_base + gvm_i] as u32;
+        if gvm_av == 1 {
+            let gvm_j: u32 = 0;
+            while gvm_j < HQC_N {
+                let gvm_bv: u32 = ct.bytes[u_base + gvm_j] as u32;
+                if gvm_bv == 1 {
+                    let gvm_idx: u32 = gvm_i + gvm_j;
+                    if gvm_idx < HQC_N {
+                        let gvm_cur: u32 = b1.bytes[gvm_idx] as u32;
+                        b1.bytes[gvm_idx] = ((gvm_cur ^ 1) & 1) as u8;
+                    } else {
+                        let gvm_nidx: u32 = gvm_idx - HQC_N;
+                        let gvm_cur: u32 = b1.bytes[gvm_nidx] as u32;
+                        b1.bytes[gvm_nidx] = ((gvm_cur ^ 1) & 1) as u8;
+                    }
+                }
+                gvm_j = gvm_j + 1;
+            }
+        }
+        gvm_i = gvm_i + 1;
+    }
+    // Inline gf2_vec_add_at(b2, 0, ct, v_base, b1, 0, HQC_N) — 7 params
+    let gva_i: u32 = 0;
+    while gva_i < HQC_N {
+        let gva_av: u32 = ct.bytes[v_base + gva_i] as u32;
+        let gva_bv: u32 = b1.bytes[gva_i] as u32;
+        b2.bytes[gva_i] = ((gva_av ^ gva_bv) & 1) as u8;
+        gva_i = gva_i + 1;
+    }
 
     // ── Phase 2: decode m' from the first HQC_M_ENC_LEN bits of v' ─────
     //   b3 ← msg  (16 bits, one byte per bit). b1=su and b2=v' now dead.
