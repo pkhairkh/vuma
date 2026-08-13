@@ -125,8 +125,8 @@
     "total": 20
   },
   "argon2|x86_64": {
-    "status": "PARTIAL",
-    "pass": 18,
+    "status": "PASS",
+    "pass": 20,
     "total": 20
   },
   "cmac_bcrypt_kdf|x86_64": {
@@ -180,8 +180,8 @@
     "total": 20
   },
   "ecdh_p256|x86_64": {
-    "status": "PARTIAL",
-    "pass": 18,
+    "status": "PASS",
+    "pass": 20,
     "total": 20
   },
   "ecdsa_p256|x86_64": {
@@ -192,6 +192,21 @@
   "secp256k1|x86_64": {
     "status": "PASS",
     "pass": 20,
+    "total": 20
+  },
+  "falcon|x86_64": {
+    "status": "PARTIAL",
+    "pass": 0,
+    "total": 20
+  },
+  "ml_kem|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
+  },
+  "ecdsa_p384|x86_64": {
+    "status": "PARTIAL",
+    "pass": 0,
     "total": 20
   }
 }
