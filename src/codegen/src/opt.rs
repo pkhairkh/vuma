@@ -2306,7 +2306,20 @@ fn run_optimizations_inner(
         // ── PROVEN-SOUND PASSES (302/320 differential, only atomics fail) ──
         let f = constant_fold(f);
         let f = cse(f);
-        let f = equality_saturation_with_cost(f, &cost_fn);
+        let f = {
+            // Wave 2.1: Skip e-graph for large functions (O(n^2) cost).
+            // The e-graph tries all possible rewrites and picks the
+            // cheapest — exponential for large functions. Functions with
+            // >500 instructions see no meaningful benefit and waste
+            // seconds of compile time (e.g. ml_kem main: 17s -> <1s).
+            let instr_count: usize =
+                f.blocks.iter().map(|b| b.instructions.len()).sum();
+            if instr_count <= 500 {
+                equality_saturation_with_cost(f, &cost_fn)
+            } else {
+                f
+            }
+        };
         let (f, provenance) = mark_ive_proven_nonaliasing(f);
         // ── Wave 1-A: linearity-directed DSE ──────────────────────────
         // Route the IVE `LinearityReport::consumed_vregs` set (if any)
