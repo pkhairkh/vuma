@@ -427,3 +427,21 @@ Stage Summary:
 - Modules verified: sha1, sha256_sha224, sha384, sha512, md5, sha3, blake2, blake3.
 - Reference libs: hashlib (built-in), blake3 (pip 1.0.9).
 - Compact_results.json updated.
+
+---
+Task ID: WAVE-B
+Agent: Super Z (orchestrator)
+Task: Wave B - Symmetric cipher modules line-by-line comparison vs pycryptodome.
+
+Work Log:
+- For each of 8 symmetric cipher modules (aes128, aes192, aes256, rc4, chacha20, salsa20, des, poly1305):
+  1. Compiled + ran each VUMA harness (4-7 per module).
+  2. Compared VUMA output bytes against JSON vector expected_hex.
+  3. Where vector lacked expected_hex, recomputed via pycryptodome (AES.ECB/CBC/CTR, ARC4, DES, ChaCha20, Salsa20, Poly1305).
+- Wave B result: 160/160 vectors PASS across all 8 symmetric cipher modules.
+
+Stage Summary:
+- Wave B COMPLETE: all 8 symmetric cipher modules 20/20 PASS on x86_64.
+- Modules verified: aes128, aes192, aes256, rc4, chacha20, salsa20, des, poly1305.
+- Reference: pycryptodome 3.23.0.
+- Compact_results.json updated.
