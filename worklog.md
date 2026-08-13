@@ -168,3 +168,42 @@ Stage Summary:
   spec (NTT + decompression + hash-to-point) — future Wave C2 task.
 - Files changed: womb/crypto/post_quantum/falcon.vuma only (within scope).
 
+
+---
+Task ID: 0B + A (ecdsa_p256)
+Agent: main orchestrator
+Task: Fix bignum carry bug, validate ecdsa_p256 on x86_64
+
+Work Log:
+- ROOT CAUSE 1: SCG InliningPass breaks State<T> pass-by-reference semantics.
+  When a function with State<T> params is inlined, the State<T> param is
+  treated as a local copy. Modifications to state inside the inlined function
+  do NOT propagate to the caller. This corrupted ALL bignum operations.
+  FIX: Set max_inline_size=0 in compile_dump.rs (commit efffd66e).
+  VERIFIED: 2*G.x, 2*G.y, Gx^2 mod p on P-256 all match Python reference.
+
+- ROOT CAUSE 2: p256_proj_add_mixed aliasing bug. When output (x3,y3,z3)
+  aliases input (x1,y1,z1) — which happens in EVERY call from scalar_mul —
+  step 13 writes X3 (overwriting X1), then step 14 reads X1 (getting wrong
+  value), corrupting Y3. This caused k*G to have correct X but wrong Y
+  for k>=3.
+  FIX: Use local temporaries (tx,ty,tz) for output, copy at end (commit 987fd6be).
+  VERIFIED: k*G for k=3,5,7,255 ALL match Python reference (both x and y).
+
+- ROOT CAUSE 3: Test vectors generated with non-deterministic k. The Python
+  `cryptography` library uses random k (not RFC 6979 deterministic), so its
+  signatures don't match VUMA's deterministic ones. VUMA's signatures are
+  VALID (verified with cryptography lib's verify()).
+  FIX: Regenerated vectors using deterministic RFC 6979 matching VUMA's
+  implementation (commit c0e33d0c).
+
+- RESULT: ecdsa_p256|x86_64: 20/20 PASS (commit 8826152a)
+
+Stage Summary:
+- ecdsa_p256 fully validated on x86_64 (20/20 PASS)
+- Three root causes found and fixed:
+  1. SCG inliner State<T> bug (max_inline_size=0)
+  2. p256_proj_add_mixed aliasing bug (local temporaries)
+  3. Vector/harness mismatch (deterministic RFC 6979)
+- Next: validate ecdsa_p384, secp256k1 (same fixes should apply)
+- Next: work on ml_kem, ml_dsa, hqc (Waves B, D, E)
