@@ -39,11 +39,6 @@
     "total": 5,
     "status_flag": "PASS"
   },
-  "ecdsa_p384|x86_64|b0": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "TOUT"
-  },
   "falcon|x86_64|b0": {
     "pass": 0,
     "total": 1,
@@ -2524,11 +2519,6 @@
     "total": 1,
     "status_flag": "PASS"
   },
-  "ecdsa_p384|x86_64|b1": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "TOUT"
-  },
   "ml_dsa|x86_64|b0": {
     "pass": 0,
     "total": 1,
@@ -2749,94 +2739,69 @@
     "total": 1,
     "status_flag": "PASS"
   },
-  "hqc|x86_64|b0": {
+  "ecdsa_p384|x86_64|b0": {
     "pass": 0,
     "total": 1,
-    "status_flag": "EXC"
+    "status_flag": "TOUT"
   },
-  "hqc|x86_64|b1": {
+  "ecdsa_p384|x86_64|b1": {
     "pass": 0,
     "total": 1,
-    "status_flag": "EXC"
+    "status_flag": "TOUT"
   },
-  "hqc|x86_64|b2": {
+  "ecdsa_p384|x86_64|b2": {
     "pass": 0,
     "total": 1,
-    "status_flag": "EXC"
+    "status_flag": "TOUT"
   },
-  "hqc|x86_64|b3": {
+  "ecdsa_p384|x86_64|b3": {
     "pass": 0,
     "total": 1,
-    "status_flag": "EXC"
+    "status_flag": "TOUT"
   },
-  "hqc|x86_64|b4": {
+  "ecdsa_p384|x86_64|b4": {
     "pass": 0,
     "total": 1,
-    "status_flag": "EXC"
+    "status_flag": "TOUT"
   },
-  "hqc|x86_64|b5": {
+  "ecdsa_p384|x86_64|b5": {
     "pass": 0,
     "total": 1,
-    "status_flag": "EXC"
+    "status_flag": "TOUT"
   },
-  "hqc|x86_64|b6": {
+  "ecdsa_p384|x86_64|b6": {
     "pass": 0,
     "total": 1,
-    "status_flag": "EXC"
+    "status_flag": "TOUT"
   },
-  "hqc|x86_64|b7": {
+  "ecdsa_p384|x86_64|b7": {
     "pass": 0,
     "total": 1,
-    "status_flag": "EXC"
+    "status_flag": "TOUT"
   },
-  "hqc|x86_64|b8": {
+  "ecdsa_p384|x86_64|b8": {
     "pass": 0,
     "total": 1,
-    "status_flag": "EXC"
+    "status_flag": "TOUT"
   },
-  "hqc|x86_64|b9": {
+  "ecdsa_p384|x86_64|b9": {
     "pass": 0,
     "total": 1,
-    "status_flag": "EXC"
+    "status_flag": "TOUT"
   },
-  "hqc|x86_64|b10": {
+  "ecdsa_p384|x86_64|b10": {
     "pass": 0,
     "total": 1,
-    "status_flag": "EXC"
+    "status_flag": "TOUT"
   },
-  "hqc|x86_64|b11": {
+  "ecdsa_p384|x86_64|b11": {
     "pass": 0,
     "total": 1,
-    "status_flag": "EXC"
+    "status_flag": "TOUT"
   },
-  "hqc|x86_64|b12": {
+  "ecdsa_p384|x86_64|b12": {
     "pass": 0,
     "total": 1,
-    "status_flag": "EXC"
-  },
-  "hqc|x86_64|b13": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "EXC"
-  },
-  "hqc|x86_64|b14": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "EXC"
-  },
-  "hqc|x86_64|b15": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "EXC"
-  },
-  "hqc|x86_64|b16": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "EXC"
-  },
-  "hqc|x86_64|b17": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "EXC"
+    "status_flag": "TOUT"
   }
 }

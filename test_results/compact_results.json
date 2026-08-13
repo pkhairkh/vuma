@@ -2050,8 +2050,8 @@
     "total": 20
   },
   "ml_kem|x86_64": {
-    "status": "PASS",
-    "pass": 20,
+    "status": "PARTIAL",
+    "pass": 0,
     "total": 20
   },
   "secp256k1|x86_64": {
