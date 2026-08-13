@@ -170,6 +170,7 @@ fn compile_for_backend_with_path(
         // functions like `fn my_handler(x: u64) -> u64 { return x + 1; }`
         // get inlined into their callers, and GetAddress can't find them.
         inline_threshold: 0,
+        max_inline_size: 0,  // Wave 0B: disable SCG inlining to fix State<T> pass-by-ref bug
         ..Default::default()
     };
     let _ = run_scg_transforms(&mut scg, &o3_config);
