@@ -368,5 +368,20 @@
     "pass": 1,
     "total": 1,
     "status_flag": "PASS"
+  },
+  "ml_kem|x86_64|b5": {
+    "pass": 0,
+    "total": 1,
+    "status_flag": "PARTIAL"
+  },
+  "ml_kem|x86_64|b6": {
+    "pass": 0,
+    "total": 1,
+    "status_flag": "PARTIAL"
+  },
+  "ml_kem|x86_64|b7": {
+    "pass": 0,
+    "total": 1,
+    "status_flag": "PARTIAL"
   }
 }
