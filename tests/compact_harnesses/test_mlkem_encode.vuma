@@ -1,0 +1,48 @@
+import "/home/z/my-project/workdir/vuma/womb/crypto/post_quantum/ml_kem.vuma"::{MlKemBuf, byte_encode_at, byte_decode_at, poly_zero_at, MLKEM_N};
+
+transform main() -> i32 {
+    let poly = state_new(MlKemBuf);
+    let enc = state_new(MlKemBuf);
+    let dec = state_new(MlKemBuf);
+
+    // Set poly[0..7] to known values, rest 0
+    poly_zero_at(poly, 0);
+    // poly[0] = 1, poly[1] = 2, ..., poly[7] = 8
+    // Each coef is u32 LE at offset i*4
+    let i: u32 = 0;
+    while i < 8 {
+        let off = i * 4;
+        let v = i + 1;
+        poly.bytes[off] = (v & 255) as u8;
+        poly.bytes[off + 1] = ((v >> 8) & 255) as u8;
+        poly.bytes[off + 2] = 0;
+        poly.bytes[off + 3] = 0;
+        i = i + 1;
+    }
+
+    // Encode with d=12 (ML-KEM standard)
+    byte_encode_at(enc, 0, poly, 0, 12);
+
+    // Print first 16 bytes of encoded
+    i = 0;
+    while i < 16 {
+        print_int(1000 + (enc.bytes[i] as u32));
+        i = i + 1;
+    }
+    print_int(999);
+
+    // Decode back
+    byte_decode_at(dec, 0, enc, 0, 12);
+
+    // Print first 8 decoded coefficients
+    i = 0;
+    while i < 8 {
+        let off = i * 4;
+        let v = (dec.bytes[off] as u32) | ((dec.bytes[off + 1] as u32) << 8) | ((dec.bytes[off + 2] as u32) << 16) | ((dec.bytes[off + 3] as u32) << 24);
+        print_int(1000 + v);
+        i = i + 1;
+    }
+    print_int(999);
+
+    return 0;
+}

@@ -1,0 +1,27 @@
+import "/home/z/my-project/workdir/vuma/womb/crypto/post_quantum/ml_kem.vuma"::{MlKemBuf, mlkem_g, mlkem_h, mlkem_shake256};
+
+transform main() -> i32 {
+    let src = state_new(MlKemBuf);
+    let dst = state_new(MlKemBuf);
+
+    // Test mlkem_g (SHA3-512) with empty input
+    mlkem_g(src, 0, dst);
+    let i: u32 = 0;
+    while i < 64 { print_int(1000 + (dst.bytes[i] as u32)); i = i + 1; }
+    print_int(999);
+
+    // Test mlkem_h (SHA3-256) with empty input
+    mlkem_h(src, 0, dst);
+    i = 0;
+    while i < 32 { print_int(1000 + (dst.bytes[i] as u32)); i = i + 1; }
+    print_int(999);
+
+    // Test mlkem_g with "abc"
+    src.bytes[0] = 97; src.bytes[1] = 98; src.bytes[2] = 99;
+    mlkem_g(src, 3, dst);
+    i = 0;
+    while i < 64 { print_int(1000 + (dst.bytes[i] as u32)); i = i + 1; }
+    print_int(999);
+
+    return 0;
+}

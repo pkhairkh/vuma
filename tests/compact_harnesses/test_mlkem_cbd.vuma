@@ -1,0 +1,28 @@
+import "/home/z/my-project/workdir/vuma/womb/crypto/post_quantum/ml_kem.vuma"::{MlKemBuf, cbd_at, poly_zero_at, MLKEM_N};
+
+transform main() -> i32 {
+    let bytes = state_new(MlKemBuf);
+    let out = state_new(MlKemBuf);
+
+    // Set bytes to a known pattern: 0xFF, 0xFF, ... (all 1s)
+    let i: u32 = 0;
+    while i < 128 {
+        bytes.bytes[i] = 255;
+        i = i + 1;
+    }
+
+    // CBD with eta=3 (ML-KEM-768 uses eta1=3, eta2=2)
+    cbd_at(bytes, 0, 3, out, 0);
+
+    // Print first 8 coefficients
+    i = 0;
+    while i < 8 {
+        let off = i * 4;
+        let v = (out.bytes[off] as u32) | ((out.bytes[off + 1] as u32) << 8) | ((out.bytes[off + 2] as u32) << 16) | ((out.bytes[off + 3] as u32) << 24);
+        print_int(1000 + v);
+        i = i + 1;
+    }
+    print_int(999);
+
+    return 0;
+}

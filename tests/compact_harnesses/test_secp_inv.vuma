@@ -1,0 +1,50 @@
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_set_u32, bn256_zero, bn256_mod_inv_fermat, bn256_copy};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/secp256k1.vuma"::{B32, secp256k1_p, be32_to_bn256, bn256_to_be32};
+
+transform main() -> i32 {
+    let p_be = state_new(B32);
+    secp256k1_p(p_be);
+    let p_bn = state_new(Bn256Ctx);
+    be32_to_bn256(p_bn, p_be);
+
+    // Compute 2*gy mod p
+    let gy_be = state_new(B32);
+    // secp256k1_gy(gy_be); // let me just set it manually
+    // gy = 0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8
+    gy_be.bytes[0] = 72; gy_be.bytes[1] = 58; gy_be.bytes[2] = 218; gy_be.bytes[3] = 119;
+    gy_be.bytes[4] = 38; gy_be.bytes[5] = 163; gy_be.bytes[6] = 70; gy_be.bytes[7] = 85;
+    gy_be.bytes[8] = 93; gy_be.bytes[9] = 164; gy_be.bytes[10] = 251; gy_be.bytes[11] = 252;
+    gy_be.bytes[12] = 14; gy_be.bytes[13] = 17; gy_be.bytes[14] = 8; gy_be.bytes[15] = 168;
+    gy_be.bytes[16] = 253; gy_be.bytes[17] = 23; gy_be.bytes[18] = 180; gy_be.bytes[19] = 72;
+    gy_be.bytes[20] = 138; gy_be.bytes[21] = 133; gy_be.bytes[22] = 84; gy_be.bytes[23] = 25;
+    gy_be.bytes[24] = 156; gy_be.bytes[25] = 71; gy_be.bytes[26] = 208; gy_be.bytes[27] = 143;
+    gy_be.bytes[28] = 177; gy_be.bytes[29] = 16; gy_be.bytes[30] = 212; gy_be.bytes[31] = 184;
+
+    let gy_bn = state_new(Bn256Ctx);
+    be32_to_bn256(gy_bn, gy_be);
+
+    // two_y = 2 * gy
+    let two_y = state_new(Bn256Ctx);
+    bn256_copy(two_y, gy_bn);
+    bn256_mod_add(two_y, two_y, gy_bn, p_bn);  // 2*gy
+
+    // two_y_inv = two_y^(-1) mod p
+    let two_y_inv = state_new(Bn256Ctx);
+    bn256_mod_inv_fermat(two_y_inv, two_y, p_bn);
+
+    // Print two_y and two_y_inv
+    let ty_be = state_new(B32);
+    let tyi_be = state_new(B32);
+    bn256_to_be32(ty_be, two_y);
+    bn256_to_be32(tyi_be, two_y_inv);
+
+    // Print two_y
+    let i: u32 = 0;
+    while i < 32 { print_int(1000 + (ty_be.bytes[i] as u32)); i = i + 1; }
+    print_int(999);
+    // Print two_y_inv
+    i = 0;
+    while i < 32 { print_int(1000 + (tyi_be.bytes[i] as u32)); i = i + 1; }
+    print_int(999);
+    return 0;
+}

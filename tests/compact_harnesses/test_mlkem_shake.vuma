@@ -1,0 +1,28 @@
+import "/home/z/my-project/workdir/vuma/womb/crypto/post_quantum/ml_kem.vuma"::{MlKemBuf, mlkem_shake256, mlkem_shake128};
+
+transform main() -> i32 {
+    let src = state_new(MlKemBuf);
+    let dst = state_new(MlKemBuf);
+
+    // Test 1: SHAKE-256(empty, 32 bytes)
+    // Expected: 714dca19d3b12c98... (Python: hashlib.shake_256(b"").digest(32))
+    mlkem_shake256(src, 0, dst, 32);
+    let i: u32 = 0;
+    while i < 32 { print_int(1000 + (dst.bytes[i] as u32)); i = i + 1; }
+    print_int(999);
+
+    // Test 2: SHAKE-256("abc", 32 bytes)
+    src.bytes[0] = 97; src.bytes[1] = 98; src.bytes[2] = 99;
+    mlkem_shake256(src, 3, dst, 32);
+    i = 0;
+    while i < 32 { print_int(1000 + (dst.bytes[i] as u32)); i = i + 1; }
+    print_int(999);
+
+    // Test 3: SHAKE-128(empty, 32 bytes)
+    mlkem_shake128(src, 0, dst, 32);
+    i = 0;
+    while i < 32 { print_int(1000 + (dst.bytes[i] as u32)); i = i + 1; }
+    print_int(999);
+
+    return 0;
+}

@@ -1,0 +1,46 @@
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_set_u32, bn256_zero};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/secp256k1.vuma"::{B32, secp256k1_scalar_mul_bn, secp256k1_p, secp256k1_gx, secp256k1_gy, be32_to_bn256, bn256_to_be32};
+
+transform do_mul(k_val: u32, rx_be: State<B32>, ry_be: State<B32>) {
+    let k = state_new(Bn256Ctx);
+    bn256_set_u32(k, k_val);
+    let p_be = state_new(B32);
+    let gx_be = state_new(B32);
+    let gy_be = state_new(B32);
+    secp256k1_p(p_be);
+    secp256k1_gx(gx_be);
+    secp256k1_gy(gy_be);
+    let p_bn = state_new(Bn256Ctx);
+    let gx_bn = state_new(Bn256Ctx);
+    let gy_bn = state_new(Bn256Ctx);
+    be32_to_bn256(p_bn, p_be);
+    be32_to_bn256(gx_bn, gx_be);
+    be32_to_bn256(gy_bn, gy_be);
+    let rx = state_new(Bn256Ctx);
+    let ry = state_new(Bn256Ctx);
+    secp256k1_scalar_mul_bn(rx, ry, k, gx_bn, gy_bn, p_bn);
+    bn256_to_be32(rx_be, rx);
+    bn256_to_be32(ry_be, ry);
+}
+
+transform print_be32(label: u32, b: State<B32>) {
+    print_int(label);
+    let i: u32 = 0;
+    while i < 32 { print_int(1000 + (b.bytes[i] as u32)); i = i + 1; }
+    print_int(999);
+}
+
+transform main() -> i32 {
+    let rx = state_new(B32);
+    let ry = state_new(B32);
+    do_mul(2, rx, ry);
+    print_be32(1002, rx);
+    print_be32(1102, ry);
+    do_mul(3, rx, ry);
+    print_be32(1003, rx);
+    print_be32(1103, ry);
+    do_mul(5, rx, ry);
+    print_be32(1005, rx);
+    print_be32(1105, ry);
+    return 0;
+}

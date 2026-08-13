@@ -1,0 +1,41 @@
+import "/home/z/my-project/workdir/vuma/womb/crypto/bignum/bignum.vuma"::{Bn256Ctx, bn256_set_u32, bn256_zero, bn256_mod_inv, bn256_mod_mul, bn256_copy};
+import "/home/z/my-project/workdir/vuma/womb/crypto/asym/secp256k1.vuma"::{B32, secp256k1_n, be32_to_bn256, bn256_to_be32};
+
+transform main() -> i32 {
+    let n_be = state_new(B32);
+    secp256k1_n(n_be);
+    let n_bn = state_new(Bn256Ctx);
+    be32_to_bn256(n_bn, n_be);
+
+    let k_be = state_new(B32);
+    k_be.bytes[0] = 83; k_be.bytes[1] = 20; k_be.bytes[2] = 53; k_be.bytes[3] = 86;
+    k_be.bytes[4] = 219; k_be.bytes[5] = 29; k_be.bytes[6] = 215; k_be.bytes[7] = 15;
+    k_be.bytes[8] = 99; k_be.bytes[9] = 115; k_be.bytes[10] = 172; k_be.bytes[11] = 164;
+    k_be.bytes[12] = 15; k_be.bytes[13] = 42; k_be.bytes[14] = 173; k_be.bytes[15] = 53;
+    k_be.bytes[16] = 242; k_be.bytes[17] = 127; k_be.bytes[18] = 41; k_be.bytes[19] = 177;
+    k_be.bytes[20] = 11; k_be.bytes[21] = 118; k_be.bytes[22] = 25; k_be.bytes[23] = 27;
+    k_be.bytes[24] = 53; k_be.bytes[25] = 134; k_be.bytes[26] = 126; k_be.bytes[27] = 98;
+    k_be.bytes[28] = 209; k_be.bytes[29] = 53; k_be.bytes[30] = 153; k_be.bytes[31] = 161;
+
+    let k_bn = state_new(Bn256Ctx);
+    be32_to_bn256(k_bn, k_be);
+
+    let k_inv = state_new(Bn256Ctx);
+    bn256_mod_inv(k_inv, k_bn, n_bn);
+
+    let prod = state_new(Bn256Ctx);
+    bn256_mod_mul(prod, k_bn, k_inv, n_bn);
+
+    let ki_be = state_new(B32);
+    let prod_be = state_new(B32);
+    bn256_to_be32(ki_be, k_inv);
+    bn256_to_be32(prod_be, prod);
+
+    let i: u32 = 0;
+    while i < 32 { print_int(1000 + (ki_be.bytes[i] as u32)); i = i + 1; }
+    print_int(999);
+    i = 0;
+    while i < 32 { print_int(1000 + (prod_be.bytes[i] as u32)); i = i + 1; }
+    print_int(999);
+    return 0;
+}

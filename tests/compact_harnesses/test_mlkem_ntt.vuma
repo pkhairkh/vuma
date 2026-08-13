@@ -1,0 +1,25 @@
+import "/home/z/my-project/workdir/vuma/womb/crypto/post_quantum/ml_kem.vuma"::{MlKemBuf, ntt_at};
+
+transform main() -> i32 {
+    let buf = state_new(MlKemBuf);
+    let i: u32 = 0;
+    while i < 256 {
+        let off = i * 4;
+        let v = i;
+        buf.bytes[off] = (v & 255) as u8;
+        buf.bytes[off + 1] = ((v >> 8) & 255) as u8;
+        buf.bytes[off + 2] = 0;
+        buf.bytes[off + 3] = 0;
+        i = i + 1;
+    }
+    ntt_at(buf, 0);
+    i = 0;
+    while i < 8 {
+        let off = i * 4;
+        let v = (buf.bytes[off] as u32) | ((buf.bytes[off + 1] as u32) << 8) | ((buf.bytes[off + 2] as u32) << 16) | ((buf.bytes[off + 3] as u32) << 24);
+        print_int(1000 + v);
+        i = i + 1;
+    }
+    print_int(999);
+    return 0;
+}
