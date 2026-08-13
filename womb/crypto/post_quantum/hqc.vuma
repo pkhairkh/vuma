@@ -350,10 +350,28 @@ transform hqc_decode_message_at(m_enc: State<HqcBuf>, m_enc_base: u32,
 // SHAKE-256 PRG wrapper.
 // ===========================================================================
 
-// Wrapper for hqc_prg_at with fixed seed_base=0, seed_len=32 (4 params — safe).
+// SHAKE-256 PRG with fixed seed_base=0, seed_len=32 (4 params — safe).
 transform hqc_prg_at_32(seed: State<HqcBuf>, counter: u32,
                         out: State<HqcBuf>, out_len: u32) {
-    hqc_prg_at(seed, 0, 32, counter, out, 0, out_len);
+    let kin = state_new(KeccakIn);
+    let kout = state_new(KeccakOut);
+    let ctx = state_new(KeccakCtx);
+    shake256_init(ctx);
+    let k: u32 = 0;
+    while k < 200 { kin.data[k] = 0; k = k + 1; }
+    k = 0;
+    while k < 32 { kin.data[k] = seed.bytes[k]; k = k + 1; }
+    shake256_update(ctx, kin, 32);
+    let k2: u32 = 0;
+    while k2 < 4 { kin.data[k2] = 0; k2 = k2 + 1; }
+    kin.data[0] = (counter & 255) as u8;
+    kin.data[1] = ((counter >> 8) & 255) as u8;
+    kin.data[2] = ((counter >> 16) & 255) as u8;
+    kin.data[3] = ((counter >> 24) & 255) as u8;
+    shake256_update(ctx, kin, 4);
+    shake256_squeeze(ctx, kout, out_len);
+    let i: u32 = 0;
+    while i < out_len { out.bytes[i] = kout.data[i]; i = i + 1; }
 }
 
 transform hqc_prg_at(seed: State<HqcBuf>, seed_base: u32, seed_len: u32,
