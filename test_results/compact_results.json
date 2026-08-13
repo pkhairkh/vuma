@@ -2043,5 +2043,10 @@
     "status": "PARTIAL",
     "pass": 0,
     "total": 20
+  },
+  "ecdsa_p256|x86_64": {
+    "status": "PASS",
+    "pass": 20,
+    "total": 20
   }
 }

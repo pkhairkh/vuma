@@ -69,76 +69,6 @@
     "total": 1,
     "status_flag": "TOUT"
   },
-  "ecdsa_p256|x86_64|b0": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "PARTIAL"
-  },
-  "ecdsa_p256|x86_64|b1": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "PARTIAL"
-  },
-  "ecdsa_p256|x86_64|b2": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "PARTIAL"
-  },
-  "ecdsa_p256|x86_64|b3": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "PARTIAL"
-  },
-  "ecdsa_p256|x86_64|b4": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "PARTIAL"
-  },
-  "ecdsa_p256|x86_64|b5": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "PARTIAL"
-  },
-  "ecdsa_p256|x86_64|b6": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "PARTIAL"
-  },
-  "ecdsa_p256|x86_64|b7": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "PARTIAL"
-  },
-  "ecdsa_p256|x86_64|b8": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "PARTIAL"
-  },
-  "ecdsa_p256|x86_64|b9": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "PARTIAL"
-  },
-  "ecdsa_p256|x86_64|b10": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "PARTIAL"
-  },
-  "ecdsa_p256|x86_64|b11": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "PARTIAL"
-  },
-  "ecdsa_p256|x86_64|b12": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "PARTIAL"
-  },
-  "ecdsa_p256|x86_64|b13": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "PARTIAL"
-  },
   "hqc|x86_64|b0": {
     "pass": 0,
     "total": 1,
@@ -338,5 +268,105 @@
     "pass": 0,
     "total": 1,
     "status_flag": "PARTIAL"
+  },
+  "ecdsa_p256|x86_64|b0": {
+    "pass": 1,
+    "total": 1,
+    "status_flag": "PASS"
+  },
+  "ecdsa_p256|x86_64|b1": {
+    "pass": 1,
+    "total": 1,
+    "status_flag": "PASS"
+  },
+  "ecdsa_p256|x86_64|b2": {
+    "pass": 1,
+    "total": 1,
+    "status_flag": "PASS"
+  },
+  "ecdsa_p256|x86_64|b3": {
+    "pass": 1,
+    "total": 1,
+    "status_flag": "PASS"
+  },
+  "ecdsa_p256|x86_64|b4": {
+    "pass": 1,
+    "total": 1,
+    "status_flag": "PASS"
+  },
+  "ecdsa_p256|x86_64|b5": {
+    "pass": 1,
+    "total": 1,
+    "status_flag": "PASS"
+  },
+  "ecdsa_p256|x86_64|b6": {
+    "pass": 1,
+    "total": 1,
+    "status_flag": "PASS"
+  },
+  "ecdsa_p256|x86_64|b7": {
+    "pass": 1,
+    "total": 1,
+    "status_flag": "PASS"
+  },
+  "ecdsa_p256|x86_64|b8": {
+    "pass": 1,
+    "total": 1,
+    "status_flag": "PASS"
+  },
+  "ecdsa_p256|x86_64|b9": {
+    "pass": 1,
+    "total": 1,
+    "status_flag": "PASS"
+  },
+  "ecdsa_p256|x86_64|b10": {
+    "pass": 1,
+    "total": 1,
+    "status_flag": "PASS"
+  },
+  "ecdsa_p256|x86_64|b11": {
+    "pass": 1,
+    "total": 1,
+    "status_flag": "PASS"
+  },
+  "ecdsa_p256|x86_64|b12": {
+    "pass": 1,
+    "total": 1,
+    "status_flag": "PASS"
+  },
+  "ecdsa_p256|x86_64|b13": {
+    "pass": 1,
+    "total": 1,
+    "status_flag": "PASS"
+  },
+  "ecdsa_p256|x86_64|b14": {
+    "pass": 1,
+    "total": 1,
+    "status_flag": "PASS"
+  },
+  "ecdsa_p256|x86_64|b15": {
+    "pass": 1,
+    "total": 1,
+    "status_flag": "PASS"
+  },
+  "ecdsa_p256|x86_64|b16": {
+    "pass": 1,
+    "total": 1,
+    "status_flag": "PASS"
+  },
+  "ecdsa_p256|x86_64|b17": {
+    "pass": 1,
+    "total": 1,
+    "status_flag": "PASS"
+  },
+  "ecdsa_p256|x86_64|b18": {
+    "pass": 1,
+    "total": 1,
+    "status_flag": "PASS"
+  },
+  "ecdsa_p256|x86_64|b19": {
+    "pass": 1,
+    "total": 1,
+    "status_flag": "PASS"
   }
 }
