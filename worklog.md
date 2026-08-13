@@ -407,3 +407,23 @@ Stage Summary:
 - Remaining x86_64 work: ecdsa_p384 (logic bug), ml_dsa (arena overflow),
   hqc (logic bug), slh_dsa/falcon/Ed448/P-521 (need full implementations)
 - Waves 5-9 (backend fixes, full matrix, final report): not started.
+
+---
+Task ID: WAVE-A
+Agent: Super Z (orchestrator)
+Task: Wave A - Hash modules line-by-line comparison vs reference implementations.
+
+Work Log:
+- Verified environment: pycryptodome 3.23.0, cryptography 50.0.0, argon2-cffi 25.1.0, blake3 1.0.9, pqcrypto 0.4.0 all installed.
+- For each of 8 hash modules (sha1, sha256_sha224, sha384, sha512, md5, sha3, blake2, blake3):
+  1. Recomputed ALL 20 vectors per module using Python reference (hashlib for sha1/sha256/sha224/sha384/sha512/md5/sha3_256/sha3_512/blake2b/blake2s, blake3 library for blake3).
+  2. ALL 160 recomputed references MATCH the JSON vector expected_hex.
+  3. Compiled + ran each VUMA harness (4-7 per module, 5 vectors each = 20 vectors/module).
+  4. Compared VUMA output bytes against expected_hex.
+- Wave A result: 160/160 vectors PASS across all 8 hash modules.
+
+Stage Summary:
+- Wave A COMPLETE: all 8 hash modules 20/20 PASS on x86_64.
+- Modules verified: sha1, sha256_sha224, sha384, sha512, md5, sha3, blake2, blake3.
+- Reference libs: hashlib (built-in), blake3 (pip 1.0.9).
+- Compact_results.json updated.
