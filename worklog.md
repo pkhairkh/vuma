@@ -207,3 +207,158 @@ Stage Summary:
   3. Vector/harness mismatch (deterministic RFC 6979)
 - Next: validate ecdsa_p384, secp256k1 (same fixes should apply)
 - Next: work on ml_kem, ml_dsa, hqc (Waves B, D, E)
+
+---
+Task ID: 1.1
+Agent: general-purpose (Wave 1.1 — secp256k1 Montgomery bug isolation)
+Task: Isolate why bn256_mod_inv_fermat fails for secp256k1 n
+
+Work Log:
+- Read /home/z/my-project/worklog.md and /work/vuma/worklog.md.
+- Downloaded womb/crypto/bignum/bignum.vuma (831 lines). Identified the Montgomery
+  chain: bn256_mod_exp (L482) -> bn256_mont_mu (L560), bn256_mont_r2 (L582),
+  bn256_mont_mul (L726) -> bn256_mont_reduce (L611).
+- Created test_bn_mod_exp_debug.vuma: for each of 4 moduli (P-256 p, P-256 n,
+  secp256k1 p, secp256k1 n), emit mu, r2 = 2^512 mod m, inv = 12345^(m-2) mod m,
+  and rt = round-trip(mont_mul(mont_mul(a, r2), 1)).
+- Ran on x86_64. Results:
+    P-256 p:       mu OK, r2 OK, inv OK, rt=12345 OK
+    P-256 n:       mu OK, r2 OK, inv OK, rt=12345 OK
+    secp256k1 p:   mu OK, r2 OK, inv OK, rt=12345 OK
+    secp256k1 n:   mu WRONG, r2 WRONG, inv WRONG, rt=12345 OK  <-- ONLY THIS FAILS
+- Initial hypothesis: bug in bn256_mont_mu or bn256_mont_r2 for secp256k1 n.
+- Created test_bn_mont_mu_trace.vuma: traced Newton iteration for secp256k1 n's
+  m0 = 0xbfd25e8cd0364141 IN ISOLATION. All 6 iterations match Python exactly.
+  bn256_mont_mu produces CORRECT mu = 0x4b0dff665588b13f. So bn256_mont_mu is NOT buggy.
+- Created test_mu_minimal.vuma: tested 5 paths to m0:
+    A. Build m0 directly with shifts (191,210,94,140,208,54,65,65):
+       m0 = 0xbfd25e8cd0364141 (CORRECT), mu = 0x4b0dff665588b13f (CORRECT)
+    B. secp256k1_n() + be32_to_bn256():
+       m0 = 0xbf25e8cd03641441 (WRONG!), mu = 0x62b68fabde8e043f (wrong)
+    C-E. After prior Montgomery work: same WRONG m0 as B.
+  => The bug is in secp256k1_n() or be32_to_bn256(), NOT in bn256_mont_mu.
+- Created test_secp_n_bytes.vuma: printed all 32 bytes of m_be after:
+    A. secp256k1_n(m_be):             last8 = bf 25 e8 cd 03 64 14 41 (WRONG)
+    B. Inline CORRECT bytes:          last8 = bf d2 5e 8c d0 36 41 41 (CORRECT)
+    C. Inline WRONG/source bytes:     last8 = bf 25 e8 cd 03 64 14 41 (matches A)
+  => VUMA codegen is NOT corrupting bytes. secp256k1_n() source has WRONG values.
+- Created test_secp_n_fixed.vuma: used CORRECT secp256k1 n bytes inline (bypassing
+  the buggy secp256k1_n()). Result: mu OK, r2 OK, inv OK, rt=12345 OK — ALL CORRECT.
+  This PROVES fixing the 6 wrong bytes fixes the entire chain.
+- Verified with the task's test vector:
+    pow(k, CORRECT_N - 2, CORRECT_N) = 0x99faa3a2...35553c1  (matches EXPECTED)
+    pow(k, WRONG_N   - 2, WRONG_N)   = 0x5896621e...34d5e839  (matches VUMA output)
+    k * vuma_output mod WRONG_N       = 0xdbae635e...76eb6e62  (matches task's "k*k_inv mod n")
+  => VUMA is computing k^(-1) mod WRONG_N, not mod CORRECT_N.
+- Confirmed WRONG_N is NOT prime (CORRECT_N is prime). This is why Fermat's little
+  theorem fails: k^(WRONG_N-2) mod WRONG_N != k^(-1) mod WRONG_N, so k*k_inv mod WRONG_N != 1.
+
+Stage Summary:
+- ROOT CAUSE: secp256k1_n() in /work/vuma/womb/crypto/asym/secp256k1.vuma (lines 49-50)
+  has WRONG byte values for positions 25-30:
+    bytes[25] =  37  (should be 210 = 0xd2)
+    bytes[26] = 232  (should be  94 = 0x5e)
+    bytes[27] = 205  (should be 140 = 0x8c)
+    bytes[28] =   3  (should be 208 = 0xd0)
+    bytes[29] = 100  (should be  54 = 0x36)
+    bytes[30] =  20  (should be  65 = 0x41)
+  This stores n as 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbf25e8cd03641441
+  instead of the correct 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141.
+  The difference is 0xac75bfccd22d00. The wrong bytes are exactly
+  (correct_bytes[25..31] << 4) | (correct_byte[31] >> 4) as a 48-bit op — likely a
+  transcription/encoding error when the constant was originally entered.
+- The bug is NOT in bignum.vuma: bn256_mont_mu, bn256_mont_r2, bn256_mont_mul,
+  bn256_mont_reduce, bn256_mod_exp, bn256_mod_inv_fermat are ALL correct (verified
+  by test_secp_n_fixed.vuma which uses correct n bytes inline and passes all checks).
+- secp256k1_p (field prime) has CORRECT bytes — that's why point operations
+  (k*G, point doubling) work but signature verification (which uses n) fails.
+- The round-trip (rt=12345) works even with wrong n because Montgomery arithmetic
+  is self-consistent: mu, r2, and the modulus are all derived from the same wrong n,
+  so a*R*R^(-1) = a still holds. But the modular inverse is computed mod WRONG_n.
+- Proposed fix (for Task 1.2): In secp256k1_n(), change lines 49-50 from:
+    out.bytes[24] = 191; out.bytes[25] =  37; out.bytes[26] = 232; out.bytes[27] = 205;
+    out.bytes[28] =   3; out.bytes[29] = 100; out.bytes[30] =  20; out.bytes[31] =  65;
+  to:
+    out.bytes[24] = 191; out.bytes[25] = 210; out.bytes[26] =  94; out.bytes[27] = 140;
+    out.bytes[28] = 208; out.bytes[29] =  54; out.bytes[30] =  65; out.bytes[31] =  65;
+- Committed 5 test harnesses as fce5e316.
+
+---
+Task ID: 1.3
+Agent: general-purpose (Wave 1.3 — secp256k1 vector regen + x86_64 validation)
+Task: Regenerate secp256k1 vectors after Task 1.2's secp256k1_n fix and validate 20/20 on x86_64.
+
+Work Log:
+- Read /home/z/my-project/worklog.md and downloaded /work/vuma/worklog.md.
+- Confirmed HEAD = ad298d40 ("fix(secp256k1): correct n constant"). Verified
+  secp256k1.vuma lines 49-50 now contain the CORRECT n bytes (25=210, 26=94,
+  27=140, 28=208, 29=54, 30=65, 31=65) — i.e. n = 0xffffffff...bbfd25e8cd0364141.
+- Deleted /tmp/vuma_compact_val/secp256k1_*.bin to force fresh recompiles.
+- Step 1 — Ran all 20 secp256k1 harnesses in parallel:
+    * Wrote /tmp/batch_secp_parallel.sh that (a) recompiles all 20 binaries in
+      parallel with /work/vuma/target/release/compile_dump, (b) runs all 20
+      binaries in parallel with `timeout 600`.
+    * Wall time: ~1s for all 20 runs (each binary completes in well under 1s).
+      Note: Task 1.1's worklog said harnesses took 60-120s; that was BEFORE the
+      n-constant fix — when the modular inverse diverged into infinite loops /
+      timeouts. With the fix, secp256k1_sign completes in milliseconds.
+    * Captured /tmp/secp_b{0..19}.out (each 328 bytes: 32 r bytes, 999, 32 s
+      bytes, 999, one value per line).
+- Step 2 — Parsed outputs with /tmp/parse_all_secp.py: each line is an int in
+  [1000, 1255]; subtracted 1000 to get a byte. Constructed r_hex (32 bytes) +
+  s_hex (32 bytes) = 128-char hex string per harness. Saved to /tmp/secp_results.json.
+- Step 2b — First verification attempt: 0/20 VALID using msg_hex + priv_hex from
+  the EXISTING (stale) vector file. Root cause: the old vector file had
+    * msg_hex = "ecdsa test 0" (12 bytes) — WRONG
+    * priv_hex = e6fdcb4f... — WRONG (did not match the harness's privkey bytes)
+  The harnesses actually use:
+    * msg = "secp256k1 test 0" (16 bytes for b0-b9, 17 bytes for b10-b19)
+    * privkey = 47b108f9ed5fbd3f... (extracted from harness source)
+- Step 2c — Wrote /tmp/extract_harness_bytes.py to regex-extract the actual
+  msg.bytes[i]=N, privkey.bytes[i]=N, and the secp256k1_sign(msg, N, ...) length
+  from each harness. Re-verified with the correct msg/priv: **20/20 VALID**.
+  Computed pub_x_hex / pub_y_hex via cryptography's derive_private_key +
+  public_numbers. Saved full new vector file to
+  /home/z/my-project/scripts/secp256k1_new.json.
+- Step 3 — Uploaded the new secp256k1.json (20 vectors, each with desc, priv_hex,
+  pub_x_hex, pub_y_hex, msg_hex, r_hex, s_hex, expected_hex) to
+  /work/vuma/test_results/standard_vectors/secp256k1.json.
+- Step 4 — Cleared cached detail entries:
+    `python3 scripts/validate_compact.py --clear secp256k1 x86_64`
+  (cleared 20 harness results).
+- Step 5 — Started detached validation:
+    nohup python3 scripts/validate_compact.py secp256k1 x86_64 > /tmp/secp_val.log 2>&1 &
+  PID=209950. Each harness: recompiled (since cached bins were deleted) and ran
+  (~30s per harness — mostly compile time; runs are sub-second).
+- Step 6 — Polled detail file every ~90s. Progression:
+    1 min: 1/20 (b0)
+    2.5 min: 5/20 (b0..b4)
+    4.5 min: 9/20 (b0..b8)
+    6 min: 12/20 (b0..b9, b10, b11)
+    ~7 min: 20/20 (all done)
+  Final log:
+    [5/20] secp256k1|x86_64: 5/5 so far
+    [10/20] secp256k1|x86_64: 10/10 so far
+    [15/20] secp256k1|x86_64: 15/15 so far
+    [20/20] secp256k1|x86_64: 20/20 so far
+    [1/1] secp256k1|x86_64: 20/20
+    Elapsed: 411s
+- Final state in compact_results.json:
+    "secp256k1|x86_64": {"status": "PASS", "pass": 20, "total": 20}
+  DoD MET: secp256k1|x86_64: 20/20 PASS.
+
+Stage Summary:
+- The secp256k1_n fix (commit ad298d40) is CONFIRMED working end-to-end: all 20
+  RFC-6979 deterministic ECDSA signatures produced by VUMA verify against the
+  reference Python cryptography library on the secp256k1 curve.
+- BONUS FIX: the old /work/vuma/test_results/standard_vectors/secp256k1.json
+  had STALE/Wrong msg_hex ("ecdsa test 0" instead of "secp256k1 test 0") and
+  wrong priv_hex values — they didn't match the harnesses. Replaced all 20
+  vector entries with the actual harness values + verified r/s + computed
+  pub_x_hex/pub_y_hex.
+- Wave 1 (secp256k1 on x86_64) is now COMPLETE (20/20 PASS).
+- Files modified:
+    * test_results/standard_vectors/secp256k1.json (regenerated, 20 vectors)
+    * test_results/compact_results.json (secp256k1|x86_64: TOUT 0/20 -> PASS 20/20)
+    * test_results/compact_results_detail.json (20 b* entries all PASS 1/1)
+
