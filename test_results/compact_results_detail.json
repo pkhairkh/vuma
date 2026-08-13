@@ -2588,5 +2588,20 @@
     "pass": 1,
     "total": 1,
     "status_flag": "PASS"
+  },
+  "ml_kem|x86_64|b14": {
+    "pass": 1,
+    "total": 1,
+    "status_flag": "PASS"
+  },
+  "ml_dsa|x86_64|b0": {
+    "pass": 0,
+    "total": 1,
+    "status_flag": "PARTIAL"
+  },
+  "ml_dsa|x86_64|b1": {
+    "pass": 0,
+    "total": 1,
+    "status_flag": "PARTIAL"
   }
 }
