@@ -19,31 +19,6 @@
     "total": 5,
     "status_flag": "PASS"
   },
-  "ml_kem|x86_64|b0": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "PARTIAL"
-  },
-  "ml_kem|x86_64|b1": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "PARTIAL"
-  },
-  "ml_kem|x86_64|b2": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "PARTIAL"
-  },
-  "ml_kem|x86_64|b3": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "PARTIAL"
-  },
-  "ml_kem|x86_64|b4": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "PARTIAL"
-  },
   "sha256_sha224|x86_64|b0": {
     "pass": 5,
     "total": 5,
@@ -369,19 +344,14 @@
     "total": 1,
     "status_flag": "PASS"
   },
-  "ml_kem|x86_64|b5": {
+  "secp256k1|x86_64|b0": {
     "pass": 0,
     "total": 1,
-    "status_flag": "PARTIAL"
+    "status_flag": "TOUT"
   },
-  "ml_kem|x86_64|b6": {
+  "secp256k1|x86_64|b1": {
     "pass": 0,
     "total": 1,
-    "status_flag": "PARTIAL"
-  },
-  "ml_kem|x86_64|b7": {
-    "pass": 0,
-    "total": 1,
-    "status_flag": "PARTIAL"
+    "status_flag": "TOUT"
   }
 }
