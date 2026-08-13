@@ -464,3 +464,34 @@ Stage Summary:
 - Waves C, D, E COMPLETE: all 16 modules 20/20 (or as appropriate) PASS on x86_64.
 - Reference libs: pycryptodome 3.23.0, argon2-cffi 25.1.0, hashlib (built-in).
 - Compact_results.json updated.
+
+---
+Task ID: WAVE-FGH (partial)
+Agent: Super Z (orchestrator)
+Task: Waves F, G, H - RSA, ECC, PQ modules line-by-line comparison.
+
+Work Log:
+- Wave F (RSA): 2 modules (rsa, rsa_oaep_pss) - 40/40 PASS vs pycryptodome
+  Note: rsa_pkcs1_ecdsa_extra has no harnesses - skipped
+- Wave G (ECC): 6 modules
+  - ed25519: 20/20 PASS (vs cryptography Ed25519)
+  - x25519: 20/20 PASS (vs cryptography X25519)
+  - secp256k1: 20/20 PASS (vs cryptography secp256k1)
+  - ecdsa_p256: 4/20 PASS (some harnesses still running, will re-verify)
+  - ecdh_p256: 6/20 PASS (still running)
+  - ecdsa_p384: 0/20 PASS (logic bug in point_double_bn - needs debugging)
+- Wave H (PQ): 5 modules
+  - ml_kem: 1/20 PASS (still running, harnesses take 30s each)
+  - ml_dsa: 0/20 PASS (still running, also arena overflow issue)
+  - falcon: 0/20 PASS (verify returns 0 instead of 1 - needs NTT impl)
+  - hqc: 0/20 PASS (still running)
+  - slh_dsa: 0/20 PASS (verify returns 0 - needs full FIPS 205 impl)
+
+Stage Summary:
+- 4 modules fully verified (20/20): rsa, rsa_oaep_pss, ed25519, x25519, secp256k1 = 100/100 vectors
+- 5 modules still in progress: ecdh_p256, ecdsa_p256, ml_kem, ml_dsa, hqc
+- 4 modules have known issues requiring deeper work:
+  - ecdsa_p384: logic bug in bn384_mod_inv path
+  - falcon: needs NTT + decompression + hash-to-point implementation
+  - slh_dsa: needs full WOTS+/FORS/hypertree implementation
+  - ml_dsa: arena overflow in verify
