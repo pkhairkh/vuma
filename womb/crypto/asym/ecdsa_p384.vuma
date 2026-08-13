@@ -502,7 +502,7 @@ transform p384_point_double_bn(rx: State<Bn384Ctx>, ry: State<Bn384Ctx>, px: Sta
     bn384_mod_add(t2, t2, a_val, p_bn);
 
     bn384_mod_add(t3, py, py, p_bn);
-    bn384_mod_inv(t3_inv, t3, p_bn);
+    bn384_mod_inv_fermat(t3_inv, t3, p_bn);
     bn384_mod_mul(slope, t2, t3_inv, p_bn);
 
     bn384_mod_mul(slope_sq, slope, slope, p_bn);
