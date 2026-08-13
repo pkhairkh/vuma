@@ -585,8 +585,8 @@
     "total": 20
   },
   "argon2|x86_64": {
-    "status": "PASS",
-    "pass": 20,
+    "status": "PARTIAL",
+    "pass": 18,
     "total": 20
   },
   "ed25519|x86_64": {
