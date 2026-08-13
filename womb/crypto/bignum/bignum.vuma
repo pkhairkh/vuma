@@ -450,7 +450,7 @@ transform bn256_mod_inv_fermat(r: State<Bn256Ctx>, a: State<Bn256Ctx>, m: State<
             if i >= 4 { break; }
             let cur = exp.limbs[i];
             if cur == 0 {
-                exp.limbs[i] = 18446744073709551614;  // 2^64 - 2
+                exp.limbs[i] = ~1;  // 2^64 - 2 (bitwise NOT of 1)
                 // continue borrowing
             } else {
                 exp.limbs[i] = cur - 1;
