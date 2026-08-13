@@ -180,13 +180,13 @@
     "total": 20
   },
   "ecdh_p256|x86_64": {
-    "status": "PARTIAL",
-    "pass": 6,
+    "status": "PASS",
+    "pass": 20,
     "total": 20
   },
   "ecdsa_p256|x86_64": {
-    "status": "PARTIAL",
-    "pass": 4,
+    "status": "PASS",
+    "pass": 20,
     "total": 20
   },
   "secp256k1|x86_64": {
@@ -201,7 +201,7 @@
   },
   "ml_kem|x86_64": {
     "status": "PARTIAL",
-    "pass": 1,
+    "pass": 18,
     "total": 20
   },
   "ecdsa_p384|x86_64": {
