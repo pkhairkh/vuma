@@ -20,50 +20,44 @@ transform main() -> i32 {
     msg.bytes[9] = 116;
     msg.bytes[10] = 32;
     msg.bytes[11] = 52;
-    privkey.bytes[0] = 157;
-    privkey.bytes[1] = 51;
-    privkey.bytes[2] = 119;
-    privkey.bytes[3] = 75;
-    privkey.bytes[4] = 253;
-    privkey.bytes[5] = 191;
-    privkey.bytes[6] = 14;
-    privkey.bytes[7] = 28;
-    privkey.bytes[8] = 52;
-    privkey.bytes[9] = 208;
-    privkey.bytes[10] = 217;
-    privkey.bytes[11] = 21;
-    privkey.bytes[12] = 110;
+    privkey.bytes[0] = 68;
+    privkey.bytes[1] = 193;
+    privkey.bytes[2] = 173;
+    privkey.bytes[3] = 49;
+    privkey.bytes[4] = 223;
+    privkey.bytes[5] = 23;
+    privkey.bytes[6] = 243;
+    privkey.bytes[7] = 58;
+    privkey.bytes[8] = 234;
+    privkey.bytes[9] = 210;
+    privkey.bytes[10] = 241;
+    privkey.bytes[11] = 167;
+    privkey.bytes[12] = 28;
     privkey.bytes[13] = 117;
-    privkey.bytes[14] = 247;
-    privkey.bytes[15] = 13;
-    privkey.bytes[16] = 254;
-    privkey.bytes[17] = 172;
-    privkey.bytes[18] = 133;
-    privkey.bytes[19] = 231;
-    privkey.bytes[20] = 121;
-    privkey.bytes[21] = 106;
-    privkey.bytes[22] = 191;
-    privkey.bytes[23] = 64;
-    privkey.bytes[24] = 240;
-    privkey.bytes[25] = 157;
-    privkey.bytes[26] = 61;
-    privkey.bytes[27] = 139;
-    privkey.bytes[28] = 97;
-    privkey.bytes[29] = 207;
-    privkey.bytes[30] = 76;
-    privkey.bytes[31] = 37;
+    privkey.bytes[14] = 169;
+    privkey.bytes[15] = 14;
+    privkey.bytes[16] = 113;
+    privkey.bytes[17] = 35;
+    privkey.bytes[18] = 177;
+    privkey.bytes[19] = 178;
+    privkey.bytes[20] = 195;
+    privkey.bytes[21] = 28;
+    privkey.bytes[22] = 180;
+    privkey.bytes[23] = 51;
+    privkey.bytes[24] = 219;
+    privkey.bytes[25] = 229;
+    privkey.bytes[26] = 148;
+    privkey.bytes[27] = 210;
+    privkey.bytes[28] = 16;
+    privkey.bytes[29] = 164;
+    privkey.bytes[30] = 205;
+    privkey.bytes[31] = 81;
     ecdsa_p256_sign(msg, 12, privkey, r_out, s_out);
     let oi: u32 = 0;
-    while oi < 32 {
-        print_int(1000 + (r_out.bytes[oi] as u32));
-        oi = oi + 1;
-    }
+    while oi < 32 { print_int(1000 + (r_out.bytes[oi] as u32)); oi = oi + 1; }
     print_int(999);
-    let oi: u32 = 0;
-    while oi < 32 {
-        print_int(1000 + (s_out.bytes[oi] as u32));
-        oi = oi + 1;
-    }
+    oi = 0;
+    while oi < 32 { print_int(1000 + (s_out.bytes[oi] as u32)); oi = oi + 1; }
     print_int(999);
     return 0;
 }
