@@ -340,6 +340,10 @@ fn compile_for_backend_with_path(
     let t_irpipe_start = Instant::now();
     let ir_program = run_ir_pipeline(ir_program, &o3_config, kind, &secret_vars, &mut timings)
         .map_err(|e| format!("ir_pipeline: {:?}", e))?;
+    eprintln!("[TIMING] IR pipeline breakdown:");
+    for (name, ms) in &timings {
+        eprintln!("[TIMING]   {}: {}ms", name, ms);
+    }
     eprintln!("[TIMING] IR pipeline: {}ms", t_irpipe_start.elapsed().as_millis());
 
     let backend = create_backend(kind).map_err(|e| format!("backend: {}", e))?;
