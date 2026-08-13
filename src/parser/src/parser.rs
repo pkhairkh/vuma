@@ -2223,13 +2223,23 @@ impl<'src> Parser<'src> {
             TokenKind::Number => {
                 let lexeme = self.current.lexeme.clone();
                 self.advance();
-                let value: i64 = lexeme.parse().map_err(|_| {
-                    ParseError::new(
-                        format!("invalid integer literal: {}", lexeme),
-                        span,
-                        ParseErrorKind::UnexpectedToken,
-                    )
-                })?;
+                // Parse as u64 to support the full 0..=18446744073709551615
+                // range, then bitcast to i64 to preserve the exact bit pattern
+                // in the AST's `Lit::Int(i64)`. Values >= 2^63 become negative
+                // i64 with the correct low-64-bit pattern; codegen emits the
+                // raw 64 bits so u64 (and `as u64`) usage stays correct.
+                // (Previously `lexeme.parse::<i64>()` failed for >= 2^63,
+                //  silently truncating the literal to 0 / dropping the binding.)
+                let value: i64 = lexeme
+                    .parse::<u64>()
+                    .map(|v| v as i64)
+                    .map_err(|_| {
+                        ParseError::new(
+                            format!("invalid integer literal: {}", lexeme),
+                            span,
+                            ParseErrorKind::UnexpectedToken,
+                        )
+                    })?;
                 Ok(MatchPattern::Lit {
                     value: Lit::Int(value),
                     span,
@@ -3189,13 +3199,23 @@ impl<'src> Parser<'src> {
                 let lexeme = self.current.lexeme.clone();
                 let span = self.current.span;
                 self.advance();
-                let value: i64 = lexeme.parse().map_err(|_| {
-                    ParseError::new(
-                        format!("invalid integer literal: {}", lexeme),
-                        span,
-                        ParseErrorKind::UnexpectedToken,
-                    )
-                })?;
+                // Parse as u64 to support the full 0..=18446744073709551615
+                // range, then bitcast to i64 to preserve the exact bit pattern
+                // in the AST's `Lit::Int(i64)`. Values >= 2^63 become negative
+                // i64 with the correct low-64-bit pattern; codegen emits the
+                // raw 64 bits so u64 (and `as u64`) usage stays correct.
+                // (Previously `lexeme.parse::<i64>()` failed for >= 2^63,
+                //  silently truncating the literal to 0 / dropping the binding.)
+                let value: i64 = lexeme
+                    .parse::<u64>()
+                    .map(|v| v as i64)
+                    .map_err(|_| {
+                        ParseError::new(
+                            format!("invalid integer literal: {}", lexeme),
+                            span,
+                            ParseErrorKind::UnexpectedToken,
+                        )
+                    })?;
                 Ok(Expr::Lit {
                     value: Lit::Int(value),
                     span,
@@ -6210,6 +6230,43 @@ mod tests {
         assert!(program.items.len() >= 2);
         assert!(matches!(&program.items[0], Item::Const(_)));
         assert!(matches!(&program.items[1], Item::Const(_)));
+    }
+
+    // ---- Reg Test 13b: u64 literals >= 2^63 are not truncated (Task 3.1) ----
+    // Previously `lexeme.parse::<i64>()` failed for values >= i64::MAX,
+    // silently truncating to 0 / dropping the binding via error recovery.
+    // Now we parse as u64 and bitcast to i64, preserving the bit pattern.
+    #[test]
+    fn reg_u64_literal_full_range() {
+        // (expected u64 bit pattern, literal source text)
+        let cases: &[(u64, &str)] = &[
+            (0, "0"),
+            (1, "1"),
+            (255, "255"),
+            (9223372036854775807, "9223372036854775807"), // i64::MAX
+            (9223372036854775808, "9223372036854775808"), // 2^63
+            (18446744073709551614, "18446744073709551614"), // 2^64 - 2
+            (18446744073709551615, "18446744073709551615"), // 2^64 - 1
+        ];
+        for (want_u64, src) in cases {
+            let source = format!("const BIG: u64 = {};", src);
+            let mut parser = Parser::new(&source);
+            let program = parser.parse_program().expect("parse should succeed");
+            assert_eq!(program.items.len(), 1, "expected 1 item for literal {}", src);
+            match &program.items[0] {
+                Item::Const(c) => match &c.value {
+                    Expr::Lit { value: Lit::Int(n), .. } => {
+                        assert_eq!(
+                            *n as u64, *want_u64,
+                            "literal {} bit pattern mismatch: got i64={} (0x{:016X}), want 0x{:016X}",
+                            src, n, *n as u64, *want_u64
+                        );
+                    }
+                    other => panic!("expected Lit::Int for {}, got {:?}", src, other),
+                },
+                other => panic!("expected Const for {}, got {:?}", src, other),
+            }
+        }
     }
 
     // ---- Reg Test 14: Static with struct init ----
