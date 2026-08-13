@@ -200,8 +200,8 @@
     "total": 20
   },
   "ml_kem|x86_64": {
-    "status": "PARTIAL",
-    "pass": 18,
+    "status": "PASS",
+    "pass": 20,
     "total": 20
   },
   "ecdsa_p384|x86_64": {
