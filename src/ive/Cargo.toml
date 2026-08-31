@@ -19,7 +19,7 @@ vuma-codegen.workspace = true
 #   Debian/Ubuntu: apt install libz3-dev
 #   macOS: brew install z3
 #   Arch: pacman -S z3
-z3 = "0.20"
+z3 = "0.21"
 
 [features]
 default = []
